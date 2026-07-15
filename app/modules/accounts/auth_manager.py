@@ -120,6 +120,21 @@ logger = logging.getLogger(__name__)
 # same-plaintext re-encryption race and must stay small to avoid live-locking.
 _TOKEN_CAS_MAX_ATTEMPTS = 5
 
+# Dedicated bounded retry budget for the FINAL safety persist of a freshly
+# rotated token, DELIBERATELY SEPARATE from the claim/caller deadline. Persisting
+# a valid single-use rotated token is worth a few extra milliseconds over budget:
+# giving up here would strand the account holding the already-consumed token, and
+# a later blind retry would re-exchange that consumed token into an
+# ``invalid_grant``/reauth knockout of an otherwise healthy account. Each attempt
+# is still a ciphertext-guarded compare-and-set against the freshly re-read
+# ciphertext (a genuinely different peer plaintext is ADOPTED, never clobbered);
+# because any ciphertext change means a writer committed and no realistic writer
+# re-encrypts the SAME consumed token in a tight loop, this lands within a couple
+# of attempts in practice. Kept small (with tiny backoff) so a truly pathological
+# storm cannot live-lock.
+_FINAL_PERSIST_MAX_ATTEMPTS = 3
+_FINAL_PERSIST_RETRY_BASE_SECONDS = 0.02
+
 # Bound on how many times releasing a refresh claim is retried when the release
 # DELETE hits a transient DB error (SQLite lock past the busy timeout, a dropped
 # Postgres connection). Release runs in ``finally`` after the token update has
@@ -621,25 +636,45 @@ class AuthManager:
 
         When the bounded guarded retries are exhausted OR the claim/caller
         deadline cuts the retry loop mid-storm, we do NOT drop the freshly rotated
-        token: we make ONE FINAL ciphertext-guarded persist attempt keyed on the
-        LAST-OBSERVED ciphertext (the row read in the immediately-preceding miss).
-        That final attempt is still a compare-and-set, so it is safe — it lands
-        only if nothing changed since that read (persisting our new token and
-        evicting the already-consumed one) and clobbers nothing otherwise. Only
-        when that final guarded attempt ALSO misses do we re-read once more and
-        decide: a genuinely different peer plaintext is ADOPTED (never
-        overwritten), and only a persistent same-plaintext re-encryption storm (or
-        undecryptable material) raises the transient ``token_persist_conflict``.
+        token: we run a DEDICATED small bounded retry loop
+        (``_FINAL_PERSIST_MAX_ATTEMPTS`` attempts with tiny backoff) that is
+        DELIBERATELY SEPARATE from the claim/caller deadline. Persisting a valid
+        single-use rotated token is worth a few extra milliseconds over budget,
+        because giving up here strands the account holding the already-consumed
+        token. Each final attempt is still a ciphertext-guarded compare-and-set
+        keyed on the freshly re-read ciphertext, so it is safe — it lands only if
+        nothing changed since that read (persisting our new token and evicting the
+        already-consumed one) and clobbers nothing otherwise. On each miss we
+        re-read and decide on the DECRYPTED plaintext: a genuinely different peer
+        plaintext is ADOPTED (never overwritten, done); the same plaintext merely
+        re-encrypted is RETRIED against the newly observed ciphertext. Because any
+        ciphertext change means a writer committed, and no realistic writer
+        re-encrypts the same consumed token in a tight loop, this lands within a
+        couple of attempts in practice.
 
-        The transient raise is therefore ALWAYS the LAST RESORT *after* a guarded
-        persist ATTEMPT of the new token — never a substitute for attempting to
-        persist it. This is what ends the long "drop the rotated token vs clobber a
-        peer rotation" oscillation: deadline exhaustion still gets that one final
-        guarded attempt, because the deadline bounds the RETRY LOOP and the
-        network/admission waits, not this single cheap final safety UPDATE. The
-        raise is acceptable and rare — it requires the writer to out-race us on the
-        bounded retries AND the final attempt — and it never risks a clobber,
-        unlike the removed unconditional write.
+        SAFE TERMINAL OUTCOME. Only if the dedicated final retries are ALL
+        exhausted while the stored material stays the already-consumed token (a
+        truly pathological same-plaintext storm, or undecryptable stored material
+        — neither occurs in real production) do we give up — but we FAIL CLOSED
+        rather than surfacing ordinary transient contention. A bare transient
+        ``token_persist_conflict`` here would release the claim and let a later
+        blind retry re-exchange the still-stored consumed token, turning this
+        persistence race into an ``invalid_grant``/reauth PERMANENT knockout of a
+        healthy account. Instead we flag the account ``REAUTH_REQUIRED`` through
+        the SAME ciphertext-guarded status path (see
+        ``_flag_persist_conflict_reauth``): the dead stored token is explicitly
+        surfaced to operators, a peer rotation that lands in the guard window is
+        ADOPTED (never clobbered), and the account is never left silently holding
+        a consumed token that a blind retry would permanently knock out.
+
+        This is what ends the long "drop the rotated token vs clobber a peer
+        rotation" oscillation, and closes the irreducible trilemma corner
+        (never-clobber vs never-drop vs bounded-time) that only appears in a
+        same-plaintext storm where a writer re-encrypts the SAME consumed token
+        faster than our CAS lands, repeatedly: the dedicated retries make the
+        persist land in all realistic cases, and the safe terminal flag makes the
+        pathological corner recoverable instead of a knockout. Every write remains
+        a guarded compare-and-set, so nothing is ever clobbered.
         """
         consumed_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, expected_refresh_token_encrypted)
         expected = expected_refresh_token_encrypted
@@ -701,46 +736,154 @@ class AuthManager:
 
         # FINAL, always-guarded persist of the freshly rotated token, keyed on the
         # LAST-OBSERVED ciphertext. Reached when the bounded retries were exhausted
-        # OR the deadline cut the retry loop. This is the invariant that ends the
-        # long "drop the rotated token vs clobber a peer rotation" oscillation: the
-        # transient raise is the LAST RESORT *after* a guarded persist ATTEMPT of
-        # the newly rotated token, never a substitute for it. It is a single
+        # OR the deadline cut the retry loop. This runs a DEDICATED small bounded
+        # retry loop that is DELIBERATELY SEPARATE from the claim/caller deadline:
+        # persisting a valid single-use rotated token is worth a few extra
+        # milliseconds over budget, because giving up here strands the account
+        # holding the already-consumed token. Each attempt is a single
         # compare-and-set, so it lands only if nothing changed since the last read
         # (persisting our new token and evicting the consumed one) and clobbers
-        # nothing otherwise. Deadline exhaustion still gets this one attempt --
-        # the deadline bounds the RETRY LOOP and the network/admission waits, not
-        # this cheap final safety UPDATE.
-        if await write(expected):
-            return None
-        latest = await self._repo.get_by_id_fresh(account.id)
-        if latest is None:
-            # Row is gone; nothing to persist or adopt.
-            return None
-        latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
-        if consumed_plaintext is not None and latest_plaintext is not None and latest_plaintext != consumed_plaintext:
-            # A genuine peer rotation landed on the final re-read: ADOPT it (our
-            # freshly rotated token is legitimately superseded), never overwrite.
-            return _adopt_account_row(account, latest)
-        # The final guarded attempt also missed on unchanged (same-plaintext, or
-        # undecryptable) material: a sustained re-encryption storm out-raced every
-        # atomic CAS window, including this last safety persist. Only NOW -- after a
-        # guarded persist ATTEMPT of the new token -- surface the transient
-        # (non-permanent) conflict so the caller retries the whole refresh once the
-        # contention clears. ``transport_error`` keeps it out of the
-        # permanent-failure cooldown cache. This never risks a clobber, unlike the
-        # removed unconditional write.
+        # nothing otherwise; on each miss we re-read and decide on the decrypted
+        # plaintext (ADOPT a genuine peer rotation, retry a same-plaintext
+        # re-encryption against the newly observed ciphertext). Because any
+        # ciphertext change means a writer committed and no realistic writer
+        # re-encrypts the same consumed token in a tight loop, this lands within a
+        # couple of attempts in practice.
+        for final_attempt in range(_FINAL_PERSIST_MAX_ATTEMPTS):
+            if await write(expected):
+                return None
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is None:
+                # Row is gone; nothing to persist or adopt.
+                return None
+            latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
+            if _is_genuine_peer_rotation(consumed_plaintext, latest_plaintext):
+                # A genuine peer rotation landed on the final re-read: ADOPT it (our
+                # freshly rotated token is legitimately superseded), never overwrite.
+                return _adopt_account_row(account, latest)
+            if consumed_plaintext is None or latest_plaintext is None:
+                # Cannot prove plaintext identity, so we cannot prove another
+                # guarded retry is safe. Stop the dedicated retries and fall
+                # through to the SAFE terminal outcome rather than spinning.
+                break
+            # Same refresh-token plaintext, re-encrypted concurrently: retry the
+            # guarded CAS against the freshly observed ciphertext so our rotation
+            # lands only while the consumed material is still stored.
+            expected = latest.refresh_token_encrypted
+            if final_attempt < _FINAL_PERSIST_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(_FINAL_PERSIST_RETRY_BASE_SECONDS * (2**final_attempt))
+
+        # SAFE TERMINAL OUTCOME. The dedicated final retries were ALL exhausted
+        # while the stored material stayed the already-consumed token (a truly
+        # pathological same-plaintext storm, or undecryptable stored material).
+        # We must NOT surface an ordinary transient ``token_persist_conflict``
+        # here: that would release the claim and let a later blind retry re-read
+        # and re-exchange the still-stored consumed single-use token, turning this
+        # persistence race into an ``invalid_grant``/reauth PERMANENT knockout of
+        # an otherwise-healthy account. Fail CLOSED instead by flagging the account
+        # REAUTH_REQUIRED through the SAME ciphertext-guarded status path, so the
+        # dead stored token is explicitly surfaced to operators (never silently
+        # retried) and a peer rotation that lands in the guard window is still
+        # ADOPTED rather than clobbered.
+        return await self._flag_persist_conflict_reauth(
+            account,
+            expected_refresh_token_encrypted=expected,
+            consumed_plaintext=consumed_plaintext,
+            deadline_elapsed=deadline_elapsed,
+        )
+
+    async def _flag_persist_conflict_reauth(
+        self,
+        account: Account,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        consumed_plaintext: str | None,
+        deadline_elapsed: bool,
+    ) -> Account | None:
+        """SAFE terminal outcome for a truly pathological final-persist storm.
+
+        Reached only when the DEDICATED bounded final-persist retries were ALL
+        exhausted while the database kept holding the already-consumed refresh
+        token (a sustained same-plaintext re-encryption storm, or undecryptable
+        stored material — neither occurs in real production, since token
+        re-encryption is a one-time re-auth/import event, not a tight loop).
+
+        Rather than surfacing a bare transient ``token_persist_conflict`` — which
+        releases the claim and lets a later blind retry re-exchange the stored
+        consumed token into an ``invalid_grant``/reauth PERMANENT knockout of a
+        healthy account — this fails CLOSED by flagging the account
+        ``REAUTH_REQUIRED`` through the SAME ciphertext-guarded status CAS keyed on
+        the last-observed (consumed-token) ciphertext:
+
+        * guarded CAS LANDS -> the account is EXPLICITLY flagged for re-auth (its
+          durable state truly holds a dead token), so operators repair it instead
+          of a blind retry silently knocking it out. Return the flagged row.
+        * guarded CAS MISSES on a genuinely DIFFERENT peer plaintext -> a peer
+          re-authenticated/rotated; the account is repaired, so ADOPT the peer row
+          (never clobbered), do not flag reauth.
+        * guarded CAS keeps missing on same-plaintext re-encryption through its
+          own bounded budget -> only THEN surface the transient
+          ``token_persist_conflict`` as the last resort (no worse than before, and
+          astronomically unlikely). ``transport_error`` keeps it out of the
+          permanent-failure cooldown cache.
+
+        Every write is a guarded compare-and-set, so a genuine peer rotation is
+        never overwritten in any branch.
+        """
+        status = AccountStatus.REAUTH_REQUIRED
+        reason = "Refresh token persistence conflict; stored token is stale - re-login required"
+        expected = expected_refresh_token_encrypted
+        for _attempt in range(_FINAL_PERSIST_MAX_ATTEMPTS):
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is None:
+                # Row is gone; nothing to flag or adopt.
+                return None
+            latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
+            if _is_genuine_peer_rotation(consumed_plaintext, latest_plaintext):
+                # A peer rotated genuinely newer material: the account is repaired.
+                # ADOPT it; do NOT flag reauth on a healthy rotated row.
+                return _adopt_account_row(account, latest)
+            expected = latest.refresh_token_encrypted
+            applied = await self._repo.update_status_if_current(
+                account.id,
+                status,
+                reason,
+                expected_status=latest.status,
+                expected_deactivation_reason=latest.deactivation_reason,
+                expected_reset_at=latest.reset_at,
+                expected_refresh_token_encrypted=expected,
+            )
+            if applied:
+                account.status = status
+                account.deactivation_reason = reason
+                mark_account_routing_unavailable(account.id)
+                get_account_selection_cache().invalidate()
+                logger.warning(
+                    "Token-refresh compare-and-set for account_id=%s could not persist the freshly "
+                    "rotated token after the dedicated final-persist retries (%s); flagged the account "
+                    "REAUTH_REQUIRED via the guarded status path so it is explicitly repaired rather "
+                    "than left holding a consumed token that a blind retry would permanently knock out",
+                    account.id,
+                    "claim/caller deadline elapsed" if deadline_elapsed else "same-plaintext storm exhausted",
+                )
+                return account
+            # Guarded status CAS missed on unchanged material; re-read and retry.
+        # Even the guarded reauth flag could not land on unchanged material through
+        # its own bounded budget: surface the transient (non-permanent) conflict as
+        # the last resort. ``transport_error`` keeps it out of the permanent-failure
+        # cooldown cache and never risks a clobber.
         logger.warning(
             "Token-refresh compare-and-set for account_id=%s could not persist the freshly rotated "
-            "token even after a final guarded attempt (%s); surfacing a transient conflict so the "
-            "caller retries the whole refresh rather than risking a clobber",
+            "token nor flag REAUTH_REQUIRED after the dedicated final-persist retries; surfacing a "
+            "transient conflict so the caller retries the whole refresh rather than risking a clobber",
             account.id,
-            "claim/caller deadline elapsed" if deadline_elapsed else f"{_TOKEN_CAS_MAX_ATTEMPTS} attempts exhausted",
         )
         raise RefreshError(
             "token_persist_conflict",
             (
                 f"Token-refresh compare-and-set for account_id={account.id} could not persist "
-                f"rotated tokens before a final guarded attempt missed on unchanged material"
+                f"rotated tokens nor flag REAUTH_REQUIRED after a final guarded attempt missed on "
+                f"unchanged material"
             ),
             False,
             transport_error=True,
@@ -1105,6 +1248,14 @@ def _decrypt_refresh_token_plaintext(encryptor: TokenEncryptor, refresh_token_en
         return encryptor.decrypt(refresh_token_encrypted)
     except Exception:
         return None
+
+
+def _is_genuine_peer_rotation(consumed_plaintext: str | None, latest_plaintext: str | None) -> bool:
+    """True when the freshly re-read plaintext is a genuinely DIFFERENT refresh
+    token than the one this attempt exchanged FROM (a peer rotation to ADOPT),
+    rather than the same consumed token merely re-encrypted or an undecryptable
+    blob. Both plaintexts must decrypt for the comparison to be trustworthy."""
+    return consumed_plaintext is not None and latest_plaintext is not None and latest_plaintext != consumed_plaintext
 
 
 def _clean_optional(value: str | None) -> str | None:

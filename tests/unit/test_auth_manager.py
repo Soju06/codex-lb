@@ -1113,13 +1113,16 @@ class _TokenCasAlwaysMissRepo(_DummyRepo):
     re-encryption storm the refresh can never win an atomic compare-and-set
     window against.
 
-    Under the no-unconditional-write invariant, once the bounded guarded CAS is
-    exhausted the persistence path raises a transient ``token_persist_conflict``
-    rather than falling back to a clobber-prone unconditional write. An
+    Under the no-unconditional-write invariant, once the bounded guarded CAS AND
+    the dedicated final-persist retries are exhausted the persistence path fails
+    CLOSED via the guarded status CAS (flag ``REAUTH_REQUIRED``) rather than
+    falling back to a clobber-prone unconditional write or a bare transient
+    conflict that a blind retry would knock the account out on. An
     ``expected=None`` (unconditional) write is FORBIDDEN here; if a regression
     ever reintroduces it, this repo applies it via the base repo and records the
     ``None`` in ``update_attempts`` so the test's ``None not in update_attempts``
-    assertion trips."""
+    assertion trips. The inherited ``update_status_if_current`` performs a real
+    guarded status CAS, so the safe terminal REAUTH_REQUIRED flag lands here."""
 
     def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
         super().__init__()
@@ -1321,20 +1324,25 @@ async def test_refresh_adopts_peer_rotation_at_cas_exhaustion_boundary(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_storm(monkeypatch):
-    """Regression (no-unconditional-write invariant): when the guarded
-    compare-and-set keeps missing on a sustained same-plaintext re-encryption storm
-    through the bounded budget, the refresh MUST NOT fall back to an unconditional
-    ``expected=None`` write. Every persist is ciphertext-guarded, so on exhaustion
-    the refresh raises a transient (non-permanent) ``token_persist_conflict`` and the
-    whole refresh is retried once the contention clears.
+async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm(monkeypatch):
+    """Regression (P1 "Do not retry after dropping rotated tokens"): when the
+    guarded compare-and-set keeps missing on a sustained same-plaintext
+    re-encryption storm through BOTH the bounded budget AND the dedicated
+    final-persist retries, the refresh MUST NOT (a) fall back to an unconditional
+    ``expected=None`` write, nor (b) drop the freshly rotated token behind a bare
+    transient ``token_persist_conflict`` that releases the claim and lets a later
+    blind retry re-exchange the still-stored consumed token into an
+    ``invalid_grant``/reauth PERMANENT knockout of a healthy account.
 
-    The removed unconditional write was the root of this finding's oscillation: it
-    left a TOCTOU gap where a genuine peer rotation landing after the final
-    plaintext-confirming read was clobbered with the already-consumed material. The
-    transient error is acceptable and rare (it requires the writer to out-race us on
-    every one of ``_TOKEN_CAS_MAX_ATTEMPTS`` bounded retries AND the final guarded
-    persist attempt) and can never clobber."""
+    Instead it FAILS CLOSED to a SAFE TERMINAL OUTCOME: it flags the account
+    ``REAUTH_REQUIRED`` through the SAME ciphertext-guarded status path, so the
+    dead stored token is explicitly surfaced to operators rather than left
+    silently holding a consumed token that a blind retry would knock out. Every
+    write remains a guarded compare-and-set, so nothing is ever clobbered.
+
+    The account is never PERMANENTLY knocked out by this race: ``REAUTH_REQUIRED``
+    is a recoverable, operator-visible state (the DB genuinely holds a dead,
+    already-consumed token), NOT a blind-retry ``invalid_grant`` knockout."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
@@ -1363,18 +1371,24 @@ async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_s
     repo = _TokenCasAlwaysMissRepo(account, plaintext="refresh-old", encryptor=encryptor)
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
-    with pytest.raises(RefreshError) as excinfo:
-        await manager.refresh_account(account)
+    # No transient raise: the SAFE TERMINAL OUTCOME flags the account REAUTH_REQUIRED.
+    result = await manager.refresh_account(account)
 
-    # Transient (non-permanent) claim-contention error, kept out of the
-    # permanent-failure cooldown so callers retry the whole refresh.
-    assert excinfo.value.code == "token_persist_conflict"
-    assert excinfo.value.is_permanent is False
-    assert excinfo.value.transport_error is True
-    # The bounded guarded CAS retries plus the FINAL guarded persist attempt ran
-    # (attempt budget + 1); NO unconditional write was ever issued, so nothing
-    # could be clobbered and nothing was persisted.
-    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + 1
+    assert result is account
+    assert result.status == AccountStatus.REAUTH_REQUIRED
+    assert result.deactivation_reason is not None
+    assert "re-login" in result.deactivation_reason
+    # The reauth flag landed through the guarded status compare-and-set (keyed on
+    # the last-observed ciphertext), NOT an unguarded status write.
+    assert repo.status_payload is not None
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
+    assert repo.status_payload["expected_refresh_token_encrypted"] is not None
+    # The bounded guarded CAS retries plus the DEDICATED final-persist retries ran;
+    # NO unconditional write was ever issued, and no rotate_tokens ever landed
+    # (the storm never let a token persist land), so nothing was clobbered.
+    assert len(repo.update_attempts) == (
+        auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + auth_manager_module._FINAL_PERSIST_MAX_ATTEMPTS
+    )
     assert None not in repo.update_attempts
     assert all(expected is not None for expected in repo.update_attempts)
     assert repo.tokens_payload is None
@@ -1426,24 +1440,27 @@ async def test_ensure_chatgpt_account_id_backfill_never_writes_token_material(mo
 
 
 @pytest.mark.asyncio
-async def test_persist_cas_deadline_still_attempts_final_guarded_persist_before_raising(monkeypatch):
-    """Regression (finding: do not drop rotated tokens after CAS misses): the
-    post-exchange token-persist compare-and-set loop runs while the cross-replica
-    refresh claim is held and is bounded by the claim/caller deadline -- a
-    contended DB write must not keep the loop (and the held claim) spinning past
-    the budget. But the deadline MUST bound only the RETRY LOOP, never drop the
-    freshly rotated single-use token unpersisted: on deadline expiry the persist
-    path STILL makes one FINAL ciphertext-guarded persist attempt keyed on the
-    last-observed ciphertext before raising.
+async def test_persist_cas_deadline_flags_reauth_when_final_retries_exhaust(monkeypatch):
+    """Regression (P1 "Do not retry after dropping rotated tokens"): the
+    post-exchange token-persist compare-and-set retry loop runs while the
+    cross-replica refresh claim is held and is bounded by the claim/caller
+    deadline -- a contended DB write must not keep that RETRY LOOP (and the held
+    claim) spinning past the budget. But the deadline MUST bound only the RETRY
+    LOOP, never drop the freshly rotated single-use token unpersisted: on deadline
+    expiry the persist path STILL runs the DEDICATED final-persist retries, which
+    are DELIBERATELY SEPARATE from the deadline (persisting a valid rotated token
+    is worth a few extra milliseconds over budget).
 
     Here the write is a sustained same-plaintext re-encryption storm that never
-    lets an atomic CAS window land (the PATHOLOGICAL case). Even so, the final
-    guarded attempt runs (two guarded writes total, not the full loop), and only
-    because that final attempt ALSO misses on unchanged (same-plaintext) material
-    is the transient ``token_persist_conflict`` raised so the claim is released
-    and the caller retries once contention clears. The DB is left holding the
-    consumed token in this rare storm, but the raise is transient (non-permanent)
-    -- documented, bounded, and retried -- and never a clobber."""
+    lets an atomic CAS window land (the PATHOLOGICAL case), so even the dedicated
+    final retries all miss on unchanged material. Rather than dropping the rotated
+    token behind a bare transient conflict -- which would release the claim and
+    let a later blind retry re-exchange the still-stored consumed token into an
+    ``invalid_grant``/reauth PERMANENT knockout -- the persist path FAILS CLOSED to
+    the SAFE TERMINAL OUTCOME: it flags the account ``REAUTH_REQUIRED`` through the
+    guarded status path. The DB genuinely holds a dead token in this rare storm,
+    so the account is explicitly surfaced for re-auth (recoverable), never left
+    silently holding a consumed token, and never clobbered."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
@@ -1472,20 +1489,198 @@ async def test_persist_cas_deadline_still_attempts_final_guarded_persist_before_
     repo = _TokenCasAlwaysMissRepo(account, plaintext="refresh-old", encryptor=encryptor)
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
-    with pytest.raises(RefreshError) as excinfo:
-        await manager._perform_refresh(
-            account,
-            refresh_token_encrypted=account.refresh_token_encrypted,
-            deadline=time.monotonic() - 1.0,
+    # No transient raise: the deadline cuts the RETRY loop, the dedicated final
+    # retries still run and exhaust, and the SAFE TERMINAL OUTCOME flags REAUTH.
+    result = await manager._perform_refresh(
+        account,
+        refresh_token_encrypted=account.refresh_token_encrypted,
+        deadline=time.monotonic() - 1.0,
+    )
+
+    assert result is account
+    assert result.status == AccountStatus.REAUTH_REQUIRED
+    assert result.deactivation_reason is not None
+    assert "re-login" in result.deactivation_reason
+    assert repo.status_payload is not None
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
+    assert repo.status_payload["expected_refresh_token_encrypted"] is not None
+    # The deadline cut the retry loop after the first guarded write, but the
+    # DEDICATED final-persist retries (which the deadline does NOT bound) still ran
+    # before the safe terminal flag: 1 retry-loop write + _FINAL_PERSIST_MAX_ATTEMPTS
+    # dedicated writes, NOT the full _TOKEN_CAS_MAX_ATTEMPTS loop, and NO
+    # unconditional write.
+    assert len(repo.update_attempts) == 1 + auth_manager_module._FINAL_PERSIST_MAX_ATTEMPTS
+    assert None not in repo.update_attempts
+    assert all(expected is not None for expected in repo.update_attempts)
+    assert repo.tokens_payload is None
+
+
+class _TokenCasStabilizesOnSecondFinalAttemptRepo(_DummyRepo):
+    """Repo modelling a same-plaintext re-encryption storm that QUIETS mid-way
+    through the DEDICATED final-persist retries. For the first ``storm_writes``
+    guarded writes a concurrent writer keeps re-encrypting the SAME consumed
+    plaintext right as we try to write, so each guarded compare-and-set misses and
+    the observed ciphertext keeps shifting; after that the storm stops and the next
+    guarded write against the last-observed ciphertext LANDS.
+
+    Sized so the storm outlasts the whole main bounded loop AND the FIRST dedicated
+    final-persist attempt, then quiets so the SECOND final attempt lands: this
+    proves the dedicated final retries make MULTIPLE attempts (not just one) and
+    persist the freshly rotated token T2 the instant the ciphertext stabilizes --
+    no transient raise, no dropped token, no reauth flag. An ``expected=None``
+    (unconditional) write is FORBIDDEN; if a regression reintroduces it, this repo
+    records the ``None`` so the test's assertions trip."""
+
+    def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor, storm_writes: int) -> None:
+        super().__init__()
+        self._plaintext = plaintext
+        self._encryptor = encryptor
+        self._storm_writes = storm_writes
+        self._writes = 0
+        # A re-encryption of the consumed plaintext DISTINCT from the caller's
+        # original ciphertext, so the very first guarded write misses.
+        self._db_ciphertext = encryptor.encrypt(plaintext)
+        self.accounts_by_id[account.id] = account
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is None:
+            return None
+        # Report the current stored ciphertext without mutating it here; the storm
+        # (if still active) shifts the stored ciphertext on the WRITE attempt.
+        row.refresh_token_encrypted = self._db_ciphertext
+        return row
+
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        if expected_refresh_token_encrypted is None:
+            # FORBIDDEN unconditional write: apply via the base repo so a
+            # regression that reintroduces it is caught by the test assertions.
+            return await super().rotate_tokens(
+                account_id,
+                access_token_encrypted=access_token_encrypted,
+                refresh_token_encrypted=refresh_token_encrypted,
+                id_token_encrypted=id_token_encrypted,
+                last_refresh=last_refresh,
+                plan_type=plan_type,
+                email=email,
+                chatgpt_account_id=chatgpt_account_id,
+                chatgpt_user_id=chatgpt_user_id,
+                workspace_id=workspace_id,
+                workspace_label=workspace_label,
+                seat_type=seat_type,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+            )
+        self._writes += 1
+        if self._writes <= self._storm_writes:
+            # Storm still raging: a concurrent writer re-encrypts the SAME consumed
+            # plaintext, moving the row out from under our guarded write -> miss and
+            # the stored ciphertext shifts.
+            self._db_ciphertext = self._encryptor.encrypt(self._plaintext)
+            return False
+        # Storm quiet: honest guarded compare-and-set against the current stored
+        # ciphertext. Lands only when our expected still matches (it does -- the
+        # last re-read observed exactly this ciphertext).
+        if expected_refresh_token_encrypted != self._db_ciphertext:
+            return False
+        self._db_ciphertext = refresh_token_encrypted
+        return await super().rotate_tokens(
+            account_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            id_token_encrypted=id_token_encrypted,
+            last_refresh=last_refresh,
+            plan_type=plan_type,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            chatgpt_user_id=chatgpt_user_id,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
         )
 
-    assert excinfo.value.code == "token_persist_conflict"
-    assert excinfo.value.is_permanent is False
-    assert excinfo.value.transport_error is True
-    # The deadline cut the retry loop after the first guarded write, but a FINAL
-    # guarded persist attempt still ran before raising: two guarded writes, NOT
-    # the full _TOKEN_CAS_MAX_ATTEMPTS loop, and NO unconditional write.
-    assert len(repo.update_attempts) == 2
+
+@pytest.mark.asyncio
+async def test_persist_cas_stabilizes_on_second_final_attempt_persists_rotated_token(monkeypatch):
+    """Regression (P1 "Do not retry after dropping rotated tokens"): the DEDICATED
+    final-persist retries make MULTIPLE bounded attempts. When the same-plaintext
+    re-encryption storm keeps missing through the whole main bounded loop AND the
+    FIRST final-persist attempt, but the ciphertext STABILIZES by the SECOND final
+    attempt, the freshly rotated token T2 MUST be persisted right then -- no
+    transient ``token_persist_conflict``, no dropped token, and no reauth flag.
+
+    This is exactly the headroom the dedicated retry loop buys: giving up after a
+    single final attempt would have stranded the account holding the consumed
+    token; the extra attempt lands the rotation the instant contention clears."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_persist_stabilizes",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_persist_stabilizes",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    # The storm outlasts the whole main bounded loop AND the first dedicated final
+    # attempt, then quiets so the SECOND final attempt lands.
+    repo = _TokenCasStabilizesOnSecondFinalAttemptRepo(
+        account,
+        plaintext="refresh-old",
+        encryptor=encryptor,
+        storm_writes=auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + 1,
+    )
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager.refresh_account(account)
+
+    # The freshly rotated token T2 is persisted; the account stays healthy.
+    assert result is account
+    assert result.status == AccountStatus.ACTIVE
+    assert result.deactivation_reason is None
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-new"
+    # The guarded token write landed (never a reauth flag, never an unconditional
+    # write), persisting the newly rotated token and evicting the consumed one.
+    assert repo.status_payload is None
+    assert repo.tokens_payload is not None
+    assert encryptor.decrypt(cast(bytes, repo.tokens_payload["refresh_token_encrypted"])) == "refresh-new"
+    assert repo.tokens_payload["expected_refresh_token_encrypted"] is not None
+    # It landed on the SECOND dedicated final attempt: main bounded loop + 2 final
+    # attempts, with NO unconditional write anywhere.
+    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + 2
     assert None not in repo.update_attempts
     assert all(expected is not None for expected in repo.update_attempts)
 

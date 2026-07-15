@@ -397,14 +397,19 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
     images_slimmed = 0
 
     item_type = item_mapping.get("type")
-    if item_type == "function_call_output":
+    if item_type in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
         output = item_mapping.get("output")
-        output_text = output if isinstance(output, str) else None
-        if output_text is not None and _should_slim_historical_tool_output(output_text):
-            item_mapping["output"] = _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
-                bytes=len(output_text.encode("utf-8"))
-            )
-            tool_outputs_slimmed += 1
+        if isinstance(output, str):
+            if _should_slim_historical_tool_output(output):
+                item_mapping["output"] = _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
+                    bytes=len(output.encode("utf-8"))
+                )
+                tool_outputs_slimmed += 1
+        else:
+            slimmed_output, output_images_slimmed = _slim_historical_response_content(output)
+            if output_images_slimmed > 0:
+                item_mapping["output"] = slimmed_output
+                images_slimmed += output_images_slimmed
 
     content = item_mapping.get("content")
     slimmed_content, content_images_slimmed = _slim_historical_response_content(content)

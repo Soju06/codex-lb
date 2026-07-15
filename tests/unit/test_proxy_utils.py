@@ -9718,8 +9718,10 @@ async def test_http_bridge_model_rejection_releases_old_account_create_lease_bef
     forwarded = await request_state.event_queue.get()
     assert forwarded is not None
     forwarded_event = parse_sse_data_json(forwarded)
+    assert isinstance(forwarded_event, dict)
     assert forwarded_event["type"] == "response.failed"
-    assert forwarded_event["response"]["error"] == rejection["error"]
+    forwarded_response = cast(dict[str, JsonValue], forwarded_event["response"])
+    assert forwarded_response["error"] == rejection["error"]
     assert await request_state.event_queue.get() is None
 
 

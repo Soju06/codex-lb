@@ -887,6 +887,18 @@ class _CompactMixin:
                 if remaining_budget <= 0:
                     logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # This budget-exhausted terminal exits compact_responses before
+                    # reaching the retry loop's settle sites, so on the HTTP bridge /
+                    # forwarded path (``owns_reservation`` false, ``compact_responses``
+                    # is the sole settler) the API-key reservation would leak held
+                    # quota. Settle BEFORE raising, mirroring the transport/permanent
+                    # preflight branches above.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 freshness_budget = _compact_freshness_budget_seconds(remaining_budget)
                 if freshness_budget <= 0:
@@ -897,6 +909,14 @@ class _CompactMixin:
                         remaining_budget,
                     )
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # Sole-settler leak guard (see above): settle the reservation
+                    # before this budget-exhausted terminal raise.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 try:
                     logger.info(
@@ -1042,6 +1062,14 @@ class _CompactMixin:
                         account.id,
                     )
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # Sole-settler leak guard (see above): settle the reservation
+                    # before this budget-exhausted terminal raise.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 request_service_tier = _service_tier_from_compact_payload(payload)
 
@@ -1105,6 +1133,18 @@ class _CompactMixin:
                                         "account_id=%s",
                                         request_id,
                                         account.id,
+                                    )
+                                    # Sole-settler leak guard (see above): this
+                                    # budget-exhausted terminal exits the retry loop
+                                    # to the outer handler without settling, so on
+                                    # the bridge/forwarded path (``owns_reservation``
+                                    # false) the reservation would leak held quota.
+                                    # Settle BEFORE raising.
+                                    await proxy._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
                                     )
                                     _raise_proxy_budget_exhausted()
                                 account = await proxy._ensure_fresh_with_budget(

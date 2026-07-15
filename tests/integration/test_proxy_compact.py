@@ -1051,6 +1051,147 @@ async def test_proxy_compact_preflight_permanent_refresh_settles_reservation(asy
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles_reservation(async_client, monkeypatch):
+    """Regression (route-level, forwarded bridge path): a compact request that
+    reaches the OWNER instance via the internal bridge forward — where
+    ``owns_reservation`` is false so ``compact_responses`` is the SOLE settler —
+    and whose preflight budget is exhausted MUST settle (release) the API-key
+    usage reservation before raising the ``502 upstream_request_timeout``, so
+    held API-key quota is not leaked.
+
+    This drives the REAL external surface, not a handcrafted service call: it
+    POSTs a signed forwarded request to the internal bridge endpoint
+    (``/internal/bridge/responses``) carrying a real ``ApiKeyUsageReservation``
+    (the reservation the ORIGIN instance created via ``_enforce_request_limits``,
+    reproduced here through the api-keys service). ``internal_bridge_responses``
+    parses the forward, sets ``skip_limit_enforcement`` + the
+    ``api_key_reservation_override``, and ``_stream_responses`` extracts the
+    terminal ``compaction_trigger`` and calls ``compact_responses`` with
+    ``owns_reservation`` false — so ``_compact_or_stream_responses``'s ``finally``
+    does NOT release the reservation and ``compact_responses`` alone must settle
+    it. Pre-fix the budget-exhausted terminal raised via
+    ``_raise_proxy_budget_exhausted`` without settling (through the outer
+    ``except ProxyResponseError`` handler and the log-only ``finally``), leaving
+    the reservation row ``reserved`` (leaked held quota); post-fix the row is
+    ``released``. PR #1254 fixed the sibling transport-failure / permanent-refresh
+    preflight raises but left the budget-exhausted terminal out of scope; this
+    completes that invariant.
+    """
+    import app.modules.proxy._service.compact as compact_module
+    from app.core.config.settings import get_settings
+    from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+    from app.db.models import ApiKeyUsageReservation
+    from app.modules.api_keys.service import ApiKeysService, ApiKeyUsageReservationData
+    from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    # Import an account so the compact selection loop has a healthy candidate.
+    email = "compact-forwarded-budget@example.com"
+    raw_account_id = "acc_compact_forwarded_budget"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    # Enable API-key auth so the owner instance validates the forwarded key and
+    # compact_responses receives a non-None api_key (otherwise the settle no-ops
+    # and there is no reservation to leak).
+    settings_resp = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings_resp.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-forwarded-budget-key",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    key = create.json()["key"]
+
+    # Reproduce the origin instance's reservation: _enforce_request_limits creates
+    # a real "reserved" ApiKeyUsageReservation row that the forward carries by id.
+    compact_model = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    async with SessionLocal() as session:
+        api_keys_service = ApiKeysService(ApiKeysRepository(session))
+        reservation = await api_keys_service.enforce_limits_for_request(
+            key_id,
+            request_model=compact_model.model,
+            request_service_tier=None,
+            request_usage_budget=estimate_api_key_request_usage(compact_model),
+        )
+    async with SessionLocal() as session:
+        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+        assert row is not None
+        assert row.status == "reserved"
+
+    # Build the signed forward the origin would send to this (owner) instance: a
+    # ResponsesRequest whose input ends with a compaction_trigger (so the owner
+    # extracts the compact payload), targeting this instance, carrying the
+    # reservation override (owns_reservation=false on the owner).
+    forwarded_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin-instance",
+        target_instance=get_settings().http_responses_session_bridge_instance_id,
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        reservation=ApiKeyUsageReservationData(
+            reservation_id=reservation.reservation_id,
+            key_id=key_id,
+            model=compact_model.model,
+        ),
+    )
+    headers = build_owner_forward_headers(
+        headers={"authorization": f"Bearer {key}"},
+        payload=forwarded_payload,
+        context=context,
+    )
+
+    # Force the compact preflight budget to read as exhausted (account selection
+    # uses the real service.py deadline, so a healthy account is still selected;
+    # the first compact-module budget check then trips the budget-exhausted
+    # terminal before any upstream/freshness work runs).
+    monkeypatch.setattr(compact_module, "_remaining_budget_seconds", lambda deadline: 0.0)
+
+    response = await async_client.post(
+        "/internal/bridge/responses",
+        json=forwarded_payload.model_dump_for_forwarding(),
+        headers=headers,
+    )
+
+    # Budget exhaustion surfaces as a 502 upstream_request_timeout from the owner.
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "upstream_request_timeout"
+
+    # The forwarded reservation row was RELEASED by compact_responses (sole
+    # settler) before the terminal raised (the fix). Pre-fix it stayed "reserved"
+    # — leaked held API-key quota — because owns_reservation is false on the
+    # forwarded path so the route's finally does not release it.
+    async with SessionLocal() as session:
+        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+        assert row is not None
+        assert row.status == "released", f"forwarded reservation leaked held quota; status={row.status!r}"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_retryable_transport_failure_retries_same_contract_only(async_client, monkeypatch):
     email = "compact-safe-retry@example.com"
     raw_account_id = "acc_compact_safe_retry"

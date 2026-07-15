@@ -88,6 +88,21 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
 
 
 DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
+    "gpt-5.6-sol": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=0.5,
+        output_per_1m=30.0,
+    ),
+    "gpt-5.6-terra": ModelPrice(
+        input_per_1m=2.5,
+        cached_input_per_1m=0.25,
+        output_per_1m=15.0,
+    ),
+    "gpt-5.6-luna": ModelPrice(
+        input_per_1m=1.0,
+        cached_input_per_1m=0.10,
+        output_per_1m=6.0,
+    ),
     "gpt-5.5": ModelPrice(
         input_per_1m=5.0,
         cached_input_per_1m=0.5,

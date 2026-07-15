@@ -1,0 +1,74 @@
+# Context: ci-simplicity-budgets
+
+## Purpose
+
+Make the simplicity effort self-enforcing. The `contribution-simplicity`
+principles (PR A) and the docs-site diet (PR B) shrink the entry-point
+documents; this change adds the mechanical gate that keeps them shrunk.
+Budgets live in data (`.github/simplicity-budgets.toml`) so every increase is
+a one-line, reviewable diff rather than an argument.
+
+## Decisions
+
+- **Separate workflow, never ci.yml.** The override label is read from the
+  event payload, so the workflow must trigger on `labeled`/`unlabeled` to see
+  a just-applied label. Adding those types to ci.yml would re-run the entire
+  sharded CI matrix on every `🤖 codex: ok` label sync from
+  `codex-review-labels.yml` (15-minute cron + `workflow_run`). The standalone
+  budget job costs seconds.
+- **No `paths:` filter.** The job is cheap, and a required check behind a
+  workflow-level paths filter would leave non-matching PRs pending forever
+  (ci.yml solves this with the dorny-filter placeholder pattern — overkill
+  here).
+- **Stdlib-only script, plain `python3`.** Matches the
+  `scripts/guard_beta_release.py` convention: runs before any dependency
+  install; `tomllib` is stdlib on the runner's Python 3.12.
+- **All-contributors block excluded from README counts.** The generated table
+  (~137 lines between the `ALL-CONTRIBUTORS-LIST:START/END` markers, which are
+  kept in README.md by design) is bot-managed, not hand-written complexity;
+  counting it would make the 200-line budget arithmetically impossible.
+- **Exit 2 on missing nav target.** The nav budget reads `NAV_ITEMS` from
+  `app-header.tsx` today. The planned progressive-disclosure refactor splits
+  core vs advanced nav; the checker refuses to pass silently when the
+  configured array vanishes, forcing that PR to repoint `[core_nav]` (array →
+  `CORE_NAV_ITEMS`) in its own diff. Intentional coupling, not an accident.
+  The same fail-loud exit 2 covers a missing or malformed
+  `.github/simplicity-budgets.toml` and an unclosed `ALL-CONTRIBUTORS-LIST`
+  block (whose tail would otherwise be silently excluded from the count).
+
+## Label caveats (operational)
+
+- **Stale payload on re-run.** The event payload is a snapshot from when the
+  event fired. Adding `simplicity-budget-approved` after a failed run and then
+  re-running that run does nothing — the re-run reuses the stale payload.
+  Applying or removing the label fires a fresh `labeled`/`unlabeled` event,
+  and that new run sees the current labels. The failure message says exactly
+  this.
+- **merge_group and push carry no labels.** The override is a review-time
+  acknowledgment only. If a PR would leave `main` over budget, the label
+  cannot save the merge queue or the post-merge push run: the budget number in
+  `.github/simplicity-budgets.toml` must be raised in the same diff.
+  Alternative considered and rejected: skipping the check on `merge_group`
+  would launder an over-budget `main` into green required checks.
+- **Label creation is out of band**: `gh label create simplicity-budget-approved`
+  once, by a maintainer. Applying it is a deliberate approval act; no
+  automation assigns it.
+
+## Rollout
+
+- Merge after the docs-site diet so the budgets pass on `main` from the first
+  run (verified: README 256 raw / ~119 counted vs 200; headings within 10;
+  `.env.example` 41 vs 60; nav 6 vs 6).
+- Add `Simplicity budgets` to the required-checks ruleset only after one green
+  run on `main` (GitHub cannot require a context that has never reported). It
+  does not join ci.yml's `ci-required` aggregate — cross-workflow `needs` is
+  impossible and the label triggers must stay out of ci.yml.
+
+## Non-goals / deferred
+
+- `README.zh-CN.md` is unbudgeted (banner-only treatment in the docs-site
+  change); a `[readme_zh]` section is a two-line follow-up if needed.
+- A settings-count budget for `app/core/config` would need the app import
+  graph (not stdlib-only) — deferred to the simplicity backlog.
+- Docs-site pages are intentionally unbudgeted: depth is supposed to move
+  there.

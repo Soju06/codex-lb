@@ -23,7 +23,7 @@ For a production-shaped Compose setup (optional PostgreSQL profile, watchtower-f
 [`docker-compose.prod.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.prod.yml):
 
 ```bash
-cp .env.example .env.local   # optional — every value is commented; codex-lb runs with zero config
+cp .env.example .env.local   # required: the compose file references .env.local via env_file — an unedited copy still runs with zero config
 docker compose -f docker-compose.prod.yml up -d
 ```
 

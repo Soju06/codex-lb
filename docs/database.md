@@ -14,8 +14,10 @@ Backup this directory to preserve your data (database, encryption key, archives)
 ## PostgreSQL via Docker Compose
 
 The Docker Compose `postgres` profile uses the Postgres 18 image and mounts the named data volume at
-`/var/lib/postgresql`, the parent of the image's versioned `PGDATA` directory. See
-[`docker-compose.prod.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.prod.yml).
+`/var/lib/postgresql`, the parent of the image's versioned `PGDATA` directory. The `postgres` and
+`postgres-upgrade` profiles live in the root
+[`docker-compose.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.yml)
+(`docker-compose.prod.yml` only defines the `server` service, for external PostgreSQL).
 
 ## Upgrading Postgres 16 → 18
 

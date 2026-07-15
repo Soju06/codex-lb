@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError
+from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
@@ -1018,7 +1018,115 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         return
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        if isinstance(exc, RefreshError):
+                            if exc.is_permanent:
+                                await proxy._load_balancer.mark_permanent_failure(account, exc.code)
+                                # The account is now removed from selection, but its
+                                # stream-concurrency slot is still occupied by the
+                                # lease appended at selection. Release it before the
+                                # failover ``continue`` (matching the transient
+                                # branches) so the dead account's slot is freed
+                                # immediately instead of being held for the entire
+                                # duration of the replacement stream.
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
+                                continue
+                            if is_transient_refresh_contention(exc):
+                                # Transient CROSS-REPLICA refresh contention: benign
+                                # claim contention (the account's refresh claim is
+                                # held by another replica) OR a post-exchange
+                                # persist/status CAS conflict. This is NOT a genuine
+                                # ``transport_error`` OAuth failure — the account's
+                                # credentials are healthy — so fail over WITHOUT an
+                                # account-health penalty (no ``_handle_stream_error``);
+                                # the genuine transport failure handled below keeps
+                                # its penalty. A post-exchange persist conflict is
+                                # logged distinctly (rarer, more-serious race).
+                                if refresh_contention_kind(exc) == "persist_conflict":
+                                    logger.warning(
+                                        "Stream freshness-check refresh post-exchange persist conflict "
+                                        "code=%s account_id=%s",
+                                        exc.code,
+                                        account.id,
+                                    )
+                                if not require_preferred_account and preferred_account_id is None:
+                                    # Movable request: release the stream lease and
+                                    # fail over to a different account instead of
+                                    # reselecting the same one until attempts are
+                                    # exhausted. Record a retryable
+                                    # upstream_unavailable so that if EVERY candidate
+                                    # hits the held-claim condition, exhaustion
+                                    # surfaces upstream_unavailable instead of a
+                                    # misleading generic no_accounts response.
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    excluded_account_ids.add(account.id)
+                                    last_retryable_stream_error = _RetryableStreamError(
+                                        "upstream_unavailable",
+                                        {
+                                            "message": (
+                                                exc.message
+                                                or "Account refresh is temporarily unavailable; "
+                                                "no healthy account could be reached."
+                                            )
+                                        },
+                                        exclude_account=True,
+                                    )
+                                    continue
+                                # PINNED request (``previous_response_id`` /
+                                # ``input_file.file_id``): must not cross accounts.
+                                # Reselecting the same pinned account until attempts
+                                # are exhausted is pointless (it would leak the held
+                                # stream lease each iteration and then surface a
+                                # misleading ``no_accounts`` result). Stay on the
+                                # owner account, release the lease, and surface a
+                                # retryable ``upstream_unavailable`` promptly so the
+                                # client can retry once the claim clears.
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
+                                message = exc.message or "Account refresh is temporarily unavailable; retry later."
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    "upstream_unavailable",
+                                    {"message": message},
+                                )
+                                await proxy._write_stream_preflight_error(
+                                    account_id=account.id,
+                                    api_key=api_key,
+                                    request_id=request_id,
+                                    model=payload.model,
+                                    start=start,
+                                    error_code="upstream_unavailable",
+                                    error_message=message,
+                                    reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                    service_tier=payload.service_tier,
+                                    transport=request_transport,
+                                    upstream_transport=upstream_stream_transport,
+                                    useragent=useragent,
+                                    useragent_group=useragent_group,
+                                    client_ip=client_ip,
+                                )
+                                event = response_failed_event(
+                                    "upstream_unavailable",
+                                    message,
+                                    response_id=request_id,
+                                )
+                                yield format_sse_event(event)
+                                return
+                            if not exc.transport_error:
+                                # Non-transport, non-permanent RefreshError: release
+                                # the stream lease and reselect (its prior behavior).
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
+                                continue
+                            # A GENUINE OAuth transport failure
+                            # (``code == "transport_error"``): the account/route is
+                            # at fault, so it falls through to the shared
+                            # transport-failure handling below — identical to a raw
+                            # aiohttp/connect failure — which records the
+                            # account-health penalty (``_handle_stream_error``) so
+                            # the broken account backs off instead of being kept
+                            # healthy and reselected on the next request.
                         _facade().logger.warning(
                             "Stream refresh/connect failed request_id=%s attempt=%s account_id=%s",
                             request_id,
@@ -1026,7 +1134,7 @@ class _StreamingRetryMixin:
                             account.id,
                             exc_info=True,
                         )
-                        message = str(exc) or "Request to upstream timed out"
+                        message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
                         if (
                             _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                             and attempt + 1 < max_attempts
@@ -1064,6 +1172,16 @@ class _StreamingRetryMixin:
                                 {"message": message},
                                 exclude_account=True,
                             )
+                            # The account keeps its health penalty above and is now
+                            # excluded from reselection, but its stream-concurrency
+                            # slot is still occupied by the lease appended at
+                            # selection. Release it before the failover ``continue``
+                            # (matching the claim-contention and permanent branches)
+                            # so the dead account's slot is freed immediately instead
+                            # of being held for the entire duration of the
+                            # replacement stream.
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
                             excluded_account_ids.add(account.id)
                             continue
                         await proxy._write_stream_preflight_error(
@@ -1492,11 +1610,111 @@ class _StreamingRetryMixin:
                                 force=True,
                                 timeout_seconds=remaining_budget,
                             )
-                        except RefreshError as refresh_exc:
-                            if refresh_exc.is_permanent:
-                                await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                            continue
-                        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
+                            if isinstance(refresh_exc, RefreshError):
+                                if refresh_exc.is_permanent:
+                                    await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                    # The account is now removed from selection, but
+                                    # its stream-concurrency slot is still occupied
+                                    # by the lease appended at selection. Release it
+                                    # before the failover ``continue`` so the dead
+                                    # account's slot is freed immediately.
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    continue
+                                if is_transient_refresh_contention(refresh_exc):
+                                    # Transient CROSS-REPLICA refresh contention on
+                                    # the post-401 forced refresh: benign claim
+                                    # contention OR a post-exchange persist/status
+                                    # CAS conflict. This is NOT a genuine
+                                    # ``transport_error`` OAuth failure — the
+                                    # account's credentials are healthy — so fail
+                                    # over WITHOUT an account-health penalty (no
+                                    # ``_handle_stream_error``); the genuine
+                                    # transport failure handled below keeps its
+                                    # penalty. A post-exchange persist conflict is
+                                    # logged distinctly (rarer, more-serious race).
+                                    if refresh_contention_kind(refresh_exc) == "persist_conflict":
+                                        logger.warning(
+                                            "Stream post-401 forced-refresh post-exchange persist conflict "
+                                            "code=%s account_id=%s",
+                                            refresh_exc.code,
+                                            account.id,
+                                        )
+                                    if not require_preferred_account and preferred_account_id is None:
+                                        # Movable request: release the skipped
+                                        # account's stream lease and fail over to a
+                                        # different account. Record a retryable
+                                        # upstream_unavailable so exhaustion surfaces
+                                        # upstream_unavailable instead of a
+                                        # misleading generic no_accounts response.
+                                        await _release_tracked_stream_lease(current_account_lease)
+                                        current_account_lease = None
+                                        excluded_account_ids.add(account.id)
+                                        last_retryable_stream_error = _RetryableStreamError(
+                                            "upstream_unavailable",
+                                            {
+                                                "message": (
+                                                    refresh_exc.message
+                                                    or "Account refresh is temporarily unavailable; "
+                                                    "no healthy account could be reached."
+                                                )
+                                            },
+                                            exclude_account=True,
+                                        )
+                                        continue
+                                    # PINNED request: must not cross accounts. Stay
+                                    # on the owner account, release the lease, and
+                                    # surface a retryable ``upstream_unavailable``
+                                    # promptly so the client can retry once the claim
+                                    # clears.
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    message = (
+                                        refresh_exc.message
+                                        or "Account refresh is temporarily unavailable; retry later."
+                                    )
+                                    last_retryable_stream_error = _RetryableStreamError(
+                                        "upstream_unavailable",
+                                        {"message": message},
+                                    )
+                                    await proxy._write_stream_preflight_error(
+                                        account_id=account.id,
+                                        api_key=api_key,
+                                        request_id=request_id,
+                                        model=payload.model,
+                                        start=start,
+                                        error_code="upstream_unavailable",
+                                        error_message=message,
+                                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                        service_tier=payload.service_tier,
+                                        transport=request_transport,
+                                        upstream_transport=upstream_stream_transport,
+                                        useragent=useragent,
+                                        useragent_group=useragent_group,
+                                        client_ip=client_ip,
+                                    )
+                                    event = response_failed_event(
+                                        "upstream_unavailable",
+                                        message,
+                                        response_id=request_id,
+                                    )
+                                    yield format_sse_event(event)
+                                    return
+                                if not refresh_exc.transport_error:
+                                    # Non-transport, non-permanent RefreshError:
+                                    # release the stream lease and reselect.
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    continue
+                                # A GENUINE OAuth transport failure
+                                # (``code == "transport_error"``): the account/route
+                                # is at fault, so it falls through to the shared
+                                # transport-failure handling below — identical to a
+                                # raw aiohttp/connect failure — which records the
+                                # account-health penalty (``_handle_stream_error``)
+                                # so the broken account backs off instead of being
+                                # kept healthy and reselected on the next request.
                             _facade().logger.warning(
                                 "Stream forced refresh/connect failed request_id=%s attempt=%s account_id=%s",
                                 request_id,
@@ -1504,7 +1722,8 @@ class _StreamingRetryMixin:
                                 account.id,
                                 exc_info=True,
                             )
-                            message = str(exc) or "Request to upstream timed out"
+                            message = getattr(refresh_exc, "message", None) or str(refresh_exc)
+                            message = message or "Request to upstream timed out"
                             if (
                                 not require_preferred_account
                                 and preferred_account_id is None
@@ -1521,6 +1740,13 @@ class _StreamingRetryMixin:
                                     {"message": message},
                                     exclude_account=True,
                                 )
+                                # Release the excluded account's stream lease before
+                                # the failover ``continue`` so its stream-concurrency
+                                # slot is not held for the duration of the replacement
+                                # stream (matching the pre-refresh transport branch and
+                                # the claim-contention/permanent branches above).
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
                                 excluded_account_ids.add(account.id)
                                 continue
                             await proxy._write_stream_preflight_error(

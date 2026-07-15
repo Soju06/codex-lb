@@ -72,6 +72,111 @@ class RefreshError(Exception):
         self.upstream_proxy_fail_closed_reason = upstream_proxy_fail_closed_reason
 
 
+# Transient cross-replica refresh-contention codes fall into TWO semantically
+# distinct categories that share the SAME external outcome (retryable, never
+# cached, no account-health penalty, failover where applicable) but are NOT the
+# same internal condition. Conflating them would mask a genuinely degraded state
+# behind benign contention, so they are classified separately.
+#
+# (1) BENIGN CLAIM CONTENTION -- ``refresh_claim_timeout``: a peer replica holds
+#     the account's refresh claim (past the wait budget, or admission/budget was
+#     exhausted before the exchange could even start). THIS caller NEVER
+#     exchanged the token; the account's OAuth credentials are entirely healthy;
+#     only its refresh claim is contended. Pure contention -> retry, no penalty.
+REFRESH_CLAIM_CONTENTION_CODES: frozenset[str] = frozenset({"refresh_claim_timeout"})
+
+# (2) POST-EXCHANGE PERSIST/STATUS CAS CONFLICT -- ``token_persist_conflict`` /
+#     ``status_downgrade_conflict``: raised AFTER the upstream OAuth exchange has
+#     already run. ``token_persist_conflict`` in particular means the single-use
+#     refresh token was already CONSUMED upstream but the guarded writes could
+#     not persist the rotated token (a same-plaintext re-encryption storm the
+#     coordinator could not win an atomic compare-and-set window against), so the
+#     database may still hold the just-consumed token; ``status_downgrade_conflict``
+#     follows a PERMANENT refresh failure whose guarded REAUTH status write lost a
+#     compare-and-set. These signal a rare, more-serious internal race than benign
+#     contention and are logged/observed DISTINCTLY. They remain transient (a
+#     plain retry re-runs the WHOLE refresh -- a fresh upstream re-exchange, never
+#     a reuse of the possibly-consumed stored token; see ``refresh_account``), so
+#     their external outcome matches benign contention.
+REFRESH_PERSIST_CONFLICT_CODES: frozenset[str] = frozenset(
+    {
+        "token_persist_conflict",
+        "status_downgrade_conflict",
+    }
+)
+
+# Union of both categories. Every code here carries ``transport_error=True`` (it
+# is transient and retryable), but crucially the account's OAuth credentials are
+# healthy. This union is deliberately DISJOINT from ``code == "transport_error"``,
+# which ``refresh_access_token`` raises for a GENUINE OAuth transport failure (the
+# OAuth request itself timing out / the upstream connection failing).
+TRANSIENT_REFRESH_CONTENTION_CODES: frozenset[str] = REFRESH_CLAIM_CONTENTION_CODES | REFRESH_PERSIST_CONFLICT_CODES
+
+
+def is_refresh_claim_contention(exc: RefreshError) -> bool:
+    """True ONLY for benign cross-replica refresh-CLAIM contention.
+
+    Narrow predicate: matches ``refresh_claim_timeout`` (a peer replica holds the
+    account's refresh claim and THIS caller never exchanged the token). Use this
+    where the code specifically means "a peer holds the claim, we did not
+    exchange". For the failover / skip-penalty EXTERNAL outcome (which treats
+    benign contention and post-exchange persist conflicts identically) gate on
+    ``is_transient_refresh_contention`` instead.
+    """
+    return exc.transport_error and exc.code in REFRESH_CLAIM_CONTENTION_CODES
+
+
+def is_refresh_persist_conflict(exc: RefreshError) -> bool:
+    """True for a POST-EXCHANGE guarded-write compare-and-set conflict.
+
+    Matches ``token_persist_conflict`` / ``status_downgrade_conflict`` -- raised
+    after the OAuth exchange when the rotated-token or REAUTH-status guarded write
+    lost a compare-and-set. Distinct from benign claim contention: for
+    ``token_persist_conflict`` the single-use token was already consumed upstream
+    but its rotation could not be persisted, so the database may still hold the
+    consumed token. This is a rarer, more-serious internal race worth surfacing
+    distinctly in logs/metrics, though its external (retryable, unpenalized)
+    outcome matches benign contention.
+    """
+    return exc.transport_error and exc.code in REFRESH_PERSIST_CONFLICT_CODES
+
+
+def is_transient_refresh_contention(exc: RefreshError) -> bool:
+    """True for EITHER benign claim contention OR a post-exchange persist conflict.
+
+    Proxy failover paths gate their "skip the account-health penalty" behavior on
+    THIS predicate rather than on the broad ``transport_error`` flag. A GENUINE
+    OAuth transport failure (``code == "transport_error"`` -- the OAuth request
+    itself timing out or the upstream connection failing) is transient too but IS
+    the account/route's fault, so it MUST retain its normal health accounting
+    (``record_error`` / ``_handle_stream_error``) and push the broken account into
+    transient backoff instead of being reselected immediately. Only the
+    claim/persist-CAS codes -- where the account's credentials are healthy -- skip
+    the penalty. The two categories are separated by ``is_refresh_claim_contention``
+    (benign) and ``is_refresh_persist_conflict`` (post-exchange) for observability;
+    both take the same unpenalized retryable failover path here.
+    """
+    return exc.transport_error and exc.code in TRANSIENT_REFRESH_CONTENTION_CODES
+
+
+def refresh_contention_kind(exc: RefreshError) -> str | None:
+    """Classify a transient refresh contention for DISTINCT observability.
+
+    Returns ``"claim_contention"`` for benign peer-holds-claim contention,
+    ``"persist_conflict"`` for a post-exchange guarded-write CAS conflict, or
+    ``None`` when ``exc`` is not transient refresh contention. Log/metric call
+    sites use this so a rare, more-serious post-exchange persist conflict is
+    surfaced distinctly rather than lumped with benign claim contention.
+    """
+    if not exc.transport_error:
+        return None
+    if exc.code in REFRESH_CLAIM_CONTENTION_CODES:
+        return "claim_contention"
+    if exc.code in REFRESH_PERSIST_CONFLICT_CODES:
+        return "persist_conflict"
+    return None
+
+
 def should_refresh(last_refresh: datetime, now: datetime | None = None) -> bool:
     current = to_utc_naive(now) if now is not None else utcnow()
     last = to_utc_naive(last_refresh)
@@ -190,6 +295,17 @@ def push_token_refresh_timeout_override(timeout_seconds: float | None) -> contex
 
 def pop_token_refresh_timeout_override(token: contextvars.Token[float | None]) -> None:
     _TOKEN_REFRESH_TIMEOUT_OVERRIDE.reset(token)
+
+
+def get_token_refresh_timeout_override() -> float | None:
+    """Caller-scoped refresh budget (seconds); ``None`` when no caller set one.
+
+    Set by the proxy request path around ``AuthManager.ensure_fresh`` so that
+    everything the (shielded, caller-outliving) refresh task does — including
+    waiting on a foreign cross-replica refresh claim — stays bounded by the
+    budget of the request that started it.
+    """
+    return _TOKEN_REFRESH_TIMEOUT_OVERRIDE.get()
 
 
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:

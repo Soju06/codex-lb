@@ -2071,3 +2071,132 @@ async def test_device_complete_ack_stays_pending_when_own_poller_already_succeed
             assert done is not None
             # No second poller was started for the already-consumed device code.
             assert done.poll_task is None
+
+
+@pytest.mark.asyncio
+async def test_superseded_device_poller_does_not_persist_account(monkeypatch):
+    """A device flow's in-process poller whose durable row is superseded by a
+    newer device start (the old pending row is deleted, possibly on another
+    replica) must abort before doing durable damage: no account is added and no
+    terminal status is written for the abandoned attempt.
+    """
+
+    email = "superseded-device@example.com"
+    raw_account_id = "acc_superseded_device"
+
+    exchange_started = asyncio.Event()
+    release_exchange = asyncio.Event()
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="SUPER-CODE",
+            device_auth_id="dev-super",
+            interval_seconds=0,
+            expires_in_seconds=300,
+        )
+
+    async def fake_exchange_device_token(**_):
+        exchange_started.set()
+        await release_exchange.wait()
+        return OAuthTokens(
+            access_token="super-access",
+            refresh_token="super-refresh",
+            id_token=_encode_jwt(
+                {
+                    "email": email,
+                    "chatgpt_account_id": raw_account_id,
+                    "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+                }
+            ),
+        )
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="device"))
+    assert start.flow_id is not None
+
+    # The poller is now blocked mid-exchange, holding the (about-to-be-consumed)
+    # device code.
+    await asyncio.wait_for(exchange_started.wait(), timeout=2)
+
+    # A replacement device start supersedes the in-flight flow by deleting the
+    # previous pending device row (exactly what _start_device_flow does before
+    # inserting the replacement).
+    async with SessionLocal() as session:
+        superseded = await oauth_module.OAuthFlowRepository(session, TokenEncryptor()).delete_pending_device()
+    assert start.flow_id in superseded
+
+    async with replica._store.lock:
+        flow = replica._store.get_flow_locked(start.flow_id)
+        assert flow is not None
+        poll_task = flow.poll_task
+        assert poll_task is not None
+
+    # Let the abandoned exchange complete; the poller must abort on its "still
+    # current?" re-read rather than persist the account.
+    release_exchange.set()
+    await asyncio.wait_for(poll_task, timeout=2)
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    async with SessionLocal() as session:
+        stored = await AccountsRepository(session).get_by_id(expected_account_id)
+    assert stored is None
+
+    # No terminal status was written for the superseded (deleted) flow.
+    async with SessionLocal() as session:
+        record = await oauth_module.OAuthFlowRepository(session, TokenEncryptor()).get_by_flow_id(start.flow_id)
+    assert record is None
+
+
+@pytest.mark.asyncio
+async def test_expired_local_browser_flow_callback_is_rejected_on_origin_replica(monkeypatch):
+    """The pending-flow TTL must hold uniformly, including on the replica that
+    started the flow and still holds its local state: a callback that arrives
+    after the TTL is rejected (state-mismatch / expired) instead of being
+    completed from the stale cached verifier.
+    """
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    exchange_calls: list[str | None] = []
+
+    async def fake_exchange_authorization_code(**kwargs):
+        exchange_calls.append(kwargs.get("code"))
+        raise AssertionError("an expired flow must never exchange the authorization code")
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+    state_token = _oauth_state_token(start.authorization_url or "")
+
+    # Force the flow past its TTL both in the local store and the shared DB.
+    async with replica._store.lock:
+        local = replica._store.get_flow_by_state_token_locked(state_token)
+        assert local is not None and local.status == "pending"
+        local.expires_at = time.time() - 1
+    async with SessionLocal() as session:
+        row = await session.get(OAuthFlowState, start.flow_id)
+        assert row is not None
+        row.expires_at = utcnow() - timedelta(seconds=1)
+        await session.commit()
+
+    result = await replica.manual_callback(
+        f"http://localhost:1455/auth/callback?code=expired-code&state={state_token}",
+        flow_id=start.flow_id,
+    )
+
+    assert result.status == "error"
+    assert result.error_message == "Invalid OAuth callback: state mismatch or missing code."
+    # The stale verifier was never used to exchange the code.
+    assert exchange_calls == []

@@ -11,7 +11,12 @@ so that a browser callback, a manually pasted callback URL, or a device-code
 status poll can be completed by any replica regardless of which replica started
 the flow. The PKCE `code_verifier` MUST be encrypted at rest with the same
 encryption key material used for account tokens, and abandoned pending flows
-MUST expire via a short TTL.
+MUST expire via a short TTL. The TTL MUST be enforced uniformly on every
+replica, including the originating replica that still holds the flow in local
+memory. A device-code poll task MUST re-verify that its flow is still the
+active pending record in the shared database before persisting an account, so a
+flow superseded by a newer device `start` (whose poll task cannot be cancelled
+cross-process) cannot add or re-authenticate an account for a consumed code.
 
 #### Scenario: Callback completes on a replica that did not start the flow
 
@@ -70,3 +75,26 @@ MUST expire via a short TTL.
 - **WHEN** a replica reads that flow by `flow_id` or `state` token
 - **THEN** the expired pending flow is treated as absent
 - **AND** it is purged opportunistically so it cannot complete after its TTL
+
+#### Scenario: Expired flow is rejected uniformly on the originating replica
+
+- **GIVEN** replica A started a browser OAuth flow and still holds its state
+  (including the cached PKCE verifier) in memory
+- **AND** the flow's TTL has elapsed
+- **WHEN** the browser callback or a manually pasted callback URL for that flow
+  lands on replica A
+- **THEN** replica A rejects it as expired / state-mismatch and MUST NOT complete
+  the authorization-code exchange from the stale cached verifier
+- **AND** the outcome matches a replica without local state (where the durable
+  row is classified expired on read), so the TTL holds uniformly
+
+#### Scenario: Superseded device poller does not persist an account
+
+- **GIVEN** replica A is running an in-process device-code poll task for a flow
+- **AND** a newer device `start` (on any replica) deletes that pending device row
+  before inserting its replacement
+- **WHEN** replica A's poll task later exchanges the now-superseded device code
+- **THEN** replica A re-reads the durable row, finds it absent or no longer
+  `pending`, and aborts WITHOUT adding or re-authenticating an account
+- **AND** no terminal status is written for the superseded flow (the atomic
+  status write also rejects a write to the deleted row)

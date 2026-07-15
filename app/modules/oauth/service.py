@@ -357,6 +357,26 @@ class OauthService:
                 return await repo.get_by_state_token(state_token)
         return None
 
+    async def _device_flow_is_current(self, flow_id: str | None) -> bool:
+        """Return whether ``flow_id`` is still the active pending device flow in
+        the shared DB.
+
+        A second device ``start`` (possibly on another replica) deletes the
+        previous pending device row before inserting the replacement, so this
+        replica's still-running poll task cannot be cancelled cross-process. The
+        poller therefore re-reads the durable row before persisting: if the row
+        is gone (superseded/deleted) or no longer ``pending`` (already terminal,
+        or expired -> classified absent by ``get_by_flow_id``), the poller must
+        abort without adding/reauthing an account. Combined with the atomic
+        monotonic ``set_status``, an abandoned poller can neither persist an
+        account nor write a terminal status once its row was replaced.
+        """
+
+        if flow_id is None:
+            return False
+        record = await self._load_flow_record(flow_id=flow_id)
+        return record is not None and record.status == "pending"
+
     @staticmethod
     def _record_to_state(record: OAuthFlowRecord) -> OAuthState:
         return OAuthState(
@@ -622,6 +642,12 @@ class OauthService:
             await self._hydrate_flow_locked_from_db(state_token=state)
 
         async with self._store.lock:
+            # Enforce the pending-flow TTL uniformly, including on the replica
+            # that started the flow: drop an expired local browser flow before
+            # trusting its cached verifier, so a callback arriving after the TTL
+            # is rejected here exactly as it is on a replica without local state
+            # (where the durable row is classified expired on read).
+            self._store.prune_expired_pending_browser_flows_locked()
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
             target_flow_id = flow.flow_id if flow is not None else flow_id
@@ -683,21 +709,26 @@ class OauthService:
             raise
 
         expires_at = time.time() + device.expires_in_seconds
+        flow = OAuthState(
+            flow_id=flow_id,
+            status="pending",
+            method="device",
+            device_auth_id=device.device_auth_id,
+            user_code=device.user_code,
+            interval_seconds=device.interval_seconds,
+            intended_account_id=intended_account_id,
+            expires_at=expires_at,
+        )
         async with self._store.lock:
-            flow = OAuthState(
-                flow_id=flow_id,
-                status="pending",
-                method="device",
-                device_auth_id=device.device_auth_id,
-                user_code=device.user_code,
-                interval_seconds=device.interval_seconds,
-                intended_account_id=intended_account_id,
-                expires_at=expires_at,
-            )
             self._store.remove_pending_device_flows_locked()
             self._store.remember_flow_locked(flow)
-            self._ensure_device_poll_task_locked(flow)
 
+        # Persist the durable row (and supersede any prior pending device row)
+        # BEFORE starting the in-process poll task. The poller re-reads its
+        # durable row before persisting an account (see ``_device_flow_is_current``),
+        # so the row must already exist when the poll task can first run;
+        # otherwise an instant token exchange could abort against a not-yet
+        # -written row.
         await self._persist_flow_record(
             OAuthFlowRecord(
                 flow_id=flow_id,
@@ -711,6 +742,13 @@ class OauthService:
             ),
             purge_pending_device=True,
         )
+
+        async with self._store.lock:
+            # The flow may have been superseded/cleared while the row was being
+            # written; only start the poller if it is still the registered flow.
+            current = self._store.get_flow_locked(flow_id)
+            if current is not None:
+                self._ensure_device_poll_task_locked(current)
 
         return OauthStartResponse(
             flow_id=flow_id,
@@ -732,6 +770,10 @@ class OauthService:
             await self._hydrate_flow_locked_from_db(state_token=state)
 
         async with self._store.lock:
+            # Enforce the pending-flow TTL uniformly (see manual_callback): an
+            # expired local browser flow on the originating replica must not be
+            # completed via its stale cached verifier after the TTL.
+            self._store.prune_expired_pending_browser_flows_locked()
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
 
@@ -778,6 +820,13 @@ class OauthService:
                     allow_direct_egress=route is None,
                 )
                 if tokens:
+                    # A replacement device start may have superseded/deleted this
+                    # flow's durable row while the exchange was in flight. Confirm
+                    # this flow is still the active pending record before doing any
+                    # durable damage; otherwise abort so an abandoned poller cannot
+                    # add or reauth an account for a consumed code.
+                    if not await self._device_flow_is_current(flow_id):
+                        return
                     await self._persist_tokens(tokens, intended_account_id=context.intended_account_id)
                     await self._set_success(flow_id)
                     return

@@ -1451,7 +1451,7 @@ class _WebSocketMixin:
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
         )
-        if codex_session_affinity and _facade().get_settings().shared_prompt_cache:
+        if codex_session_affinity and getattr(_facade().get_settings(), "shared_prompt_cache", True):
             responses_payload.enable_shared_instruction_cache()
         normalized_payload = responses_payload.to_payload()
         body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)

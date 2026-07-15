@@ -6,7 +6,7 @@ import hmac
 import json
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import aiohttp
@@ -219,8 +219,7 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
-    if context.openai_sdk_request:
-        forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1"
+    forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1" if context.openai_sdk_request else "0"
     signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
@@ -340,7 +339,19 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
-    if openai_sdk_value is not None:
+    if tools_bound_signature is not None and openai_sdk_value is None:
+        sdk_context = replace(context, openai_sdk_request=True)
+        stripped_sdk_flag_valid = hmac.compare_digest(
+            tools_bound_signature,
+            _bridge_forward_tools_bound_signature(
+                payload=payload,
+                context=sdk_context,
+                signature_version=signature_version,
+            ),
+        )
+        if stripped_sdk_flag_valid:
+            return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value == "1":
         return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, cast
 
-from sqlalchemy import delete, select
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -124,14 +125,26 @@ class OAuthFlowRepository:
         status: str,
         error_message: str | None,
     ) -> bool:
-        row = await self._session.get(OAuthFlowState, flow_id)
-        if row is None:
-            return False
-        row.status = status
-        row.error_message = error_message
-        row.finished_at = utcnow() if status in _TERMINAL_OAUTH_STATUSES else None
+        # Terminal writes are monotonic and enforced ATOMICALLY in SQL so the
+        # guard holds under real cross-session/cross-replica concurrency. A
+        # durable ``success`` is sticky: only a ``success`` write may land on an
+        # already-``success`` row (idempotent), and any non-success write is
+        # rejected by the ``WHERE`` predicate. This closes the read-then-write
+        # TOCTOU race where two pollers both load a still-``pending`` row and the
+        # later ``error`` writer would otherwise clobber a committed ``success``
+        # (e.g. a losing/duplicate device poller receiving an OAuth error for the
+        # now-consumed device code). ``pending -> terminal`` and
+        # ``error -> success`` remain allowed.
+        finished_at = utcnow() if status in _TERMINAL_OAUTH_STATUSES else None
+        statement = update(OAuthFlowState).where(OAuthFlowState.flow_id == flow_id)
+        if status != "success":
+            statement = statement.where(OAuthFlowState.status != "success")
+        statement = statement.values(
+            status=status, error_message=error_message, finished_at=finished_at
+        ).execution_options(synchronize_session=False)
+        result = cast(CursorResult[Any], await self._session.execute(statement))
         await self._session.commit()
-        return True
+        return int(result.rowcount or 0) > 0
 
     async def delete_pending_device(self) -> list[str]:
         result = await self._session.execute(

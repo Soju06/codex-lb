@@ -473,17 +473,22 @@ class OauthService:
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
         if payload.flow_id is not None:
-            # The shared DB is authoritative once a flow is terminal. If another
-            # replica already completed this browser flow, honor that durable
-            # success/error here instead of the origin replica's stale local
-            # ``pending`` (which would flip the dashboard back to pending and
-            # skip account invalidation).
             record = await self._load_flow_record(flow_id=payload.flow_id)
             if record is not None and record.status in _TERMINAL_OAUTH_STATUSES:
+                # A targeted ``/complete`` (explicit ``flow_id``, as the dashboard
+                # sends after observing a success status) reports the shared-DB
+                # authoritative terminal status. For a browser / manual-callback
+                # flow completed on another replica this overrides the origin
+                # replica's stale local ``pending`` (which would otherwise flip
+                # the dashboard back to pending and skip account invalidation).
+                # For a device flow it reflects the (possibly cross-replica)
+                # result WITHOUT re-polling the single-use device code.
                 await self._reconcile_local_flow_from_db_terminal(record)
                 return OauthCompleteResponse(status=record.status)
-            # The device poll runs in-process; if this replica did not start the
-            # flow, hydrate it from the shared DB so it can resume polling.
+            # Only (re)attach an in-process device poller for a still-pending
+            # flow this replica did not start; a terminal flow returned above and
+            # must never be re-polled (the device code is single-use, and a
+            # duplicate poller's later error must not clobber the success).
             await self._hydrate_flow_locked_from_db(flow_id=payload.flow_id)
         uninitialized_flow_id: str | None = None
         async with self._store.lock:
@@ -497,11 +502,20 @@ class OauthService:
                 flow.user_code = payload.user_code
             if flow is not None:
                 self._store.set_latest_flow_locked(flow)
-            if state.status == "success":
-                return OauthCompleteResponse(status="success")
-            if state.method != "device":
-                return OauthCompleteResponse(status="pending")
-            if not self._ensure_device_poll_task_locked(state):
+            if state.method == "device":
+                # ``/complete`` acknowledges a device flow and ensures its single
+                # in-process poller. A targeted query (explicit ``flow_id``, as the
+                # dashboard sends after a success status) reports the terminal
+                # status so the UI can invalidate; the fire-and-forget
+                # acknowledgement (no ``flow_id``) returns ``pending`` while the
+                # poll proceeds. A flow that already reached a terminal state is
+                # never re-polled — the device code is single-use.
+                if state.status in _TERMINAL_OAUTH_STATUSES:
+                    if payload.flow_id is not None:
+                        return OauthCompleteResponse(status=state.status)
+                    return OauthCompleteResponse(status="pending")
+                if self._ensure_device_poll_task_locked(state):
+                    return OauthCompleteResponse(status="pending")
                 if flow is not None:
                     self._store.set_flow_status_locked(
                         flow,
@@ -514,6 +528,9 @@ class OauthService:
                     state.error_message = "Device code flow is not initialized."
                 if uninitialized_flow_id is None:
                     return OauthCompleteResponse(status="error")
+            elif state.status == "success":
+                # Browser / manual-callback: report an observed success.
+                return OauthCompleteResponse(status="success")
             else:
                 return OauthCompleteResponse(status="pending")
         if uninitialized_flow_id is not None:

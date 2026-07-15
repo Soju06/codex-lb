@@ -1,7 +1,7 @@
 """add oauth flow states coordination table
 
 Revision ID: 20260714_000000_add_oauth_flow_states
-Revises: 20260713_040000_add_account_refresh_claims
+Revises: 20260715_000000_add_request_log_queue_latency
 Create Date: 2026-07-14
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260714_000000_add_oauth_flow_states"
-down_revision = "20260713_040000_add_account_refresh_claims"
+down_revision = "20260715_000000_add_request_log_queue_latency"
 branch_labels = None
 depends_on = None
 

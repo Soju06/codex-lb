@@ -1929,3 +1929,145 @@ async def test_complete_on_origin_replica_honors_durable_success_from_other_repl
     async with replica_a._store.lock:
         local = replica_a._store.get_flow_locked(start.flow_id)
         assert local is not None and local.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_set_status_success_is_not_overwritten_by_later_error():
+    """Monotonic terminal write (repository.py): when a device flow is completed
+    twice (duplicate/losing poller), the poller that exchanged the code persists
+    ``success`` while the other later receives an OAuth error for the consumed
+    code. That stale error MUST NOT turn the durable row back to ``error``.
+    """
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, encryptor)
+        await repo.create(
+            oauth_module.OAuthFlowRecord(
+                flow_id="mono-flow",
+                method="device",
+                status="pending",
+                device_auth_id="dev-mono",
+                user_code="MONO-CODE",
+                interval_seconds=1,
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, encryptor)
+        # Winning poller persists success.
+        assert await repo.set_status("mono-flow", status="success", error_message=None) is True
+        # Losing/duplicate poller's later error for the consumed code is rejected.
+        assert await repo.set_status("mono-flow", status="error", error_message="invalid_grant") is False
+        record = await repo.get_by_flow_id("mono-flow")
+        assert record is not None
+        assert record.status == "success"
+        assert record.error_message is None
+        # success -> success remains idempotent.
+        assert await repo.set_status("mono-flow", status="success", error_message=None) is True
+        # error -> success is still allowed (success may win over an earlier error).
+        await repo.create(
+            oauth_module.OAuthFlowRecord(
+                flow_id="err-then-ok",
+                method="device",
+                status="error",
+                error_message="transient",
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+        assert await repo.set_status("err-then-ok", status="success", error_message=None) is True
+        healed = await repo.get_by_flow_id("err-then-ok")
+        assert healed is not None and healed.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_set_status_success_is_atomic_across_concurrent_sessions():
+    """The monotonic guard MUST hold under real cross-session concurrency, not
+    only single-session Python logic. Two pollers (separate DB sessions) both
+    read the row while it is ``pending`` (the TOCTOU window); the winning poller
+    commits ``success`` first, then the losing poller tries to write ``error``
+    for the now-consumed device code. A client-side read-then-write guard would
+    still see its stale ``pending`` snapshot and clobber the success; the SQL
+    conditional UPDATE rejects it atomically.
+    """
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as seed_session:
+        await oauth_module.OAuthFlowRepository(seed_session, encryptor).create(
+            oauth_module.OAuthFlowRecord(
+                flow_id="race-flow",
+                method="device",
+                status="pending",
+                device_auth_id="dev-race",
+                user_code="RACE-CODE",
+                interval_seconds=1,
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+
+    async with SessionLocal() as session_win, SessionLocal() as session_lose:
+        repo_win = oauth_module.OAuthFlowRepository(session_win, encryptor)
+        repo_lose = oauth_module.OAuthFlowRepository(session_lose, encryptor)
+
+        # Losing poller loads the still-``pending`` row into its own session and
+        # keeps that transaction/snapshot open — the TOCTOU window where both
+        # transactions have observed ``pending``. A client-side read-then-write
+        # guard would re-use this cached ``pending`` snapshot on its own status
+        # write and wrongly conclude the downgrade is allowed.
+        preloaded = await session_lose.get(OAuthFlowState, "race-flow")
+        assert preloaded is not None and preloaded.status == "pending"
+
+        # Winning poller exchanges the code and commits ``success`` first.
+        assert await repo_win.set_status("race-flow", status="success", error_message=None) is True
+
+        # Losing poller now gets an OAuth error for the consumed code while still
+        # holding its stale ``pending`` snapshot. The atomic conditional UPDATE
+        # re-checks the current row state in SQL and refuses to downgrade the
+        # committed ``success``; a client-side guard would clobber it.
+        applied = await repo_lose.set_status("race-flow", status="error", error_message="invalid_grant")
+        assert applied is False
+
+    async with SessionLocal() as verify_session:
+        record = await oauth_module.OAuthFlowRepository(verify_session, encryptor).get_by_flow_id("race-flow")
+        assert record is not None
+        assert record.status == "success"
+        assert record.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_device_complete_ack_stays_pending_when_own_poller_already_succeeded():
+    """Device same-replica ``/complete`` contract: the fire-and-forget
+    acknowledgement (no ``flow_id``) must report ``pending`` even when this
+    flow's own in-process poller has already raced to ``success`` (the DB/store
+    already shows success). This deterministically reproduces the CI race where
+    the instant device-token exchange completed before ``/complete`` was read,
+    and must NOT spawn a second poll of the consumed device code.
+    """
+
+    await oauth_module._OAUTH_STORE.reset()
+    async with SessionLocal() as session:
+        service = oauth_module.OauthService(AccountsRepository(session))
+
+        async with oauth_module._OAUTH_STORE.lock:
+            flow = oauth_module.OAuthState(
+                flow_id="device-raced",
+                status="pending",
+                method="device",
+                device_auth_id="dev-raced",
+                user_code="RACED-CODE",
+                interval_seconds=1,
+                expires_at=time.time() + 30,
+            )
+            oauth_module._OAUTH_STORE.remember_flow_locked(flow)
+            # The flow's own poller has already written success.
+            oauth_module._OAUTH_STORE.set_flow_status_locked(flow, status="success", error_message=None)
+
+        response = await service.complete_oauth(oauth_module.OauthCompleteRequest())
+        assert response.status == "pending"
+
+        async with oauth_module._OAUTH_STORE.lock:
+            done = oauth_module._OAUTH_STORE.get_flow_locked("device-raced")
+            assert done is not None
+            # No second poller was started for the already-consumed device code.
+            assert done.poll_task is None

@@ -46,6 +46,24 @@ MUST expire via a short TTL.
   database rather than its stale in-memory `pending`
 - **AND** replica A reconciles its in-memory flow state to that terminal status
 
+#### Scenario: A durable success is never regressed to error
+
+- **GIVEN** a persisted flow whose shared-database status is `success`
+- **WHEN** a later status write attempts to set the same `flow_id` to `error`
+  (e.g. a duplicate or losing device poller receiving an OAuth error for the
+  already-consumed device code)
+- **THEN** the persisted `success` status is retained and MUST NOT be overwritten
+- **AND** status polling continues to report `success`
+
+#### Scenario: Device-code acknowledgement does not re-poll a completed flow
+
+- **GIVEN** a device-code flow whose in-process poller has already reached a
+  terminal status
+- **WHEN** `POST /api/oauth/complete` is called for that flow
+- **THEN** no second poll of the single-use device code is started
+- **AND** the untargeted acknowledgement (no `flow_id`) reports `pending` while a
+  targeted call (explicit `flow_id`) reports the durable terminal status
+
 #### Scenario: Abandoned pending flow expires
 
 - **GIVEN** a persisted pending flow whose `expires_at` is in the past

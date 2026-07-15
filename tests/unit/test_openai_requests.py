@@ -901,6 +901,7 @@ def test_shared_instruction_cache_key_survives_trimmed_model_copy():
     )
 
     assert trimmed.to_payload()["prompt_cache_key"] == wire_key
+    assert trimmed.model_dump_for_forwarding()["prompt_cache_key"] == wire_key
 
 
 def test_shared_instruction_cache_preserves_client_breakpoint_and_unsupported_shapes():

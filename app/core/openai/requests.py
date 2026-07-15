@@ -788,6 +788,11 @@ class ResponsesRequest(BaseModel):
             # ``tools`` has a default factory, but omission must survive owner
             # forwarding and model-source egress.
             payload.pop("tools", None)
+        if (
+            self._shared_instruction_cache_key is not None
+            and _shared_instruction_cache_boundary(payload["input"]) is None
+        ):
+            payload["prompt_cache_key"] = self._shared_instruction_cache_key
         return payload
 
     def enable_shared_instruction_cache(self) -> bool:

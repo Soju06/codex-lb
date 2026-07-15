@@ -2630,3 +2630,66 @@ async def test_non_originating_complete_reports_durable_status_without_second_po
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.parametrize("path", ["manual_callback", "handle_callback"])
+@pytest.mark.asyncio
+async def test_loser_browser_callback_honors_durable_success_not_error(monkeypatch, path):
+    """Browser-callback analog of the loser-writes-error bug: two callbacks race
+    on the same single-use authorization code. The winner commits durable success
+    WHILE the loser is exchanging; the loser's exchange then fails with
+    ``invalid_grant``. The loser's terminal ERROR write is rejected by the
+    monotonic guard (durable row already ``success``), so the loser MUST report
+    the durable SUCCESS (not error) and MUST NOT leave the local flow in error.
+    """
+
+    from aiohttp.test_utils import make_mocked_request
+
+    holder: dict[str, str] = {}
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    async def fake_oauth_route():
+        return None
+
+    async def fake_exchange_authorization_code(**_kwargs):
+        # The winner commits durable success DURING the loser's exchange (so the
+        # top-of-callback reconciliation gate saw ``pending`` and the loser
+        # actually reaches this exchange), then the loser's exchange of the
+        # now-consumed code fails.
+        async with SessionLocal() as session:
+            await OAuthFlowRepository(session, TokenEncryptor()).set_status(
+                holder["flow_id"], status="success", error_message=None
+            )
+        raise OAuthError("invalid_grant", "Authorization code expired", status_code=400)
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+    holder["flow_id"] = start.flow_id
+    state_token = _oauth_state_token(start.authorization_url or "")
+
+    if path == "manual_callback":
+        manual = await replica.manual_callback(
+            f"http://localhost:1455/auth/callback?code=consumed-code&state={state_token}",
+            flow_id=start.flow_id,
+        )
+        assert manual.status == "success"
+    else:
+        request = make_mocked_request("GET", f"/auth/callback?code=consumed-code&state={state_token}")
+        response = await replica._handle_callback(request)
+        assert response.status == 200
+        assert response.text is not None and "Login failed" not in response.text
+
+    # The loser must not leave the local flow in error; it honors durable success.
+    async with replica._store.lock:
+        local = replica._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "success"
+    async with SessionLocal() as session:
+        record = await OAuthFlowRepository(session, TokenEncryptor()).get_by_flow_id(start.flow_id)
+    assert record is not None and record.status == "success"

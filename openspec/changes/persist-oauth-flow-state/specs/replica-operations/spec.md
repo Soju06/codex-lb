@@ -156,6 +156,15 @@ row that is absent or expired drops the stale local flow. An entry point MUST
 NOT branch on a local `pending`, reuse a locally cached PKCE verifier, or replay
 a callback without first reconciling against the durable status.
 
+A caller that attempts a durable terminal ERROR write MUST honor a rejected
+result. When the monotonic guard rejects a non-success terminal write because
+the durable row is already `success` (a racing callback/poller committed success
+for the same single-use code), the caller MUST NOT surface an error or leave the
+local flow in `error`; it MUST reconcile against the durable row and report the
+durable `success`. This applies uniformly to every browser/manual-callback error
+branch (invalid callback, `invalid_grant`/`OAuthError` exchange failure, reauth
+seat mismatch, identity conflict, and unexpected errors).
+
 #### Scenario: Replayed callback observes the durable terminal instead of re-exchanging
 
 - **GIVEN** replica A started a browser OAuth flow and still holds it locally as
@@ -176,3 +185,12 @@ a callback without first reconciling against the durable status.
   browser callback handler, or the manual callback is invoked for that flow
 - **THEN** that entry point reports the durable terminal (never the stale local
   `pending`) and reconciles the local in-memory flow to it
+
+#### Scenario: Loser callback honors durable success on a rejected error write
+
+- **GIVEN** two browser callbacks race on the same single-use authorization code
+- **AND** the winner commits durable `success` while the loser is exchanging
+- **WHEN** the loser's exchange fails with `invalid_grant` and it attempts a
+  durable `error` write that the monotonic guard rejects
+- **THEN** the loser reports the durable `success` (not an error) and does not
+  leave the local flow in `error`

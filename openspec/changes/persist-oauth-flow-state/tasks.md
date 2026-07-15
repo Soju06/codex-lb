@@ -37,6 +37,10 @@
       loser writes nothing); the originating replica is the sole poller and a
       non-originating `/complete` reports durable status without spawning a
       second poller.
+- [x] 6.6 Propagate rejected durable terminal-error writes: browser/manual
+      callback error branches honor a durable `success` (report success, do not
+      leave local `error`) when the monotonic guard rejects the error write for a
+      single-use code already completed by a racing callback.
 
 ## 3. Service wiring
 

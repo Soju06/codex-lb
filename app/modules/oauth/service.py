@@ -359,10 +359,14 @@ class OauthService:
             async with get_background_session() as session:
                 return await OAuthFlowRepository(session, self._encryptor).consume_device_slot(flow_id)
 
-    async def _persist_flow_status(self, flow_id: str, *, status: str, error_message: str | None) -> None:
+    async def _persist_flow_status(self, flow_id: str, *, status: str, error_message: str | None) -> bool:
+        """Write a durable status transition. Returns whether it was applied; a
+        non-success write is rejected (``False``) by the monotonic guard when the
+        durable row is already ``success`` (a racing winner committed first)."""
+
         async with get_background_session() as session:
             repo = OAuthFlowRepository(session, self._encryptor)
-            await repo.set_status(flow_id, status=status, error_message=error_message)
+            return await repo.set_status(flow_id, status=status, error_message=error_message)
 
     async def _load_flow_record(
         self,
@@ -635,14 +639,14 @@ class OauthService:
 
         if error:
             message = f"OAuth error: {error}"
-            if can_update_error:
-                await self._set_error(message, flow_id=target_flow_id)
+            if can_update_error and await self._finalize_callback_error(message, flow_id=target_flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=message)
 
         if not code or not state or flow is None or not verifier:
             message = "Invalid OAuth callback: state mismatch or missing code."
-            if can_update_error:
-                await self._set_error(message, flow_id=target_flow_id)
+            if can_update_error and await self._finalize_callback_error(message, flow_id=target_flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=message)
 
         try:
@@ -658,18 +662,28 @@ class OauthService:
             asyncio.create_task(self._stop_callback_server_if_idle())
             return ManualCallbackResponse(status="success")
         except OAuthError as exc:
-            await self._set_error(exc.message, flow_id=flow.flow_id)
+            # Loser race: a concurrent callback may have committed success for the
+            # same single-use code, so honor the durable success on a rejected
+            # error write instead of surfacing this ``invalid_grant``.
+            if await self._finalize_callback_error(exc.message, flow_id=flow.flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=exc.message)
         except ReauthSeatMismatchError:
-            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id)
+            if await self._finalize_callback_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=_REAUTH_SEAT_MISMATCH_MESSAGE)
         except AccountIdentityConflictError:
-            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+            if (
+                await self._finalize_callback_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+                == "success"
+            ):
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
         except Exception as exc:
             logger.error("manual OAuth callback failed exception_type=%s", type(exc).__name__)
             message = "An internal error occurred."
-            await self._set_error(message, flow_id=flow.flow_id)
+            if await self._finalize_callback_error(message, flow_id=flow.flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=message)
 
     async def _start_device_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
@@ -762,11 +776,19 @@ class OauthService:
             return self._html_response(_error_html(terminal_error or "Authorization failed."))
 
         if error:
-            await self._set_error(f"OAuth error: {error}", flow_id=flow.flow_id if flow is not None else None)
+            outcome = await self._finalize_callback_error(
+                f"OAuth error: {error}", flow_id=flow.flow_id if flow is not None else None
+            )
+            if outcome == "success":
+                return self._html_response(_success_html())
             return self._html_response(_error_html("Authorization failed."))
 
         if not code or not state or flow is None or not verifier:
-            await self._set_error("Invalid OAuth callback state.", flow_id=flow.flow_id if flow is not None else None)
+            outcome = await self._finalize_callback_error(
+                "Invalid OAuth callback state.", flow_id=flow.flow_id if flow is not None else None
+            )
+            if outcome == "success":
+                return self._html_response(_success_html())
             return self._html_response(_error_html("Invalid OAuth callback."))
 
         try:
@@ -781,14 +803,26 @@ class OauthService:
             await self._set_success(flow.flow_id)
             html = _success_html()
         except OAuthError as exc:
-            await self._set_error(exc.message, flow_id=flow.flow_id)
-            html = _error_html(exc.message)
+            # Loser race: honor a durable success committed by a concurrent
+            # callback for the same single-use code instead of showing an error.
+            html = (
+                _success_html()
+                if await self._finalize_callback_error(exc.message, flow_id=flow.flow_id) == "success"
+                else _error_html(exc.message)
+            )
         except ReauthSeatMismatchError:
-            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id)
-            html = _error_html(_REAUTH_SEAT_MISMATCH_MESSAGE)
+            html = (
+                _success_html()
+                if await self._finalize_callback_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id) == "success"
+                else _error_html(_REAUTH_SEAT_MISMATCH_MESSAGE)
+            )
         except AccountIdentityConflictError:
-            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
-            html = _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
+            html = (
+                _success_html()
+                if await self._finalize_callback_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+                == "success"
+                else _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
+            )
 
         asyncio.create_task(self._stop_callback_server_if_idle())
         return self._html_response(html)
@@ -1000,18 +1034,45 @@ class OauthService:
             # on its next status poll instead of its stale in-memory pending.
             await self._persist_flow_status(flow_id, status="success", error_message=None)
 
-    async def _set_error(self, message: str, flow_id: str | None = None) -> None:
-        async with self._store.lock:
-            if flow_id is None:
+    async def _set_error(self, message: str, flow_id: str | None = None) -> bool:
+        """Record a terminal error. Returns whether the durable error was applied.
+
+        The durable write happens FIRST: if the monotonic guard rejects it
+        (``False``) because the durable row is already ``success`` — a racing
+        callback/poller committed success for the same single-use code — the
+        local in-memory flow is left untouched (never shadowed into ``error``),
+        and the caller must honor the durable success instead of surfacing the
+        error. ``flow_id`` of ``None`` updates only the local latest state.
+        """
+
+        if flow_id is None:
+            async with self._store.lock:
                 if self._store.state.flow_id is None:
                     self._store.state.status = "error"
                     self._store.state.error_message = message
-            else:
-                flow = self._store.get_flow_locked(flow_id)
-                if flow is not None:
-                    self._store.set_flow_status_locked(flow, status="error", error_message=message)
-        if flow_id is not None:
-            await self._persist_flow_status(flow_id, status="error", error_message=message)
+            return True
+        applied = await self._persist_flow_status(flow_id, status="error", error_message=message)
+        if not applied:
+            return False
+        async with self._store.lock:
+            flow = self._store.get_flow_locked(flow_id)
+            if flow is not None:
+                self._store.set_flow_status_locked(flow, status="error", error_message=message)
+        return True
+
+    async def _finalize_callback_error(self, message: str, *, flow_id: str | None) -> str:
+        """Record a terminal error for a browser/manual-callback flow and return
+        the status to report. If the durable error write is rejected because a
+        racing callback already committed ``success`` for the same single-use
+        code, reconcile the local flow and report the durable ``success`` instead
+        of misreporting an error (the loser must not surface an error)."""
+
+        if await self._set_error(message, flow_id=flow_id):
+            return "error"
+        record = await self._reconcile_flow_from_durable(flow_id=flow_id) if flow_id is not None else None
+        if record is not None and record.status == "success":
+            return "success"
+        return "error"
 
     def _start_callback_server_stop_locked(self, server: OAuthCallbackServer) -> asyncio.Task[None]:
         stop_task = self._store._callback_server_stop_task

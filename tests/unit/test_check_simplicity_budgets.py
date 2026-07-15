@@ -128,6 +128,20 @@ def test_heading_count_fence_close_must_match_opening_character():
     assert checker.count_top_level_headings(lines) == 1
 
 
+def test_heading_count_close_fence_must_have_no_info_string():
+    checker = _load_checker_module()
+
+    lines = [
+        "```",
+        "```bash",
+        "# still inside: a close fence may not carry an info string",
+        "```",
+        "# heading after the real close",
+    ]
+
+    assert checker.count_top_level_headings(lines) == 1
+
+
 def test_strip_contributors_block_removes_markers_and_body():
     checker = _load_checker_module()
 

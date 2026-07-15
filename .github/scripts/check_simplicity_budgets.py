@@ -85,8 +85,9 @@ def count_top_level_headings(lines: list[str]) -> int:
     """Count h1/h2 headings, ignoring lines inside fenced code blocks.
 
     Fences may use ``` or ~~~ and be indented up to 3 spaces (CommonMark);
-    a fence is closed only by a fence line using the same character and at
-    least the same length (so a ``` line inside a ```` block is content).
+    a fence is closed only by a fence line using the same character, at
+    least the same length, and no info string (so a ``` line inside a
+    ```` block and a ```bash line inside a ``` block are both content).
     """
     fence_open: tuple[str, int] | None = None
     count = 0
@@ -95,9 +96,10 @@ def count_top_level_headings(lines: list[str]) -> int:
         if fence is not None:
             fence_str = fence.group("fence")
             char, length = fence_str[0], len(fence_str)
+            bare = line[fence.end() :].strip() == ""
             if fence_open is None:
                 fence_open = (char, length)
-            elif char == fence_open[0] and length >= fence_open[1]:
+            elif char == fence_open[0] and length >= fence_open[1] and bare:
                 fence_open = None
             continue
         if fence_open is None and HEADING_RE.match(line):

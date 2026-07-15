@@ -9110,3 +9110,157 @@ def test_backend_responses_websocket_closes_before_replaying_exposed_sequence(
     assert log_calls[0]["request_id"] == "resp_ws_sequenced_first"
     assert log_calls[0]["status"] == "error"
     assert log_calls[0]["error_code"] == "stream_incomplete"
+
+
+@pytest.mark.parametrize(("terminal_sequence", "expect_recovery"), [(1, True), (0, False)])
+def test_backend_responses_websocket_recovers_created_only_sequenced_prewarm(
+    app_instance,
+    monkeypatch,
+    terminal_sequence: int,
+    expect_recovery: bool,
+):
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "sequence_number": 0,
+                        "response": {"id": "resp_ws_prewarm_first", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "error",
+                error="no close frame received or sent",
+            ),
+        ]
+    )
+    replay_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "sequence_number": 0,
+                        "response": {"id": "resp_ws_prewarm_replay", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "sequence_number": terminal_sequence,
+                        "response": {
+                            "id": "resp_ws_prewarm_replay",
+                            "status": "completed",
+                            "usage": {
+                                "input_tokens": 12,
+                                "output_tokens": 0,
+                                "total_tokens": 12,
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    upstreams = [first_upstream, replay_upstream]
+    connect_calls = 0
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        nonlocal connect_calls
+        del self, headers, kwargs
+        connect_calls += 1
+        return SimpleNamespace(id="acct_ws_prewarm_replay"), upstreams.pop(0)
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "generate": False,
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "custom", "name": "shell"}],
+            }
+        ],
+        "stream": True,
+    }
+    headers = {
+        "x-codex-turn-metadata": json.dumps(
+            {"request_kind": "prewarm", "turn_id": "turn_sequenced_prewarm"},
+            separators=(",", ":"),
+        )
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses", headers=headers) as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created_event = json.loads(websocket.receive_text())
+            if expect_recovery:
+                terminal_event = json.loads(websocket.receive_text())
+                disconnect = None
+            else:
+                terminal_event = None
+                with pytest.raises(WebSocketDisconnect) as disconnect_info:
+                    websocket.receive_text()
+                disconnect = disconnect_info.value
+
+    assert created_event["type"] == "response.created"
+    assert created_event["response"]["id"] == "resp_ws_prewarm_first"
+    assert created_event["sequence_number"] == 0
+    assert connect_calls == 2
+    assert upstreams == []
+    assert len(first_upstream.sent_text) == 1
+    assert len(replay_upstream.sent_text) == 1
+    assert json.loads(first_upstream.sent_text[0])["generate"] is False
+    assert json.loads(replay_upstream.sent_text[0])["generate"] is False
+    assert len(log_calls) == 1
+    assert log_calls[0]["request_kind"] == "prewarm"
+
+    if expect_recovery:
+        assert terminal_event is not None
+        assert terminal_event["type"] == "response.completed"
+        assert terminal_event["response"]["id"] == "resp_ws_prewarm_first"
+        assert terminal_event["sequence_number"] == 1
+        assert log_calls[0]["request_id"] == "resp_ws_prewarm_replay"
+        assert log_calls[0]["status"] == "success"
+        assert log_calls[0]["output_tokens"] == 0
+        assert disconnect is None
+    else:
+        assert terminal_event is None
+        assert disconnect is not None
+        assert disconnect.code == 1011
+        assert log_calls[0]["request_id"] == "resp_ws_prewarm_replay"
+        assert log_calls[0]["status"] == "error"
+        assert log_calls[0]["error_code"] == "stream_incomplete"

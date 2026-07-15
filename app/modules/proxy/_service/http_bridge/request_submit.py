@@ -326,6 +326,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 input_full_fingerprint = _fingerprint_input_items(payload_input_list)
 
         resolved_request_id = request_id or f"ws_{uuid4().hex}"
+        request_kind = _request_kind_from_headers(headers)
         request_state = _WebSocketRequestState(
             request_id=resolved_request_id,
             request_log_id=request_log_id,
@@ -346,7 +347,8 @@ class _HTTPBridgeRequestSubmitMixin:
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
-            request_kind=_request_kind_from_headers(headers),
+            request_kind=request_kind,
+            generate_false_prewarm=request_kind == "prewarm" and upstream_payload.get("generate") is False,
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count

@@ -68,10 +68,15 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
 def warn_removed_settings(environ: Mapping[str, str] | None = None) -> list[str]:
     """Log one WARN listing removed ``CODEX_LB_*`` env vars still set.
 
-    Returns the removed names found so the startup caller and tests share one
-    source of truth. Values are never logged.
+    Scans the process environment plus the same env files Settings loads
+    (``ENV_FILES``), so removed names lingering in ``.env``/``.env.local``
+    are reported too. Returns the removed names found so the startup caller
+    and tests share one source of truth. Values are never logged.
     """
-    source: Mapping[str, str] = os.environ if environ is None else environ
+    if environ is None:
+        source: Mapping[str, str | None] = _effective_environ()
+    else:
+        source = environ
     found = [name for name in _REMOVED_SETTINGS if name in source]
     if found:
         logger.warning(
@@ -113,10 +118,10 @@ def _default_http_bridge_instance_id() -> str:
 
 
 def _default_upstream_websocket_trust_env() -> bool:
-    return outbound_proxy_env_configured(_configured_outbound_proxy_env())
+    return outbound_proxy_env_configured(_effective_environ())
 
 
-def _configured_outbound_proxy_env() -> dict[str, str | None]:
+def _effective_environ() -> dict[str, str | None]:
     environ: dict[str, str | None] = {}
     for env_file in ENV_FILES:
         environ.update(dotenv_values(env_file))
@@ -350,7 +355,7 @@ class Settings(BaseSettings):
     dashboard_trust_loopback_host_header_for_long_sessions: bool = False
 
     def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
-        return _configured_outbound_proxy_env()
+        return _effective_environ()
 
     dashboard_auth_proxy_header: str = "Remote-User"
 

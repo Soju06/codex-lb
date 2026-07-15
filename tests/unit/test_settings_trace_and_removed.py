@@ -75,6 +75,19 @@ def test_warn_removed_settings_is_silent_when_nothing_is_set(caplog):
     assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
 
 
+def test_warn_removed_settings_scans_env_files(tmp_path, monkeypatch, caplog):
+    env_file = tmp_path / ".env.local"
+    env_file.write_text("CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT=64\n", encoding="utf-8")
+    monkeypatch.setattr("app.core.config.settings.ENV_FILES", (tmp_path / ".env", env_file))
+    monkeypatch.delenv("CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+        found = warn_removed_settings()
+
+    assert found == ["CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT"]
+    assert "64" not in caplog.text
+
+
 def test_removed_settings_tuple_covers_all_five_groups():
     assert len(_REMOVED_SETTINGS) == 24
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)

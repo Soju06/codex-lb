@@ -40,10 +40,15 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
+from app.modules.oauth.repository import (
+    OAuthFlowRecord,
+    OAuthFlowRepository,
+    epoch_to_naive_utc,
+)
 from app.modules.oauth.schemas import (
     ManualCallbackResponse,
     OauthCompleteRequest,
@@ -311,11 +316,89 @@ class OauthService:
         self,
         accounts_repo: AccountsRepository,
         repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepository]] | None = None,
+        store: OAuthStateStore | None = None,
     ) -> None:
         self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
-        self._store = _OAUTH_STORE
+        # ``store`` is the process-local runtime registry (callback server +
+        # device poll tasks). It defaults to the module singleton; tests inject
+        # a distinct store to simulate a second replica over the shared DB.
+        self._store = store if store is not None else _OAUTH_STORE
         self._repo_factory = repo_factory
+
+    # ------------------------------------------------------------------
+    # Shared DB-backed flow persistence (cross-replica source of truth)
+    # ------------------------------------------------------------------
+
+    async def _persist_flow_record(self, record: OAuthFlowRecord, *, purge_pending_device: bool = False) -> None:
+        async with get_background_session() as session:
+            repo = OAuthFlowRepository(session, self._encryptor)
+            if purge_pending_device:
+                await repo.delete_pending_device()
+            await repo.purge_expired(terminal_keep=_MAX_RETAINED_TERMINAL_OAUTH_FLOWS)
+            await repo.create(record)
+
+    async def _persist_flow_status(self, flow_id: str, *, status: str, error_message: str | None) -> None:
+        async with get_background_session() as session:
+            repo = OAuthFlowRepository(session, self._encryptor)
+            await repo.set_status(flow_id, status=status, error_message=error_message)
+
+    async def _load_flow_record(
+        self,
+        *,
+        flow_id: str | None = None,
+        state_token: str | None = None,
+    ) -> OAuthFlowRecord | None:
+        async with get_background_session() as session:
+            repo = OAuthFlowRepository(session, self._encryptor)
+            if flow_id is not None:
+                return await repo.get_by_flow_id(flow_id)
+            if state_token is not None:
+                return await repo.get_by_state_token(state_token)
+        return None
+
+    @staticmethod
+    def _record_to_state(record: OAuthFlowRecord) -> OAuthState:
+        return OAuthState(
+            flow_id=record.flow_id,
+            status=record.status,
+            method=record.method,
+            error_message=record.error_message,
+            state_token=record.state_token,
+            intended_account_id=record.intended_account_id,
+            code_verifier=record.code_verifier,
+            device_auth_id=record.device_auth_id,
+            user_code=record.user_code,
+            interval_seconds=record.interval_seconds,
+            expires_at=naive_utc_to_epoch(record.expires_at) if record.expires_at is not None else None,
+            finished_at=naive_utc_to_epoch(record.finished_at) if record.finished_at is not None else None,
+        )
+
+    async def _hydrate_flow_locked_from_db(
+        self,
+        *,
+        flow_id: str | None = None,
+        state_token: str | None = None,
+    ) -> None:
+        """Load a flow the local store never saw (started on another replica)
+        from the shared DB and register it in the process-local store."""
+
+        async with self._store.lock:
+            if flow_id is not None and self._store.get_flow_locked(flow_id) is not None:
+                return
+            if state_token is not None and self._store.get_flow_by_state_token_locked(state_token) is not None:
+                return
+        record = await self._load_flow_record(flow_id=flow_id, state_token=state_token)
+        if record is None:
+            return
+        async with self._store.lock:
+            if self._store.get_flow_locked(record.flow_id) is not None:
+                return
+            if record.state_token is not None and (
+                self._store.get_flow_by_state_token_locked(record.state_token) is not None
+            ):
+                return
+            self._store.remember_flow_locked(self._record_to_state(record))
 
     async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
         force_method = (request.force_method or "").lower()
@@ -349,6 +432,14 @@ class OauthService:
             return await self._start_device_flow()
 
     async def oauth_status(self, flow_id: str | None = None) -> OauthStatusResponse:
+        if flow_id is not None:
+            # The shared DB is authoritative: another replica may have completed
+            # this flow, so a local ``pending`` on the originating replica must
+            # not shadow a durable success/error.
+            record = await self._load_flow_record(flow_id=flow_id)
+            if record is not None:
+                status = record.status if record.status != "idle" else "pending"
+                return OauthStatusResponse(status=status, error_message=record.error_message)
         async with self._store.lock:
             state = self._store.get_flow_locked(flow_id)
             if state is None:
@@ -358,6 +449,11 @@ class OauthService:
 
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
+        if payload.flow_id is not None:
+            # The device poll runs in-process; if this replica did not start the
+            # flow, hydrate it from the shared DB so it can resume polling.
+            await self._hydrate_flow_locked_from_db(flow_id=payload.flow_id)
+        uninitialized_flow_id: str | None = None
         async with self._store.lock:
             flow = self._store.get_flow_locked(payload.flow_id)
             state = flow
@@ -380,11 +476,21 @@ class OauthService:
                         status="error",
                         error_message="Device code flow is not initialized.",
                     )
+                    uninitialized_flow_id = flow.flow_id
                 else:
                     state.status = "error"
                     state.error_message = "Device code flow is not initialized."
-                return OauthCompleteResponse(status="error")
-            return OauthCompleteResponse(status="pending")
+                if uninitialized_flow_id is None:
+                    return OauthCompleteResponse(status="error")
+            else:
+                return OauthCompleteResponse(status="pending")
+        if uninitialized_flow_id is not None:
+            await self._persist_flow_status(
+                uninitialized_flow_id,
+                status="error",
+                error_message="Device code flow is not initialized.",
+            )
+        return OauthCompleteResponse(status="error")
 
     async def _start_browser_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
         await self._wait_for_callback_server_stop()
@@ -396,6 +502,7 @@ class OauthService:
         settings = get_settings()
         callback_server: OAuthCallbackServer | None = None
 
+        expires_at = time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS
         async with self._store.lock:
             self._store.remember_flow_locked(
                 OAuthState(
@@ -405,7 +512,7 @@ class OauthService:
                     state_token=state_token,
                     code_verifier=code_verifier,
                     intended_account_id=intended_account_id,
-                    expires_at=time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS,
+                    expires_at=expires_at,
                 )
             )
             if self._store._callback_server is None:
@@ -415,6 +522,18 @@ class OauthService:
                     port=settings.oauth_callback_port,
                 )
                 self._store._callback_server = callback_server
+
+        await self._persist_flow_record(
+            OAuthFlowRecord(
+                flow_id=flow_id,
+                method="browser",
+                status="pending",
+                state_token=state_token,
+                code_verifier=code_verifier,
+                intended_account_id=intended_account_id,
+                expires_at=epoch_to_naive_utc(expires_at),
+            )
+        )
 
         if callback_server is not None:
             try:
@@ -446,6 +565,12 @@ class OauthService:
         error = params.get("error", [None])[0]
         code = params.get("code", [None])[0]
         state = params.get("state", [None])[0]
+
+        if state is not None:
+            # Any replica may receive the pasted callback; hydrate the flow (and
+            # its encrypted verifier) from the shared DB when this replica did
+            # not start it.
+            await self._hydrate_flow_locked_from_db(state_token=state)
 
         async with self._store.lock:
             flow = self._store.get_flow_by_state_token_locked(state)
@@ -508,6 +633,7 @@ class OauthService:
             await self._set_error(exc.message)
             raise
 
+        expires_at = time.time() + device.expires_in_seconds
         async with self._store.lock:
             flow = OAuthState(
                 flow_id=flow_id,
@@ -517,11 +643,25 @@ class OauthService:
                 user_code=device.user_code,
                 interval_seconds=device.interval_seconds,
                 intended_account_id=intended_account_id,
-                expires_at=time.time() + device.expires_in_seconds,
+                expires_at=expires_at,
             )
             self._store.remove_pending_device_flows_locked()
             self._store.remember_flow_locked(flow)
             self._ensure_device_poll_task_locked(flow)
+
+        await self._persist_flow_record(
+            OAuthFlowRecord(
+                flow_id=flow_id,
+                method="device",
+                status="pending",
+                device_auth_id=device.device_auth_id,
+                user_code=device.user_code,
+                interval_seconds=device.interval_seconds,
+                intended_account_id=intended_account_id,
+                expires_at=epoch_to_naive_utc(expires_at),
+            ),
+            purge_pending_device=True,
+        )
 
         return OauthStartResponse(
             flow_id=flow_id,
@@ -538,6 +678,9 @@ class OauthService:
         error = params.get("error")
         code = params.get("code")
         state = params.get("state")
+
+        if state is not None:
+            await self._hydrate_flow_locked_from_db(state_token=state)
 
         async with self._store.lock:
             flow = self._store.get_flow_by_state_token_locked(state)
@@ -753,26 +896,28 @@ class OauthService:
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:
             flow = self._store.get_flow_locked(flow_id)
-            if flow_id is not None and flow is None:
-                return
-            if flow is None:
+            if flow is not None:
+                self._store.set_flow_status_locked(flow, status="success", error_message=None)
+            elif flow_id is None:
                 self._store.state.status = "success"
                 self._store.state.error_message = None
-                return
-            self._store.set_flow_status_locked(flow, status="success", error_message=None)
+        if flow_id is not None:
+            # Durable, cross-replica status: the originating replica reads this
+            # on its next status poll instead of its stale in-memory pending.
+            await self._persist_flow_status(flow_id, status="success", error_message=None)
 
     async def _set_error(self, message: str, flow_id: str | None = None) -> None:
         async with self._store.lock:
-            if flow_id is None and self._store.state.flow_id is not None:
-                return
-            flow = self._store.get_flow_locked(flow_id)
-            if flow_id is not None and flow is None:
-                return
-            if flow is None:
-                self._store.state.status = "error"
-                self._store.state.error_message = message
-                return
-            self._store.set_flow_status_locked(flow, status="error", error_message=message)
+            if flow_id is None:
+                if self._store.state.flow_id is None:
+                    self._store.state.status = "error"
+                    self._store.state.error_message = message
+            else:
+                flow = self._store.get_flow_locked(flow_id)
+                if flow is not None:
+                    self._store.set_flow_status_locked(flow, status="error", error_message=message)
+        if flow_id is not None:
+            await self._persist_flow_status(flow_id, status="error", error_message=message)
 
     def _start_callback_server_stop_locked(self, server: OAuthCallbackServer) -> asyncio.Task[None]:
         stop_task = self._store._callback_server_stop_task

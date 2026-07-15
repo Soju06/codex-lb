@@ -28,6 +28,18 @@ from app.modules.oauth.schemas import ManualCallbackRequest
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _oauth_flow_schema(db_setup):
+    """Ensure the shared schema (incl. ``oauth_flow_states``) exists.
+
+    Every OAuth service path now persists flow state to the shared DB, so the
+    service-level tests that construct ``OauthService`` directly need the table
+    present, not only the ``async_client`` ones.
+    """
+
+    del db_setup
+
+
 def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -1694,3 +1706,114 @@ async def test_manual_callback_idempotent_success_requires_requested_flow(async_
     second_status = await async_client.get("/api/oauth/status", params={"flowId": second_payload["flowId"]})
     assert second_status.status_code == 200
     assert second_status.json() == {"status": "pending", "errorMessage": None}
+
+
+def _make_replica_service(store: "oauth_module.OAuthStateStore") -> oauth_module.OauthService:
+    """Build an OauthService bound to a distinct process-local store, standing in
+    for one replica behind a load balancer. All replicas share the one test DB."""
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _repo_factory():
+        async with SessionLocal() as session:
+            yield AccountsRepository(session)
+
+    return oauth_module.OauthService(
+        cast(AccountsRepository, SimpleNamespace(list_accounts=AsyncMock(return_value=[]))),
+        repo_factory=_repo_factory,
+        store=store,
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_oauth_flow_completes_on_replica_that_did_not_start_it(monkeypatch):
+    """Multi-replica regression: replica A starts a browser flow; the manually
+    pasted callback lands on replica B, whose in-memory store never saw the flow.
+
+    Before this change the flow record lived only in replica A's process-local
+    ``_OAUTH_STORE``, so replica B reported "state mismatch" and the account was
+    never added. Now B loads the encrypted verifier + metadata from the shared
+    DB and completes the exchange.
+    """
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    email = "cross-replica@example.com"
+    raw_account_id = "acc_cross_replica"
+
+    async def fake_exchange_authorization_code(**_):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="cross-access",
+            refresh_token="cross-refresh",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+
+    replica_a = _make_replica_service(oauth_module.OAuthStateStore())
+    replica_b = _make_replica_service(oauth_module.OAuthStateStore())
+
+    start = await replica_a.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.method == "browser"
+    assert start.flow_id is not None
+    state_token = _oauth_state_token(start.authorization_url or "")
+
+    # Replica B never held this flow in memory.
+    async with replica_b._store.lock:
+        assert replica_b._store.get_flow_by_state_token_locked(state_token) is None
+
+    result = await replica_b.manual_callback(
+        f"http://localhost:1455/auth/callback?code=cross-code&state={state_token}",
+        flow_id=start.flow_id,
+    )
+    assert result.status == "success"
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    async with SessionLocal() as session:
+        stored = await AccountsRepository(session).get_by_id(expected_account_id)
+    assert stored is not None
+
+    # Replica A, still holding a stale in-memory pending flow, must report the
+    # authoritative success written by replica B to the shared DB.
+    status_a = await replica_a.oauth_status(start.flow_id)
+    assert status_a.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_reads_completion_written_by_another_replica(monkeypatch):
+    """A flow started on replica A and marked success in the shared DB by another
+    replica is reported as success by A's status poll, not its stale pending."""
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    replica_a = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica_a.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+
+    # Replica A's in-memory view is still pending.
+    async with replica_a._store.lock:
+        local = replica_a._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "pending"
+
+    # Another replica writes the terminal status directly to the shared DB.
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, TokenEncryptor())
+        assert await repo.set_status(start.flow_id, status="success", error_message=None)
+
+    status = await replica_a.oauth_status(start.flow_id)
+    assert status.status == "success"

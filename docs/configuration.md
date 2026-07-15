@@ -9,7 +9,7 @@ Settings are environment variables with the `CODEX_LB_` prefix, or a `.env.local
 | Variable | Default | When to set it |
 |----------|---------|----------------|
 | `CODEX_LB_DATA_DIR` | `~/.codex-lb` (host) / `/var/lib/codex-lb` (Docker) | Move the data directory (DB, encryption key, archives) |
-| `PORT` | `2455` | Change the listen port (read only from the process environment or docker-compose `env_file` — not from `.env.local`, which only maps `CODEX_LB_`-prefixed variables) |
+| `PORT` | `2455` | Change the listen port on host (uvx/local) runs — process environment only, not `.env.local` (env files map only `CODEX_LB_`-prefixed variables). In Docker the container always listens on 2455 (the entrypoint pins `--port 2455`); change the host side of the compose `ports` mapping instead (e.g. `"8080:2455"`) |
 | `CODEX_LB_DATABASE_URL` | SQLite in the data dir | Use PostgreSQL — see [Database](database.md) |
 | `CODEX_LB_ENCRYPTION_KEY_FILE` | auto-generated in the data dir | Pin the key location (recommended for Docker volumes and required to be shared across replicas) |
 | `CODEX_LB_DASHBOARD_AUTH_MODE` | `standard` | `trusted_header` / `disabled` — see [Authentication](authentication.md) |

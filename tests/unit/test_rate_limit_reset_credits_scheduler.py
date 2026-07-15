@@ -490,8 +490,16 @@ async def test_auto_redeem_uses_existing_helper_for_soonest_expiring_credit(
 
     store = RateLimitResetCreditsStore()
     account = _make_account("acc_auto")
-    lock_session = object()
+    latest_account = _make_account("acc_auto")
     redeem_calls: list[dict[str, Any]] = []
+
+    class _FakeLockSession:
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == account.id
+            return latest_account
+
+    lock_session = _FakeLockSession()
 
     @asynccontextmanager
     async def _fake_background_session():
@@ -520,7 +528,7 @@ async def test_auto_redeem_uses_existing_helper_for_soonest_expiring_credit(
     )
 
     assert len(redeem_calls) == 1
-    assert redeem_calls[0]["account"] is account
+    assert redeem_calls[0]["account"] is latest_account
     assert redeem_calls[0]["store"] is store
     assert redeem_calls[0]["fetch_fn"] is fetch_fn
     assert redeem_calls[0]["lock_session"] is lock_session
@@ -528,6 +536,52 @@ async def test_auto_redeem_uses_existing_helper_for_soonest_expiring_credit(
     assert redeem_calls[0]["redeem_request_id"].startswith("auto-reset-credit:")
     assert redeem_calls[0]["skip_if_redeem_request_pinned"] is True
     assert callable(redeem_calls[0]["refresh_usage"])
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_reloads_account_and_skips_if_no_longer_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.rate_limit_reset_credits.redeem_coordination as redeem_coordination
+
+    store = RateLimitResetCreditsStore()
+    stale_account = _make_account("acc_auto_paused", status=AccountStatus.ACTIVE)
+    latest_account = _make_account("acc_auto_paused", status=AccountStatus.PAUSED)
+    redeem_calls: list[str] = []
+
+    class _FakeLockSession:
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == stale_account.id
+            return latest_account
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        yield _FakeLockSession()
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(240)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(redeem_coordination, "get_pinned_redeem_credit_id", AsyncMock(return_value=None))
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[stale_account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert redeem_calls == []
+    snapshot = store.get(stale_account.id)
+    assert snapshot is not None
+    assert snapshot.available_count == 1
 
 
 @pytest.mark.asyncio
@@ -620,8 +674,15 @@ async def test_auto_redeem_skips_when_helper_finds_pin_inside_redeem_lock(
 
     store = RateLimitResetCreditsStore()
     account = _make_account("acc_inner_pin")
-    lock_session = object()
     redeem_calls: list[str] = []
+
+    class _FakeLockSession:
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == account.id
+            return account
+
+    lock_session = _FakeLockSession()
 
     @asynccontextmanager
     async def _fake_background_session():
@@ -663,12 +724,21 @@ async def test_auto_redeem_failure_is_isolated_to_one_account(monkeypatch: pytes
 
     store = RateLimitResetCreditsStore()
     accounts = [_make_account("acc_redeem_fail"), _make_account("acc_redeem_ok")]
-    issued_lock_sessions: list[object] = []
-    redeem_calls: list[tuple[str, object]] = []
+    issued_lock_sessions: list[Any] = []
+    redeem_calls: list[tuple[str, Any]] = []
+
+    class _FakeLockSession:
+        def __init__(self, account: Account) -> None:
+            self.account = account
+
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == self.account.id
+            return self.account
 
     @asynccontextmanager
     async def _fake_background_session():
-        lock_session = object()
+        lock_session = _FakeLockSession(accounts[len(issued_lock_sessions)])
         issued_lock_sessions.append(lock_session)
         yield lock_session
 

@@ -294,9 +294,25 @@ async def _auto_redeem_reset_credit(
 
     effective_redeem_fn = redeem_fn or _redeem_soonest_reset_credit
     async with get_background_session() as lock_session:
+        latest_account = await lock_session.get(Account, account.id)
+        if latest_account is None:
+            logger.info(
+                "Skipping automatic reset credit redeem because account no longer exists account_id=%s",
+                account.id,
+            )
+            return
+        if latest_account.status in _RESET_CREDITS_SKIP_STATUSES or not latest_account.chatgpt_account_id:
+            logger.info(
+                "Skipping automatic reset credit redeem because account is no longer eligible "
+                "account_id=%s status=%s has_chatgpt_account_id=%s",
+                latest_account.id,
+                latest_account.status.value,
+                bool(latest_account.chatgpt_account_id),
+            )
+            return
         try:
             await effective_redeem_fn(
-                account=account,
+                account=latest_account,
                 store=store,
                 encryptor=encryptor,
                 lock_session=lock_session,

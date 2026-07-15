@@ -493,14 +493,11 @@ class OauthService:
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
         if payload.flow_id is not None:
-            # Durable status is authoritative. The gate reconciles local state
-            # and hydrates a still-pending flow this replica did not start (so a
-            # device poller can resume); a terminal flow is reported directly and
-            # never re-polled (single-use device code).
+            # Durable status is authoritative: reconcile local state and report a
+            # durable terminal directly (never re-polling a single-use code).
             record = await self._reconcile_flow_from_durable(flow_id=payload.flow_id)
             if record is not None and record.status in _TERMINAL_OAUTH_STATUSES:
                 return OauthCompleteResponse(status=record.status)
-        uninitialized_flow_id: str | None = None
         async with self._store.lock:
             flow = self._store.get_flow_locked(payload.flow_id)
             state = flow
@@ -513,43 +510,25 @@ class OauthService:
             if flow is not None:
                 self._store.set_latest_flow_locked(flow)
             if state.method == "device":
-                # ``/complete`` acknowledges a device flow and ensures its single
-                # in-process poller. A targeted query (explicit ``flow_id``, as the
-                # dashboard sends after a success status) reports the terminal
-                # status so the UI can invalidate; the fire-and-forget
-                # acknowledgement (no ``flow_id``) returns ``pending`` while the
-                # poll proceeds. A flow that already reached a terminal state is
-                # never re-polled — the device code is single-use.
-                if state.status in _TERMINAL_OAUTH_STATUSES:
-                    if payload.flow_id is not None:
-                        return OauthCompleteResponse(status=state.status)
-                    return OauthCompleteResponse(status="pending")
-                if self._ensure_device_poll_task_locked(state):
-                    return OauthCompleteResponse(status="pending")
-                if flow is not None:
-                    self._store.set_flow_status_locked(
-                        flow,
-                        status="error",
-                        error_message="Device code flow is not initialized.",
-                    )
-                    uninitialized_flow_id = flow.flow_id
-                else:
-                    state.status = "error"
-                    state.error_message = "Device code flow is not initialized."
-                if uninitialized_flow_id is None:
-                    return OauthCompleteResponse(status="error")
-            elif state.status == "success":
+                # ``/complete`` only REPORTS device status; it never starts a poll
+                # task. The originating replica is the sole device poller (started
+                # at ``start``), so a ``/complete`` served on a replica that did
+                # not originate the flow reports the durable status (via the gate
+                # above) without spawning a duplicate poller for the single-use
+                # device code. If the originating replica dies mid-poll the flow
+                # simply expires by TTL and the user retries. A targeted query
+                # (explicit ``flow_id``, sent by the dashboard after a success
+                # status) reports a terminal so the UI can invalidate; the
+                # fire-and-forget acknowledgement (no ``flow_id``) returns
+                # ``pending`` while the sole poller runs, even if this replica's
+                # own poller just raced to a terminal in-memory.
+                if state.status in _TERMINAL_OAUTH_STATUSES and payload.flow_id is not None:
+                    return OauthCompleteResponse(status=state.status)
+                return OauthCompleteResponse(status="pending")
+            if state.status == "success":
                 # Browser / manual-callback: report an observed success.
                 return OauthCompleteResponse(status="success")
-            else:
-                return OauthCompleteResponse(status="pending")
-        if uninitialized_flow_id is not None:
-            await self._persist_flow_status(
-                uninitialized_flow_id,
-                status="error",
-                error_message="Device code flow is not initialized.",
-            )
-        return OauthCompleteResponse(status="error")
+            return OauthCompleteResponse(status="pending")
 
     async def _start_browser_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
         await self._wait_for_callback_server_stop()
@@ -717,13 +696,9 @@ class OauthService:
             self._store.remove_pending_device_flows_locked()
             self._store.remember_flow_locked(flow)
 
-        # Persist the durable row and atomically claim the single-active device
-        # slot (superseding any prior device flow) BEFORE starting the in-process
-        # poll task. The poller consumes the slot before persisting an account
-        # (see ``_consume_device_slot``), so the slot must already name this flow
-        # when the poll task can first run; otherwise an instant token exchange
-        # could abort against a not-yet-claimed slot. The single-statement UPSERT
-        # makes two simultaneous starts leave exactly one current flow.
+        # Persist the durable row BEFORE claiming the single-active slot and
+        # starting the sole poll task, so the poller's slot consume never races a
+        # not-yet-written row.
         await self._persist_flow_record(
             OAuthFlowRecord(
                 flow_id=flow_id,
@@ -736,14 +711,20 @@ class OauthService:
                 expires_at=epoch_to_naive_utc(expires_at),
             )
         )
-        await self._claim_device_slot(flow_id)
 
         async with self._store.lock:
-            # The flow may have been superseded/cleared while the row was being
-            # written; only start the poller if it is still the registered flow.
-            current = self._store.get_flow_locked(flow_id)
-            if current is not None:
-                self._ensure_device_poll_task_locked(current)
+            # A later device start on THIS replica may have superseded this flow
+            # while its row was being persisted (the newer start removed it from
+            # the local store). Claim the single-active slot and start the sole
+            # poll task ONLY if this is still the current local device flow, and
+            # do so while holding the store lock: the claim then happens under the
+            # lock a competing start must also acquire, so claim order follows
+            # supersession order and a superseded start can neither install a
+            # stale slot pointer nor start a duplicate poller. A superseded start
+            # still returns its device code to its caller but does not poll.
+            if self._store.get_flow_locked(flow_id) is flow:
+                await self._claim_device_slot(flow_id)
+                self._ensure_device_poll_task_locked(flow)
 
         return OauthStartResponse(
             flow_id=flow_id,
@@ -813,6 +794,14 @@ class OauthService:
         return self._html_response(html)
 
     async def _poll_device_tokens(self, flow_id: str | None, context: "DevicePollContext") -> None:
+        # Slot ownership is the single authority for who may complete a device
+        # flow. Only the poller that atomically consumed the current device slot
+        # may persist an account OR write ANY terminal status (success or error).
+        # A poller that does not hold/win the slot writes NOTHING: this prevents a
+        # losing/duplicate poller that received ``invalid_grant`` for the consumed
+        # code from writing ``error`` during the winner's persist window (which
+        # would stop the dashboard polling before the winner's success lands).
+        consumed = False
         try:
             while time.time() < context.expires_at:
                 route = await _oauth_route()
@@ -823,27 +812,28 @@ class OauthService:
                     allow_direct_egress=route is None,
                 )
                 if tokens:
-                    # Point of no return: atomically consume the single-active
-                    # device-flow slot. Only the flow that still holds the slot
-                    # may persist; if a newer device start superseded this flow
-                    # (the slot now names a different flow_id), the consume
-                    # matches zero rows and we abort WITHOUT adding/reauthing an
-                    # account. This is a single conditional statement performed
-                    # immediately before the account write, so no replacement can
-                    # slip through a check->persist window.
-                    if not await self._consume_device_slot(flow_id):
+                    # Point of no return: consume the single-active slot. If a
+                    # newer start superseded this flow, the consume matches zero
+                    # rows and we abort WITHOUT persisting or writing anything.
+                    consumed = await self._consume_device_slot(flow_id)
+                    if not consumed:
                         return
                     await self._persist_tokens(tokens, intended_account_id=context.intended_account_id)
                     await self._set_success(flow_id)
                     return
                 await _async_sleep(context.interval_seconds)
-            await self._set_error("Device code expired.", flow_id=flow_id)
+            # Code expired: only the slot holder may record the terminal error.
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error("Device code expired.", flow_id=flow_id)
         except OAuthError as exc:
-            await self._set_error(exc.message, flow_id=flow_id)
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error(exc.message, flow_id=flow_id)
         except ReauthSeatMismatchError:
-            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow_id)
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow_id)
         except AccountIdentityConflictError:
-            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow_id)
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow_id)
         finally:
             async with self._store.lock:
                 flow = self._store.get_flow_locked(flow_id)

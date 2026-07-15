@@ -27,6 +27,16 @@
       poller atomically consumes the slot before persisting tokens and aborts
       if superseded. Migration `20260716_000000_add_oauth_device_flow_slots`
       parented on the current single head.
+- [x] 6.4 Route every entry point through the durable reconciliation gate so a
+      durable terminal/expired always wins over local pending (status, complete,
+      browser callback, manual callback, device).
+- [x] 6.5 Converge the device-flow class on slot ownership: claim only while
+      still the current local flow and under the store lock (a superseded
+      same-replica start installs no stale slot pointer / no poller); ALL
+      terminal writes (success and error) gated on holding the consumed slot (a
+      loser writes nothing); the originating replica is the sole poller and a
+      non-originating `/complete` reports durable status without spawning a
+      second poller.
 
 ## 3. Service wiring
 

@@ -94,14 +94,24 @@ a single conditional UPSERT (not a delete-then-insert), so two replicas starting
 device OAuth simultaneously leave exactly ONE current `flow_id` rather than two
 orphaned pending records that both believe they are current.
 
-Because a poll task running on another replica cannot be cancelled
-cross-process, a device poll task MUST atomically consume the slot as its point
-of no return immediately before persisting tokens, and MUST persist the account
-only if that consume succeeded. A poll task whose flow was superseded (the slot
-now names a different `flow_id`) MUST lose the consume and abort WITHOUT adding
-or re-authenticating an account, leaving no window between the liveness check
-and the account write through which a replacement can slip. This composes with
-the atomic monotonic status write (a durable `success` is never regressed).
+Slot ownership SHALL be the single authority for who may complete a device flow.
+A device `start` claims the slot only while it is still the current local device
+flow, so a start superseded on the same replica (its local record already
+replaced by a later start) MUST NOT install a stale slot pointer or begin
+polling. Because a poll task on another replica cannot be cancelled
+cross-process, a poll task MUST atomically consume the slot as its point of no
+return, and only the poller that consumed/holds the slot MAY persist an account
+OR write ANY terminal status (success or error). A poller that did not win/hold
+the slot MUST write nothing, so a losing or duplicate poller that received
+`invalid_grant` for the already-consumed code cannot record an `error` during
+the winner's persist window. This composes with the atomic monotonic status
+write (a durable `success` is never regressed).
+
+The originating replica SHALL be the sole poller for a device flow. A device
+`/complete` served on a replica that did not originate the flow MUST report the
+durable status through the reconciliation gate and MUST NOT spawn a second poll
+task for the single-use device code. If the originating replica dies mid-poll,
+the flow expires by its TTL and the user retries.
 
 #### Scenario: Simultaneous device starts leave exactly one current flow
 
@@ -111,14 +121,29 @@ the atomic monotonic status write (a durable `success` is never regressed).
 - **AND** only the poll task holding the current slot can consume it and persist;
   the other's consume matches zero rows and it cannot persist
 
-#### Scenario: Superseded device poll task cannot persist (liveness race)
+#### Scenario: Overlapping same-replica starts — the later start wins
 
-- **GIVEN** a device poll task has exchanged its code and is about to persist
-- **AND** a newer device `start` atomically re-claims the slot to a different
-  `flow_id` before the first task's account write commits
-- **THEN** the superseded task's slot consume matches zero rows
-- **AND** it aborts without adding or re-authenticating an account, and writes no
-  terminal status for the superseded flow
+- **GIVEN** a device `start` is awaiting its durable persist on a replica
+- **WHEN** a later device `start` on the same replica supersedes it locally,
+  claims the slot, and begins polling
+- **THEN** the later start is the current slot holder and the sole poller
+- **AND** the superseded earlier start installs no stale slot pointer and starts
+  no poll task
+
+#### Scenario: Only the slot holder writes a terminal status
+
+- **GIVEN** the winning poller consumed the slot and is mid-persist (success not
+  yet written)
+- **WHEN** a losing/duplicate poller receives `invalid_grant` for the consumed
+  device code
+- **THEN** the loser writes NO terminal status (no `pending` -> `error`)
+- **AND** the winner's later `success` is the durable outcome
+
+#### Scenario: Non-originating /complete does not start a second poller
+
+- **GIVEN** a device flow started (and being polled) on its originating replica
+- **WHEN** `/complete` for that flow is served on a different replica
+- **THEN** that replica reports the durable status and starts no second poll task
 
 ### Requirement: Durable status is authoritative over local state at every entry point
 

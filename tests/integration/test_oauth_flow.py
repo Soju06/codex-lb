@@ -2433,3 +2433,200 @@ async def test_browser_callback_replay_on_origin_does_not_reexchange_consumed_co
     assert response.text is not None and "Login failed" not in response.text
 
     assert exchange_calls == []
+
+
+@pytest.mark.asyncio
+async def test_overlapping_same_replica_device_starts_later_start_wins_slot_and_poller(monkeypatch):
+    """Finding 1: two device starts overlap on the SAME replica; the earlier
+    start is superseded in the local store while awaiting its durable persist. It
+    must NOT install a stale slot pointer or a poll task; the later start ends up
+    as the current slot holder and the sole poller.
+    """
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="OVERLAP-CODE",
+            device_auth_id="dev-overlap",
+            interval_seconds=30,
+            expires_in_seconds=300,
+        )
+
+    async def fake_exchange_device_token(**_):
+        await asyncio.Event().wait()  # never completes; keep pollers pending
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+
+    # Gate the FIRST start's durable persist so a second start can supersede it
+    # while it is parked mid-persist (after it registered locally, before it
+    # claims the slot / starts its poller).
+    original_persist = replica._persist_flow_record
+    persist_first_reached = asyncio.Event()
+    release_first_persist = asyncio.Event()
+    calls = {"n": 0}
+
+    async def gated_persist(record):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            persist_first_reached.set()
+            await release_first_persist.wait()
+        await original_persist(record)
+
+    monkeypatch.setattr(replica, "_persist_flow_record", gated_persist)
+
+    first_task = asyncio.create_task(replica.start_oauth(oauth_module.OauthStartRequest(force_method="device")))
+    await asyncio.wait_for(persist_first_reached.wait(), timeout=2)
+
+    # Second start runs to completion: it supersedes the first locally, claims the
+    # slot, and starts its poller.
+    second = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="device"))
+
+    # Release the first start; it resumes past its persist and must detect it was
+    # superseded (no stale claim, no poll task).
+    release_first_persist.set()
+    first = await asyncio.wait_for(first_task, timeout=2)
+
+    assert first.flow_id is not None and second.flow_id is not None and first.flow_id != second.flow_id
+
+    async with SessionLocal() as session:
+        current = await OAuthFlowRepository(session, TokenEncryptor()).current_device_slot_flow_id()
+    assert current == second.flow_id  # the later start holds the slot
+
+    async with replica._store.lock:
+        second_flow = replica._store.get_flow_locked(second.flow_id)
+        first_flow = replica._store.get_flow_locked(first.flow_id)
+        assert second_flow is not None and second_flow.poll_task is not None  # sole poller
+        # The superseded first start neither remains current nor holds a poller.
+        assert first_flow is None or first_flow.poll_task is None
+        second_task = second_flow.poll_task
+
+    if second_task is not None:
+        second_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await second_task
+
+
+@pytest.mark.asyncio
+async def test_loser_device_poller_writes_no_terminal_during_winner_persist(monkeypatch):
+    """Finding 2: only the slot holder may write a terminal status. A loser poller
+    that received ``invalid_grant`` for the consumed code (while the winner is
+    mid-persist, slot already consumed, success not yet written) MUST write NO
+    terminal (no pending->error), so the dashboard keeps polling and the winner's
+    later success is the durable outcome.
+    """
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await OAuthFlowRepository(session, encryptor).create(
+            oauth_module.OAuthFlowRecord(
+                flow_id="race-terminal",
+                method="device",
+                status="pending",
+                device_auth_id="dev-rt",
+                user_code="RT-CODE",
+                interval_seconds=0,
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+
+    service = _make_replica_service(oauth_module.OAuthStateStore())
+    await service._claim_device_slot("race-terminal")
+
+    # Winner consumes the slot (it is now mid-persist, success not yet written).
+    assert await service._consume_device_slot("race-terminal") is True
+
+    # Loser poll task: its exchange raises invalid_grant for the consumed code.
+    async def fake_exchange_device_token(**_):
+        raise OAuthError("invalid_grant", "Authorization code expired", status_code=400)
+
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    loser_context = oauth_module.DevicePollContext(
+        device_auth_id="dev-rt",
+        user_code="RT-CODE",
+        interval_seconds=0,
+        expires_at=time.time() + 300,
+    )
+    await service._poll_device_tokens("race-terminal", loser_context)
+
+    # The loser wrote NO terminal status; the flow is still pending.
+    async with SessionLocal() as session:
+        record = await OAuthFlowRepository(session, encryptor).get_by_flow_id("race-terminal")
+    assert record is not None and record.status == "pending"
+
+    # The winner's success (written after its persist) is the durable outcome.
+    await service._set_success("race-terminal")
+    async with SessionLocal() as session:
+        record = await OAuthFlowRepository(session, encryptor).get_by_flow_id("race-terminal")
+    assert record is not None and record.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_non_originating_complete_reports_durable_status_without_second_poller(monkeypatch):
+    """Reduced duplicate-poller surface: a device ``/complete`` served on a
+    replica that did NOT originate the flow reports the durable status and does
+    NOT spawn a second poll task for the single-use device code.
+    """
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="ORIG-CODE",
+            device_auth_id="dev-orig",
+            interval_seconds=30,
+            expires_in_seconds=300,
+        )
+
+    async def fake_exchange_device_token(**_):
+        await asyncio.Event().wait()
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+
+    origin = _make_replica_service(oauth_module.OAuthStateStore())
+    other = _make_replica_service(oauth_module.OAuthStateStore())
+
+    start = await origin.start_oauth(oauth_module.OauthStartRequest(force_method="device"))
+    assert start.flow_id is not None
+
+    # The non-originating replica reports the durable pending status ...
+    resp = await other.complete_oauth(oauth_module.OauthCompleteRequest(flow_id=start.flow_id))
+    assert resp.status == "pending"
+
+    # ... and did NOT start a second poll task for the flow.
+    async with other._store.lock:
+        other_flow = other._store.get_flow_locked(start.flow_id)
+    assert other_flow is None or other_flow.poll_task is None
+
+    # Cross-replica durable terminal is still reported by /complete on the other
+    # replica once written.
+    async with SessionLocal() as session:
+        assert await OAuthFlowRepository(session, TokenEncryptor()).set_status(
+            start.flow_id, status="success", error_message=None
+        )
+    resp2 = await other.complete_oauth(oauth_module.OauthCompleteRequest(flow_id=start.flow_id))
+    assert resp2.status == "success"
+
+    # Clean up the origin's sole poll task.
+    async with origin._store.lock:
+        origin_flow = origin._store.get_flow_locked(start.flow_id)
+        task = origin_flow.poll_task if origin_flow is not None else None
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

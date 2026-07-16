@@ -356,6 +356,30 @@ def test_terminal_capacity_retry_accepts_native_output_free_continuation() -> No
     )
 
 
+def test_transport_close_capacity_retry_accepts_native_output_free_continuation() -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_transport_close_capacity_retry_error_code(
+            _accepted_capacity_retry_state(),
+            has_other_pending_requests=False,
+            error_code=None,
+            error_message="no close frame received or sent",
+        )
+        == "stream_incomplete"
+    )
+
+
+def test_transport_close_capacity_retry_accepts_lifecycle_only_downstream_sequence() -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_transport_close_capacity_retry_error_code(
+            _accepted_capacity_retry_state(last_downstream_sequence_number=1),
+            has_other_pending_requests=False,
+            error_code=None,
+            error_message="no close frame received or sent",
+        )
+        == "stream_incomplete"
+    )
+
+
 def test_terminal_capacity_retry_rejects_another_pending_request() -> None:
     assert (
         http_bridge_upstream_events_module._http_bridge_terminal_capacity_retry_error_code(
@@ -363,6 +387,18 @@ def test_terminal_capacity_retry_rejects_another_pending_request() -> None:
             event_type="error",
             payload=cast(Any, _server_overloaded_event_payload()),
             has_other_pending_requests=True,
+        )
+        is None
+    )
+
+
+def test_transport_close_capacity_retry_rejects_another_pending_request() -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_transport_close_capacity_retry_error_code(
+            _accepted_capacity_retry_state(),
+            has_other_pending_requests=True,
+            error_code=None,
+            error_message="no close frame received or sent",
         )
         is None
     )
@@ -389,6 +425,32 @@ def test_terminal_capacity_retry_rejects_unsafe_lifecycle(
             event_type="error",
             payload=cast(Any, _server_overloaded_event_payload()),
             has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("unsafe_field", "unsafe_value"),
+    [
+        ("enforce_openai_sdk_contract", True),
+        ("upstream_model_output_seen", True),
+        ("downstream_visible", True),
+        ("replay_count", 1),
+        ("response_id", None),
+        ("awaiting_response_created", True),
+    ],
+)
+def test_transport_close_capacity_retry_rejects_unsafe_lifecycle(
+    unsafe_field: str,
+    unsafe_value: object,
+) -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_transport_close_capacity_retry_error_code(
+            _accepted_capacity_retry_state(**{unsafe_field: unsafe_value}),
+            has_other_pending_requests=False,
+            error_code=None,
+            error_message="no close frame received or sent",
         )
         is None
     )

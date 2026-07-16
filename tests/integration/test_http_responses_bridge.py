@@ -538,6 +538,46 @@ class _AcceptedContinuationOverloadUpstreamWebSocket(_FakeBridgeUpstreamWebSocke
         )
 
 
+class _AcceptedContinuationAbruptCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self, order: list[tuple[str, object]]) -> None:
+        super().__init__("resp_capacity_parent")
+        self.order = order
+
+    async def send_text(self, text: str) -> None:
+        if not self.sent_text:
+            self.order.append(("parent_send", None))
+            await super().send_text(text)
+            return
+        self.sent_text.append(text)
+        self.order.append(("close_send", None))
+        response_id = "resp_capacity_closed"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.in_progress",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await self._messages.put(_FakeUpstreamMessage("close", error="no close frame received or sent"))
+
+
 class _CreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -8217,6 +8257,165 @@ async def test_backend_responses_http_bridge_waits_and_retries_accepted_output_f
         "acc_http_bridge_accepted_server_overload",
     ]
     assert order.index(("overload_send", None)) < order.index(("sleep", 0.25)) < order.index(("connect", 1))
+
+    first_attempt_payload = json.loads(first_upstream.sent_text[1])
+    retry_payload = json.loads(retry_upstream.sent_text[0])
+    assert first_attempt_payload["previous_response_id"] == parent_response_id
+    assert retry_payload["previous_response_id"] == parent_response_id
+
+    follow_up_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue after retry",
+            "previous_response_id": retry_response_id,
+            "prompt_cache_key": prompt_cache_key,
+            "stream": True,
+        },
+    )
+
+    follow_up_payload = json.loads(retry_upstream.sent_text[1])
+    assert follow_up_payload["previous_response_id"] == retry_response_id
+    assert follow_up_events[-1]["response"]["id"] == "resp_capacity_retry_2"
+    assert connect_count == 2
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_waits_and_retries_accepted_output_free_abrupt_close(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_accepted_abrupt_close",
+        "http-bridge-accepted-abrupt-close@example.com",
+    )
+    account = await _get_account(account_id)
+    order: list[tuple[str, object]] = []
+    first_upstream = _AcceptedContinuationAbruptCloseUpstreamWebSocket(order)
+    retry_upstream = _FakeBridgeUpstreamWebSocket("resp_capacity_retry")
+    upstreams = [first_upstream, retry_upstream]
+    connect_account_ids: list[str | None] = []
+    connect_count = 0
+
+    class _RecordingAsyncio:
+        def __getattr__(self, name: str) -> object:
+            return getattr(asyncio, name)
+
+        async def sleep(self, delay: float) -> None:
+            order.append(("sleep", delay))
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        nonlocal connect_count
+        order.append(("connect", connect_count))
+        connect_account_ids.append(account_id_header)
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    async def fail_legacy_stream(*args, **kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(http_bridge_request_submit_module, "backoff_seconds", lambda attempt: 0.25)
+    monkeypatch.setattr(http_bridge_request_submit_module, "asyncio", _RecordingAsyncio())
+
+    prompt_cache_key = "accepted-abrupt-close-retry-key"
+    parent_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "parent",
+            "prompt_cache_key": prompt_cache_key,
+            "stream": True,
+        },
+    )
+    parent_response_id = parent_events[-1]["response"]["id"]
+    assert parent_response_id == "resp_capacity_parent_1"
+
+    retry_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "retry accepted abrupt close",
+            "previous_response_id": parent_response_id,
+            "prompt_cache_key": prompt_cache_key,
+            "stream": True,
+        },
+    )
+
+    retry_created_ids = [event["response"]["id"] for event in retry_events if event["type"] == "response.created"]
+    assert retry_created_ids == ["resp_capacity_closed", "resp_capacity_retry_1"]
+    assert not any(event["type"] in {"error", "response.failed"} for event in retry_events)
+    retry_response_id = retry_events[-1]["response"]["id"]
+    assert retry_response_id == "resp_capacity_retry_1"
+    assert connect_count == 2
+    assert connect_account_ids == [
+        "acc_http_bridge_accepted_abrupt_close",
+        "acc_http_bridge_accepted_abrupt_close",
+    ]
+    assert order.index(("close_send", None)) < order.index(("sleep", 0.25)) < order.index(("connect", 1))
 
     first_attempt_payload = json.loads(first_upstream.sent_text[1])
     retry_payload = json.loads(retry_upstream.sent_text[0])

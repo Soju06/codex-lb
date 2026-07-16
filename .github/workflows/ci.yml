@@ -73,6 +73,10 @@ jobs:
               - 'uv.lock'
               - 'Makefile'
               - '.github/workflows/ci.yml'
+              # Drift-guarded files (tests/unit/test_settings_reference.py):
+              # a docs-only or env-example-only edit must still run the guards.
+              - 'docs/reference/settings.md'
+              - '.env.example'
             helm:
               - 'deploy/helm/**'
               - 'Makefile'

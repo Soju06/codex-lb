@@ -846,6 +846,13 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         return False
     if request_state.downstream_visible:
         return False
+    if request_state.transport == _REQUEST_TRANSPORT_HTTP and request_state.response_id is not None:
+        # An HTTP bridge response.created is already an SSE-visible continuity
+        # anchor. Rewriting a replacement upstream stream to that id would
+        # leave a later client previous_response_id pointing at an id the new
+        # upstream account never issued. Durable aliases identify the owning
+        # session, not an old-id-to-replacement-id translation target.
+        return False
     has_retry_safe_fresh_payload = (
         request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
     )

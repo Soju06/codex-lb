@@ -684,15 +684,11 @@ async def test_http_bridge_security_retry_never_marks_or_migrates_file_pinned_ow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("downstream_visible", [False, True])
-async def test_http_bridge_security_retry_after_response_created_requires_no_visible_output(
+async def test_http_bridge_security_retry_after_response_created_is_not_replayed(
     monkeypatch: pytest.MonkeyPatch,
-    downstream_visible: bool,
 ) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     regular_account = _make_account("acc_http_security_created_regular")
-    authorized_account = _make_account("acc_http_security_created_authorized")
-    authorized_account.security_work_authorized = True
     session = _make_bridge_session()
     session.account = regular_account
     session.durable_session_id = "durable-security-created"
@@ -707,7 +703,7 @@ async def test_http_bridge_security_retry_after_response_created_requires_no_vis
         response_id="resp-created-before-cyber-denial",
         awaiting_response_created=False,
         response_event_count=1,
-        downstream_visible=downstream_visible,
+        downstream_visible=False,
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
     )
     session.pending_requests.append(request_state)
@@ -715,41 +711,20 @@ async def test_http_bridge_security_retry_after_response_created_requires_no_vis
     mark_durable = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
     monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", mark_durable)
 
-    async def reconnect(
-        _session: proxy_service._HTTPBridgeSession,
-        *,
-        request_state: proxy_service._WebSocketRequestState,
-        require_security_work_authorized: bool,
-    ) -> None:
-        assert request_state.response_id is None
-        assert request_state.response_event_count == 0
-        assert request_state.replay_downstream_response_id == "resp-created-before-cyber-denial"
-        assert request_state.suppress_next_created_downstream is True
-        assert require_security_work_authorized is True
-        _session.account = authorized_account
-        _session.upstream = cast(
-            UpstreamResponsesWebSocket,
-            SimpleNamespace(send_text=AsyncMock()),
-        )
-
+    reconnect = AsyncMock()
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
 
     retried = await service._retry_http_bridge_security_work_request(session, request_state)
 
-    assert retried is (not downstream_visible)
-    if downstream_visible:
-        mark_durable.assert_not_awaited()
-        assert request_state.response_id == "resp-created-before-cyber-denial"
-        assert request_state.require_security_work_authorized is False
-        assert session.requires_security_work_authorized is False
-    else:
-        mark_durable.assert_awaited_once_with(session_id="durable-security-created")
-        assert request_state.response_id is None
-        assert request_state.replay_downstream_response_id == "resp-created-before-cyber-denial"
-        assert request_state.suppress_next_created_downstream is True
-        assert request_state.require_security_work_authorized is True
-        assert session.requires_security_work_authorized is True
-        assert session.account is authorized_account
+    assert retried is False
+    mark_durable.assert_not_awaited()
+    reconnect.assert_not_awaited()
+    assert request_state.response_id == "resp-created-before-cyber-denial"
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.require_security_work_authorized is False
+    assert session.requires_security_work_authorized is False
+    assert session.account is regular_account
 
 
 @pytest.mark.asyncio
@@ -812,7 +787,7 @@ async def test_http_bridge_owner_failover_never_migrates_on_file_id_in_fresh_ret
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("require_security_work_authorized", [False, True])
-async def test_http_bridge_failed_owner_failover_restores_original_continuity_state(
+async def test_http_bridge_failed_precreated_owner_failover_restores_original_continuity_state(
     monkeypatch: pytest.MonkeyPatch,
     require_security_work_authorized: bool,
 ) -> None:
@@ -828,9 +803,9 @@ async def test_http_bridge_failed_owner_failover_restores_original_continuity_st
         api_key_reservation=None,
         started_at=1.0,
         transport="http",
-        awaiting_response_created=False,
-        response_id="resp-created-owner",
-        response_event_count=1,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
         previous_response_id="resp-owner",
         proxy_injected_previous_response_id=True,
         preferred_account_id=owner_account.id,
@@ -864,8 +839,8 @@ async def test_http_bridge_failed_owner_failover_restores_original_continuity_st
     )
     assert request_state.responses_lite_model == "gpt-5.6-sol"
     assert request_state.replay_count == 0
-    assert request_state.response_id == "resp-created-owner"
-    assert request_state.response_event_count == 1
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
     assert request_state.replay_downstream_response_id is None
     assert request_state.suppress_next_created_downstream is False
     assert request_state.require_security_work_authorized is require_security_work_authorized

@@ -13711,7 +13711,7 @@ async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(mo
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_replays_previous_response_from_validated_full_resend_on_security_account(monkeypatch):
+async def test_http_bridge_forwards_security_error_after_response_created(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_bridge_security_previous_pinned")
@@ -13796,18 +13796,23 @@ async def test_http_bridge_replays_previous_response_from_validated_full_resend_
 
     await service._process_http_bridge_upstream_text(session, text)
 
-    reconnect.assert_awaited_once()
-    assert reconnect.await_args is not None
-    assert reconnect.await_args.kwargs["require_security_work_authorized"] is True
-    assert request_state.replay_count == 1
-    assert request_state.previous_response_id is None
+    reconnect.assert_not_awaited()
+    assert request_state.replay_count == 0
+    assert request_state.previous_response_id == "resp_anchor"
     assert request_state.require_security_work_authorized is True
-    assert request_state.excluded_account_ids == {account.id}
+    assert session.requires_security_work_authorized is True
+    assert request_state.excluded_account_ids == set()
     assert request_state.event_queue is not None
     warning_block = await request_state.event_queue.get()
     assert warning_block is not None
     warning = json.loads(warning_block.split("data: ", 1)[1])
-    assert warning["warning"]["action"] == "retry_security_work_authorized"
+    assert warning["warning"]["action"] == "forward_original_security_work_error"
+    failure_block = await request_state.event_queue.get()
+    assert failure_block is not None
+    failure = json.loads(failure_block.split("data: ", 1)[1])
+    assert failure["type"] == "response.failed"
+    assert failure["response"]["id"] == "resp_security_previous_pinned"
+    assert await request_state.event_queue.get() is None
 
 
 @pytest.mark.asyncio
@@ -14137,7 +14142,7 @@ async def test_http_bridge_reports_missing_security_work_pool_before_original_wa
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_does_not_replay_security_work_warning_after_visible_output(monkeypatch):
+async def test_http_bridge_does_not_replay_security_work_after_response_created(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     regular_account = _make_account("acc_bridge_security_created")
@@ -14163,8 +14168,8 @@ async def test_http_bridge_does_not_replay_security_work_warning_after_visible_o
         event_queue=asyncio.Queue(),
         transport="http",
         request_text=request_text,
-        response_event_count=2,
-        downstream_visible=True,
+        response_event_count=1,
+        downstream_visible=False,
     )
     request_state.response_id = "resp_security_created"
     session = proxy_service._HTTPBridgeSession(
@@ -32875,7 +32880,7 @@ async def test_retry_http_bridge_precreated_request_reacquires_replacement_respo
 
 
 @pytest.mark.asyncio
-async def test_retry_http_bridge_precreated_request_replays_created_without_visible_output(monkeypatch):
+async def test_retry_http_bridge_precreated_request_refuses_created_without_visible_output(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     send_request_ids: list[str | None] = []
@@ -32897,6 +32902,7 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
         awaiting_response_created=False,
         response_event_count=1,
         downstream_visible=False,
+        transport="http",
     )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
@@ -32917,21 +32923,16 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
     reconnect = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
 
-    token = set_request_id("ambient_old_session_request")
-    try:
-        retried = await service._retry_http_bridge_precreated_request(session)
-        assert get_request_id() == "ambient_old_session_request"
-    finally:
-        reset_request_id(token)
+    retried = await service._retry_http_bridge_precreated_request(session)
 
-    assert retried is True
-    reconnect.assert_awaited_once_with(session, request_state=request_state)
-    send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
-    assert send_request_ids == ["archive_bridge_created_no_output"]
-    assert request_state.replay_count == 1
-    assert request_state.awaiting_response_created is True
-    assert request_state.response_id is None
-    assert request_state.response_event_count == 0
+    assert retried is False
+    reconnect.assert_not_awaited()
+    send_text.assert_not_awaited()
+    assert send_request_ids == []
+    assert request_state.replay_count == 0
+    assert request_state.awaiting_response_created is False
+    assert request_state.response_id == "resp_bridge_created_then_closed"
+    assert request_state.response_event_count == 1
 
 
 @pytest.mark.asyncio

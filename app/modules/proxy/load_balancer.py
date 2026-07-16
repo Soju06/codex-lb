@@ -17,6 +17,7 @@ from app.core.balancer import (
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
@@ -55,6 +56,11 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
+from app.modules.proxy.cap_partitioning import (
+    configured_account_concurrency_caps,
+    get_cap_partition,
+    partition_cap,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 from app.modules.usage.additional_quota_keys import (
@@ -69,6 +75,11 @@ if TYPE_CHECKING:
     from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 logger = logging.getLogger(__name__)
+
+# Rows written by the same upstream fetch land within milliseconds of each
+# other; a sibling row only proves a *later* fetch (one that no longer
+# reported the stale window) when it is newer by more than this margin.
+_SIBLING_FETCH_MARGIN_SECONDS = 5.0
 
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
 
@@ -136,6 +147,15 @@ class AccountSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountConcurrencyCaps:
+    response_create_limit: int
+    stream_limit: int
+    configured_response_create_limit: int | None = None
+    configured_stream_limit: int | None = None
+    replica_count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
 class _AdditionalLimitFilterResult:
     accounts: list[Account]
     latest_primary: dict[str, AdditionalUsageHistory]
@@ -184,17 +204,19 @@ class LoadBalancer:
         *,
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
     ) -> AccountLease | None:
+        caps = concurrency_caps or effective_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             runtime = self._runtime.setdefault(account_id, RuntimeState())
             if kind == "response_create":
-                cap = get_settings().proxy_account_response_create_limit
+                cap = caps.response_create_limit
                 if cap > 0 and runtime.inflight_response_creates >= cap:
                     _record_account_cap_rejection("response_create")
                     return None
             else:
-                cap = get_settings().proxy_account_stream_limit
+                cap = caps.stream_limit
                 if cap > 0 and runtime.inflight_streams >= cap:
                     _record_account_cap_rejection("stream")
                     return None
@@ -245,13 +267,14 @@ class LoadBalancer:
         account_id: str,
         *,
         kind: AccountLeaseKind,
+        caps: AccountConcurrencyCaps,
         stream_reserve_slots: int = 0,
     ) -> bool:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
         if kind == "response_create":
-            cap = get_settings().proxy_account_response_create_limit
+            cap = caps.response_create_limit
             return cap <= 0 or runtime.inflight_response_creates < cap
-        cap = get_settings().proxy_account_stream_limit
+        cap = caps.stream_limit
         effective_cap = max(1, cap - max(0, stream_reserve_slots))
         return cap <= 0 or runtime.inflight_streams < effective_cap
 
@@ -319,6 +342,7 @@ class LoadBalancer:
         estimated_lease_tokens: float = 0.0,
         stream_reserve_slots: int = 0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -389,6 +413,7 @@ class LoadBalancer:
             return selection_inputs
 
         selection_inputs = await load_selection_inputs()
+        caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open()
         if circuit_breaker_open:
             set_degraded("upstream circuit breaker is open")
@@ -438,11 +463,12 @@ class LoadBalancer:
                     selection_states = _filter_states_for_account_caps(
                         states,
                         lease_kind=lease_kind,
+                        caps=caps,
                         stream_reserve_slots=stream_reserve_slots,
                     )
                     if not selection_states and states:
                         selection_error_code = _account_cap_error_code(lease_kind)
-                        error_message = _account_cap_error_message(lease_kind)
+                        error_message = _account_cap_error_message(lease_kind, caps)
                         result = SelectionResult(None, error_message)
                         logger.warning(
                             "Account cap exhausted during selection lease_kind=%s reason=%s candidates=%s",
@@ -635,12 +661,13 @@ class LoadBalancer:
                     else _filter_states_for_account_caps(
                         states,
                         lease_kind=lease_kind,
+                        caps=caps,
                         stream_reserve_slots=stream_reserve_slots,
                     )
                 )
                 if not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
-                    result = SelectionResult(None, _account_cap_error_message(lease_kind))
+                    result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
                     logger.warning(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
                         lease_kind,
@@ -704,11 +731,12 @@ class LoadBalancer:
                                 if not self._account_lease_allowed_locked(
                                     selected.id,
                                     kind=lease_kind,
+                                    caps=caps,
                                     stream_reserve_slots=stream_reserve_slots,
                                 ):
                                     selected_snapshot = None
                                     selection_error_code = _account_cap_error_code(lease_kind)
-                                    error_message = _account_cap_error_message(lease_kind)
+                                    error_message = _account_cap_error_message(lease_kind, caps)
                                 else:
                                     selected_lease = self._acquire_account_lease_locked(
                                         selected.id,
@@ -936,11 +964,12 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
-            standard_latest_primary, standard_latest_secondary, latest_monthly = await asyncio.gather(
-                repos.usage.latest_by_account(),
-                repos.usage.latest_by_account(window="secondary"),
-                repos.usage.latest_by_account(window="monthly"),
-            )
+            # These share one AsyncSession: concurrent execution on a single
+            # session is unsafe (asyncpg) and gains nothing — the driver
+            # serializes statements per connection anyway.
+            standard_latest_primary = await repos.usage.latest_by_account()
+            standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
                 latest_primary = additional_filter.latest_primary
@@ -1006,6 +1035,8 @@ class LoadBalancer:
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
+        stream_reserve_slots: int = 0,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
@@ -1017,6 +1048,7 @@ class LoadBalancer:
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
             )
+        caps = concurrency_caps or effective_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -1029,7 +1061,12 @@ class LoadBalancer:
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             )
-            selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
+            selection_states = _filter_states_for_account_caps(
+                states,
+                lease_kind=lease_kind,
+                caps=caps,
+                stream_reserve_slots=stream_reserve_slots,
+            )
             if not selection_states and states:
                 logger.warning(
                     "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
@@ -1484,16 +1521,56 @@ class LoadBalancer:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
 
-    async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
+    async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
+        """Downgrade *account* to its permanent-failure status and, when that
+        downgrade actually lands, exclude it from local routing.
+
+        Returns whether the permanent downgrade applied (or was already in
+        effect). When the guarded status write MISSES because a peer replica
+        concurrently re-authed/imported and rotated ``refresh_token_encrypted``
+        (the DB row was repaired and left ACTIVE), the account is NOT marked
+        routing-unavailable in this replica's local overlay -- excluding a
+        freshly repaired healthy account would be a self-inflicted routing loss
+        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
+        write needed because the primary refresh authority already CAS-wrote it)
+        both persists the failure status and applies the local exclusion.
+        """
         lock = await self._get_account_lock(account.id)
         async with lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
-                await self._persist_state(repos.accounts, account, state)
-            mark_account_routing_unavailable(account.id)
+                # Guard the DB permanent-status downgrade on the refresh-token
+                # ciphertext this replica currently holds so a concurrent peer
+                # re-auth/import rotation (which changes the ciphertext) is never
+                # clobbered back to a permanent-failure status. On the refresh
+                # path AuthManager._handle_permanent_refresh_failure is the
+                # PRIMARY guarded authority: it has already CAS-written the
+                # downgrade and, in the single-caller case, mutated THIS object's
+                # status to the failure status, so the predicate inside
+                # _persist_state_if_current sees no status change and issues no
+                # redundant write (exactly one guarded downgrade total). This
+                # guarded write covers only the callers whose in-memory object
+                # did not go through that CAS -- an intra-process singleflight
+                # joiner sharing the winner's permanent error, and non-refresh
+                # permanent failures -- without reintroducing the unguarded
+                # update_status that would clobber a peer's ACTIVE/rotated repair
+                # and tear down its live sticky/bridge sessions.
+                downgraded = await self._persist_state_if_current(
+                    repos.accounts,
+                    account,
+                    state,
+                    expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                )
+            # Honor the guarded-CAS result: only exclude the account from local
+            # routing when the permanent downgrade actually applied. A CAS miss
+            # means a peer replica repaired/rotated the row (still ACTIVE), so
+            # keep the healthy account selectable here.
+            if downgraded:
+                mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
+            return downgraded
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
@@ -1641,6 +1718,8 @@ class LoadBalancer:
         accounts_repo: AccountsRepository,
         account: Account,
         state: AccountState,
+        *,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         reset_at_int = int(state.reset_at) if state.reset_at else None
         blocked_at_int = int(state.blocked_at) if state.blocked_at else None
@@ -1660,6 +1739,7 @@ class LoadBalancer:
                 expected_deactivation_reason=account.deactivation_reason,
                 expected_reset_at=account.reset_at,
                 expected_blocked_at=account.blocked_at,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
             )
             if updated:
                 account.status = state.status
@@ -1731,19 +1811,19 @@ def _filter_states_for_account_caps(
     states: Iterable[AccountState],
     *,
     lease_kind: AccountLeaseKind | None,
+    caps: AccountConcurrencyCaps,
     stream_reserve_slots: int = 0,
 ) -> list[AccountState]:
     if lease_kind is None:
         return list(states)
-    settings = get_settings()
     filtered: list[AccountState] = []
     for state in states:
         if lease_kind == "response_create":
-            cap = settings.proxy_account_response_create_limit
+            cap = caps.response_create_limit
             if cap > 0 and state.inflight_response_creates >= cap:
                 continue
         else:
-            cap = settings.proxy_account_stream_limit
+            cap = caps.stream_limit
             effective_cap = max(1, cap - max(0, stream_reserve_slots))
             if cap > 0 and state.inflight_streams >= effective_cap:
                 continue
@@ -1759,18 +1839,51 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
     return None
 
 
-def _account_cap_error_message(lease_kind: AccountLeaseKind | None) -> str:
-    settings = get_settings()
+def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: AccountConcurrencyCaps) -> str:
     if lease_kind == "response_create":
-        cap = int(getattr(settings, "proxy_account_response_create_limit", 0))
+        cap = caps.response_create_limit
+        if caps.replica_count > 1 and caps.configured_response_create_limit is not None:
+            return (
+                f"Account response-create capacity is exhausted; this replica's share is {cap} "
+                f"of the per-account limit {caps.configured_response_create_limit} "
+                f"across {caps.replica_count} replicas"
+            )
         return f"Account response-create capacity is exhausted; per-account limit is {cap}"
     if lease_kind == "stream":
-        cap = int(getattr(settings, "proxy_account_stream_limit", 0))
+        cap = caps.stream_limit
+        if caps.replica_count > 1 and caps.configured_stream_limit is not None:
+            return (
+                f"Account stream capacity is exhausted; this replica's share is {cap} "
+                f"of the per-account limit {caps.configured_stream_limit} "
+                f"across {caps.replica_count} replicas. "
+                "Increase the dashboard stream limit or wait for active streams to finish."
+            )
         return (
             f"Account stream capacity is exhausted; per-account limit is {cap}. "
-            "Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT or wait for active streams to finish."
+            "Increase the dashboard stream limit or wait for active streams to finish."
         )
     return "Account capacity is exhausted"
+
+
+def effective_account_concurrency_caps(dashboard_settings: object | None = None) -> AccountConcurrencyCaps:
+    startup_settings = get_settings()
+    configured_response_create_limit, configured_stream_limit = configured_account_concurrency_caps(
+        dashboard_settings, startup_settings=startup_settings
+    )
+    scope = getattr(startup_settings, "proxy_account_caps_scope", "partitioned")
+    partition = get_cap_partition()
+    if scope == "replica" or partition.replica_count <= 1:
+        return AccountConcurrencyCaps(
+            response_create_limit=configured_response_create_limit,
+            stream_limit=configured_stream_limit,
+        )
+    return AccountConcurrencyCaps(
+        response_create_limit=partition_cap(configured_response_create_limit, partition.replica_count, partition.rank),
+        stream_limit=partition_cap(configured_stream_limit, partition.replica_count, partition.rank),
+        configured_response_create_limit=configured_response_create_limit,
+        configured_stream_limit=configured_stream_limit,
+        replica_count=partition.replica_count,
+    )
 
 
 def _record_account_lease_acquired(kind: AccountLeaseKind) -> None:
@@ -1892,19 +2005,36 @@ def _state_from_account(
         secondary_entry,
     )
 
-    # If the usage window has reset (reset_at is in the past) but the last
-    # recorded sample still shows 100 % usage, the data is stale.  Zero it
-    # out so the account is not incorrectly blocked or deprioritised while
-    # waiting for the next usage refresh to fetch fresh numbers.
+    # If the usage window has reset (reset_at is in the past), the last
+    # recorded sample describes an expired window at ANY used percentage:
+    # upstream may have stopped reporting the window entirely (e.g. the
+    # temporary 5h-limit removal), in which case the row is never rewritten
+    # and a frozen sub-100% sample would otherwise hold drain tiers and
+    # budget pressure forever. Zero the derived locals — not the stored
+    # rows — so the account is not incorrectly blocked or deprioritised
+    # while waiting for the next usage refresh. Expired samples map to 0.0
+    # rather than None because usage-derived status recovery only evaluates
+    # non-None percentages.
     now_epoch = int(time.time())
-    if primary_used is not None and primary_used >= 100.0:
-        if primary_reset is not None and primary_reset <= now_epoch:
-            primary_used = 0.0
-            primary_reset = None
-    if secondary_used is not None and secondary_used >= 100.0:
-        if secondary_reset is not None and secondary_reset <= now_epoch:
-            secondary_used = 0.0
-            secondary_reset = None
+    if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
+        primary_used = 0.0
+        primary_reset = None
+    # A strictly newer long-window row proves a later fetch no longer
+    # reported the short window: drop the stale duration — whether or not
+    # the stale row's reset has elapsed — so phase planning stops treating
+    # the account as having a short phase window.
+    if (
+        primary_window_minutes is not None
+        and primary_entry is not None
+        and effective_secondary_entry is not None
+        and effective_secondary_entry is not primary_entry
+        and (effective_secondary_entry.recorded_at - primary_entry.recorded_at).total_seconds()
+        > _SIBLING_FETCH_MARGIN_SECONDS
+    ):
+        primary_window_minutes = None
+    if secondary_used is not None and secondary_reset is not None and secondary_reset <= now_epoch:
+        secondary_used = 0.0
+        secondary_reset = None
 
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
@@ -1914,14 +2044,58 @@ def _state_from_account(
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
+
+    # An account marked RATE_LIMITED by an actual 429 always carries a
+    # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
+    # Evaluate the persisted cooldown against the ORIGINAL persisted
+    # status/blocked_at/reset_at, before the zero-primary-capacity ACTIVE
+    # rewrite below, so that rewrite cannot erase rate-limit cooldown
+    # semantics: fresh monthly/long-window quota is recovery evidence for
+    # stale window data, not for an upstream 429 whose cooldown is running.
+    rate_limited_cooldown_deadline: float | None = None
+    if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
+        persisted_deadline = (
+            float(account.reset_at) if account.reset_at else effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        )
+        if time.time() < persisted_deadline:
+            rate_limited_cooldown_deadline = persisted_deadline
+        if (
+            rate_limited_cooldown_deadline is not None
+            and runtime.cooldown_until is not None
+            and runtime.cooldown_until <= time.time()
+            and runtime.blocked_at is not None
+            and runtime.blocked_at >= effective_blocked_at
+        ):
+            # The marking replica keeps its existing early-recovery gate: fresh
+            # post-block usage evidence lifts the hold locally; peers (with no
+            # runtime knowledge of the 429) wait for the persisted deadline.
+            # The runtime block marker must be at least as recent as the
+            # persisted block: leftover runtime state from an earlier 429 does
+            # not prove this replica observed the current one.
+            early_freshness_entry = _rate_limited_freshness_entry(
+                account=account,
+                primary_entry=primary_entry,
+                long_window_entry=effective_secondary_entry,
+            )
+            if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
+                recorded_epoch = early_freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
+                if recorded_epoch > effective_blocked_at:
+                    rate_limited_cooldown_deadline = None
+
     if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
-            primary_window_minutes is not None
-            and not usage_core.is_primary_window_minutes(primary_window_minutes)
-            and long_window_quota_available
+            rate_limited_cooldown_deadline is None
+            and (
+                (
+                    primary_window_minutes is not None
+                    and not usage_core.is_primary_window_minutes(primary_window_minutes)
+                    and long_window_quota_available
+                )
+                or (primary_entry is None and long_window_quota_available)
+            )
         )
-        or (primary_entry is None and long_window_quota_available)
     ):
         primary_used = None
         primary_reset = None
@@ -1939,7 +2113,21 @@ def _state_from_account(
         effective_runtime_reset = db_reset_at or runtime.reset_at
     else:
         effective_runtime_reset = None
-    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
+
+    # Defense-in-depth for RATE_LIMITED rows persisted without a reset_at
+    # deadline (written before cooldown persistence, or by an older replica):
+    # hold the account out of rotation for a minimum floor window after
+    # blocked_at instead of letting a replica with no runtime knowledge of
+    # the 429 flip it straight back to ACTIVE. Once the floor elapses,
+    # recovery proceeds through the normal CAS-guarded persistence path.
+    if (
+        status_seed == AccountStatus.RATE_LIMITED
+        and effective_runtime_reset is None
+        and effective_blocked_at is not None
+    ):
+        floor_deadline = effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        if time.time() < floor_deadline:
+            effective_runtime_reset = floor_deadline
 
     if (
         account.status == AccountStatus.QUOTA_EXCEEDED
@@ -1959,15 +2147,24 @@ def _state_from_account(
     # observed and the debounce period is over.
     #
     # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
-    # process restarts. RATE_LIMITED keeps the narrower runtime-only behavior,
-    # because its cooldown duration is not persisted today.
+    # process restarts. RATE_LIMITED keeps the narrower runtime-only gate: only
+    # the replica that observed the 429 (and therefore holds the runtime
+    # cooldown) may recover the account early on fresh post-block usage
+    # evidence; peers wait for the persisted reset_at deadline to elapse. The
+    # runtime block marker must be at least as recent as the effective block:
+    # leftover runtime state from an earlier 429 does not prove this replica
+    # observed the current one.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
             effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
         )
     elif (
-        runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None
+        runtime.cooldown_until is not None
+        and runtime.cooldown_until <= time.time()
+        and runtime.blocked_at is not None
+        and effective_blocked_at is not None
+        and runtime.blocked_at >= effective_blocked_at
     ):
         cooldown_ready = True
 
@@ -1987,6 +2184,15 @@ def _state_from_account(
             if recorded_epoch > effective_blocked_at:
                 effective_runtime_reset = None
 
+    # A resetless rate limit whose runtime cooldown was lost (e.g. a restart
+    # after a 429 without reset metadata) has no deadline to expire and no
+    # post-block evidence trail; a long-window sample alone must not clear
+    # it. Evidence-gated clearing above always starts from a persisted or
+    # runtime reset, so this only matches the truly resetless case.
+    resetless_rate_limit_without_evidence = (
+        status_seed == AccountStatus.RATE_LIMITED and db_reset_at is None and runtime.reset_at is None
+    )
+
     status, used_percent, reset_at = apply_usage_quota(
         status=status_seed,
         primary_used=primary_used,
@@ -2000,6 +2206,8 @@ def _state_from_account(
         credits_balance=credits_balance,
         infer_status_from_usage=False,
     )
+    if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
+        status = AccountStatus.RATE_LIMITED
 
     if status == AccountStatus.QUOTA_EXCEEDED:
         next_blocked_at = effective_blocked_at
@@ -2065,6 +2273,7 @@ def _state_from_account(
         used_percent=effective_used_percent,
         reset_at=reset_at,
         primary_reset_at=primary_reset,
+        primary_window_minutes=primary_window_minutes,
         blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=effective_secondary_used_percent,
@@ -2171,9 +2380,23 @@ def _rate_limited_freshness_entry(
         and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
     ):
         return long_window_entry
-    if primary_entry is not None:
+    if primary_entry is None:
+        return long_window_entry
+    if long_window_entry is None:
         return primary_entry
-    return None
+    # A post-block refresh that no longer reports the short primary window
+    # writes only long-window rows, so a strictly newer long-window row is
+    # the recovery evidence — but only once the last primary sample's own
+    # reset deadline has provably elapsed, and only when that long window
+    # still has capacity. An exhausted long-window row must not clear the
+    # block: recovery would route traffic to an account whose long quota is
+    # still at 100%. While the primary sample still claims an active window,
+    # or omits reset metadata entirely, its freshness keeps gating recovery.
+    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
+    long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
+    if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
+        return long_window_entry
+    return primary_entry
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:

@@ -6,7 +6,7 @@ Define API key lifecycle, enforcement, accounting, and dashboard management cont
 ## Requirements
 ### Requirement: API Key creation
 
-The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowed_models` (optional list), `weekly_token_limit` (optional integer), `expires_at` (optional ISO 8601 datetime), and `assigned_account_ids` (optional list). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
+The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowed_models` (optional list), `weekly_token_limit` (optional integer), `expires_at` (optional ISO 8601 datetime), `assigned_account_ids` (optional list), and `usage_sections` (optional comma-separated string, defaults to `"upstream_limits,account_pool_usage"`). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
 
 When `assigned_account_ids` is omitted or empty, the created key SHALL remain unscoped and apply to all accounts. When `assigned_account_ids` is provided with one or more valid account IDs, the created key SHALL enable account-assignment scope and persist those assignments.
 
@@ -39,7 +39,9 @@ When `assigned_account_ids` is omitted or empty, the created key SHALL remain un
 - **AND** the response returns `expiresAt` representing the same UTC instant
 
 ### Requirement: API Key update
-The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence.
+The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`, `usageSections`, `transportPolicyOverride`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence. The `transportPolicyOverride` field MUST accept `null` (follow the global policy) or one of `"smart"`, `"always_http"`, `"always_websocket"`; any other value MUST be rejected with HTTP 400.
+
+When a submitted API key limit rule does not match an existing rule by `limit_type`, `limit_window`, and `model_filter`, the system MUST initialize the new rule's `current_value` from the API key's successful existing request-log usage in that rule's current window. If `resetUsage` is true, the system MUST initialize submitted limits with `current_value: 0`.
 
 #### Scenario: Update key with timezone-aware expiration
 - **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "expiresAt": "2025-12-31T00:00:00Z" }`
@@ -50,6 +52,40 @@ The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. U
 
 - **WHEN** admin submits `PATCH /api/api-keys/{id}` with an unknown ID
 - **THEN** the system returns 404
+
+#### Scenario: Add token limit after current-window usage exists
+
+- **WHEN** an API key has successful request-log token usage in the active daily window
+- **AND** the API key has error or incomplete request-log token usage in the same window
+- **AND** admin submits `PATCH /api/api-keys/{id}` adding a daily `total_tokens` limit without `resetUsage`
+- **THEN** the new limit's `current_value` includes only the successful current-window token usage
+
+#### Scenario: Add cost limit after current-window usage exists
+
+- **WHEN** an API key has successful request-log costs in the active daily window
+- **AND** admin submits `PATCH /api/api-keys/{id}` adding a daily `cost_usd` limit without `resetUsage`
+- **THEN** the new limit's `current_value` is the sum of each successful request log's `cost_usd` converted to truncated integer microdollars
+
+#### Scenario: Reset usage when adding a limit
+
+- **WHEN** an API key has request-log usage in the active window
+- **AND** admin submits `PATCH /api/api-keys/{id}` adding a limit with `resetUsage: true`
+- **THEN** the new limit's `current_value` is `0`
+
+#### Scenario: Update key transport policy override
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": "always_http" }`
+- **THEN** the system persists the override and returns `transportPolicyOverride = "always_http"`
+
+#### Scenario: Clear key transport policy override
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": null }`
+- **THEN** the system clears the override and the key follows the global `http_downstream_transport_policy`
+
+#### Scenario: Reject invalid transport policy override
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": "carrier-pigeon" }`
+- **THEN** the system returns 400 and does not modify the key
 
 ### Requirement: API Key deletion
 
@@ -161,89 +197,37 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 
 ### Requirement: Model restriction enforcement
 
-The system SHALL enforce per-key model restrictions in the proxy service layer (not middleware). When `allowed_models` is set (non-null, non-empty) and the requested model is not in the list, the system MUST reject the request. The `/v1/models` endpoint MUST filter the model list based on the authenticated key's `allowed_models`.
+The system SHALL enforce per-key model restrictions in the proxy service layer (not middleware). When `allowed_models` is set (non-null, non-empty) and the requested model is not in the list, the system MUST reject the request. When reading stored `allowed_models`, JSON `null`, blank strings, and non-string array entries MUST be ignored and MUST NOT become model names. The `/v1/models` endpoint MUST filter the model list based on the authenticated key's `allowed_models`.
 
-For fixed-model endpoints such as `/v1/audio/transcriptions` and `/backend-api/transcribe`, the service MUST evaluate restrictions against fixed effective model `gpt-4o-transcribe`.
+#### Scenario: Stored null allowed-model entries are ignored
 
-`/backend-api/codex/models` SHALL keep the existing allowlist filtering behavior by default. When an authenticated API key has `apply_to_codex_model = true` and `allowed_models` is non-empty, `/backend-api/codex/models` SHALL return the full catalog and rewrite each model entry visibility so allowlisted models use `visibility: "list"` and every other model uses `visibility: "hide"`. When `apply_to_codex_model = true` but `allowed_models` is null or empty, `/backend-api/codex/models` SHALL preserve the original behavior because there is no allowlist to apply.
+- **GIVEN** an API key row stores `allowed_models` as `[null, "gpt-5.2", 42, ""]`
+- **WHEN** the key policy is loaded
+- **THEN** the effective allowed model list is `["gpt-5.2"]`
+- **AND** `null` is not converted to `"None"`
 
-#### Scenario: Requested model not allowed
-
-- **WHEN** a key has `allowed_models: ["o3-pro"]` and a request is made for model `gpt-4.1`
-- **THEN** the proxy returns 403 with OpenAI-format error `{ "error": { "code": "model_not_allowed", "message": "This API key does not have access to model 'gpt-4.1'" } }`
-
-#### Scenario: Cursor alias allowed model permits canonical request
-
-- **WHEN** a key has `allowed_models: ["gpt-5.4-mini-high"]`
-- **AND** a request is made for model `gpt-5.4-mini`
-- **THEN** the proxy permits the request because the allowed alias resolves to the requested canonical model
-
-#### Scenario: All models allowed
-
-- **WHEN** a key has `allowed_models: null`
-- **THEN** any model is permitted
-
-#### Scenario: Model list filtered
-
-- **WHEN** a key with `allowed_models: ["o3-pro"]` calls `GET /v1/models`
-- **THEN** the response contains only models matching the allowed list
-
-#### Scenario: Model list canonicalizes Cursor aliases
-
-- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]` and `enforced_model: "gpt-5.4-mini-high"` calls `GET /v1/models`
-- **THEN** the response contains the canonical model `gpt-5.4-mini`
-- **AND** the response does not expose a synthetic `gpt-5.4-mini-high` model id
-
-#### Scenario: Codex model list visibility canonicalizes Cursor aliases
-
-- **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]`, `enforced_model: "gpt-5.4-mini-high"`, and `apply_to_codex_model=true` calls `GET /backend-api/codex/models`
-- **THEN** the canonical `gpt-5.4-mini` entry is visible with `visibility: "list"`
-- **AND** other entries are hidden according to the API key allowlist policy
-
-#### Scenario: No API key auth (disabled)
-
-- **WHEN** `api_key_auth_enabled` is false and a request is made to `/v1/models`
-- **THEN** the full model catalog is returned
-
-#### Scenario: Fixed transcription model not allowed
-
-- **WHEN** a key has `allowed_models: ["gpt-5.1"]` and a request is made to `/v1/audio/transcriptions` or `/backend-api/transcribe`
-- **THEN** the proxy returns 403 with OpenAI-format error code `model_not_allowed` for model `gpt-4o-transcribe`
-
-#### Scenario: Codex models keep filtered behavior by default
-- **WHEN** a key has `allowed_models: ["o3-pro"]` and `apply_to_codex_model: false`
-- **AND** the key calls `GET /backend-api/codex/models`
-- **THEN** the response contains only models matching the allowed list
-
-#### Scenario: Codex models rewrite visibility when opted in
-- **WHEN** a key has `allowed_models: ["o3-pro"]` and `apply_to_codex_model: true`
-- **AND** the key calls `GET /backend-api/codex/models`
-- **THEN** the response contains the full catalog
-- **AND** the `o3-pro` entry has `visibility: "list"`
-- **AND** every model not in `allowed_models` has `visibility: "hide"`
-
-#### Scenario: Codex models preserve original behavior without an allowlist
-- **WHEN** a key has `allowed_models: null` and `apply_to_codex_model: true`
-- **AND** the key calls `GET /backend-api/codex/models`
-- **THEN** the response preserves the original `/backend-api/codex/models` behavior because there is no allowlist to apply
 ### Requirement: Weekly token usage tracking
-
-The system SHALL atomically increment `weekly_tokens_used` on the API key record when a proxy request completes with token usage data. The token count MUST be `input_tokens + output_tokens`. If token usage is unavailable (error response), the counter MUST NOT be incremented.
+The system SHALL atomically increment `weekly_tokens_used` on the API key record when a non-warmup proxy request completes with token usage data. The token count MUST be `input_tokens + output_tokens`. If token usage is unavailable (error response), the counter MUST NOT be incremented.
 
 #### Scenario: Successful request with usage
 
-- **WHEN** a proxy request completes with `input_tokens: 100, output_tokens: 50` for an authenticated key
+- **WHEN** a non-warmup proxy request completes with `input_tokens: 100, output_tokens: 50` for an authenticated key
 - **THEN** `weekly_tokens_used` is atomically incremented by 150
 
 #### Scenario: Request with no usage data
 
-- **WHEN** a proxy request fails with an error and no usage data is returned
+- **WHEN** a non-warmup proxy request fails with an error and no usage data is returned
 - **THEN** `weekly_tokens_used` is not incremented
 
 #### Scenario: Request without API key auth
 
-- **WHEN** `api_key_auth_enabled` is false and a proxy request completes
+- **WHEN** `api_key_auth_enabled` is false and a non-warmup proxy request completes
 - **THEN** no API key usage tracking occurs
+
+#### Scenario: Warmup request is excluded from weekly usage tracking
+
+- **WHEN** an authenticated `POST /v1/warmup` execution writes request log rows
+- **THEN** those warmup rows are excluded from API key weekly token usage increments
 
 ### Requirement: Weekly token usage reset
 
@@ -280,7 +264,7 @@ The system SHALL record the `api_key_id` in the `request_logs` table for proxy r
 
 ### Requirement: Frontend API Key management
 
-The SPA settings page SHALL include an API Key management section with: a toggle for `apiKeyAuthEnabled`, a key list table showing prefix/name/models/limit/usage/expiry/status, a create dialog (name, model selection, assigned-account selection, weekly limit, expiry date), and key actions (edit, delete, regenerate). On key creation, the SPA MUST display the plain key in a copy-able dialog with a warning that it will not be shown again, and the copy action MUST remain functional in secure and non-secure contexts.
+The SPA settings page SHALL include an API Key management section with: a toggle for `apiKeyAuthEnabled`, a key list table showing prefix/name/models/limit/usage/expiry/status, a create dialog (name, model selection, assigned-account selection, usage sections multi-select, weekly limit, expiry date), and key actions (edit, delete, regenerate). On key creation, the SPA MUST display the plain key in a copy-able dialog with a warning that it will not be shown again, and the copy action MUST remain functional in secure and non-secure contexts.
 
 The create and edit dialogs SHALL expose an `Apply to codex /model` checkbox directly below `Allowed models`. The checkbox SHALL default to unchecked for new keys and SHALL edit the stored API key value for existing keys.
 
@@ -290,6 +274,13 @@ The create and edit dialogs SHALL expose an `Apply to codex /model` checkbox dir
 - **THEN** the dialog shows the Assigned accounts picker
 - **AND** leaving the picker at `All accounts` creates an unscoped key
 - **AND** selecting one or more accounts creates a scoped key for only those accounts
+
+#### Scenario: Create key with usage sections multi-select
+
+- **WHEN** an admin opens the create API key dialog
+- **THEN** the dialog shows a "Usage sections shown to client" multi-select dropdown below the Assigned accounts picker
+- **AND** the dropdown includes "Upstream limits" and "Account pool usage" options
+- **AND** by default both options are selected
 
 #### Scenario: Create key and show plain key
 
@@ -310,6 +301,7 @@ The create and edit dialogs SHALL expose an `Apply to codex /model` checkbox dir
 #### Scenario: Edit key with stored codex model visibility option
 - **WHEN** an admin opens the edit API key dialog for a key with `apply_to_codex_model: true`
 - **THEN** the `Apply to codex /model` checkbox is shown as checked
+
 ### Requirement: Cost accounting uses model and service-tier pricing
 When computing API key `cost_usd` usage, the system MUST price requests using the resolved model pricing and the authoritative `service_tier` reported by the upstream response when available, falling back to the forwarded request `service_tier` only when the response omits it. Requests sent with non-standard service tiers MUST use the published pricing for the tier actually used instead of falling back to standard-tier pricing.
 
@@ -373,14 +365,14 @@ The service contract SHALL be typed explicitly: `enforce_limits_for_request(key_
 - **THEN** all proxy requests return 429
 
 ### Requirement: Limit update with usage state preservation
-
 When updating API key limits, the system SHALL preserve existing usage state (`current_value`, `reset_at`) for unchanged limit rules. Limit comparison key is `(limit_type, limit_window, model_filter)`.
 
 - Matching existing rule: `current_value` and `reset_at` SHALL be preserved; only `max_value` is updated
-- New rule (no match): when `resetUsage` is false, `current_value` is initialized from successful request-log usage in the new rule's current window; when `resetUsage` is true, `current_value=0`; always with a fresh `reset_at`
+- New rule (no match) without `resetUsage`: `current_value` SHALL be initialized from the API key's successful existing request-log usage in the new rule's current window, with a fresh `reset_at`
+- New rule (no match) with `resetUsage`: `current_value=0` and fresh `reset_at`
 - Removed rule (in existing but not in update): row is deleted
 
-Usage reset SHALL only occur via an explicit action (`reset_usage` field or dedicated endpoint), never as a side-effect of metadata or policy edits.
+Usage reset SHALL only occur via an explicit action (`resetUsage` field or dedicated endpoint), never as a side-effect of metadata or policy edits.
 
 #### Scenario: Metadata-only edit preserves usage state
 
@@ -395,13 +387,24 @@ Usage reset SHALL only occur via an explicit action (`reset_usage` field or dedi
 
 #### Scenario: max_value adjustment preserves counters
 
-- **WHEN** an API key PATCH includes `limits` with a changed `max_value` for an existing rule
-- **THEN** `current_value` and `reset_at` are preserved; only the threshold changes
+- **WHEN** an API key PATCH changes only `max_value` for an existing matched limit rule
+- **THEN** that rule's existing `current_value` and `reset_at` are unchanged
 
-#### Scenario: Explicit reset action resets usage
+#### Scenario: Adding a new limit backfills current-window usage
 
-- **WHEN** an explicit usage reset action is invoked
-- **THEN** `current_value` is set to 0 and `reset_at` is refreshed
+- **WHEN** an API key has successful request-log usage in the active window
+- **AND** an API key PATCH adds a limit rule that does not match any existing rule
+- **AND** `resetUsage` is not true
+- **THEN** the new rule's `current_value` reflects successful existing request-log usage for that rule's current window
+- **AND** the new rule receives a fresh `reset_at`
+
+#### Scenario: resetUsage keeps new limits at zero
+
+- **WHEN** an API key has request-log usage in the active window
+- **AND** an API key PATCH adds a limit rule that does not match any existing rule
+- **AND** `resetUsage` is true
+- **THEN** the new rule's `current_value` is `0`
+- **AND** the new rule receives a fresh `reset_at`
 
 ### Requirement: API key edit payload — conditional limits transmission
 
@@ -575,7 +578,8 @@ The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key
 - `cached_input_tokens`
 - `total_cost_usd`
 - `limits[]` containing limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`. When no API-key limits are configured and aggregate upstream quota details are visible to the caller, `limits[]` MAY mirror those aggregate upstream credit windows for legacy client compatibility.
-- `upstream_limits[]` containing aggregate upstream Codex credit windows when available, with the same fields and `source: "aggregate"`
+- `upstream_limits[]` containing aggregate upstream Codex credit windows when available, with the same fields and `source: "aggregate"`, subject to the key's `usage_sections` containing `upstream_limits`
+- `account_pool_usage` containing `primary` and `secondary` float remaining percentages, subject to the key's `usage_sections` containing `account_pool_usage`
 
 Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
 
@@ -652,7 +656,7 @@ Selectable accounts exclude accounts whose status is `paused` or `deactivated`, 
 
 The response SHALL include `pooled_remaining_percent_primary` (float or null), `pooled_remaining_percent_secondary` (float or null), and `pooled_capacity_credits_primary` (float, default 0.0) on each key object.
 
-When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are free-tier), `pooled_remaining_percent_primary` SHALL be null.
+When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are free-tier), `pooled_remaining_percent_primary` SHALL be null. Primary samples whose `reset_at` has elapsed SHALL be pooled as reset windows rather than frozen values, and when no live (unexpired) primary sample exists across the pooled accounts, `pooled_remaining_percent_primary` SHALL be null instead of an optimistic value.
 
 #### Scenario: Scoped key pools assigned accounts only
 
@@ -670,6 +674,11 @@ When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are f
 - **WHEN** all assigned accounts have plan_type "free" (primary capacity = 0)
 - **THEN** `pooled_capacity_credits_primary` = 0.0
 - **AND** `pooled_remaining_percent_primary` = null
+
+#### Scenario: Absent primary windows hide the pooled primary bar
+
+- **WHEN** upstream stopped reporting the primary window and every pooled account's primary sample has an elapsed `reset_at` or no primary sample at all
+- **THEN** `pooled_remaining_percent_primary` = null
 
 #### Scenario: Paused and deactivated accounts are excluded
 
@@ -775,3 +784,331 @@ omit alias-only synthetic IDs so clients see stable model names.
 - **WHEN** a key with `allowed_models: ["gpt-5.4-mini-high"]`, `enforced_model: "gpt-5.4-mini-high"`, and `apply_to_codex_model=true` calls `GET /backend-api/codex/models`
 - **THEN** the canonical `gpt-5.4-mini` entry is visible with `visibility: "list"`
 - **AND** other entries are hidden according to the API key allowlist policy
+
+### Requirement: API Keys Declare Traffic Class
+
+API keys SHALL have a `traffic_class` value. The default SHALL be `foreground`. The system SHALL also accept `opportunistic` for clients that may only use burnable quota.
+
+#### Scenario: Create opportunistic key
+- **WHEN** admin creates an API key with `trafficClass: "opportunistic"`
+- **THEN** the key is persisted and returned with `trafficClass: "opportunistic"`
+
+#### Scenario: Omitted traffic class defaults to foreground
+- **WHEN** admin creates an API key without `trafficClass`
+- **THEN** the key is persisted and returned with `trafficClass: "foreground"`
+
+### Requirement: Assigned-account quota badges reflect monthly-only free accounts
+
+The API key create and edit dialogs SHALL display assigned-account quota badges according to the normalized quota model of each account.
+
+#### Scenario: Free account shows monthly badge only
+- **WHEN** assigned-account selection renders a free account whose normalized quota model is monthly-only
+- **THEN** the dialog shows a `Monthly <percent>% left` badge for that account
+- **AND** it does not show a weekly-left badge for that account
+
+#### Scenario: Paid account retains 5h and 7d badges
+- **WHEN** assigned-account selection renders an account with normalized 5h and 7d quota windows
+- **THEN** the dialog shows `5h <percent>% left` and `7d <percent>% left` badges for that account
+
+### Requirement: API keys can enforce extended reasoning efforts
+
+The dashboard API key CRUD surface MUST allow callers to persist optional
+enforced reasoning efforts advertised by the model catalog, including extended
+GPT-5.6 efforts `max` and `ultra`.
+
+#### Scenario: API key accepts extended enforced reasoning effort on create
+
+- **WHEN** a dashboard client creates an API key with `enforcedReasoningEffort: "ultra"`
+- **THEN** the request is accepted
+- **AND** the response returns `enforcedReasoningEffort: "ultra"`
+
+#### Scenario: API key accepts extended enforced reasoning effort on update
+
+- **WHEN** a dashboard client updates an API key with `enforcedReasoningEffort: "max"`
+- **THEN** the request is accepted
+- **AND** the response returns `enforcedReasoningEffort: "max"`
+
+### Requirement: Per-key transport policy override
+
+Each API key record MUST carry an optional `transport_policy_override`
+field (nullable, default `null`). When non-null, its value MUST be one of
+`"smart"`, `"always_http"`, or `"always_websocket"`, and it MUST be used
+as the effective downstream-HTTP transport routing policy for requests
+authenticated by that key, taking precedence over the global
+`http_downstream_transport_policy`. When `null`, requests authenticated
+by the key MUST follow the global policy.
+
+The field MUST be settable on creation (`POST /api/api-keys`, optional)
+and on update (`PATCH /api/api-keys/{id}`), MUST be returned on key reads
+as `transportPolicyOverride`, and MUST be persisted via an additive
+nullable column. Existing rows MUST default to `null` (follow global) so
+the migration is backward compatible with no behavior change for keys
+that never set an override.
+
+#### Scenario: Create key with transport policy override
+
+- **WHEN** admin submits `POST /api/api-keys` with `{ "name": "graphiti", "transportPolicyOverride": "always_http" }`
+- **THEN** the created key returns `transportPolicyOverride = "always_http"`
+
+#### Scenario: Create key without override defaults to null
+
+- **WHEN** admin submits `POST /api/api-keys` without `transportPolicyOverride`
+- **THEN** the created key returns `transportPolicyOverride = null`
+- **AND** the key follows the global `http_downstream_transport_policy`
+
+#### Scenario: Existing keys migrate to null override
+
+- **GIVEN** API key rows created before this change
+- **WHEN** the additive migration runs
+- **THEN** every existing row has `transport_policy_override = null`
+- **AND** those keys follow the global policy with no behavior change
+
+### Requirement: API key usage_sections controls visible /v1/usage detail sections
+
+The system SHALL accept an optional `usage_sections` field in `POST /api/api-keys` and `PATCH /api/api-keys/{id}`. The field SHALL be a comma-separated string of section names. Supported values SHALL be `upstream_limits` and `account_pool_usage`. When `usage_sections` is omitted during creation, the system SHALL default it to `"upstream_limits,account_pool_usage"`.
+
+The `ApiKeyResponse` SHALL include `usage_sections` as a string.
+
+#### Scenario: Create key with explicit usage_sections
+
+- **WHEN** admin submits `POST /api/api-keys` with `{ "name": "dev-key", "usageSections": "upstream_limits" }`
+- **THEN** the created key returns `usageSections: "upstream_limits"`
+
+#### Scenario: Create key without usage_sections defaults to all
+
+- **WHEN** admin submits `POST /api/api-keys` without `usageSections`
+- **THEN** the created key returns `usageSections: "upstream_limits,account_pool_usage"`
+
+#### Scenario: Update key usage_sections
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "usageSections": "account_pool_usage" }`
+- **THEN** the key returns `usageSections: "account_pool_usage"`
+
+#### Scenario: Reject unknown usage_sections values
+
+- **WHEN** admin submits `POST /api/api-keys` with `usageSections` containing an unsupported value
+- **THEN** the system returns 400
+
+### Requirement: API-key quota privacy toggle
+The system SHALL provide a `hide_upstream_quota_from_api_keys` boolean in `DashboardSettings`, defaulting to `false`. The dashboard settings API SHALL accept and return this field.
+
+#### Scenario: Default preserves current behavior
+
+- **WHEN** the setting is not enabled
+- **THEN** API-key-authenticated requests continue to receive upstream quota details exactly as they do today
+
+#### Scenario: API-key usage response hides upstream limits
+
+- **GIVEN** `hide_upstream_quota_from_api_keys` is `true`
+- **WHEN** an API-key-authenticated client calls `GET /v1/usage`
+- **THEN** the response SHALL omit upstream quota entries
+- **AND** the response SHALL still include the API key's own quota data
+
+#### Scenario: API-key usage response hides account pool usage
+
+- **GIVEN** `hide_upstream_quota_from_api_keys` is `true`
+- **AND** the API key's `usage_sections` includes `account_pool_usage`
+- **WHEN** an API-key-authenticated client calls `GET /v1/usage`
+- **THEN** the response SHALL set `account_pool_usage` to `null`
+- **AND** the privacy toggle SHALL take precedence over the API key's `usage_sections`
+
+#### Scenario: Proxy responses hide upstream quota headers
+
+- **GIVEN** `hide_upstream_quota_from_api_keys` is `true`
+- **WHEN** an API-key-authenticated client calls a protected proxy route that emits quota headers
+- **THEN** the response SHALL NOT include `x-codex-primary-*`, `x-codex-secondary-*`, or `x-codex-credits-*` headers
+- **AND** internal routing headers such as `x-codex-turn-state` SHALL remain unchanged
+
+#### Scenario: Dashboard views stay visible
+
+- **GIVEN** `hide_upstream_quota_from_api_keys` is `true`
+- **WHEN** an owner views dashboard settings or owner-facing usage data without API-key authentication
+- **THEN** upstream quota details SHALL remain visible
+
+### Requirement: API keys can inspect and redeem reset credits within their account pool
+
+The system SHALL expose `GET /v1/reset-credit` and `POST /v1/reset-credit` for API-key-authenticated self-service reset-credit access. Both routes MUST require a valid `Authorization: Bearer sk-clb-...` header even when `api_key_auth_enabled` is false globally. Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
+
+The target account pool SHALL be derived from the authenticated API key. If `account_assignment_scope_enabled=true`, only `assigned_account_ids` SHALL be eligible. If account scope is not enabled, all selectable accounts SHALL be eligible.
+
+`GET /v1/reset-credit` SHALL return only credits for the authenticated key's eligible account pool. `POST /v1/reset-credit` SHALL reject requests whose `account_id` is outside that pool.
+
+Before `POST /v1/reset-credit` decrypts and forwards the bearer token for the upstream consume call, the system SHALL refresh the target account with the normal account-token freshness rules and use the refreshed account credentials for the consume request.
+
+If that self-service credential refresh fails, `POST /v1/reset-credit` SHALL stop before the upstream consume call, return a client-actionable conflict response, and keep using the existing `/v1/*` OpenAI error envelope.
+
+After acquiring the cross-replica redeem claim, `POST /v1/reset-credit` SHALL re-validate the requested `redeem_id` against a live upstream reset-credits fetch performed inside the serialized redeem section using the refreshed account credentials, regardless of whether the replica-local snapshot lists the credit as available. It MUST NOT consume a credit solely on the basis of the replica-local snapshot, because a peer replica may have redeemed that credit while this request waited for the claim and the local snapshot can remain stale until its invalidation poll fires. The upstream fetch response is authoritative: if the credit is available upstream the redemption proceeds; otherwise the endpoint returns 409 and replaces the cached snapshot for that account with the fresh upstream snapshot.
+
+On a successful `POST /v1/reset-credit` redemption, the system SHALL invalidate the redeemed account's cached reset-credit snapshot, force a usage refresh for that account, and invalidate account-selection cache state when that usage refresh writes updated usage. A failed or empty post-redeem usage refresh SHALL NOT roll back the successful credit redemption response.
+
+#### Scenario: Missing API key is rejected
+
+- **WHEN** a client calls `GET /v1/reset-credit` or `POST /v1/reset-credit` without a Bearer token
+- **THEN** the system returns 401 in the OpenAI error format
+
+#### Scenario: Invalid API key is rejected
+
+- **WHEN** a client calls `GET /v1/reset-credit` or `POST /v1/reset-credit` with an unknown, expired, or inactive Bearer key
+- **THEN** the system returns 401 in the OpenAI error format
+
+#### Scenario: Scoped API key sees only assigned accounts
+
+- **WHEN** an API key has account scope enabled with assigned accounts
+- **AND** the client calls `GET /v1/reset-credit`
+- **THEN** the response includes reset-credit entries only for those assigned accounts
+
+#### Scenario: Unscoped API key can read the full selectable pool
+
+- **WHEN** an API key has account scope disabled
+- **AND** the client calls `GET /v1/reset-credit`
+- **THEN** the response may include reset-credit entries for any selectable account that currently has an available cached credit
+
+#### Scenario: Out-of-pool account is rejected on redeem
+
+- **WHEN** a client calls `POST /v1/reset-credit` with an `account_id` outside the authenticated API key's eligible pool
+- **THEN** the system returns 403 without redeeming any credit
+
+#### Scenario: Self-service reset-credit works while global proxy auth is disabled
+
+- **WHEN** `api_key_auth_enabled` is false and a client calls `GET /v1/reset-credit` or `POST /v1/reset-credit` with a valid Bearer key
+- **THEN** the system still authenticates that key and applies the same account-pool rules
+
+#### Scenario: Self-service redemption refreshes stale account credentials before consume
+
+- **GIVEN** an eligible account has a redeemable reset credit
+- **AND** the persisted access token for that account is stale but refreshable
+- **WHEN** a client successfully calls `POST /v1/reset-credit` for that account
+- **THEN** codex-lb refreshes the account before decrypting the consume bearer token
+- **AND** the upstream reset-credit consume call uses the refreshed account credentials
+
+#### Scenario: Self-service redemption surfaces refresh failures as conflicts
+
+- **GIVEN** an eligible account has a redeemable reset credit
+- **AND** that account's credential refresh fails before the upstream consume call
+- **WHEN** a client calls `POST /v1/reset-credit` for that account
+- **THEN** codex-lb returns a conflict response in the standard `/v1/*` OpenAI error envelope
+- **AND** codex-lb does not call upstream reset-credit consume for that request
+
+#### Scenario: Fresh replica redeems a credit missing from its local snapshot
+
+- **GIVEN** a freshly started replica whose reset-credit snapshot store is empty for the target account
+- **AND** upstream reports the requested `redeem_id` as available
+- **WHEN** a client calls `POST /v1/reset-credit` for that account and `redeem_id`
+- **THEN** the replica fetches the account's reset credits from upstream inside the serialized redeem section
+- **AND** the redemption proceeds and succeeds instead of returning a false 409
+
+#### Scenario: Credit already redeemed elsewhere returns 409 with a fresh snapshot
+
+- **GIVEN** the replica-local snapshot does not list the requested `redeem_id` as available
+- **AND** the authoritative upstream fetch reports that credit as unavailable
+- **WHEN** a client calls `POST /v1/reset-credit` for that account and `redeem_id`
+- **THEN** the endpoint returns 409 without calling upstream consume
+- **AND** the fresh upstream snapshot replaces the replica's cached snapshot for that account
+
+#### Scenario: Stale cached credit is re-validated after winning the claim
+
+- **GIVEN** two replicas both cached the same reset credit as available
+- **AND** replica A redeemed it while replica B waited on the cross-replica redeem claim
+- **AND** replica B's cached snapshot still lists that `redeem_id` as available
+- **WHEN** replica B wins the claim and processes `POST /v1/reset-credit` for that `redeem_id`
+- **THEN** replica B performs the authoritative upstream fetch instead of consuming from its stale cache
+- **AND** because upstream reports the credit unavailable, replica B returns 409 without sending a second upstream consume
+- **AND** replica B replaces its cached snapshot with the fresh upstream snapshot
+
+#### Scenario: Successful self-service redemption refreshes usage for immediate follow-up traffic
+
+- **GIVEN** an eligible account has a redeemable reset credit and persisted usage/account state that still reflects a blocked window
+- **WHEN** a client successfully calls `POST /v1/reset-credit` for that account
+- **THEN** the redeemed account's cached reset-credit snapshot is invalidated
+- **AND** codex-lb forces a usage refresh for that account before returning
+- **AND** any account-selection cache entry derived from the stale usage state is invalidated when the refresh writes updated usage
+- **AND** the response still returns the upstream `{code, windows_reset, redeemed_at}` success payload
+
+### Requirement: API keys may be scoped to model sources
+
+The system SHALL allow API keys to be scoped to zero or more model-source ids in
+addition to existing account assignments and model allowlists. Source scoping
+MUST be represented separately from account assignment scoping and MUST expose a
+source-assignment-scope-enabled state in API-key read contracts. When an API key
+has source assignment scope disabled, it MAY use any enabled source subject to
+model allowlists and route eligibility. When source assignment scope is enabled,
+source-routed requests and model listing MUST be restricted to the assigned
+source ids.
+
+#### Scenario: Key without source assignments can see enabled source models
+
+- **GIVEN** an API key has no assigned source ids
+- **AND** source assignment scope is disabled
+- **AND** its model allowlist permits `local-coder`
+- **WHEN** the key calls `GET /v1/models`
+- **THEN** enabled `local-coder` source entries are eligible for listing
+
+#### Scenario: Key with source assignments is restricted
+
+- **GIVEN** an API key is assigned to source `src_a`
+- **AND** source `src_b` also exposes model `local-coder`
+- **WHEN** the key calls `GET /v1/models`
+- **THEN** only entries from `src_a` are eligible
+
+#### Scenario: Deleted assigned source does not broaden access
+
+- **GIVEN** an API key is assigned to source `src_a`
+- **AND** source `src_b` also exposes model `local-coder`
+- **WHEN** `src_a` is deleted
+- **THEN** the API key remains source-assignment scoped with no assigned source ids
+- **AND** source `src_b` is not eligible for model listing or routing
+
+### Requirement: Source-routed usage uses API-key reservations
+
+The system MUST reserve API-key usage before forwarding an OpenAI-compatible
+source-routed request authenticated by an API key, and MUST finalize the
+reservation from the upstream OpenAI-compatible `usage` payload when the
+request completes.
+The finalized input, output, cached-input, and cost values MUST update the same
+API-key limit and usage-reporting paths used by subscription-backed requests.
+
+#### Scenario: Source-routed response finalizes token usage
+
+- **WHEN** an API key calls a source-routed model and the upstream response
+  includes `usage.prompt_tokens=100` and `usage.completion_tokens=20`
+- **THEN** the API-key reservation is finalized with 100 input tokens and 20
+  output tokens
+- **AND** `/v1/usage` for that key reflects the completed usage
+
+#### Scenario: Missing usage fails closed for limited keys
+
+- **GIVEN** an API key has a token or cost limit
+- **WHEN** a source-routed response succeeds but lacks usable OpenAI `usage`
+  fields
+- **THEN** the system does not silently finalize zero usage
+- **AND** the request fails or is marked failed according to the source-routing
+  error contract
+
+### Requirement: Stream reservation settlement is detached from the response path
+
+Settling a stream API-key reservation MUST NOT block the response/stream close, with one deliberate exception: when a keyed websocket stream terminates with an account-health error, the finalizer MUST wait for the settlement to commit before the load-balancer health write (the settlement-ordering invariant), so that error path intentionally blocks on settlement. In all other cases the settlement MUST run as a tracked background task; when it fails or is cancelled, the reservation MUST still be released by the tracking fallback, and the request's finalization path MUST NOT double-release a transferred settlement. Reservations MUST continue to count toward key limits until finalized or released, so deferred settlement can never admit usage a synchronous settlement would have rejected.
+
+#### Scenario: Response close precedes settlement completion
+
+- **GIVEN** a keyed stream whose settlement transaction is still running
+- **WHEN** the stream closes
+- **THEN** the close does not wait for the settlement
+- **AND** the settlement finalizes the reservation exactly once in the background
+
+#### Scenario: Failed detached settlement still releases the reservation
+
+- **GIVEN** a detached settlement whose finalize raises
+- **WHEN** the settlement task completes
+- **THEN** the tracking fallback releases the reservation
+
+#### Scenario: Websocket health-error settlement precedes the health write
+
+- **GIVEN** a keyed websocket stream that terminates with an account-health error
+- **WHEN** the finalizer settles the reservation
+- **THEN** it waits for the settlement to commit before recording the account-health error
+
+#### Scenario: Shutdown drains pending settlements
+
+- **WHEN** the service shuts down gracefully with settlements in flight
+- **THEN** shutdown waits for them up to the configured drain timeout
+

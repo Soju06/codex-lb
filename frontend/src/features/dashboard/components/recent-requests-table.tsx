@@ -123,6 +123,30 @@ function formatRequestCostSummary(request: RequestLog | null): string | null {
   return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;
 }
 
+function formatGenerationSpeed(request: RequestLog): string | null {
+  const outputCount = request.outputTokensRaw;
+  if (outputCount == null || request.latencyMs == null || request.latencyFirstTokenMs == null) {
+    return null;
+  }
+
+  const generationMs = request.latencyMs - request.latencyFirstTokenMs;
+  if (outputCount <= 0 || generationMs <= 0) {
+    return null;
+  }
+
+  return (outputCount / (generationMs / 1000)).toFixed(1);
+}
+
+function formatCompactElapsed(ms: number | null | undefined): string | null {
+  if (ms == null) {
+    return null;
+  }
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export function RecentRequestsTable({
   requests,
   accounts,
@@ -171,7 +195,7 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="min-w-[1240px] table-fixed">
+        <Table className="w-full table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
@@ -181,6 +205,8 @@ export function RecentRequestsTable({
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
               <TableHead className="w-32 pr-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
               <TableHead className="w-24 pl-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
+              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">TTFT</TableHead>
+              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">TPS</TableHead>
               <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Tokens</TableHead>
               <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Cost</TableHead>
               <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Details</TableHead>
@@ -199,6 +225,7 @@ export function RecentRequestsTable({
               const planType = request.planType?.trim().toLowerCase() || null;
               const planLabel = planType ? formatSlug(planType) : "--";
               const upstreamTransport = request.upstreamTransport;
+              const generationSpeed = formatGenerationSpeed(request);
 
               return (
                 <TableRow key={request.requestId}>
@@ -274,6 +301,12 @@ export function RecentRequestsTable({
                     >
                       {REQUEST_STATUS_LABELS[request.status] ?? request.status}
                     </Badge>
+                  </TableCell>
+                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                    {formatCompactElapsed(request.latencyFirstTokenMs) ?? "--"}
+                  </TableCell>
+                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                    {generationSpeed ?? "--"}
                   </TableCell>
                   <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     <div className="leading-tight">
@@ -364,6 +397,9 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Request kind" value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
                 <RequestDetailField label="Elapsed" value={formatElapsed(selectedRequest?.latencyMs ?? null)} />
+                <RequestDetailField label="TTFT" value={formatElapsed(selectedRequest?.latencyFirstTokenMs ?? null)} />
+                <RequestDetailField label="Queue" value={formatElapsed(selectedRequest?.latencyQueueMs ?? null)} />
+                <RequestDetailField label="TPS" value={selectedRequest ? (formatGenerationSpeed(selectedRequest) ?? "—") : "—"} />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />

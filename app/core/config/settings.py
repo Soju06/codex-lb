@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 from collections.abc import Mapping
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Annotated, Literal
@@ -17,8 +18,73 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
+logger = logging.getLogger(__name__)
+
 BASE_DIR = Path(__file__).resolve().parents[3]
 ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+# OAuth protocol constants. These values identify codex-lb to OpenAI's OAuth
+# endpoints exactly like the Codex CLI; they are protocol constants, not
+# deployment tunables, and changing any of them breaks login
+# (PRINCIPLES.md P2, issue #1340).
+AUTH_BASE_URL = "https://auth.openai.com"
+OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+OAUTH_ORIGINATOR = "codex_chatgpt_desktop"
+OAUTH_SCOPE = "openid profile email"
+OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
+OAUTH_CALLBACK_PORT = 1455  # Do not change the port. OpenAI dislikes changes.
+
+# Env names of settings removed from the Settings surface (issue #1340,
+# PRINCIPLES.md P2). ``extra="ignore"`` already makes them harmless; startup
+# emits one WARN for one release as a courtesy to operators who still set them.
+_REMOVED_SETTINGS: tuple[str, ...] = (
+    "CODEX_LB_AUTH_BASE_URL",
+    "CODEX_LB_OAUTH_CLIENT_ID",
+    "CODEX_LB_OAUTH_ORIGINATOR",
+    "CODEX_LB_OAUTH_SCOPE",
+    "CODEX_LB_OAUTH_REDIRECT_URI",
+    "CODEX_LB_OAUTH_CALLBACK_PORT",
+    "CODEX_LB_AUTH_GUARDIAN_INTERVAL_SECONDS",
+    "CODEX_LB_AUTH_GUARDIAN_MAX_REFRESH_AGE_SECONDS",
+    "CODEX_LB_AUTH_GUARDIAN_BATCH_SIZE",
+    "CODEX_LB_AUTH_GUARDIAN_CONCURRENCY",
+    "CODEX_LB_AUTH_GUARDIAN_JITTER_SECONDS",
+    "CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_BASE_SECONDS",
+    "CODEX_LB_AUTH_GUARDIAN_FAILURE_BACKOFF_MAX_SECONDS",
+    "CODEX_LB_LOG_PROXY_REQUEST_SHAPE",
+    "CODEX_LB_LOG_PROXY_REQUEST_SHAPE_RAW_CACHE_KEY",
+    "CODEX_LB_LOG_PROXY_REQUEST_PAYLOAD",
+    "CODEX_LB_LOG_PROXY_SERVICE_TIER_TRACE",
+    "CODEX_LB_LOG_UPSTREAM_REQUEST_SUMMARY",
+    "CODEX_LB_LOG_UPSTREAM_REQUEST_PAYLOAD",
+    "CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT",
+    "CODEX_LB_BULKHEAD_PROXY_WEBSOCKET_LIMIT",
+    "CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT",
+    "CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS",
+    "CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS",
+)
+
+
+def warn_removed_settings(environ: Mapping[str, str] | None = None) -> list[str]:
+    """Log one WARN listing removed ``CODEX_LB_*`` env vars still set.
+
+    Scans the process environment plus the same env files Settings loads
+    (``ENV_FILES``), so removed names lingering in ``.env``/``.env.local``
+    are reported too. Returns the removed names found so the startup caller
+    and tests share one source of truth. Values are never logged.
+    """
+    if environ is None:
+        source: Mapping[str, str | None] = _effective_environ()
+    else:
+        source = environ
+    found = [name for name in _REMOVED_SETTINGS if name in source]
+    if found:
+        logger.warning(
+            "removed setting(s) ignored: %s — values are now fixed; see PRINCIPLES.md P2 / issue #1340",
+            ", ".join(found),
+        )
+    return found
+
 
 DOCKER_DATA_DIR = Path("/var/lib/codex-lb")
 DOCKER_CALLBACK_HOST = "0.0.0.0"
@@ -52,10 +118,10 @@ def _default_http_bridge_instance_id() -> str:
 
 
 def _default_upstream_websocket_trust_env() -> bool:
-    return outbound_proxy_env_configured(_configured_outbound_proxy_env())
+    return outbound_proxy_env_configured(_effective_environ())
 
 
-def _configured_outbound_proxy_env() -> dict[str, str | None]:
+def _effective_environ() -> dict[str, str | None]:
     environ: dict[str, str | None] = {}
     for env_file in ENV_FILES:
         environ.update(dotenv_values(env_file))
@@ -153,6 +219,7 @@ class Settings(BaseSettings):
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
     database_sqlite_startup_check_mode: Literal["quick", "full", "off"] = "quick"
     database_alembic_auto_remap_enabled: bool = True
+    database_migration_lock_timeout_seconds: float = Field(default=300.0, gt=0)
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
@@ -171,29 +238,26 @@ class Settings(BaseSettings):
     # fail locally with a 1009 before upstream completion.
     max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
     upstream_response_create_max_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
-    auth_base_url: str = "https://auth.openai.com"
-    oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
-    oauth_originator: str = "codex_chatgpt_desktop"
-    oauth_scope: str = "openid profile email"
     oauth_timeout_seconds: float = 30.0
-    oauth_redirect_uri: str = "http://localhost:1455/auth/callback"
     oauth_callback_host: str = _default_oauth_callback_host()
-    oauth_callback_port: int = 1455  # Do not change the port. OpenAI dislikes changes.
     token_refresh_timeout_seconds: float = 8.0
+    # Cross-replica token-refresh claim (account_refresh_claims table).
+    # The TTL bounds how long a crashed claimant can block refresh for one
+    # account; it is validated to stay >= proxy_admission_wait_timeout_seconds
+    # + 2x token_refresh_timeout_seconds because the claim is held across the
+    # refresh-admission wait AND the OAuth exchange, and a healthy claimant
+    # must not lose its claim mid-work.
+    token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
     auth_guardian_enabled: bool = False
-    auth_guardian_interval_seconds: int = Field(default=21600, gt=0)
-    auth_guardian_max_refresh_age_seconds: int = Field(default=43200, gt=0)
-    auth_guardian_batch_size: int = Field(default=100, gt=0)
-    auth_guardian_concurrency: int = Field(default=3, gt=0)
-    auth_guardian_jitter_seconds: float = Field(default=300.0, ge=0)
-    auth_guardian_failure_backoff_base_seconds: float = Field(default=300.0, ge=0)
-    auth_guardian_failure_backoff_max_seconds: float = Field(default=3600.0, ge=0)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
+    live_usage_ingestion_enabled: bool = True
+    live_usage_write_min_interval_seconds: float = Field(default=5.0, ge=0)
+    live_usage_queue_size: int = Field(default=512, gt=0)
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
@@ -223,18 +287,30 @@ class Settings(BaseSettings):
     http_responses_session_bridge_advertise_base_url: str | None = None
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
+    # Data retention (0 = disabled). Non-zero values have safety floors so
+    # every in-product consumer window stays inside retained data.
+    # Display-only pagination total for the request-log listing; 0 disables.
+    request_log_count_cache_ttl_seconds: float = Field(default=30.0, ge=0)
+    request_log_retention_days: int = Field(default=0, ge=0, le=3650)
+    usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     quota_planner_tick_seconds: int = Field(default=300, gt=0)
     automations_scheduler_enabled: bool = True
     automations_scheduler_interval_seconds: int = Field(default=30, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
+    # Startup cross-replica encryption-key consistency check against the shared
+    # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an
+    # ERROR and continues, "off" disables the check.
+    encryption_key_fingerprint_mode: Literal["enforce", "warn", "off"] = "enforce"
     database_migrations_fail_fast: bool = True
-    log_proxy_request_shape: bool = False
-    log_proxy_request_shape_raw_cache_key: bool = False
-    log_proxy_request_payload: bool = False
-    log_proxy_service_tier_trace: bool = False
-    log_upstream_request_summary: bool = False
-    log_upstream_request_payload: bool = False
+    # Incident-debugging trace channels (env ``CODEX_LB_TRACE``), a
+    # comma-separated list. Empty (the default) disables all trace logging.
+    # Channels: ``shape`` (request shape), ``shape_raw_cache_key`` (include the
+    # raw prompt cache key in shape logs), ``payload`` (downstream request
+    # payload), ``service_tier`` (service-tier trace), ``upstream_summary``
+    # (upstream request summary/completion), ``upstream_payload`` (upstream
+    # request payload). Interactive incident use only, not steady-state config.
+    trace: str = ""
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
@@ -262,6 +338,9 @@ class Settings(BaseSettings):
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
     model_registry_client_version: str = "0.144.0"
+    # Persisted registry snapshots older than this are ignored at load time
+    # (bootstrap catalog remains the floor until the next leader refresh).
+    model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
     codex_fingerprint_os: str = "Mac OS 26.5.0"
     codex_fingerprint_arch: str = "arm64"
     codex_fingerprint_terminal: str = "iTerm.app/3.6.10"
@@ -276,7 +355,7 @@ class Settings(BaseSettings):
     dashboard_trust_loopback_host_header_for_long_sessions: bool = False
 
     def upstream_websocket_proxy_env(self) -> Mapping[str, str | None]:
-        return _configured_outbound_proxy_env()
+        return _effective_environ()
 
     dashboard_auth_proxy_header: str = "Remote-User"
 
@@ -289,8 +368,8 @@ class Settings(BaseSettings):
     log_format: str = "text"  # "text" or "json"
 
     # Leader election
-    leader_election_enabled: bool = False
-    leader_election_ttl_seconds: int = 600
+    leader_election_enabled: bool = True
+    leader_election_ttl_seconds: int = Field(default=60, ge=5)
 
     # Circuit breaker
     circuit_breaker_enabled: bool = False
@@ -310,10 +389,9 @@ class Settings(BaseSettings):
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
+    # Per-class proxy bulkhead limits (http/websocket/compact) always derive
+    # from this single limit; see ``BulkheadSemaphore`` for the derivation.
     bulkhead_proxy_limit: int = Field(default=512, ge=0)
-    bulkhead_proxy_http_limit: int | None = Field(default=None, ge=0)
-    bulkhead_proxy_websocket_limit: int | None = Field(default=None, ge=0)
-    bulkhead_proxy_compact_limit: int | None = Field(default=None, ge=0)
     bulkhead_dashboard_limit: int = Field(default=50, ge=0)
     dashboard_bootstrap_token: str | None = None
     proxy_token_refresh_limit: int = Field(default=64, ge=0)
@@ -327,6 +405,18 @@ class Settings(BaseSettings):
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
+    proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
+    proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)
+    # Explicit operator declaration of how many worker processes
+    # (uvicorn/gunicorn) this instance runs behind a single bridge-ring instance
+    # id. Only ``1`` (the default) is supported: per-account concurrency caps are
+    # partitioned per REPLICA via the bridge ring, and intra-pod multi-worker
+    # cap partitioning cannot be made reliable (there is no portable per-worker
+    # index — standard multi-worker launches inherit the same environment into
+    # every child). A declared value greater than 1 is rejected at startup by
+    # ``_validate_workers_per_instance``; operators scale horizontally via
+    # replicas instead. Default 1 is a no-op requiring zero operator action.
+    workers_per_instance: int = Field(default=1, ge=1)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 
@@ -343,6 +433,20 @@ class Settings(BaseSettings):
     # HTTP connector limits
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
+
+    @field_validator("request_log_retention_days")
+    @classmethod
+    def _validate_request_log_retention(cls, value: int) -> int:
+        if value != 0 and value < 30:
+            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
+        return value
+
+    @field_validator("usage_history_retention_days")
+    @classmethod
+    def _validate_usage_history_retention(cls, value: int) -> int:
+        if value != 0 and value < 45:
+            raise ValueError("usage_history_retention_days must be 0 (disabled) or >= 45")
+        return value
 
     @field_validator("data_dir", mode="before")
     @classmethod
@@ -552,15 +656,34 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @cached_property
+    def trace_channels(self) -> frozenset[str]:
+        """Parsed ``trace`` channels; empty set (the default) disables all."""
+        return frozenset(entry.strip().lower() for entry in self.trace.split(",") if entry.strip())
+
     @model_validator(mode="after")
-    def _normalize_bulkhead_limits(self) -> "Settings":
-        if self.bulkhead_proxy_http_limit is None:
-            self.bulkhead_proxy_http_limit = self.bulkhead_proxy_limit
-        if self.bulkhead_proxy_websocket_limit is None:
-            self.bulkhead_proxy_websocket_limit = self.bulkhead_proxy_limit
-        if self.bulkhead_proxy_compact_limit is None:
-            http_limit = self.bulkhead_proxy_http_limit
-            self.bulkhead_proxy_compact_limit = 0 if http_limit <= 0 else min(http_limit, 16)
+    def _validate_token_refresh_claim_ttl(self) -> "Settings":
+        # The claim is acquired BEFORE the refresh-admission wait and held
+        # through the OAuth exchange, so the TTL floor must cover both: the
+        # admission wait ceiling plus the HTTP exchange (2x for margin). A TTL
+        # sized only around the HTTP timeout can expire under a healthy
+        # claimant stuck in admission, letting another replica claim the same
+        # account and reuse the single-use refresh token.
+        minimum_ttl = self.proxy_admission_wait_timeout_seconds + 2.0 * self.token_refresh_timeout_seconds
+        if "token_refresh_claim_ttl_seconds" not in self.model_fields_set:
+            # The operator has not opted into the new setting. Derive the
+            # default from the related timeouts so a deployment that only
+            # raised the refresh/admission timeouts before this setting
+            # existed still boots with a TTL that satisfies the invariant,
+            # instead of crashing at startup against the fixed 30s default.
+            self.token_refresh_claim_ttl_seconds = max(self.token_refresh_claim_ttl_seconds, minimum_ttl)
+            return self
+        if self.token_refresh_claim_ttl_seconds < minimum_ttl:
+            raise ValueError(
+                "token_refresh_claim_ttl_seconds must be at least proxy_admission_wait_timeout_seconds "
+                f"+ 2x token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose "
+                "its claim while waiting for refresh admission or mid-exchange"
+            )
         return self
 
     @model_validator(mode="after")
@@ -578,6 +701,28 @@ class Settings(BaseSettings):
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
         if not self.firewall_trusted_proxy_cidrs:
             raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_workers_per_instance(self) -> "Settings":
+        # Only one worker process per instance is supported. Per-account
+        # concurrency caps are partitioned per REPLICA via the bridge ring, which
+        # is correct only when a single process runs behind each ring instance
+        # id. Running multiple worker processes per instance cannot be made
+        # reliable for shared caps: there is no portable per-worker index, and a
+        # standard uvicorn/gunicorn multi-worker launch inherits the SAME
+        # environment into every child, so the workers cannot self-partition. Fail
+        # fast on the explicit declaration rather than silently over-admitting.
+        if self.workers_per_instance > 1:
+            raise ValueError(
+                "workers_per_instance (CODEX_LB_WORKERS_PER_INSTANCE="
+                f"{self.workers_per_instance}) is not supported: running more than one worker "
+                "process per instance would multiply per-account concurrency caps, because those "
+                "caps are partitioned per replica via the bridge ring and intra-pod worker "
+                "partitioning cannot be made reliable. Run ONE worker per pod/container and scale "
+                "horizontally via replicas (the bridge ring partitions caps per replica); set "
+                "CODEX_LB_WORKERS_PER_INSTANCE=1 (the default)."
+            )
         return self
 
 

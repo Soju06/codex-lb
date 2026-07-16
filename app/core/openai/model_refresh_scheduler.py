@@ -4,10 +4,12 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
+from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
 from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
@@ -16,6 +18,11 @@ from app.core.openai.model_registry import (
     UpstreamModel,
     _merge_service_tier_metadata,
     get_model_registry,
+)
+from app.core.openai.model_registry_store import (
+    encode_registry_export,
+    persist_registry_snapshot,
+    reconcile_model_registry_from_store,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
@@ -28,8 +35,11 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 logger = logging.getLogger(__name__)
 
 
+_T = TypeVar("_T")
+
+
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 @dataclass(slots=True)
@@ -81,9 +91,16 @@ class ModelRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        is_leader = await _get_leader_election().try_acquire()
-        if not is_leader:
-            return
+        ran_as_leader = await _get_leader_election().run_if_leader(self._refresh_as_leader)
+        if not ran_as_leader:
+            # Never fetch upstream on a non-leader; reconcile from the persisted
+            # snapshot instead. This is the TTL backstop for a lost invalidation
+            # bump — the 0.5s cache-invalidation poller is the fast path. Also
+            # covers losing the lease mid-refresh, where run_if_leader returns
+            # None after cancelling the body.
+            await reconcile_model_registry_from_store()
+
+    async def _refresh_as_leader(self) -> bool:
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
@@ -94,7 +111,8 @@ class ModelRefreshScheduler:
                 await get_model_registry().clear()
                 get_account_selection_cache().invalidate()
                 logger.info("Model registry cleared because no active accounts remain")
-                return
+                await _persist_registry_state_and_bump()
+                return True
 
             encryptor = TokenEncryptor()
             per_plan_results: dict[str, list[UpstreamModel]] = {}
@@ -127,10 +145,57 @@ class ModelRefreshScheduler:
                     total_models,
                 )
                 get_account_selection_cache().invalidate()
+                await _persist_registry_state_and_bump()
             else:
                 logger.warning("Model registry refresh failed for all plans")
+                # Every upstream fetch failed, so the leader made no change and
+                # never advances the persisted ``refreshed_at``. Followers drop
+                # to the bootstrap floor once the store row ages past
+                # ``model_registry_snapshot_max_age_seconds``; reconcile here so
+                # the leader applies the same expiry instead of serving its now
+                # stale in-memory catalog indefinitely under a prolonged
+                # upstream outage. On a still-fresh row this is a no-op because
+                # the leader's applied content hash already matches the store.
+                await reconcile_model_registry_from_store()
         except Exception:
             logger.exception("Model registry refresh loop failed")
+        # Ran as leader (even on internal failure): signal completion so the
+        # caller does not additionally reconcile from the persisted snapshot.
+        return True
+
+
+async def _persist_registry_state_and_bump() -> None:
+    """Persist the leader's registry state, then bump the bus (write-then-bump).
+
+    A persist failure degrades to leader-local refresh behavior: the in-memory
+    registry already holds the refreshed catalog and persistence is retried on
+    the next cycle. The applied-hash marker is reset on failure because the
+    in-memory state now diverges from the persisted row; leaving the old hash
+    in place would make a later reconcile (e.g. after losing leadership) treat
+    the store's row as already applied and never converge back to it.
+    """
+    registry = get_model_registry()
+    try:
+        export = await registry.export_state()
+        encoded = encode_registry_export(export)
+        async with get_background_session() as session:
+            changed = await persist_registry_snapshot(
+                session,
+                encoded=encoded,
+                leader_id=get_settings().http_responses_session_bridge_instance_id,
+            )
+        registry.note_applied_content_hash(encoded.content_hash)
+    except Exception:
+        registry.note_applied_content_hash(None)
+        logger.warning(
+            "Model registry snapshot persist failed; serving leader-local refresh until next cycle",
+            exc_info=True,
+        )
+        return
+    if changed:
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_MODEL_REGISTRY)
 
 
 def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:

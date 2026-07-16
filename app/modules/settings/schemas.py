@@ -36,6 +36,9 @@ class DashboardSettingsResponse(DashboardModel):
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
+    proxy_account_response_create_limit: int = Field(ge=0)
+    proxy_account_stream_limit: int = Field(ge=0)
+    proxy_account_stream_recovery_reserve: int = Field(ge=0)
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
@@ -65,6 +68,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_prompt: str = Field(min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int = Field(ge=60)
     limit_warmup_exhausted_threshold_percent: float = Field(gt=0.0, le=100.0)
+    limit_warmup_idle_threshold_percent: float = Field(gt=0.0, le=100.0)
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
     weekly_pace_smoothing_minutes: int = Field(default=30)
@@ -73,9 +77,11 @@ class DashboardSettingsResponse(DashboardModel):
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
     guest_password_configured: bool
+    version: int = Field(ge=1)
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
+    expected_version: int | None = Field(default=None, ge=1)
     sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(
         default=None,
@@ -86,6 +92,9 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         default=None,
         pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
     )
+    proxy_account_response_create_limit: int | None = Field(default=None, ge=0)
+    proxy_account_stream_limit: int | None = Field(default=None, ge=0)
+    proxy_account_stream_recovery_reserve: int | None = Field(default=None, ge=0)
     upstream_proxy_routing_enabled: bool | None = None
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool | None = None
@@ -116,6 +125,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_prompt: str | None = Field(default=None, min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int | None = Field(default=None, ge=60)
     limit_warmup_exhausted_threshold_percent: float | None = Field(default=None, gt=0.0, le=100.0)
+    limit_warmup_idle_threshold_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     weekly_pace_working_days: str | None = None
     weekly_pace_smoothing_minutes: int | None = None

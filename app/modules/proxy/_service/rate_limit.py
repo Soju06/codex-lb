@@ -93,6 +93,10 @@ class _RateLimitMixin:
                 primary_rows_raw,
                 secondary_rows_raw,
             )
+            now_epoch = int(time.time())
+            primary_rows = usage_core.expire_elapsed_window_rows(primary_rows, now_epoch=now_epoch)
+            secondary_rows = usage_core.expire_elapsed_window_rows(secondary_rows, now_epoch=now_epoch)
+            monthly_rows = usage_core.expire_elapsed_window_rows(monthly_rows, now_epoch=now_epoch)
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             if primary_summary is not None:
@@ -127,12 +131,15 @@ class _RateLimitMixin:
                 primary_rows_raw,
                 secondary_rows_raw,
             )
+            now_epoch = int(time.time())
+            primary_rows = usage_core.expire_elapsed_window_rows(primary_rows, now_epoch=now_epoch)
+            secondary_rows = usage_core.expire_elapsed_window_rows(secondary_rows, now_epoch=now_epoch)
+            monthly_rows = usage_core.expire_elapsed_window_rows(monthly_rows, now_epoch=now_epoch)
 
             primary_summary = _summarize_window(primary_rows, account_map, "primary")
             secondary_summary = _summarize_window(secondary_rows, account_map, "secondary")
             monthly_summary = _summarize_window(monthly_rows, account_map, "monthly")
 
-            now_epoch = int(time.time())
             primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
             secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
             monthly_window = _window_snapshot(monthly_summary, monthly_rows, "monthly", now_epoch)

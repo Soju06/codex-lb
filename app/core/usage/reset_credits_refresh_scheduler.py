@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -34,9 +35,24 @@ ResetCreditsFetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
 
+_TICK_JITTER_LOW = 0.9
+_TICK_JITTER_HIGH = 1.1
+
+
 @dataclass(slots=True)
 class RateLimitResetCreditsRefreshScheduler:
+    """Per-replica reset-credits refresh loop with desynchronized ticks.
+
+    Every replica refreshes its own process-local snapshot store (the store is
+    not shared, so the loop MUST NOT be leader-gated). The randomized startup
+    delay and per-tick jitter only spread replica ticks over the interval so
+    N replicas do not hit upstream in lockstep; aggregate upstream fetch rate
+    still scales with replica count and is controlled by
+    ``rate_limit_reset_credits_refresh_interval_seconds``.
+    """
+
     interval_seconds: int
+    rng: random.Random = field(default_factory=random.Random)
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -56,13 +72,26 @@ class RateLimitResetCreditsRefreshScheduler:
             await self._task
         self._task = None
 
+    def _startup_delay_seconds(self) -> float:
+        return self.rng.uniform(0.0, float(self.interval_seconds))
+
+    def _tick_delay_seconds(self) -> float:
+        return float(self.interval_seconds) * self.rng.uniform(_TICK_JITTER_LOW, _TICK_JITTER_HIGH)
+
     async def _run_loop(self) -> None:
+        if await self._wait_or_stop(self._startup_delay_seconds()):
+            return
         while not self._stop.is_set():
             await self._refresh_once()
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
-            except asyncio.TimeoutError:
-                continue
+            if await self._wait_or_stop(self._tick_delay_seconds()):
+                return
+
+    async def _wait_or_stop(self, delay_seconds: float) -> bool:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay_seconds)
+        except asyncio.TimeoutError:
+            return False
+        return True
 
     async def _refresh_once(self) -> None:
         async with self._lock:

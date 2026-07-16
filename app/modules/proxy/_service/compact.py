@@ -10,7 +10,7 @@ from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError
+from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy, failover_decision
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -25,6 +25,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.resilience.network_recovery import ProcessNetworkRecovery
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -47,7 +48,12 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
+    AccountLease,
+    AccountSelection,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -78,7 +84,7 @@ class _CompactServiceProtocol(Protocol):
     ) -> str | None: ...
 
     async def _acquire_account_response_create_lease_or_overload(
-        self, *, account_id: str, request_id: str, surface: str
+        self, *, account_id: str, request_id: str, surface: str, concurrency_caps: AccountConcurrencyCaps
     ) -> AccountLease: ...
 
     async def _resolve_upstream_route_for_account(
@@ -552,6 +558,7 @@ class _CompactMixin:
         proxy._raise_for_unsupported_input_image_references(payload)
         rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         settings = await _service_get_settings_cache().get()
+        concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
@@ -673,6 +680,7 @@ class _CompactMixin:
                             account_id=target.id,
                             request_id=request_id,
                             surface="compact",
+                            concurrency_caps=concurrency_caps,
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")
@@ -795,6 +803,7 @@ class _CompactMixin:
                         _service_pop_compact_timeout_overrides(timeout_tokens)
 
             last_exc: ProxyResponseError | None = None
+            network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
             require_security_work_authorized = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
@@ -880,6 +889,18 @@ class _CompactMixin:
                 if remaining_budget <= 0:
                     logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # This budget-exhausted terminal exits compact_responses before
+                    # reaching the retry loop's settle sites, so on the HTTP bridge /
+                    # forwarded path (``owns_reservation`` false, ``compact_responses``
+                    # is the sole settler) the API-key reservation would leak held
+                    # quota. Settle BEFORE raising, mirroring the transport/permanent
+                    # preflight branches above.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 freshness_budget = _compact_freshness_budget_seconds(remaining_budget)
                 if freshness_budget <= 0:
@@ -890,6 +911,14 @@ class _CompactMixin:
                         remaining_budget,
                     )
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # Sole-settler leak guard (see above): settle the reservation
+                    # before this budget-exhausted terminal raise.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 try:
                     logger.info(
@@ -906,19 +935,127 @@ class _CompactMixin:
                         request_id,
                         account.id,
                     )
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                except ProxyResponseError:
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
-                    message = str(exc) or "Request to upstream timed out"
+                    # ensure_fresh_with_budget translates terminal process-network
+                    # recovery outcomes before the compact upstream settlement
+                    # branches run, so this boundary owns reservation cleanup.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
+                    raise
+                except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    selected_account_response_create_lease = None
+                    if isinstance(exc, RefreshError):
+                        if exc.is_permanent:
+                            # Permanent refresh failures keep their prior
+                            # escalation (they propagate to the caller). On the
+                            # HTTP bridge / forwarded path the caller passes an
+                            # ``api_key_reservation_override`` with
+                            # ``owns_reservation`` false, so ``compact_responses``
+                            # is the sole settler; settle BEFORE raising so the
+                            # reservation is finalized instead of leaking held
+                            # API-key quota (matching the post-401 permanent
+                            # branch, which settles before re-raising).
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise
+                        if is_transient_refresh_contention(exc):
+                            # Transient CROSS-REPLICA refresh contention: benign
+                            # claim contention (``refresh_claim_timeout``: the
+                            # account's refresh claim is held by another replica) OR
+                            # a post-exchange persist/status CAS conflict
+                            # (``token_persist_conflict`` / ``status_downgrade_conflict``).
+                            # This is NOT a genuine ``transport_error`` OAuth failure
+                            # — the account's credentials are healthy — so it fails
+                            # over WITHOUT an account-health penalty. Unlike the
+                            # genuine transport-level failure handled below, do NOT
+                            # record ``_handle_stream_error`` here: that would push an
+                            # otherwise-healthy account into backoff for normal
+                            # cross-replica contention. Surface a retryable
+                            # ``upstream_unavailable`` on exhaustion (``last_exc``).
+                            message = exc.message or str(exc) or "Request to upstream timed out"
+                            if refresh_contention_kind(exc) == "persist_conflict":
+                                logger.warning(
+                                    "Compact refresh post-exchange persist conflict code=%s "
+                                    "request_id=%s account_id=%s",
+                                    exc.code,
+                                    request_id,
+                                    account.id,
+                                    exc_info=True,
+                                )
+                            else:
+                                logger.warning(
+                                    "Compact refresh claim contention request_id=%s account_id=%s",
+                                    request_id,
+                                    account.id,
+                                    exc_info=True,
+                                )
+                            if preferred_account_id is not None:
+                                # File/previous-response-pinned requests cannot
+                                # fail over. On the HTTP bridge / forwarded path
+                                # the caller passes an ``api_key_reservation_override``
+                                # with ``owns_reservation`` false, making
+                                # ``compact_responses`` responsible for settling the
+                                # reservation. Settle it BEFORE raising so the
+                                # API-key reservation is finalized instead of leaking
+                                # held quota when the pinned refresh claim times out.
+                                await proxy._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                _raise_proxy_unavailable(message)
+                            last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+                            excluded_account_ids.add(account.id)
+                            continue
+                        # A GENUINE OAuth transport failure (``code == "transport_error"``:
+                        # the refresh request itself timed out / its upstream
+                        # connection failed). This IS the account/route's fault, so
+                        # it falls through to the shared transport-failure handling
+                        # below — identical to a raw aiohttp/connect failure — which
+                        # records the account-health penalty (``_handle_stream_error``)
+                        # so a persistently broken account backs off instead of
+                        # being kept healthy and reselected on the next request.
+                    message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
                     logger.warning(
                         "Compact refresh/connect failed request_id=%s account_id=%s",
                         request_id,
                         account.id,
                         exc_info=True,
                     )
+                    # Both terminal (non-failover) transport-failure raises below
+                    # exit compact_responses without reaching the retry loop's
+                    # settle sites, so on the HTTP bridge / forwarded path
+                    # (owns_reservation false, compact_responses is the sole
+                    # settler) the API-key reservation would leak held quota.
+                    # Settle BEFORE raising, mirroring the claim-contention and
+                    # post-401 transport branches.
                     if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                        await proxy._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=None,
+                            request_service_tier=request_service_tier,
+                        )
                         _raise_proxy_unavailable(message)
                     if preferred_account_id is not None:
+                        await proxy._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=None,
+                            request_service_tier=request_service_tier,
+                        )
                         _raise_proxy_unavailable(message)
                     await proxy._handle_stream_error(
                         account,
@@ -940,6 +1077,14 @@ class _CompactMixin:
                         account.id,
                     )
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # Sole-settler leak guard (see above): settle the reservation
+                    # before this budget-exhausted terminal raise.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 request_service_tier = _service_tier_from_compact_payload(payload)
 
@@ -952,6 +1097,7 @@ class _CompactMixin:
                         account_response_create_lease = selected_account_response_create_lease
                         selected_account_response_create_lease = None
                         response = await _call_compact(account, account_response_create_lease)
+                        network_recovery.log_recovered()
                         actual_service_tier = _service_tier_from_response(response)
                         await proxy._load_balancer.record_success(account)
                         await proxy._settle_compact_api_key_usage(
@@ -1004,24 +1150,116 @@ class _CompactMixin:
                                         request_id,
                                         account.id,
                                     )
+                                    # Sole-settler leak guard (see above): this
+                                    # budget-exhausted terminal exits the retry loop
+                                    # to the outer handler without settling, so on
+                                    # the bridge/forwarded path (``owns_reservation``
+                                    # false) the reservation would leak held quota.
+                                    # Settle BEFORE raising.
+                                    await proxy._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
+                                    )
                                     _raise_proxy_budget_exhausted()
                                 account = await proxy._ensure_fresh_with_budget(
                                     account,
                                     force=True,
                                     timeout_seconds=_compact_freshness_budget_seconds(remaining_budget),
                                 )
-                            except RefreshError as refresh_exc:
-                                if refresh_exc.is_permanent:
-                                    await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            except ProxyResponseError:
+                                # A translated refresh-recovery error escapes the
+                                # current upstream-error handler, so settle before
+                                # handing it to the request-level error boundary.
                                 await proxy._settle_compact_api_key_usage(
                                     api_key=api_key,
                                     api_key_reservation=api_key_reservation,
                                     response=None,
                                     request_service_tier=request_service_tier,
                                 )
-                                raise exc
-                            except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
-                                message = str(timeout_exc) or "Request to upstream timed out"
+                                raise
+                            except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
+                                if isinstance(refresh_exc, RefreshError):
+                                    if refresh_exc.is_permanent:
+                                        await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                        await proxy._settle_compact_api_key_usage(
+                                            api_key=api_key,
+                                            api_key_reservation=api_key_reservation,
+                                            response=None,
+                                            request_service_tier=request_service_tier,
+                                        )
+                                        raise exc
+                                    if is_transient_refresh_contention(refresh_exc):
+                                        # Transient CROSS-REPLICA refresh contention
+                                        # on the post-401 forced refresh: benign
+                                        # claim contention (``refresh_claim_timeout``)
+                                        # OR a post-exchange persist/status CAS
+                                        # conflict (``token_persist_conflict`` /
+                                        # ``status_downgrade_conflict``). This is NOT
+                                        # a genuine ``transport_error`` OAuth failure
+                                        # — the account's credentials are healthy — so
+                                        # fail over WITHOUT an account-health penalty
+                                        # and surface a retryable
+                                        # ``upstream_unavailable`` on exhaustion
+                                        # instead of the misleading original 401. Do
+                                        # NOT record ``_handle_stream_error`` here
+                                        # (that is reserved for the genuine transport
+                                        # failure handled below).
+                                        message = (
+                                            refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
+                                        )
+                                        if refresh_contention_kind(refresh_exc) == "persist_conflict":
+                                            logger.warning(
+                                                "Compact forced refresh post-exchange persist conflict code=%s "
+                                                "request_id=%s account_id=%s",
+                                                refresh_exc.code,
+                                                request_id,
+                                                account.id,
+                                                exc_info=True,
+                                            )
+                                        else:
+                                            logger.warning(
+                                                "Compact forced refresh claim contention request_id=%s account_id=%s",
+                                                request_id,
+                                                account.id,
+                                                exc_info=True,
+                                            )
+                                        if preferred_account_id is not None:
+                                            await proxy._settle_compact_api_key_usage(
+                                                api_key=api_key,
+                                                api_key_reservation=api_key_reservation,
+                                                response=None,
+                                                request_service_tier=request_service_tier,
+                                            )
+                                            _raise_proxy_unavailable(message)
+                                        last_exc = ProxyResponseError(
+                                            502, openai_error("upstream_unavailable", message)
+                                        )
+                                        excluded_account_ids.add(account.id)
+                                        transient_exhausted = True
+                                        break
+                                    if not refresh_exc.transport_error:
+                                        # Non-transport, non-permanent RefreshError
+                                        # keeps its prior escalation: re-raise the
+                                        # original 401 to the caller.
+                                        await proxy._settle_compact_api_key_usage(
+                                            api_key=api_key,
+                                            api_key_reservation=api_key_reservation,
+                                            response=None,
+                                            request_service_tier=request_service_tier,
+                                        )
+                                        raise exc
+                                    # A GENUINE OAuth transport failure
+                                    # (``code == "transport_error"``): the account/
+                                    # route is at fault, so it falls through to the
+                                    # shared transport-failure handling below —
+                                    # identical to a raw aiohttp/connect failure —
+                                    # which records the account-health penalty
+                                    # (``_handle_stream_error``) so the broken
+                                    # account backs off instead of being reselected.
+                                message = getattr(refresh_exc, "message", None) or str(refresh_exc)
+                                message = message or "Request to upstream timed out"
                                 logger.warning(
                                     "Compact forced refresh/connect failed request_id=%s account_id=%s",
                                     request_id,
@@ -1089,15 +1327,33 @@ class _CompactMixin:
                             excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break  # break inner loop → outer loop tries different account
-                        if exc.retryable_same_contract and safe_retry_budget > 0:
-                            safe_retry_budget -= 1
-                            continue
                         error = _parse_openai_error(exc.payload)
                         code = _normalize_error_code(
                             error.code if error else None,
                             error.type if error else None,
                         )
                         error_message = error.message if error else None
+                        network_recovery.account_id = account.id
+                        recovery_decision = await network_recovery.wait(
+                            error_code=code,
+                            retryable_same_contract=exc.retryable_same_contract,
+                            deadline=deadline,
+                            rotate_shared_client=True,
+                            failed_session=exc.failed_session,
+                        )
+                        if recovery_decision == "retry":
+                            continue
+                        if recovery_decision == "exhausted":
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            _raise_proxy_budget_exhausted()
+                        if exc.retryable_same_contract and safe_retry_budget > 0:
+                            safe_retry_budget -= 1
+                            continue
                         if _is_security_work_authorization_required_error(code, error_message):
                             if (
                                 not account.security_work_authorized

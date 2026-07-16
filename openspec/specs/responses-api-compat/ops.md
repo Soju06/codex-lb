@@ -284,14 +284,25 @@ If you deploy multiple replicas behind a load balancer, configure front-door aff
 
 Without front-door affinity, each replica will maintain its own in-memory bridge pool and HTTP continuity can fragment across instances.
 
-If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring. In strict mode the proxy fails closed with `bridge_instance_mismatch` for hard continuity keys; in gateway-safe mode prompt-cache-only bridge requests can tolerate a locality miss and continue locally.
+If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring. Hard continuity keys that land on a non-owner replica are proxy-forwarded to the owner replica over its advertised endpoint; the proxy fails closed (`bridge_instance_mismatch` / `bridge_forward_*` errors) only when the owner endpoint or ring membership cannot be resolved or the forward signature fails authentication. In gateway-safe mode prompt-cache-only bridge requests can tolerate a locality miss and continue locally.
 
 ### Failure interpretation
 
 - `queue_full`: one bridge key is overloaded; increase bridge capacity carefully or reduce per-session concurrency upstream.
 - `capacity_exhausted_active_sessions`: the bridge pool hit `max_sessions` while every existing session still had pending work. The proxy intentionally refused the new request with `429` instead of evicting an active session. Mitigate by increasing pool size carefully, reducing concurrent bridge fan-out, or improving front-door affinity so related calls land on the same replica.
-- `owner_mismatch` / `bridge_instance_mismatch`: a hard continuity key (`x-codex-turn-state` or explicit session header) landed on the wrong instance. Fix ingress affinity or route that continuity key to the logged owner instance.
+- `owner_mismatch`: a hard continuity key (`x-codex-turn-state` or explicit session header) landed on a non-owner instance and was proxy-forwarded to the logged owner instance (`outcome=forward`). Each forward adds an intra-cluster hop and owner-side load, so improve front-door affinity if the rate is high.
+- `bridge_instance_mismatch`: owner forwarding was not possible — the owner endpoint or ring membership could not be resolved, or the forward signature failed authentication — and the proxy failed closed. Check ring membership advertise endpoints and that every replica shares the same encryption key.
 - `prompt_cache_locality_miss` / `soft_local_rebind`: gateway-safe mode tolerated a prompt-cache locality miss and created or reused a local bridge session instead of returning `bridge_instance_mismatch`. Investigate front-door stickiness if this is frequent, because cache reuse and bridge continuity can still fragment across replicas.
 - `reconnect`: the bridge recreated an upstream websocket before response creation and retried once.
 - `terminal_error` with `previous_response_not_found`: continuity was already broken upstream; inspect replica affinity, bridge eviction timing, or upstream resets.
 - plain `transport = "http"` request logs are still expected for bridged HTTP requests; the internal upstream websocket does not change external transport accounting.
+
+## Websocket Ingress Message Budget & Reverse-Proxy Sizing
+
+Codex clients send each Responses turn as one websocket text message. After a reconnect (connection loss, the upstream 60-minute connection limit, or a new client process) the official client resends the entire conversation history — inline base64 screenshots included — in that single message, with no client-side size guard or chunking. If the server closes the connection at the protocol layer (`1009 message too big`), the client burns 5 full-payload retries and then permanently downgrades the session to HTTP transport, where the same body must pass any front-proxy body-size limit.
+
+- The downstream websocket ingress budget defaults to 128 MiB (parity with `max_decompressed_responses_body_bytes`) and is configurable via `--ws-max-size` / `UVICORN_WS_MAX_SIZE`. The budget applies to the decompressed message size; `permessage-deflate` stays negotiated on the client-facing socket (the client always offers it and compresses outbound frames when accepted).
+- Requests that exceed the upstream websocket budget after historical slimming fail locally with status `400` and `error.code = "payload_too_large"`. The official client surfaces `400` immediately as a non-retryable invalid request and stays on websocket transport; `413` would instead trigger 5 full-payload resends followed by a sticky session-wide websocket→HTTP downgrade.
+- Front proxies must size the HTTP path for the client's websocket→HTTP fallback and for remote-compaction POSTs, which carry full history. For nginx: `client_max_body_size 128m;` (matching codex-lb's own cap), plus websocket upgrade passthrough (`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`) and a `proxy_read_timeout` comfortably above idle turn gaps (websocket connections live up to 60 minutes).
+
+Diagnostic signature of an undersized websocket ingress budget: uvicorn logs show `WebSocket ... [accepted]` → `connection open` → `connection closed` within seconds, repeated at backoff intervals, with **no** application-level proxy log lines and no `request_logs` row in between — followed by the client's HTTP fallback (visible as `POST /backend-api/codex/responses` hitting the front proxy, often as `413` there).

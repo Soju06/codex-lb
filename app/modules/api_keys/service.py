@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -397,6 +398,15 @@ def _compute_pooled_credits(
         primary_rows_raw,
         secondary_rows_raw,
     )
+    now_epoch = int(time.time())
+    # A live primary sample is one whose reset has not elapsed; when none
+    # exists (upstream stopped reporting the short window), the pooled
+    # primary bar must read absent rather than frozen or optimistic.
+    has_live_primary = any(row.reset_at is None or row.reset_at > now_epoch for row in primary_rows)
+    primary_rows = usage_core.expire_elapsed_window_rows(primary_rows, now_epoch=now_epoch)
+    # Secondary (weekly) rows pool raw: upstream still reports long windows,
+    # so an elapsed sample is transient staleness the next refresh rewrites —
+    # zeroing it would briefly report an exhausted weekly pool as 100% free.
     primary_rows = _seed_missing_usage_rows(primary_rows, account_ids)
     secondary_rows = _seed_missing_usage_rows(secondary_rows, account_ids)
 
@@ -406,7 +416,7 @@ def _compute_pooled_credits(
     primary_remaining = usage_core.remaining_percent_from_used(primary_summary.used_percent)
     secondary_remaining = usage_core.remaining_percent_from_used(secondary_summary.used_percent)
 
-    if primary_summary.capacity_credits == 0.0:
+    if primary_summary.capacity_credits == 0.0 or not has_live_primary:
         primary_remaining = None
 
     return PooledCreditData(

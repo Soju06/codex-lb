@@ -8,6 +8,7 @@ export function buildSettingsUpdateRequest(
   patch: Partial<SettingsUpdateRequest>,
 ): SettingsUpdateRequest {
   const payload: SettingsUpdateRequest = {
+    expectedVersion: settings.version,
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
     prohibitFastMode: settings.prohibitFastMode,
@@ -34,6 +35,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
     limitWarmupExhaustedThresholdPercent: settings.limitWarmupExhaustedThresholdPercent,
+    limitWarmupIdleThresholdPercent: settings.limitWarmupIdleThresholdPercent,
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     limitWarmupStaggeredIdleEnabled: settings.limitWarmupStaggeredIdleEnabled,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
@@ -42,6 +44,9 @@ export function buildSettingsUpdateRequest(
     hideUpstreamQuotaFromApiKeys: settings.hideUpstreamQuotaFromApiKeys,
     ...patch,
   };
+  if (payload.expectedVersion === undefined) {
+    delete payload.expectedVersion;
+  }
   if (
     (payload.stickyReallocationBudgetThresholdPct === undefined ||
       settings.__stickyReallocationBudgetThresholdPctProvided === false) &&

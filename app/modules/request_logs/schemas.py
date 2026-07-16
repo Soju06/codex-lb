@@ -47,12 +47,14 @@ class RequestLogEntry(DashboardModel):
     tokens: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    output_tokens_raw: int | None = None
     cached_input_tokens: int | None = None
     reasoning_effort: str | None = None
     cost_usd: float | None = None
     cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)
     latency_ms: int | None = None
     latency_first_token_ms: int | None = None
+    latency_queue_ms: int | None = None
 
 
 class RequestLogsResponse(DashboardModel):

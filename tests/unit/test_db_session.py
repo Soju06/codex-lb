@@ -42,6 +42,8 @@ class _FakeMigrationState:
     has_alembic_version_table: bool
     has_legacy_migrations_table: bool
     needs_upgrade: bool
+    unknown_revisions: tuple[str, ...] = ()
+    is_ahead: bool = False
 
 
 @dataclass(slots=True)

@@ -12,6 +12,7 @@ from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -612,6 +613,110 @@ def test_select_account_round_robin_prefers_never_selected():
     assert result.account.account_id == "b"
 
 
+def _round_robin_tie_pool() -> list[AccountState]:
+    # Five accounts that are exactly tied on the round-robin primary keys:
+    # no planner cost and never-selected (last_selected_at is None -> 0.0). The
+    # only differentiator is the final tie-break.
+    return [AccountState(f"acct-{i}", AccountStatus.ACTIVE, used_percent=10.0) for i in range(1, 6)]
+
+
+def _round_robin_winner(salt: str, *, now: float) -> str:
+    result = select_account(_round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt=salt)
+    assert result.account is not None
+    return result.account.account_id
+
+
+def test_round_robin_distinct_salts_decorrelate_exact_tie():
+    now = 1_700_000_000.0
+
+    winner_a = select_account(
+        _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-a"
+    ).account
+    winner_b = select_account(
+        _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-b"
+    ).account
+
+    assert winner_a is not None and winner_b is not None
+    # Two replicas with distinct salts break the exact tie toward different
+    # accounts instead of both herding onto the lexicographically-first account.
+    assert winner_a.account_id != winner_b.account_id
+    # Pre-change the final tie-break was ``account_id`` alone, so every replica
+    # (any salt) selected "acct-1"; this asserts the second replica no longer
+    # herds onto that account.
+    assert winner_b.account_id == "acct-2"
+    assert {winner_a.account_id, winner_b.account_id} <= {f"acct-{i}" for i in range(1, 6)}
+
+
+def test_round_robin_many_salts_spread_across_pool():
+    now = 1_700_000_000.0
+    winners = {_round_robin_winner(f"replica-{i}", now=now) for i in range(12)}
+    # A herd (pre-change behavior) would collapse to a single account; the salt
+    # spreads exact-tie winners across multiple equally-good accounts.
+    assert len(winners) > 1
+
+
+def test_round_robin_salt_does_not_change_primary_ordering():
+    now = 1_700_000_000.0
+    for salt in ("replica-a", "replica-b", "replica-c"):
+        states = [
+            AccountState("a", AccountStatus.ACTIVE, used_percent=90.0, last_selected_at=now - 2),
+            AccountState("b", AccountStatus.ACTIVE, used_percent=10.0, last_selected_at=now - 30),
+            AccountState("c", AccountStatus.ACTIVE, used_percent=5.0, last_selected_at=now - 5),
+        ]
+        result = select_account(states, now=now, routing_strategy="round_robin", replica_salt=salt)
+        assert result.account is not None
+        # Least-recently-selected wins regardless of salt: primary ordering is
+        # untouched, only genuine ties are decorrelated.
+        assert result.account.account_id == "b"
+
+
+def test_round_robin_salt_respects_planner_cost_before_tie_break():
+    now = 1_700_000_000.0
+    states = _round_robin_tie_pool()
+    # Give one otherwise-tied account the lowest planner cost; it must win under
+    # any salt because planner cost precedes the decorrelated tie-break.
+    for salt in ("replica-a", "replica-b", "replica-z"):
+        result = select_account(
+            states,
+            now=now,
+            routing_strategy="round_robin",
+            replica_salt=salt,
+            routing_costs={"acct-4": RoutingCost(total=-1.0, reason="cheapest")},
+        )
+        assert result.account is not None
+        assert result.account.account_id == "acct-4"
+
+
+def test_round_robin_single_replica_deterministic():
+    now = 1_700_000_000.0
+    winners = {_round_robin_winner("replica-fixed", now=now) for _ in range(20)}
+    # A fixed salt is stable per call, so a single replica selects the same
+    # account every time (no random per-call jitter).
+    assert len(winners) == 1
+
+
+def test_round_robin_salt_precedence_explicit_over_configured():
+    from app.core.balancer import configure_replica_salt
+
+    now = 1_700_000_000.0
+    try:
+        configure_replica_salt("replica-a")
+        # No explicit salt -> configured process salt is used (== replica-a).
+        configured = select_account(_round_robin_tie_pool(), now=now, routing_strategy="round_robin").account
+        explicit_same = select_account(
+            _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-a"
+        ).account
+        # Explicit salt wins over the configured process salt.
+        explicit_other = select_account(
+            _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-b"
+        ).account
+        assert configured is not None and explicit_same is not None and explicit_other is not None
+        assert configured.account_id == explicit_same.account_id == "acct-1"
+        assert explicit_other.account_id == "acct-2"
+    finally:
+        configure_replica_salt(None)
+
+
 def test_select_account_single_account_returns_selected_candidate():
     states = [
         AccountState("selected", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=20.0),
@@ -841,6 +946,59 @@ def test_handle_rate_limit_uses_backoff_when_no_delay(monkeypatch):
     assert state.status == AccountStatus.RATE_LIMITED
     assert state.cooldown_until is not None
     assert state.cooldown_until == pytest.approx(now + 0.2)
+
+
+def test_handle_rate_limit_persists_floored_deadline_without_reset_metadata(monkeypatch):
+    # Regression: a metadata-free 429 must persist a reset_at deadline so a
+    # peer replica sharing the database cannot flip the account back to
+    # ACTIVE while the cooldown is running. The sub-second backoff is floored
+    # at RATE_LIMITED_MIN_COOLDOWN_SECONDS for the persisted deadline only.
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    monkeypatch.setattr("app.core.balancer.logic.backoff_seconds", lambda _: 0.2)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Rate limit exceeded."})
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.blocked_at == pytest.approx(now)
+    assert state.reset_at == pytest.approx(now + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
+    # Local cooldown keeps the raw backoff so the marking replica's own
+    # recovery gates are unchanged.
+    assert state.cooldown_until == pytest.approx(now + 0.2)
+
+
+def test_handle_rate_limit_persists_retry_after_deadline_verbatim(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Try again in 20m"})
+    assert state.reset_at == pytest.approx(now + 1200.0)
+    assert state.cooldown_until == pytest.approx(now + 1200.0)
+
+
+def test_handle_rate_limit_short_retry_after_deadline_rounds_up_for_persistence(monkeypatch):
+    # Regression: the persistence path writes ``int(state.reset_at)``, so a
+    # short or fractional Retry-After hint near a second boundary used to
+    # truncate to a timestamp already elapsed for peer replicas, dropping the
+    # hinted cooldown entirely. The persisted deadline must round UP.
+    now = 1_700_000_000.9
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Try again in 500ms"})
+    assert state.reset_at is not None
+    assert state.reset_at == 1_700_000_002.0  # ceil(now + 0.5), not int(now + 0.5) == 1_700_000_001
+    # The peer-visible integer deadline stays in the future.
+    assert int(state.reset_at) > now
+    # Local cooldown keeps the raw hint so the marking replica's own recovery
+    # gates are unchanged.
+    assert state.cooldown_until == pytest.approx(now + 0.5)
+
+
+def test_handle_rate_limit_upstream_reset_metadata_still_wins(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Rate limit exceeded.", "resets_in_seconds": 600})
+    assert state.reset_at == pytest.approx(now + 600.0)
 
 
 def test_handle_rate_limit_cooldown_honors_word_unit_hint(monkeypatch):
@@ -1546,12 +1704,15 @@ def test_state_from_account_clears_stale_advisory_account_reset_for_active_accou
 
     handle_rate_limit(state, {"message": "rate limit"})
     assert state.status == AccountStatus.RATE_LIMITED
-    assert state.reset_at is None
+    # The stale advisory reset (now + 300) is not reused; the persisted
+    # deadline is the floored backoff fallback so peer replicas honor the
+    # cooldown even when the 429 carried no reset metadata.
+    assert state.reset_at == pytest.approx(now + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
     assert state.cooldown_until is not None
     assert now + 0.18 <= state.cooldown_until <= now + 0.22
 
 
-def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_resetless_rate_limit(
+def test_state_from_account_floors_resetless_rate_limited_row_instead_of_advisory_reset(
     monkeypatch,
 ):
     now = 1_700_000_000.0
@@ -1560,6 +1721,7 @@ def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_reset
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
+    blocked_at = now - 1
     state = _state_from_account(
         account=_make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=None),
         primary_entry=_make_test_usage(
@@ -1569,12 +1731,16 @@ def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_reset
             recorded_at=_epoch_to_naive_utc(now - 30),
         ),
         secondary_entry=None,
-        runtime=RuntimeState(cooldown_until=cooldown_until, blocked_at=now - 1),
+        runtime=RuntimeState(cooldown_until=cooldown_until, blocked_at=blocked_at),
     )
 
-    assert state.status == AccountStatus.ACTIVE
+    # A RATE_LIMITED row without a persisted reset_at (legacy row) is held by
+    # the blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS floor instead of
+    # flipping straight back to ACTIVE; the stale advisory reset (now + 300)
+    # is still not reused.
+    assert state.status == AccountStatus.RATE_LIMITED
     assert state.used_percent == 100.0
-    assert state.reset_at is None
+    assert state.reset_at == pytest.approx(blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
     assert state.primary_reset_at == future_reset
     assert state.cooldown_until == cooldown_until
 
@@ -1649,6 +1815,188 @@ def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(m
 
     assert state.secondary_used_percent == 0.0
     assert state.secondary_reset_at is None
+
+
+def test_state_from_account_expires_stale_partial_primary_usage_after_reset(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=87.0,
+            reset_at=int(now - 10),
+            recorded_at=_epoch_to_naive_utc(now - 3600),
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.used_percent == 0.0
+    assert state.reset_at is None
+    # A frozen sub-100% sample from a window upstream no longer reports must
+    # not hold the account in the soft-drain tier.
+    assert state.health_tier == HEALTH_TIER_HEALTHY
+    assert state.secondary_used_percent == 40.0
+
+
+def test_state_from_account_drops_stale_window_duration_when_superseded(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        # Upstream stopped reporting the short window: the primary row is
+        # hours older than the weekly row written by later fetches.
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=40.0,
+            reset_at=int(now - 7200),
+            recorded_at=_epoch_to_naive_utc(now - 3 * 3600),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes is None
+
+
+def test_state_from_account_drops_superseded_window_duration_before_expiry(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        # Upstream stopped reporting the short window while the stale row's
+        # reset is still in the future: the newer weekly row proves the
+        # short window is gone, so plannability must drop immediately.
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=40.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 3 * 3600),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes is None
+
+
+def test_state_from_account_keeps_window_duration_for_same_fetch_rows(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        # Both rows came from the same fetch; the reset elapsed between
+        # refreshes, which does not mean the short window disappeared.
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=40.0,
+            reset_at=int(now - 10),
+            recorded_at=_epoch_to_naive_utc(now - 60),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 59),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes == 300
+
+
+def test_state_from_account_expires_stale_partial_secondary_usage_after_reset(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=60.0,
+            reset_at=int(now - 10),
+            recorded_at=_epoch_to_naive_utc(now - 3600),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.secondary_used_percent == 0.0
+    assert state.secondary_reset_at is None
+
+
+def test_state_from_account_carries_primary_window_minutes(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=10.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=300,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes == 300
+    assert state.primary_reset_at == int(now + 3600)
+
+
+def test_state_from_account_clears_primary_window_minutes_for_weekly_only(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="free"),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=20.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    # The weekly-primary remap moves the row to the secondary slot; the
+    # account has no short window and must not look phase-plannable.
+    assert state.primary_window_minutes is None
+    assert state.secondary_used_percent == 20.0
 
 
 def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressure(monkeypatch):
@@ -1843,6 +2191,243 @@ def test_state_from_account_preserves_free_rate_limit_for_legacy_unknown_primary
 
     assert state.status == AccountStatus.RATE_LIMITED
     assert state.reset_at == future_reset
+
+
+def test_state_from_account_free_plan_rate_limit_holds_floor_despite_fresh_monthly_quota(monkeypatch):
+    # Regression (codex P1): a free-plan (zero primary capacity) account marked
+    # RATE_LIMITED by a 429 without reset metadata (blocked_at set, reset_at
+    # NULL) must not be flipped back to ACTIVE by the zero-primary-capacity
+    # recovery rewrite while fresh monthly usage shows quota available. The
+    # blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS floor applies first.
+    now = 1_700_000_000.0
+    blocked_at = int(now - 5)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=None,
+        blocked_at=blocked_at,
+        plan_type="free",
+    )
+    monthly_entry = _make_test_usage(
+        window="monthly",
+        used_percent=10.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == pytest.approx(blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
+
+    # Once the floor has elapsed the zero-primary recovery proceeds as before.
+    later = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS + 1.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: later)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: later)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(later))
+    recovered = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(),
+    )
+
+    assert recovered.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_free_plan_peer_honors_persisted_rate_limit_deadline(monkeypatch):
+    # Regression (codex P1): the persisted 429 cooldown deadline (reset_at)
+    # must survive the zero-primary-capacity ACTIVE rewrite on a peer replica
+    # even when fresh monthly usage shows quota available.
+    now = 1_700_000_000.0
+    blocked_at = int(now - 5)
+    cooldown_reset = int(now + 25)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=cooldown_reset,
+        blocked_at=blocked_at,
+        plan_type="free",
+    )
+    monthly_entry = _make_test_usage(
+        window="monthly",
+        used_percent=10.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == cooldown_reset
+
+
+def test_state_from_account_zero_capacity_recovery_respects_recent_blocked_at_floor(monkeypatch):
+    # Regression (codex P2): a legacy RATE_LIMITED row (reset_at NULL) with a
+    # blocked_at seconds ago must be held by the minimum-cooldown floor; the
+    # zero-primary-capacity recovery rewrite must not bypass it.
+    now = 1_700_000_000.0
+    future_reset = int(now + 14 * 24 * 3600)
+    blocked_at = int(now - 5)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=None,
+        blocked_at=blocked_at,
+        plan_type="free",
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43200,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=10.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == pytest.approx(blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
+
+
+def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(monkeypatch):
+    # The marking replica's early-recovery gate is unchanged: once its local
+    # cooldown elapsed and a usage snapshot recorded after the block shows
+    # quota, the zero-primary recovery may proceed before the persisted
+    # deadline.
+    now = 1_700_000_000.0
+    blocked_at = now - 10.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now + 20),
+        blocked_at=int(blocked_at),
+        plan_type="free",
+    )
+    monthly_entry = _make_test_usage(
+        window="monthly",
+        used_percent=10.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 2),
+        window_minutes=43200,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(cooldown_until=now - 1, blocked_at=blocked_at),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_stale_runtime_block_does_not_recover_free_plan_peer_marked_block(monkeypatch):
+    # Regression (codex P2): leftover runtime cooldown state from an EARLIER
+    # 429 must not count as having observed the CURRENT 429. Here the
+    # persisted block (blocked_at now-10) was written by a peer replica after
+    # this replica's stale runtime marker (now-900); the zero-primary recovery
+    # must keep honoring the persisted deadline.
+    now = 1_700_000_000.0
+    stale_runtime_blocked_at = now - 900.0
+    persisted_blocked_at = int(now - 10)
+    persisted_reset = int(now + 1200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=persisted_reset,
+        blocked_at=persisted_blocked_at,
+        plan_type="free",
+    )
+    monthly_entry = _make_test_usage(
+        window="monthly",
+        used_percent=10.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 2),
+        window_minutes=43200,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(cooldown_until=now - 600, blocked_at=stale_runtime_blocked_at),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == persisted_reset
+
+
+def test_state_from_account_stale_runtime_block_does_not_recover_peer_marked_rate_limit(monkeypatch):
+    # Regression (codex P2): same stale-runtime scenario on a standard plan.
+    # Fresh primary usage recorded after the peer's block must not clear the
+    # persisted cooldown when this replica's runtime block marker predates the
+    # current persisted blocked_at.
+    now = 1_700_000_000.0
+    stale_runtime_blocked_at = now - 900.0
+    persisted_blocked_at = int(now - 60)
+    persisted_reset = int(now + 1200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=persisted_reset,
+        blocked_at=persisted_blocked_at,
+    )
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=None,
+        runtime=RuntimeState(cooldown_until=now - 600, blocked_at=stale_runtime_blocked_at),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == persisted_reset
 
 
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(
@@ -2403,6 +2988,246 @@ def test_background_recovery_state_prefers_fresh_monthly_over_stale_primary(monk
 
     assert state.status == AccountStatus.ACTIVE
     assert state.reset_at is None
+
+
+def test_background_recovery_state_recovers_when_upstream_stops_reporting_primary(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    # The primary row was never rewritten after the block because upstream
+    # stopped reporting the short window; the weekly row proves the
+    # post-block refresh happened.
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+    fresh_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=fresh_secondary,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_background_recovery_state_recovers_without_any_primary_row(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    # Upstream never wrote a primary row for this account; the post-block
+    # refresh recorded only the weekly window with fresh capacity.
+    fresh_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=fresh_secondary,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_state_from_account_keeps_resetless_rate_limit_without_primary_row(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    # A resetless 429 whose runtime cooldown was lost to a restart: an old
+    # sub-100% weekly row is not fresh recovery evidence, and with no reset
+    # deadline to expire the block must be preserved.
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=None,
+        blocked_at=None,
+    )
+    stale_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 2 * 24 * 3600),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=stale_secondary,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_background_recovery_state_keeps_rate_limited_without_primary_row_and_stale_secondary(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    stale_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=stale_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_background_recovery_state_keeps_rate_limited_when_long_window_exhausted(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+    # The post-block weekly row is itself exhausted: it must not act as
+    # recovery evidence and route traffic to an account with no long quota.
+    exhausted_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=exhausted_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_background_recovery_state_keeps_rate_limited_when_primary_reset_metadata_missing(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    # The primary sample omits reset metadata entirely: it has not provably
+    # expired, so a newer weekly row must not supersede it as evidence.
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=None,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+    fresh_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=fresh_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_background_recovery_state_keeps_rate_limited_when_all_rows_predate_block(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=past_reset,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+    stale_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(blocked - 20),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=stale_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == pytest.approx(past_reset)
 
 
 def test_background_recovery_state_keeps_rate_limited_when_primary_predates_block(monkeypatch):

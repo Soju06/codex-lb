@@ -9,23 +9,41 @@ Before the first successful upstream model-registry refresh, the system MUST
 serve a conservative static catalog of known Codex model slugs from both
 `GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a
 bundled fallback for startup/offline paths; refreshed upstream model-registry
-data remains the authoritative source once available. The bootstrap catalog MUST
-include `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`,
-`gpt-5.3-codex-spark`, `gpt-5.2`, and `codex-auto-review`, and MUST NOT invent
-unverified variant slugs such as `gpt-5.5-pro`.
+data remains the authoritative source once available. A replica that starts
+while a fresh persisted registry snapshot exists SHALL serve the persisted
+catalog (not the bootstrap catalog) before its first scheduler tick; the
+bootstrap catalog remains the floor only when no persisted or refreshed
+snapshot is available. The bootstrap catalog MUST
+include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`,
+`gpt-5.2`, and `codex-auto-review`, and MUST NOT invent unverified variant
+slugs such as `gpt-5.5-pro` or a bare `gpt-5.6`. `gpt-5.3-codex` and
+`gpt-5.3-codex-spark` were dropped from upstream's bundled catalog at
+codex rust-v0.144.x but remain retained for older pinned clients because the
+upstream backend still serves them.
 
 #### Scenario: OpenAI-compatible models endpoint serves bootstrap slugs
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** no persisted registry snapshot is available
 - **WHEN** a client calls `GET /v1/models`
 - **THEN** the response contains exactly the bootstrap model slugs
-- **AND** the response does not include `gpt-5.5-pro`
+- **AND** the response includes `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+- **AND** the response does not include `gpt-5.5-pro` or bare `gpt-5.6`
 
-#### Scenario: Codex-native models endpoint serves bootstrap metadata
+#### Scenario: Codex-native models endpoint serves GPT-5.6 bootstrap metadata
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** a client calls `GET /backend-api/codex/models`
-- **THEN** entries such as `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `codex-auto-review` include representative upstream metadata including client version, context-window, visibility, modality, plan-availability, and reasoning/verbosity fields where known
+- **THEN** the `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` entries include representative upstream metadata including context-window, visibility, speed-tier, and reasoning fields
+- **AND** Sol and Terra advertise `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`
+- **AND** Luna advertises `low`, `medium`, `high`, `xhigh`, and `max`
+
+#### Scenario: Replica startup with a fresh persisted snapshot serves the persisted catalog
+
+- **GIVEN** a fresh persisted registry snapshot exists whose catalog differs from the bootstrap catalog
+- **WHEN** a replica starts and a client calls `GET /v1/models` before the first refresh tick
+- **THEN** the response reflects the persisted catalog, not the bootstrap catalog
 
 ### Requirement: Refreshed upstream model data remains authoritative
 
@@ -127,3 +145,691 @@ When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native 
 - **WHEN** the upstream model catalog contains `gpt-5.5` with `context_window=272000`
 - **THEN** `GET /backend-api/codex/models` returns `gpt-5.5.context_window=272000`
 - **AND** it does not replace that field with `400000`
+
+#### Scenario: Codex model catalog also exposes OpenAI data alias
+
+- **WHEN** a client requests `GET /backend-api/codex/models`
+- **THEN** the response keeps the Codex-native `models` list
+- **AND** the response includes `object: "list"` and an OpenAI-compatible `data` list
+- **AND** `data` contains model entries whose Codex visibility is `list`
+- **AND** `data` excludes entries whose Codex visibility is `hide`
+
+### Requirement: OpenAI-compatible model metadata preserves speed tiers
+
+When serving `GET /v1/models`, the system SHALL preserve upstream speed-tier metadata in each model's `metadata` object when upstream provides it. This includes `additional_speed_tiers`, `service_tiers`, and `default_service_tier`. The system MUST NOT invent speed tiers for models whose upstream catalog entry does not advertise them.
+
+#### Scenario: /v1/models exposes upstream fast tier metadata
+
+- **WHEN** the upstream model catalog contains `gpt-5.5` with `additional_speed_tiers=["fast"]`
+- **AND** the upstream model catalog includes a `service_tiers` entry with `id="priority"` and `name="Fast"`
+- **WHEN** a client calls `GET /v1/models`
+- **THEN** the `gpt-5.5` entry's metadata includes `additional_speed_tiers=["fast"]`
+- **AND** the metadata includes the upstream `service_tiers` entry
+- **AND** the metadata includes the upstream `default_service_tier` when present
+
+### Requirement: GPT-5.6 bootstrap metadata matches the upstream bundled catalog
+
+The GPT-5.6 bootstrap catalog entries (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) MUST mirror the upstream bundled catalog (`codex-rs/models-manager/models.json` at codex release rust-v0.144.1) field-for-field for every metadata field codex-lb serves. In particular each
+entry MUST carry: `context_window` and `max_context_window` of `372000`;
+`minimal_client_version` `"0.144.0"`; `tool_mode` `"code_mode_only"`;
+`use_responses_lite` `true`; `apply_patch_tool_type` `"freeform"`;
+`web_search_tool_type` `"text_and_image"`; `supports_image_detail_original`
+`true`; `truncation_policy` `{"mode": "tokens", "limit": 10000}`;
+`comp_hash` `"3000"`; `reasoning_summary_format` `"experimental"`;
+`default_reasoning_summary` `"none"`; `include_skills_usage_instructions`
+`false`; `experimental_supported_tools` `[]` (a field the Codex client's
+deserializer requires); `supports_search_tool` `true`; `additional_speed_tiers`
+`["fast"]`; the `priority`/`Fast` service tier entry; `shell_type`
+`"shell_command"`; `prefer_websockets` `true`; and the 21-plan
+`available_in_plans` list upstream advertises (including `edu_plus`,
+`edu_pro`, `enterprise_cbp_automation`, and `sci`). `multi_agent_version` MUST
+be `"v2"` for Sol and Terra and `"v1"` for Luna. Sol MUST carry the upstream
+`availability_nux` message while Terra and Luna carry `null`. Default
+reasoning levels MUST be `low` for Sol and `medium` for Terra and Luna, and
+reasoning-level descriptions MUST be the verbatim upstream strings.
+
+The ~16.5 KB upstream `base_instructions` prompt and the personality-templated
+`model_messages` object are deliberately NOT bundled in the bootstrap catalog;
+the first successful live registry refresh supplies them. This is the only
+sanctioned divergence from the upstream GPT-5.6 entries.
+
+#### Scenario: GPT-5.6 entries expose upstream tool and multi-agent metadata
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` carry `tool_mode: "code_mode_only"`, `use_responses_lite: true`, `experimental_supported_tools: []`, and `minimal_client_version: "0.144.0"`
+- **AND** `multi_agent_version` is `"v2"` for Sol and Terra and `"v1"` for Luna
+
+#### Scenario: GPT-5.6 entries expose upstream reasoning-summary and plan metadata
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** each GPT-5.6 entry carries `default_reasoning_summary: "none"`, `reasoning_summary_format: "experimental"`, and `comp_hash: "3000"`
+- **AND** each GPT-5.6 entry's `available_in_plans` includes `edu_plus`, `edu_pro`, `enterprise_cbp_automation`, and `sci`
+- **AND** only `gpt-5.6-sol` carries a non-null `availability_nux` message
+
+### Requirement: Fallback client version covers the bootstrap catalog
+
+The configured fallback Codex client version (used when the live Codex release lookup fails and no cached version exists) MUST be greater than or equal to the highest `minimal_client_version` in the bootstrap catalog, so a degraded-startup registry refresh still receives the newest bootstrap models from upstream.
+
+#### Scenario: Degraded-startup refresh still requests GPT-5.6
+
+- **GIVEN** the live Codex release lookup fails and no version is cached
+- **WHEN** the model registry refresh fetches `<base>/codex/models?client_version=<fallback>`
+- **THEN** the fallback version is at least `0.144.0` (GPT-5.6's `minimal_client_version`)
+
+### Requirement: Dashboard model metadata exposes supported reasoning efforts
+
+When serving `GET /api/models`, the system MUST expose the supported reasoning
+efforts advertised by each public model catalog entry. The response MUST include
+new upstream-supported efforts such as `max` and `ultra` instead of filtering
+them out.
+
+#### Scenario: Dashboard model list exposes GPT-5.6 reasoning efforts
+
+- **WHEN** the model catalog contains `gpt-5.6-sol` with supported efforts `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`
+- **WHEN** a client calls `GET /api/models`
+- **THEN** the `gpt-5.6-sol` entry's `supportedReasoningEfforts` includes `max` and `ultra`
+- **AND** `defaultReasoningEffort` reflects the catalog default
+
+### Requirement: Source-model Codex catalog entries are Codex-parseable
+
+Codex catalog entries built for OpenAI-compatible source models MUST be
+parseable by Codex clients without relying on bundled metadata. When the
+source model has no configured context window, the entry MUST report a
+context window of 128,000 tokens and a matching `max_context_window`. The
+entry MUST include `shell_type` (`shell_command`), a `truncation_policy`,
+and the client-capability fields `include_skills_usage_instructions`,
+`supports_image_detail_original`, `supports_search_tool`,
+`use_responses_lite`, and `experimental_supported_tools`, defaulting each to
+its most conservative value. Operator-provided values for these keys in the
+source model's `raw_metadata_json` MUST take precedence over the defaults.
+
+#### Scenario: Source model without a context window gets the default budget
+
+- **GIVEN** an enabled Responses-capable source model with no `contextWindow` configured
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the model's entry reports `context_window` of 128000
+- **AND** `max_context_window` of 128000
+- **AND** `shell_type` of `shell_command`
+- **AND** conservative defaults for the client-capability fields (for example `supports_search_tool` is `false` and `use_responses_lite` is `false`)
+
+#### Scenario: Operator capability opt-in overrides the defaults
+
+- **GIVEN** a source model whose `raw_metadata_json` sets `"supports_search_tool": true`
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the model's entry reports `supports_search_tool` as `true`
+
+### Requirement: Source request overrides never appear in client-visible catalogs
+
+The per-model `source_request_overrides` object in a source model's `raw_metadata_json` is operator-side request configuration and MUST NOT
+appear in any client-visible catalog payload (`GET /backend-api/codex/models`,
+`GET /v1/models`, or any equivalent catalog route), while remaining available
+server-side for request override application.
+
+#### Scenario: Override config is stripped from the Codex catalog
+
+- **GIVEN** a source model whose `raw_metadata_json` contains `"source_request_overrides": {"options": {"num_ctx": 32768}}`
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the model's catalog entry does not contain a `source_request_overrides` key
+- **AND** the string `source_request_overrides` appears nowhere in the response payload
+
+#### Scenario: Overrides still apply to forwarded requests
+
+- **GIVEN** the same source model
+- **WHEN** a Responses request is forwarded to the source
+- **THEN** the forwarded payload includes the configured override values
+
+### Requirement: Upstream model_messages is preserved in the catalog
+
+When parsing upstream model-registry data, the system MUST preserve the
+`model_messages` field on each model entry through to the Codex-native catalog
+response. The field MUST NOT be stripped during fetch parsing, registry
+storage, or catalog serialization. `GET /backend-api/codex/models` and
+`GET /v1/models?client_version=<v>` MUST return each model's `model_messages`
+object unchanged from the upstream response once a refreshed registry snapshot
+exists.
+
+#### Scenario: model_messages survives the fetch → registry → catalog path
+
+- **GIVEN** the upstream model catalog contains a model with a `model_messages` object
+- **WHEN** the model registry refresh parses the upstream response
+- **THEN** the resulting `UpstreamModel.raw` includes `model_messages` unchanged
+
+#### Scenario: Codex-native catalog endpoint returns model_messages
+
+- **GIVEN** the model registry has a refreshed snapshot containing a model with `model_messages`
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the model entry in the response includes `model_messages` with the same value as the upstream response
+
+#### Scenario: OpenAI-compatible catalog endpoint returns model_messages for Codex clients
+
+- **GIVEN** the model registry has a refreshed snapshot containing a model with `model_messages`
+- **WHEN** a client calls `GET /v1/models?client_version=<v>`
+- **THEN** the model entry in the response includes `model_messages` with the same value as the upstream response
+
+### Requirement: Codex metadata survives a partial live catalog refresh
+
+The proxy MUST retain the last successfully fetched complete metadata for a
+bundled Codex model when a later successful live catalog refresh omits that
+model. A retained model that is absent from the current live availability snapshot MUST be
+returned through the Codex model catalog with hidden visibility so an explicitly
+configured client can resolve its metadata without advertising it in the model
+picker.
+
+Retained metadata MUST NOT add the model to current plan, account, service-tier,
+routing, dashboard, warmup, or `/v1/models` availability. A current live entry
+MUST replace the retained entry when the model appears again.
+Models outside the bundled Codex catalog MUST NOT be retained after they leave
+the current live availability snapshot.
+
+OpenAI-compatible source entries that share a slug with retained Codex metadata
+MUST replace retained metadata only when the source entry's effective Codex
+visibility is `list` for the requesting client. A same-slug source entry hidden
+by raw catalog visibility or by the API key's exact source allowlist MUST NOT
+shadow the retained metadata.
+
+#### Scenario: Sol metadata remains resolvable after a partial refresh
+
+- **GIVEN** a successful live catalog refresh returned complete metadata for `gpt-5.6-sol`
+- **WHEN** a later successful refresh omits `gpt-5.6-sol`
+- **THEN** the Codex catalog includes the last complete Sol metadata with hidden visibility
+- **AND** `/v1/models` and live availability indexes omit Sol
+
+#### Scenario: A later live entry replaces retained metadata
+
+- **GIVEN** metadata was retained for a model omitted by a previous refresh
+- **WHEN** a later live refresh returns that model with updated metadata
+- **THEN** the updated live metadata is used and the model follows its current live visibility
+
+#### Scenario: Hidden source entry does not replace retained metadata
+
+- **GIVEN** metadata was retained for `gpt-5.6-sol`
+- **AND** an OpenAI-compatible source exposes the same `gpt-5.6-sol` slug
+- **AND** that source entry is hidden from the effective Codex catalog by raw visibility or an API key's exact source allowlist
+- **WHEN** a client calls `GET /backend-api/codex/models` with that API key
+- **THEN** the hidden Sol catalog entry uses the retained Codex metadata
+
+#### Scenario: Visible same-slug source follows an earlier hidden source
+
+- **GIVEN** multiple enabled sources expose the same model slug
+- **AND** an earlier source is hidden while a later source is list-visible
+- **WHEN** the Codex catalog is rendered
+- **THEN** the list-visible source entry MUST take precedence for that slug
+- **AND** the earlier hidden source MUST NOT suppress or replace it
+
+#### Scenario: Bundled model appears on only one account in a plan
+
+- **GIVEN** a same-plan refresh returns a bundled Codex model from one successful account but omits it from another
+- **WHEN** the availability intersection excludes that model
+- **THEN** the model MUST remain absent from live availability indexes
+- **AND** its complete per-account live entry MUST refresh the metadata-only catalog
+
+### Requirement: Complete account catalogs constrain pooled routing
+
+The system MUST retain the union of successfully refreshed account model
+catalogs for client discovery. When every active account has a current or
+retained last-known catalog, request selection MUST route a model or explicit
+non-default service tier only to accounts whose own catalog advertised that
+capability. Requests that omit a tier or use the omit-equivalent `auto` or
+`default` tiers MUST use model-only account filtering, including when reusing
+an HTTP bridge session.
+
+#### Scenario: Same-plan accounts expose different models
+
+- **GIVEN** two active accounts share a plan
+- **AND** only one account advertises a model
+- **WHEN** all active account catalogs are known
+- **THEN** the merged discovery catalog includes the model
+- **AND** requests for that model select only the advertising account
+
+#### Scenario: Same-plan accounts expose different Fast tiers
+
+- **GIVEN** two active accounts advertise the same model
+- **AND** only one advertises the priority service tier
+- **WHEN** a request explicitly asks for priority
+- **THEN** selection considers only the account that advertised priority
+
+### Requirement: Unknown account catalogs degrade without false exclusion
+
+The system MUST distinguish an account catalog that successfully omitted a
+capability from an account catalog that could not be fetched. If any active
+account has neither a current nor retained last-known catalog, account-level
+capability indexes MUST NOT be treated as authoritative and selection MUST use
+the existing plan-level fallback. Operator-mapped model slugs MUST NOT be
+rejected solely because they are absent from subscription catalog discovery.
+An otherwise authoritative snapshot whose account set does not cover every
+currently selectable account MUST likewise degrade to plan-level routing until
+account catalog coverage catches up.
+
+When there is no authoritative account coverage — including partial refreshes
+after prior successful cycles and when every account is removed and live
+capability state is cleared — the static bootstrap catalog MUST remain the
+discovery and plan-gating floor. Clearing capability state MUST NOT publish an
+authoritative-empty catalog that reports canonical models as absent;
+otherwise, in the window after an account is added but before the next
+scheduled refresh, model/plan filtering would be skipped (an unsupported plan
+could be selected) and `/v1/models` would report no models.
+
+Carrying a plan's catalog forward when its refresh does not complete MUST NOT
+re-advertise a model that no currently-active account of that plan advertises,
+per the last-known per-account catalogs. This drop invariant MUST hold
+regardless of whether the previous snapshot was authoritative: the authoritative
+distinction governs whether per-account routing is trusted, not whether a dead
+model is dropped from discovery. When a carried-forward model has no per-account
+provenance at all (an older or plan-only snapshot that never captured per-account
+catalogs), the system MUST preserve it rather than drop it, degrading safe when a
+model cannot be attributed to any account.
+
+A retained account catalog MUST remain associated with the plan type that
+produced it. If an active account changes plan type and its new catalog refresh
+fails, the system MUST leave that account's catalog unknown rather than
+re-labeling its old capabilities as support for the new plan. Any previously
+advertised catalog slug explicitly suppressed because all its known advertisers
+left the active set MUST still enter plan filtering and select no account,
+whether or not it is part of the static bootstrap catalog; this is distinct from
+an operator-mapped slug that has no catalog evidence at all.
+
+#### Scenario: Catalog fetch partially fails after restart
+
+- **GIVEN** there is no previous registry snapshot
+- **AND** one active account catalog refresh succeeds while another fails
+- **WHEN** selection evaluates a model or service tier
+- **THEN** the partial index is non-authoritative
+- **AND** the failed account is not classified as lacking every capability
+
+#### Scenario: No active accounts fall back to the bootstrap floor
+
+- **GIVEN** live capability state is cleared because no active accounts remain
+- **WHEN** an account is added before the next scheduled refresh completes
+- **THEN** canonical bootstrap models remain discoverable via `/v1/models`
+- **AND** those models remain plan-gated by the bootstrap catalog
+- **AND** an account whose plan does not support the model is not selected
+
+#### Scenario: Failed refresh has last-known account data
+
+- **GIVEN** every active account had a successful earlier catalog
+- **AND** one account fails a later refresh
+- **WHEN** that account remains active
+- **THEN** its last-known capability data is retained
+- **AND** the complete snapshot remains authoritative
+
+#### Scenario: Successful empty catalog withdraws stale capabilities
+
+- **GIVEN** an active account previously advertised a model
+- **AND** its later catalog refresh succeeds with an empty model list
+- **WHEN** the next registry snapshot is built
+- **THEN** the empty catalog is treated as successful account coverage
+- **AND** the previously advertised model leaves discovery and exact routing
+
+#### Scenario: Metadata-only account model stays unroutable during partial refresh
+
+- **GIVEN** an account catalog contains a model omitted from the plan discovery catalog
+- **AND** a later refresh retains that account's stale catalog
+- **WHEN** the next registry snapshot is built
+- **THEN** the metadata-only model does not enter model, plan, account, or service-tier routing indexes
+
+#### Scenario: Fresh metadata-only model stays out of routing indexes
+
+- **GIVEN** a refreshed account catalog contains a model omitted from the merged discovery catalog
+- **WHEN** the registry builds account and service-tier routing indexes
+- **THEN** the metadata-only model does not enter either routing index
+
+#### Scenario: Selectable account set is newer than registry coverage
+
+- **GIVEN** an authoritative registry snapshot covers the previously selectable accounts
+- **AND** a newly imported or reactivated account becomes selectable before the next catalog refresh
+- **WHEN** request selection evaluates model or service-tier support
+- **THEN** account-level indexes are treated as incomplete
+- **AND** selection degrades to plan-level routing
+
+#### Scenario: Bridge owner is newer than registry coverage
+
+- **GIVEN** an HTTP bridge session belongs to a selectable account absent from the registry snapshot
+- **WHEN** a compatible follow-up evaluates model or service-tier support
+- **THEN** stale account-level indexes do not detach the bridge owner
+- **AND** compatibility degrades to plan-level routing
+
+#### Scenario: Failed refresh follows an account plan-type change
+
+- **GIVEN** an account previously advertised a catalog while on one plan type
+- **AND** the active account record now has a different plan type
+- **AND** its catalog refresh fails in that cycle
+- **WHEN** the next registry snapshot is built
+- **THEN** the prior catalog is not retained for that account
+- **AND** the account remains unknown until a catalog for its current plan is fetched
+
+#### Scenario: Account is paused or removed
+
+- **GIVEN** an account has retained catalog capabilities
+- **WHEN** it is no longer in the active account set
+- **THEN** its capabilities no longer contribute to discovery or routing
+
+#### Scenario: Removed account is the sole advertiser within a stale plan
+
+- **GIVEN** two accounts share a plan and only one advertised a given model
+- **AND** the plan's refresh does not complete this cycle, so its catalog is carried forward
+- **AND** the sole advertiser is no longer in the active account set
+- **AND** the other account of that plan remains active
+- **WHEN** the stale plan's retained catalog is merged into discovery
+- **THEN** the model advertised only by the removed account leaves discovery
+- **AND** the models still advertised by the remaining active account are retained
+
+#### Scenario: Sole advertiser removed under a non-authoritative previous snapshot
+
+- **GIVEN** a first refresh recorded a model advertised by one account of a plan
+- **AND** a same-plan account had no catalog, so the snapshot is non-authoritative
+- **WHEN** that sole advertiser is removed while another same-plan account stays active
+- **AND** the plan's refresh does not complete in a later cycle
+- **THEN** the model advertised only by the removed account still leaves discovery
+
+#### Scenario: Removed catalog model stays suppressed across repeated partial refreshes
+
+- **GIVEN** a snapshot suppressed a previously advertised catalog model because every last-known advertiser left the active account set
+- **WHEN** later refresh cycles remain non-authoritative and still do not produce fresh active evidence for that model
+- **THEN** the model stays absent from discovery and plan gating across those repeated partial refreshes
+
+#### Scenario: Suppressed catalog model cannot select an account
+
+- **GIVEN** a snapshot explicitly suppresses a previously advertised model because no active account advertises it
+- **WHEN** account selection receives a request for that model
+- **THEN** the selector rejects every account for that model
+- **AND** it does not treat the known suppressed slug as an operator-mapped unknown
+
+#### Scenario: First complete catalog suppresses omitted bootstrap model
+
+- **GIVEN** there is no previous registry snapshot
+- **AND** a bootstrap model slug is known to the proxy
+- **WHEN** the first authoritative account-catalog refresh omits that model
+- **THEN** the registry marks the omitted bootstrap slug as suppressed
+- **AND** account selection does not treat that known slug as an operator-mapped unknown
+
+#### Scenario: Fresh active evidence clears catalog suppression
+
+- **GIVEN** a catalog model was previously suppressed after its last-known advertisers left the active account set
+- **WHEN** a later refresh records that an active account advertises that model again
+- **THEN** the suppression is cleared
+- **AND** the model returns to discovery and plan gating from live registry data
+
+#### Scenario: Never-known operator mapping remains distinct from suppression
+
+- **GIVEN** an operator-mapped slug has never appeared in an account catalog
+- **WHEN** an authoritative catalog snapshot does not contain that slug
+- **THEN** the registry does not mark the slug as suppressed
+- **AND** the existing operator-mapped unknown fallback remains available
+
+#### Scenario: Carried-forward model has unknown per-account provenance
+
+- **GIVEN** a plan-only snapshot carried a model with no per-account provenance
+- **WHEN** the plan is stale in a later refresh that knows the active account set
+- **THEN** the model is preserved in discovery rather than dropped
+
+### Requirement: Speed and service tier metadata aggregates across accounts
+
+When the model registry merges catalog entries for the same model slug fetched from multiple plans or accounts, the system MUST union the model's `service_tiers`, `additional_speed_tiers`, and `default_service_tier` metadata across all contributing entries rather than overwriting them with the last-fetched entry. A slug MUST expose a speed/service tier when at least one contributing account advertises it, so an account without Fast entitlement cannot remove Fast from the shared catalog served by `GET /v1/models` and `GET /backend-api/codex/models`. Union entries MUST be de-duplicated. All non-tier model fields MAY retain last-fetched values.
+
+#### Scenario: An account without Fast does not hide Fast globally
+
+- **GIVEN** one account/plan returns `gpt-5.5` with a `fast` service tier
+- **AND** another account/plan returns `gpt-5.5` with no `fast` service tier
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the `gpt-5.5` entry includes the `fast` service tier
+- **AND** the `fast` entry appears exactly once
+
+#### Scenario: Shared tiers are not duplicated
+
+- **GIVEN** two accounts both return `gpt-5.5` with the same `fast` service tier
+- **WHEN** the registry merges the two catalog snapshots
+- **THEN** the merged `gpt-5.5` service tiers contain a single `fast` entry
+
+### Requirement: Codex clients receive the Codex catalog from /v1/models
+
+When `GET /v1/models` is called with a non-empty `client_version` query parameter, the service MUST return the same Codex catalog payload as `GET /backend-api/codex/models`, including its `models` entries and the OpenAI-compatible `object`/`data` fields. When the parameter is absent or empty, the service MUST return the unchanged OpenAI-compatible list shape. API-key model filtering and visibility rules MUST apply in both cases.
+
+#### Scenario: Codex client fetches its catalog through the /v1 base URL
+
+- **GIVEN** a Codex client configured with `openai_base_url` pointing at this proxy
+- **WHEN** it calls `GET /v1/models?client_version=0.144.1`
+- **THEN** the response contains Codex catalog entries under `models`
+- **AND** the payload equals the response of `GET /backend-api/codex/models`
+
+#### Scenario: OpenAI-compatible clients are unaffected
+
+- **GIVEN** an OpenAI-compatible client
+- **WHEN** it calls `GET /v1/models` without a `client_version` parameter (or with an empty value)
+- **THEN** the response keeps the `{"object": "list", "data": [...]}` shape
+
+### Requirement: Model catalog entries preserve model-source identity
+
+The model registry SHALL represent each catalog entry with explicit model-source
+identity. Subscription-backed entries SHALL use a subscription source kind and
+MUST continue to derive account/plan availability from the existing ChatGPT
+account model registry refresh. OpenAI-compatible endpoint entries SHALL use an
+OpenAI-compatible source kind and a stable source id. The model-source
+abstraction MUST NOT require OpenAI-compatible sources to be represented as
+`Account` rows.
+
+#### Scenario: Subscription model keeps subscription source identity
+
+- **WHEN** the existing model refresh loads `gpt-5.4` from ChatGPT/Codex account metadata
+- **THEN** the registry entry has source kind `subscription`
+- **AND** the entry remains eligible for existing account/plan routing
+
+#### Scenario: OpenAI-compatible model keeps endpoint source identity
+
+- **WHEN** an enabled OpenAI-compatible source defines model `local-coder`
+- **THEN** the registry entry has source kind `openai_compatible`
+- **AND** the entry references the source id for that endpoint
+- **AND** no `Account` row is required for that source
+
+### Requirement: /v1/models includes eligible OpenAI-compatible source models
+
+`GET /v1/models` SHALL include enabled OpenAI-compatible source models alongside
+subscription-backed public models when the authenticated API key is allowed to
+see the model and source. Disabled sources and disabled source models MUST NOT be
+listed. Source identity MAY be omitted from the public OpenAI-compatible model
+payload, but internal filtering and routing MUST preserve it.
+
+#### Scenario: API key sees assigned source model
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `local-coder`
+- **AND** an API key is assigned to that source and allows `local-coder`
+- **WHEN** the key calls `GET /v1/models`
+- **THEN** the response includes `local-coder`
+
+#### Scenario: API key cannot see unassigned source model
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `local-coder`
+- **AND** an API key is scoped to a different source
+- **WHEN** the key calls `GET /v1/models`
+- **THEN** the response does not include `local-coder`
+
+### Requirement: Codex-native catalog includes only Responses-capable source models
+
+`GET /backend-api/codex/models` SHALL include OpenAI-compatible source models
+only when the source explicitly declares Responses-compatible support. This
+allows Codex model-picker entries for external providers without advertising
+Chat Completions-only sources that cannot satisfy Codex-native Responses
+requests. Disabled sources and disabled source models MUST NOT be listed.
+Subscription-backed Codex catalog entries MUST continue to be listed through the
+existing registry path. If a source model entry emits `model_provider`, it MUST
+emit `codex-lb` and MUST NOT advertise the external upstream provider name.
+
+#### Scenario: Responses-capable source is advertised to Codex-native clients
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `deepseek-v4-flash`
+- **AND** the source declares Responses-compatible support
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the response includes `deepseek-v4-flash`
+- **AND** the model entry does not change the Codex provider away from `codex-lb`
+
+#### Scenario: Chat-only source is not advertised to Codex-native clients
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `local-coder`
+- **AND** the source declares Chat Completions support only
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the response does not include `local-coder`
+
+### Requirement: Refreshed model catalog is replica-coherent
+
+The leader refresh cycle SHALL persist the complete registry state (models, plan maps, per-account tier maps, suppression set, authoritative flags, metadata retention state, and the refresh wall-clock timestamp) to the single-row `model_registry_snapshot` table and SHALL bump the `model_registry` cache-invalidation namespace only after the persist commits (write-then-bump). The payload write and the bump SHALL be skipped when the serialized content hash is unchanged from the last persisted state AND the stored row was still within `model_registry_snapshot_max_age_seconds`; the stored `refreshed_at` timestamp SHALL still be advanced so snapshot age reflects the leader's latest successful refresh. When the content hash is unchanged but the stored row had already aged past `model_registry_snapshot_max_age_seconds` before this refresh revived it, the leader SHALL still bump the `model_registry` namespace (only the payload rewrite stays skipped): an expired row causes followers to clear their local registry and reset their applied-content-hash marker, so an unchanged-content revival still requires a bump for them to re-apply within the cache-invalidation poll bound instead of waiting for the non-leader scheduler backstop. Every replica MUST apply a newly persisted snapshot within the cache-invalidation poll bound and MUST invalidate its local account-selection cache on apply; that account-selection invalidation MUST be local-only (non-propagating), because reconcile only applies a change the leader already published (which bumped `model_registry` to reach every replica) and each replica clears its own selection cache on apply, so a propagating clear would make every follower durably re-bump `account_selection` and amplify bus traffic with no peer-visible effect. When the reconcile is driven by the `model_registry` invalidation callback and the snapshot load fails (transient DB read error or malformed payload), the callback MUST surface the failure to the invalidation poller so the poller leaves the `model_registry` version unacknowledged and retries on the next poll cycle (matching the `account_routing` refresh callback), rather than acknowledging the bump and stranding the replica on the stale catalog until the non-leader scheduler backstop; the startup one-shot reconcile and the refresh-tick backstop instead swallow such a load failure (keeping the current in-memory state) so they never fail startup or the scheduler loop. Payload decode MUST treat a set-backed or mapping-backed catalog field whose persisted value has the wrong type — for example a `model_plans`/`plan_models`/`model_accounts`/per-account tier entry persisted as a scalar or object where a list of slugs is expected, or a model entry that is not an object — as a malformed payload and raise, rather than silently dropping the offending entry and applying a partial catalog; a genuinely-absent or empty container (an absent key, an empty map, or an empty list) is not malformed and MUST decode successfully. After apply, `/v1/models`, plan gating (`plan_types_for_model`), suppression (`is_suppressed_model`), and per-account service-tier routing on a non-leader MUST be identical to the leader. A non-leader refresh tick MUST NOT fetch the upstream catalog and SHALL instead reconcile from the persisted snapshot when the stored snapshot header differs from the last applied one (backstop for a lost invalidation bump). A leader catalog clear SHALL persist an explicit cleared marker and bump, so followers revert to the bootstrap floor rather than serving a withdrawn catalog. Every replica SHALL install its `model_registry` cache-invalidation callback (the global invalidation poller) before starting the model refresh scheduler, so a first leader tick that persists a changed snapshot cannot silently drop its bump. Every replica SHALL record the invalidation-poller version baseline before running its one-shot startup reconcile, so a leader bump that lands in the window between that reconcile's snapshot read and the poller's first background tick is delivered as an invalidation callback (within the poll bound) rather than absorbed as the poller's initial callback-less baseline (which would defer convergence to the non-leader scheduler backstop). The baseline-priming read SHALL surface a failure to its caller (the poller MUST remain uninitialized) rather than silently continuing, so a transient failure of the startup seed is logged and explicitly degraded to first-poll-baseline behavior instead of being mistaken for a recorded baseline — otherwise the first successful background poll would absorb a peer bump as its initial callback-less baseline and void the delivery guarantee priming exists to provide.
+
+#### Scenario: Follower serves the refreshed catalog on /v1/models
+
+- **GIVEN** replica A (leader) completes a registry refresh whose catalog adds a new slug and withdraws a bootstrap slug
+- **AND** replica A persists the snapshot and bumps the `model_registry` namespace
+- **WHEN** replica B's cache-invalidation poller observes the version change
+- **THEN** replica B applies the snapshot to its in-memory registry
+- **AND** `GET /v1/models` served by replica B lists the new slug and omits the withdrawn slug
+
+#### Scenario: Follower enforces suppression of a withdrawn slug
+
+- **GIVEN** the leader's refreshed snapshot marks a previously served slug as suppressed
+- **WHEN** a follower applies the persisted snapshot
+- **THEN** `is_suppressed_model` returns true for that slug on the follower
+
+#### Scenario: Follower enforces plan gating for a newly gated slug
+
+- **GIVEN** the leader's refreshed snapshot maps a slug to exactly one plan type
+- **WHEN** a follower applies the persisted snapshot
+- **THEN** `plan_types_for_model` on the follower returns exactly that plan set instead of no filtering
+
+#### Scenario: Catalog clear propagates to followers
+
+- **GIVEN** the leader clears the registry because no active accounts remain
+- **WHEN** the leader persists the cleared marker and bumps, and a follower applies it
+- **THEN** the follower reverts to the bootstrap catalog floor
+
+#### Scenario: Lost bump converges via the refresh-tick backstop
+
+- **GIVEN** a snapshot was persisted but the invalidation bump was lost
+- **WHEN** a non-leader replica's next refresh tick runs
+- **THEN** the replica detects the header mismatch, applies the persisted snapshot, and converges within one refresh interval
+
+#### Scenario: Transient load failure in the callback is retried, not acknowledged
+
+- **GIVEN** the leader persisted a changed snapshot and bumped the `model_registry` namespace
+- **AND** a follower's snapshot load transiently fails on the invalidation callback (e.g. a DB read error or a momentarily unreadable payload)
+- **WHEN** the follower's poll cycle runs the callback and it fails
+- **THEN** the poller does not acknowledge the observed `model_registry` version and retries the callback on the next poll cycle
+- **AND** once the transient failure clears, the retry applies the persisted snapshot within the poll bound without requiring a new leader bump
+
+#### Scenario: Malformed set-backed field is rejected, not silently dropped
+
+- **GIVEN** the leader bumped the `model_registry` namespace and the persisted payload is valid JSON but a set-backed field is wrong-typed (e.g. `model_plans` maps a slug to `{"gpt-x": "pro"}` instead of a list of plan slugs)
+- **WHEN** a follower's invalidation callback loads and decodes the payload
+- **THEN** the decode raises rather than dropping the offending entry
+- **AND** the poller leaves the `model_registry` version unacknowledged and no partial catalog is applied (the follower keeps its prior in-memory state and retries on the next poll)
+
+#### Scenario: Empty set-backed maps decode successfully
+
+- **GIVEN** a persisted snapshot whose set-backed fields are genuinely empty (empty maps, or a slug mapped to an empty list)
+- **WHEN** a replica decodes the payload
+- **THEN** the decode succeeds and the corresponding sets are empty (empty is not treated as malformed)
+
+#### Scenario: Applying a snapshot does not re-bump account_selection
+
+- **GIVEN** the leader persisted a changed snapshot and bumped `model_registry`
+- **WHEN** a follower applies the snapshot and invalidates its local account-selection cache
+- **THEN** the follower does not enqueue or write an `account_selection` cache-invalidation bump
+
+#### Scenario: Non-leader tick performs no upstream fetch
+
+- **WHEN** a non-leader replica's refresh tick runs
+- **THEN** it performs no upstream model-catalog fetch, regardless of whether it reconciled from the store
+
+#### Scenario: First leader bump is not dropped at startup
+
+- **GIVEN** a replica is starting up
+- **WHEN** the model refresh scheduler starts
+- **THEN** the global cache-invalidation poller with the `model_registry` callback is already installed, so an immediate leader persist-and-bump reaches followers within the poll bound
+
+#### Scenario: Bump during the startup reconcile window is not dropped
+
+- **GIVEN** a replica is starting up and has recorded the invalidation-poller version baseline
+- **AND** a leader persists a changed snapshot and bumps the `model_registry` namespace in the window between the replica's one-shot startup reconcile and the poller's first background tick
+- **WHEN** the poller's first background tick runs
+- **THEN** it observes the version advanced past the recorded baseline and invokes the reconcile callback, so the replica applies the new snapshot within the poll bound rather than waiting for the non-leader scheduler backstop
+
+#### Scenario: Reviving an expired unchanged snapshot bumps the bus
+
+- **GIVEN** a snapshot was persisted with content hash H and its stored row then aged past `model_registry_snapshot_max_age_seconds`, so followers dropped to the bootstrap floor and reset their applied-content-hash marker
+- **WHEN** the leader's next refresh succeeds with the same catalog bytes (content hash H again)
+- **THEN** the leader advances `refreshed_at` without rewriting the payload but still bumps the `model_registry` namespace
+- **AND** the followers observe the version change and re-apply the revived snapshot within the poll bound rather than waiting for the non-leader scheduler backstop
+
+#### Scenario: Failed startup baseline prime is surfaced, not silently absorbed
+
+- **GIVEN** a replica is starting up and the invalidation-poller baseline-priming read fails transiently
+- **WHEN** the priming step runs
+- **THEN** the poller remains uninitialized and the failure is surfaced (logged) rather than treated as a recorded baseline, degrading explicitly to first-poll-baseline behavior
+
+### Requirement: Persisted model catalog survives restart and version skew
+
+At startup every replica SHALL load the persisted model-registry snapshot into its in-memory registry before background schedulers start, provided the snapshot's age is within `model_registry_snapshot_max_age_seconds` (default 86400); an older snapshot SHALL be ignored so the bootstrap catalog remains the floor. A replica that still carries local registry state — whether an applied persisted snapshot or an unpublished leader-local refresh whose persist failed (no applied-snapshot marker) — SHALL drop it, reverting to the bootstrap floor and invalidating its local account-selection cache, when a reconcile observes that the only stored snapshot's age now exceeds the cap, so neither an expired catalog nor an unpublished one is served indefinitely while other replicas fall back to the floor. A snapshot whose `schema_version` differs from the running code's codec version SHALL be ignored with a warning and MUST NOT fail startup or the invalidation poller (rolling-deploy safety). A persist failure on the leader SHALL degrade to leader-local refresh behavior with a warning (the in-memory registry is still updated and persistence is retried next cycle) and SHALL reset the replica's applied-snapshot marker, so a later reconcile — for example after losing leadership — reloads the persisted snapshot instead of treating it as already applied. When a reconcile finds no persisted snapshot row at all while the replica still carries local registry state (an unpublished leader-local refresh whose persist failed, or an applied row deleted from the store), the replica SHALL drop that state — reverting to the bootstrap floor and invalidating its local account-selection cache — so it converges with the other replicas until a leader publishes a snapshot. When a leader refresh tick has active accounts but every upstream catalog fetch fails, the leader SHALL reconcile from the store on that tick — it made no change and did not advance the persisted `refreshed_at`, so under a prolonged upstream outage the leader SHALL drop to the bootstrap floor once the stored snapshot's age exceeds the staleness cap (matching the followers) instead of serving its now-stale in-memory catalog indefinitely; while the stored row is still fresh this reconcile SHALL be a no-op. Imported snapshots SHALL preserve refresh-TTL semantics by deriving the monotonic `fetched_at` from the persisted wall-clock `refreshed_at`.
+
+#### Scenario: Restart loads the persisted catalog before the first refresh
+
+- **GIVEN** a fresh persisted snapshot exists
+- **WHEN** a replica starts
+- **THEN** its registry serves the persisted catalog before the first refresh tick completes
+
+#### Scenario: Snapshot older than the staleness cap is ignored
+
+- **GIVEN** the persisted snapshot's `refreshed_at` is older than `model_registry_snapshot_max_age_seconds`
+- **WHEN** a replica starts
+- **THEN** the snapshot is not applied and the bootstrap catalog is served
+- **AND** the next successful leader refresh repopulates the snapshot
+
+#### Scenario: Mismatched schema version is ignored without error
+
+- **GIVEN** the persisted snapshot's `schema_version` differs from the running code's codec version
+- **WHEN** a replica attempts to load it at startup or via the poller
+- **THEN** the snapshot is ignored with a warning and no error is raised
+
+#### Scenario: Leader persist failure keeps the leader serving its refreshed catalog
+
+- **GIVEN** the leader's registry refresh succeeded but persisting the snapshot fails
+- **WHEN** the refresh cycle completes
+- **THEN** the leader's in-memory registry still serves the refreshed catalog and a warning is logged
+- **AND** the replica's applied-snapshot marker is reset so reconciliation no longer treats the store's row as already applied
+
+#### Scenario: Former leader converges back to the persisted snapshot after a failed persist
+
+- **GIVEN** a replica applied persisted snapshot hash H, then won leadership, refreshed its in-memory registry, and failed to persist the refreshed state
+- **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
+- **THEN** it reloads the store's snapshot H and stops serving the unpublished catalog
+
+#### Scenario: Unpublished catalog is dropped when the store is empty after leadership loss
+
+- **GIVEN** the first-ever leader refresh updated a replica's in-memory registry but persisting the snapshot failed, so no `model_registry_snapshot` row exists
+- **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
+- **THEN** it drops the unpublished catalog, reverts to the bootstrap floor, and invalidates its account-selection cache
+
+#### Scenario: Applied snapshot is dropped once the store entry expires
+
+- **GIVEN** a follower applied a persisted snapshot while it was fresh
+- **AND** the leader stops advancing `refreshed_at` until the stored snapshot's age exceeds `model_registry_snapshot_max_age_seconds`
+- **WHEN** the follower's next reconcile runs
+- **THEN** the follower drops the applied snapshot, reverts to the bootstrap catalog floor, and invalidates its account-selection cache
+
+#### Scenario: Leader drops the stale catalog when all fetches fail past the staleness cap
+
+- **GIVEN** the leader applied a persisted snapshot while it was fresh
+- **AND** every subsequent leader refresh tick has active accounts but all upstream catalog fetches fail, so the persisted `refreshed_at` is never advanced and its age exceeds `model_registry_snapshot_max_age_seconds`
+- **WHEN** the leader's next refresh tick runs and again fails all fetches
+- **THEN** the leader reconciles from the store, drops the stale in-memory snapshot, reverts to the bootstrap catalog floor, and invalidates its account-selection cache (converging with the followers)
+
+#### Scenario: Leader keeps a fresh catalog when all fetches fail within the staleness cap
+
+- **GIVEN** the leader applied a persisted snapshot that is still within `model_registry_snapshot_max_age_seconds`
+- **WHEN** a leader refresh tick has active accounts but all upstream catalog fetches fail
+- **THEN** the leader keeps serving the applied catalog (the reconcile is a no-op because its applied content hash already matches the store) and does not drop to the bootstrap floor
+
+#### Scenario: Unpublished catalog is dropped when the only stored row is expired after leadership loss
+
+- **GIVEN** a leader refresh updated a replica's in-memory registry but persisting the snapshot failed (no applied-snapshot marker)
+- **AND** the only `model_registry_snapshot` row is a previously published snapshot whose age now exceeds `model_registry_snapshot_max_age_seconds`
+- **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
+- **THEN** it drops the unpublished catalog, reverts to the bootstrap floor, and invalidates its account-selection cache
+

@@ -14,6 +14,7 @@
     "automations": "Automations",
     "apis": "APIs",
     "settings": "Settings",
+    "advanced": "Advanced",
     "openMenu": "Open menu",
     "adminSignIn": "Admin Sign In",
     "showEmails": "Show Emails",
@@ -75,11 +76,17 @@
   "settings": {
     "page": {
       "title": "Settings",
-      "subtitle": "Configure routing, auth, API key management, and firewall.",
+      "subtitle": "Configure appearance, auth, and API keys. Power-user tuning lives in the Advanced settings group below.",
       "readOnlyNotice": "You are viewing the dashboard with read-only guest access. Admin controls are disabled.",
       "trustedHeaderNotice": "Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay available only as optional fallback login.",
       "disabledNotice": "Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions or external access control.",
       "savingLabel": "Saving settings..."
+    },
+    "advanced": {
+      "title": "Advanced settings",
+      "description": "Routing tuning, upstream proxies, model sources, firewall, quota planner, and sticky sessions.",
+      "show": "Show advanced settings",
+      "hide": "Hide advanced settings"
     },
     "guestAccess": {
       "title": "Guest access",
@@ -199,7 +206,7 @@
       "warmupModel": {
         "label": "Warmup model",
         "description": "Set the model used by the normal warmup endpoint.",
-        "save": "Save warmup model"
+        "save": "Save"
       },
       "additionalQuota": {
         "title": "Additional quota routing policies",
@@ -231,6 +238,17 @@
         "loading": "Loading accounts...",
         "placeholder": "Choose account",
         "empty": "Import an account before enabling single-account routing."
+      },
+      "accountCapacity": {
+        "title": "Per-account capacity limits",
+        "description": "Limit concurrent Responses work on each account. Set a limit to 0 for unlimited.",
+        "responseCreateLabel": "Response-create limit",
+        "responseCreateDescription": "Maximum concurrent response creates per account; 0 is unlimited.",
+        "streamLabel": "Stream limit",
+        "streamDescription": "Maximum concurrent streams per account; 0 is unlimited.",
+        "streamRecoveryReserveLabel": "Stream recovery reserve",
+        "streamRecoveryReserveDescription": "Keep stream slots for recovery and reattach work. 0 disables the reserve; it cannot exceed a nonzero stream limit.",
+        "save": "Save capacity limits"
       },
       "stickyThresholds": {
         "primaryLabel": "Sticky primary threshold",
@@ -270,6 +288,30 @@
         "cooldownAria": "Warm-up cooldown",
         "promptAria": "Warm-up prompt",
         "save": "Save",
+        "saveAria": "Save warm-up settings",
+        "shared": {
+          "windowsLabel": "Windows",
+          "windowsAria": "Warm-up windows",
+          "modelLabel": "Model",
+          "cooldownLabel": "Cooldown (sec)",
+          "promptLabel": "Prompt"
+        },
+        "resetConfirmed": {
+          "badge": "After reset",
+          "title": "Reset-confirmed warm-up",
+          "description": "Fires when an exhausted account's quota resets. Accounts at or above this usage before reset qualify.",
+          "thresholdLabel": "Min usage %",
+          "thresholdAria": "Min usage percent"
+        },
+        "staggeredIdle": {
+          "badge": "Proactive",
+          "title": "Staggered idle warm-up",
+          "description": "Pre-starts the 5h window for idle accounts before traffic arrives. Accounts at or below this usage are considered idle.",
+          "disabledDescription": "Pre-starts the 5h window for idle accounts before traffic arrives. Enable to configure.",
+          "thresholdLabel": "Max usage %",
+          "thresholdAria": "Max usage percent",
+          "toggleAria": "Enable staggered idle warm-up"
+        },
         "windows": {
           "both": "5h + weekly",
           "primary": "5h only",

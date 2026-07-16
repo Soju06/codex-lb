@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import usage as usage_core
 from app.core.clients.proxy import stream_responses
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
@@ -28,10 +29,14 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
-from .logic import PlannerSettings
+from .logic import SHORT_WINDOW_MAX_MINUTES, PlannerSettings
 from .repository import QuotaPlannerRepository
 
 WARMUP_REQUEST_KIND = "warmup"
+# Rows written by the same upstream fetch land within milliseconds of each
+# other; a sibling row only proves a later fetch when it is newer by more
+# than this margin.
+_SIBLING_FETCH_MARGIN_SECONDS = 5.0
 WARMUP_DEFAULT_INPUT_BUDGET = 32
 WARMUP_DEFAULT_OUTPUT_BUDGET = 8
 
@@ -126,22 +131,14 @@ class QuotaWarmupService:
             )
         assert account is not None
 
-        claimed = await self._planner.update_decision_status(
+        claimed = await self._planner.claim_warmup_decision(
             decision.id,
-            status="executing",
-            reason="warmup_executing",
-            expected_status="planned",
+            since=_local_midnight(),
+            max_warmups=settings.max_warmups_per_day,
+            max_credits=settings.max_warmup_credits_per_day,
         )
         if claimed is None:
-            current = await self._planner.get_decision(decision.id)
-            if current is None:
-                return WarmupExecutionResult(decision_id=decision.id, status="skipped", reason="decision_missing")
-            return WarmupExecutionResult(
-                decision_id=current.id,
-                status=current.status,
-                reason=current.reason or f"decision_{current.status}",
-                executed_at=current.executed_at,
-            )
+            return await self._resolve_refused_claim(decision_id=decision.id, settings=settings)
 
         reservation_id: str | None = None
         if api_key_id is not None:
@@ -314,6 +311,49 @@ class QuotaWarmupService:
         except Exception:
             logger.exception("Failed to record quota warmup effect", extra={"account_id": account.id, "model": model})
 
+    async def _resolve_refused_claim(
+        self,
+        *,
+        decision_id: str,
+        settings: PlannerSettings,
+    ) -> WarmupExecutionResult:
+        """Map a refused planned -> executing claim to a decision outcome.
+
+        The claim UPDATE returns no row either because a concurrent worker
+        already moved the decision out of ``planned`` or because a daily budget
+        guard failed. Re-read the decision fresh (the identity map may hold a
+        stale snapshot) to distinguish the two, then re-run the budget counts to
+        pick the matching budget-exhausted reason.
+        """
+        current = await self._planner.get_decision_fresh(decision_id)
+        if current is None:
+            return WarmupExecutionResult(decision_id=decision_id, status="skipped", reason="decision_missing")
+        if current.status != "planned":
+            return WarmupExecutionResult(
+                decision_id=current.id,
+                status=current.status,
+                reason=current.reason or f"decision_{current.status}",
+                executed_at=current.executed_at,
+            )
+        today = _local_midnight()
+        active_today = await self._planner.count_active_warmups_since(today)
+        if active_today >= settings.max_warmups_per_day:
+            reason = "daily_warmup_count_budget_exhausted"
+        else:
+            reason = "daily_warmup_credit_budget_exhausted"
+        row = await self._planner.update_decision_status(
+            decision_id,
+            status="skipped",
+            reason=reason,
+            expected_status="planned",
+        )
+        return await self._result_from_update_or_current(
+            decision_id=decision_id,
+            row=row,
+            fallback_status="skipped",
+            fallback_reason=reason,
+        )
+
     async def _result_from_update_or_current(
         self,
         *,
@@ -376,12 +416,18 @@ class QuotaWarmupService:
             return False, f"account_status_{account.status.value}"
 
         latest = (await self._usage.latest_by_account()).get(account.id)
+        if _sample_blocks_short_window_planning(latest):
+            return False, "no_short_window"
+        if await self._short_window_superseded(account, latest):
+            return False, "no_short_window"
         if latest is not None and latest.reset_at is not None and latest.reset_at > int(utcnow().timestamp()):
             return False, "account_window_already_active"
 
-        today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        executed_today = await self._planner.count_executed_warmups_since(today)
-        if executed_today >= settings.max_warmups_per_day:
+        # Advisory pre-check only: the authoritative budget enforcement happens
+        # inside the atomic planned -> executing claim (claim_warmup_decision).
+        today = _local_midnight()
+        active_today = await self._planner.count_active_warmups_since(today)
+        if active_today >= settings.max_warmups_per_day:
             return False, "daily_warmup_count_budget_exhausted"
         spent_today = await self._planner.warmup_cost_since(today)
         if settings.max_warmup_credits_per_day <= 0 or spent_today >= settings.max_warmup_credits_per_day:
@@ -391,6 +437,34 @@ class QuotaWarmupService:
         if not force_probe and (effect is None or effect.confidence not in {"observed", "known", "high"}):
             return False, "warmup_effect_unknown"
         return True, "ready"
+
+    async def _short_window_superseded(self, account: Account, latest: object | None) -> bool:
+        # A strictly newer long-window row proves a later refresh no longer
+        # reported the short window: the stale short primary sample is not
+        # evidence of a current short window, so warm-up traffic would open
+        # nothing. Same-fetch rows land within milliseconds and stay inside
+        # the margin. Monthly rows only count for plans with monthly
+        # capacity — lingering rows from a former plan are not applicable.
+        if latest is None:
+            return False
+        latest_window_minutes = getattr(latest, "window_minutes", None)
+        if latest_window_minutes is None or int(latest_window_minutes) > SHORT_WINDOW_MAX_MINUTES:
+            # Only samples that positively report a short duration are
+            # eligible for supersession rejection; metadata-less samples
+            # keep the legacy bootstrap behavior.
+            return False
+        latest_recorded_at = getattr(latest, "recorded_at", None)
+        if latest_recorded_at is None:
+            return False
+        for window in ("secondary", "monthly"):
+            if window == "monthly" and usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
+                continue
+            sibling = (await self._usage.latest_by_account(window=window)).get(account.id)
+            if sibling is None:
+                continue
+            if (sibling.recorded_at - latest_recorded_at).total_seconds() > _SIBLING_FETCH_MARGIN_SECONDS:
+                return True
+        return False
 
     async def _send_warmup_probe(self, *, account: Account, model: str, request_id: str) -> WarmupUsage:
         payload = ResponsesRequest.model_validate(
@@ -413,6 +487,11 @@ class QuotaWarmupService:
             access_token,
             upstream_account_id,
             raise_for_status=True,
+            # The probe's own live signals must not pre-write fresh usage
+            # rows: _record_warmup_effect measures the post-probe window via
+            # its controlled refresh, which would otherwise skip as fresh
+            # and downgrade the observation to unknown.
+            suppress_live_usage=True,
         ):
             event = parse_sse_event(event_block)
             if event is None or event.response is None or event.response.usage is None:
@@ -443,7 +522,12 @@ class QuotaWarmupService:
         latest_before_by_account = {account.id: latest_before} if latest_before else {}
         await UsageUpdater(self._usage, self._accounts).refresh_accounts([account], latest_before_by_account)
         latest_after = (await self._usage.latest_by_account()).get(account.id)
-        observed_after = latest_after if _usage_history_is_fresh(latest_before, latest_after) else None
+        observed_after = (
+            latest_after
+            if _usage_history_is_fresh(latest_before, latest_after)
+            and not _sample_blocks_short_window_planning(latest_after)
+            else None
+        )
         effective_confidence = confidence if observed_after is not None else "unknown"
         await self._planner.add_window_observation(
             account_id=account.id,
@@ -453,6 +537,24 @@ class QuotaWarmupService:
             primary_reset_at=observed_after.reset_at if observed_after else None,
             confidence=effective_confidence,
         )
+
+
+def _local_midnight() -> datetime:
+    return utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _sample_blocks_short_window_planning(entry: object | None) -> bool:
+    # Phase planning only applies to short rolling windows. Only positive
+    # evidence of a long (weekly or monthly) window in the primary slot
+    # blocks warm-up execution — weekly-only plans surface the weekly window
+    # there. Absent samples or samples without duration metadata keep the
+    # legacy bootstrap behavior.
+    if entry is None:
+        return False
+    window_minutes = getattr(entry, "window_minutes", None)
+    if window_minutes is None:
+        return False
+    return int(window_minutes) > SHORT_WINDOW_MAX_MINUTES
 
 
 def _usage_history_is_fresh(before: object | None, after: object | None) -> bool:

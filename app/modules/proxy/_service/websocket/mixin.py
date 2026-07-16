@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import time
 from collections import deque
@@ -16,6 +17,8 @@ from pydantic import ValidationError
 
 from app.core.auth.refresh import (
     RefreshError,
+    is_transient_refresh_contention,
+    refresh_contention_kind,
 )
 from app.core.balancer import (
     ResetPreferenceWindow,
@@ -53,6 +56,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
+    UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
 )
 from app.core.errors import (
@@ -66,6 +70,11 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+)
+from app.core.resilience.network_recovery import (
+    NetworkRecoveryDecision,
+    ProcessNetworkRecovery,
+    process_network_error_code,
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
@@ -298,6 +307,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _FIRST_TOKEN_EVENT_TYPES,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -319,6 +329,7 @@ from app.modules.proxy._service.support import (
     _WebSocketContinuityState,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
+    _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -431,7 +442,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     normalize_responses_request_payload,
@@ -451,6 +462,26 @@ from app.modules.proxy.tool_call_dedupe import (
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
+
+
+logger = logging.getLogger(__name__)
+
+_WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
+
+
+def _log_websocket_persist_conflict(context: str, exc: RefreshError, account_id: str) -> None:
+    """Surface a post-exchange persist/status CAS conflict distinctly in logs.
+
+    Benign claim contention is expected and unlogged here; a post-exchange
+    persist conflict is a rarer, more-serious internal race worth surfacing.
+    """
+    if refresh_contention_kind(exc) == "persist_conflict":
+        logger.warning(
+            "WebSocket %s refresh post-exchange persist conflict code=%s account_id=%s",
+            context,
+            exc.code,
+            account_id,
+        )
 
 
 async def _reject_websocket_owner_switch_blocked(
@@ -484,6 +515,23 @@ async def _reject_websocket_owner_switch_blocked(
         downstream_activity=downstream_activity,
     )
     await _release_websocket_response_create_gate(request_state, response_create_gate)
+
+
+async def _close_downstream_after_sequenced_replay_refusal(
+    websocket: WebSocket,
+    downstream_activity: _DownstreamWebSocketActivity,
+) -> None:
+    # Once a sequence-numbered frame is visible, a synthetic terminal frame
+    # would violate the upstream sequence. Closing is therefore the only
+    # client-visible terminal signal whenever replay is refused.
+    downstream_activity.mark_disconnected()
+    try:
+        await websocket.close(code=1011, reason="upstream replay requires a fresh request")
+    except Exception:
+        _facade().logger.debug(
+            "Failed to close downstream websocket after sequenced replay refusal",
+            exc_info=True,
+        )
 
 
 @contextmanager
@@ -595,6 +643,25 @@ async def _websocket_archive_request_id_for_message(
 def _raise_proxy_budget_exhausted() -> NoReturn:
     _facade()._raise_proxy_budget_exhausted()
     raise AssertionError("proxy budget exhaustion helper returned")
+
+
+async def _wait_for_process_network_recovery(
+    recovery: ProcessNetworkRecovery,
+    exc: ProxyResponseError,
+    *,
+    deadline: float,
+) -> NetworkRecoveryDecision:
+    error = _parse_openai_error(exc.payload)
+    return await recovery.wait(
+        error_code=_normalize_error_code(
+            error.code if error else None,
+            error.type if error else None,
+        ),
+        retryable_same_contract=exc.retryable_same_contract,
+        deadline=deadline,
+        rotate_shared_client=True,
+        failed_session=exc.failed_session,
+    )
 
 
 def _websocket_text_with_account_installation_id(text_data: str, account: Account) -> str:
@@ -1260,11 +1327,13 @@ class _WebSocketMixin:
                         and _is_websocket_response_create(payload)
                         and request_state.account_response_create_lease is None
                     ):
+                        current_settings = await _facade().get_settings_cache().get()
                         request_state.account_response_create_lease = (
                             await proxy._acquire_account_response_create_lease_or_overload(
                                 account_id=account.id,
                                 request_id=request_state.request_log_id or request_state.request_id,
                                 surface="websocket",
+                                concurrency_caps=effective_account_concurrency_caps(current_settings),
                             )
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
@@ -1316,10 +1385,56 @@ class _WebSocketMixin:
                             downstream_activity=downstream_activity,
                         )
                     continue
+                except UpstreamWebSocketTransportError as exc:
+                    # send_str/send_bytes may fail after handing bytes to the
+                    # kernel. Delivery is uncertain, so replay could duplicate
+                    # a response.create even when no output is visible yet.
+                    async with pending_lock:
+                        sequenced_downstream_replay_refused = any(
+                            state.last_downstream_sequence_number is not None for state in pending_requests
+                        )
+                    await proxy._fail_pending_websocket_requests(
+                        account=account,
+                        account_id_value=account.id if account else None,
+                        pending_requests=pending_requests,
+                        pending_lock=pending_lock,
+                        error_code=exc.error_code,
+                        error_message=str(exc),
+                        api_key=api_key,
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                        response_create_gate=response_create_gate,
+                        downstream_activity=downstream_activity,
+                        penalize_account=exc.error_code != "proxy_network_unavailable",
+                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
+                    )
+                    if sequenced_downstream_replay_refused:
+                        await _close_downstream_after_sequenced_replay_refusal(
+                            websocket,
+                            downstream_activity,
+                        )
+                    if upstream_reader is not None:
+                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        upstream_reader = None
+                    upstream_control = None
+                    if upstream is not None:
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            _facade().logger.debug(
+                                "Failed to close upstream websocket after transport send failure",
+                                exc_info=True,
+                            )
+                    upstream = None
+                    await release_current_account_lease()
+                    account = None
+                    continue
                 except Exception:
+                    replay_refusal_reasons: list[str] = []
                     replay_candidate = await _pop_replayable_precreated_websocket_request_state(
                         pending_requests,
                         pending_lock=pending_lock,
+                        replay_refusal_reasons=replay_refusal_reasons,
                     )
                     if replay_candidate is not None:
                         _facade().logger.info(
@@ -1345,6 +1460,7 @@ class _WebSocketMixin:
                         await release_current_account_lease()
                         account = None
                         continue
+                    sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
                     await proxy._fail_pending_websocket_requests(
                         account=account,
                         account_id_value=account.id if account else None,
@@ -1357,7 +1473,13 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
+                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
+                    if sequenced_downstream_replay_refused:
+                        await _close_downstream_after_sequenced_replay_refusal(
+                            websocket,
+                            downstream_activity,
+                        )
                     if upstream_reader is not None:
                         await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None
@@ -1852,7 +1974,45 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     websocket=websocket,
                     force_refresh=forced_refresh_account_id == account.id,
+                    # Gate transient transport-level refresh failover on whether
+                    # the request is *genuinely pinned* (hard-required account:
+                    # session continuity or file pin), NOT merely on a preferred
+                    # account being set. A forced-refresh reconnect auth replay
+                    # sets both force_refresh_account_id and preferred_account_id
+                    # to the stale account even for movable requests, so keying
+                    # off preferred_account_id would wrongly strand a movable
+                    # request on the stale account when its refresh claim is held
+                    # by another replica. Hard-pinned requests
+                    # (require_preferred_account) still stay on their account.
+                    can_transient_failover=not require_preferred_account,
                 )
+            except _WebSocketTransientRefreshFailover as failover:
+                # A transient, transport-level refresh failure (e.g. the
+                # account's refresh claim is held by another replica) reached
+                # the connect path. Release the skipped account's already-
+                # acquired stream lease so it does not keep consuming a
+                # stream-concurrency slot for a connection that never opens,
+                # exclude it, and reselect a healthy account.
+                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                selected_stream_lease = None
+                excluded_account_ids.add(failover.account_id)
+                # Record a capacity-style failure so that if every account
+                # attempt hits a transient refresh-claim failover, the loop
+                # still surfaces a proper terminal error after exhaustion
+                # instead of returning (None, None) silently. The account
+                # credentials are fine (its refresh claim is just held by
+                # another replica), so this must be a 503/capacity-style
+                # upstream error, NOT a bogus 401 invalid_api_key.
+                last_failover_exc = ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_unavailable",
+                        "Account refresh is temporarily unavailable; no healthy account could be reached.",
+                        error_type="server_error",
+                    ),
+                )
+                last_failover_account = account
+                continue
             except ProxyResponseError as exc:
                 action = await proxy._decide_websocket_failover_action(
                     account=account,
@@ -2193,6 +2353,52 @@ class _WebSocketMixin:
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
         force_refresh: bool = False,
+        can_transient_failover: bool = False,
+    ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
+        recovery = ProcessNetworkRecovery(
+            transport="websocket",
+            request_id=request_state.request_log_id or request_state.request_id,
+            account_id=account.id,
+        )
+        while True:
+            try:
+                result = await self._try_open_websocket_connect_attempt_once(
+                    account,
+                    headers,
+                    deadline=deadline,
+                    api_key=api_key,
+                    request_state=request_state,
+                    client_send_lock=client_send_lock,
+                    websocket=websocket,
+                    force_refresh=force_refresh,
+                    can_transient_failover=can_transient_failover,
+                )
+                recovery.log_recovered()
+                return result
+            except ProxyResponseError as exc:
+                decision = await _wait_for_process_network_recovery(
+                    recovery,
+                    exc,
+                    deadline=deadline,
+                )
+                if decision == "retry":
+                    continue
+                if decision == "exhausted":
+                    _raise_proxy_budget_exhausted()
+                raise
+
+    async def _try_open_websocket_connect_attempt_once(
+        self,
+        account: Account,
+        headers: dict[str, str],
+        *,
+        deadline: float,
+        api_key: ApiKeyData | None,
+        request_state: _WebSocketRequestState,
+        client_send_lock: anyio.Lock,
+        websocket: WebSocket,
+        force_refresh: bool = False,
+        can_transient_failover: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -2253,10 +2459,74 @@ class _WebSocketMixin:
                 request_state=request_state,
                 client_send_lock=client_send_lock,
                 websocket=websocket,
+                can_transient_failover=can_transient_failover,
             )
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
+            elif can_transient_failover and is_transient_refresh_contention(exc):
+                # Transient CROSS-REPLICA refresh contention on the proactive
+                # freshness check: benign claim contention (the account's refresh
+                # claim is held by another replica) OR a post-exchange persist/status
+                # CAS conflict (``token_persist_conflict`` / ``status_downgrade_conflict``).
+                # This is NOT a genuine ``transport_error`` OAuth failure — the
+                # account's credentials are healthy — so do not surface a bogus 401
+                # invalid_api_key. Signal the connect loop to release this account's
+                # stream lease, exclude it, and fail over to a healthy account
+                # WITHOUT an account-health penalty. Log a post-exchange persist
+                # conflict distinctly (rarer, more-serious than benign contention).
+                _log_websocket_persist_conflict("freshness-check", exc, account.id)
+                raise _WebSocketTransientRefreshFailover(account.id) from exc
+            elif is_transient_refresh_contention(exc):
+                # PINNED refresh contention (require_preferred_account:
+                # previous_response_id session continuity or file ownership).
+                # can_transient_failover is False, so the movable failover
+                # branch above is correctly skipped -- a pinned request must
+                # not cross accounts. The owner account's credentials are
+                # healthy; its refresh claim is merely held by a peer replica,
+                # so a 401 invalid_api_key would be misleading and terminal.
+                # Stay on the owner (no crossing, no permanent mark), release
+                # the acquired stream lease (the caller releases it when this
+                # returns None), and surface a RETRYABLE upstream_unavailable so
+                # the client can retry once the peer replica releases the claim.
+                # (Also covers a pinned post-exchange persist/status CAS conflict,
+                # logged distinctly.)
+                _log_websocket_persist_conflict("pinned freshness-check", exc, account.id)
+                message = exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
+                await proxy._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=account.id,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=503,
+                    payload=openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                    error_code="upstream_unavailable",
+                    error_message=message,
+                )
+                return None
+            elif exc.transport_error:
+                # A GENUINE OAuth transport failure (``code == "transport_error"``:
+                # the refresh request itself timed out / its upstream connection
+                # failed). This IS the account/route's fault, so treat it exactly
+                # like the aiohttp/connect transport handler below — raise a
+                # retryable 502 ``upstream_unavailable`` so the connect loop
+                # applies its normal transport-failure failover/health handling —
+                # rather than a misleading terminal 401 invalid_api_key or the
+                # unpenalized claim-contention failover.
+                message = exc.message or str(exc) or "Request to upstream timed out"
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                ) from exc
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -2275,10 +2545,11 @@ class _WebSocketMixin:
             return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             message = str(exc) or "Request to upstream timed out"
+            error_code = process_network_error_code(exc, fallback="upstream_unavailable")
             raise ProxyResponseError(
                 502,
                 openai_error(
-                    "upstream_unavailable",
+                    error_code,
                     message,
                     error_type="server_error",
                 ),
@@ -2294,6 +2565,7 @@ class _WebSocketMixin:
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        can_transient_failover: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -2316,6 +2588,61 @@ class _WebSocketMixin:
         except RefreshError as refresh_exc:
             if refresh_exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+            elif can_transient_failover and is_transient_refresh_contention(refresh_exc):
+                # Transient CROSS-REPLICA refresh contention on the post-401 forced
+                # refresh: benign claim contention (the account's refresh claim is
+                # held by another replica) OR a post-exchange persist/status CAS
+                # conflict. This is NOT a genuine ``transport_error`` OAuth failure,
+                # so fail over to a healthy account WITHOUT an account-health penalty
+                # instead of surfacing a bogus 401 invalid_api_key.
+                _log_websocket_persist_conflict("post-401 forced-refresh", refresh_exc, account.id)
+                raise _WebSocketTransientRefreshFailover(account.id) from refresh_exc
+            elif is_transient_refresh_contention(refresh_exc):
+                # PINNED refresh contention on the post-401 forced refresh:
+                # mirror the pre-open freshness branch. The request is hard-pinned
+                # (can_transient_failover is False), so it must not cross accounts,
+                # but the owner's credentials are healthy (its refresh claim is
+                # merely held by a peer replica). Stay on the owner (no crossing,
+                # no permanent mark), release the acquired stream lease (the caller
+                # releases it when this returns None), and surface a RETRYABLE
+                # upstream_unavailable instead of a terminal 401 invalid_api_key.
+                # (Also covers a pinned post-exchange persist/status CAS conflict,
+                # logged distinctly.)
+                _log_websocket_persist_conflict("pinned post-401 forced-refresh", refresh_exc, account.id)
+                message = refresh_exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
+                await proxy._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=account.id,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=503,
+                    payload=openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                    error_code="upstream_unavailable",
+                    error_message=message,
+                )
+                return None
+            elif refresh_exc.transport_error:
+                # A GENUINE OAuth transport failure (``code == "transport_error"``):
+                # the account/route is at fault, so treat it exactly like the
+                # aiohttp/connect transport handler below — raise a retryable 502
+                # ``upstream_unavailable`` so the connect loop applies its normal
+                # transport-failure failover/health handling — rather than a
+                # misleading terminal 401 invalid_api_key or the unpenalized
+                # claim-contention failover.
+                message = refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                ) from refresh_exc
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -2437,13 +2764,36 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         started_at = time.monotonic()
-        try:
-            with anyio.fail_after(timeout_seconds):
-                return await proxy._open_upstream_websocket(account, headers, request_state=request_state)
-        except TimeoutError:
-            if time.monotonic() - started_at < timeout_seconds:
+        deadline = started_at + timeout_seconds
+        recovery = ProcessNetworkRecovery(
+            transport="websocket",
+            request_id=None if request_state is None else request_state.request_log_id or request_state.request_id,
+            account_id=account.id,
+        )
+        while True:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                _raise_proxy_budget_exhausted()
+            try:
+                with anyio.fail_after(remaining_seconds):
+                    upstream = await proxy._open_upstream_websocket(account, headers, request_state=request_state)
+                recovery.log_recovered()
+                return upstream
+            except ProxyResponseError as exc:
+                decision = await _wait_for_process_network_recovery(
+                    recovery,
+                    exc,
+                    deadline=deadline,
+                )
+                if decision == "retry":
+                    continue
+                if decision == "exhausted":
+                    _raise_proxy_budget_exhausted()
                 raise
-            _raise_proxy_budget_exhausted()
+            except TimeoutError:
+                if time.monotonic() - started_at < timeout_seconds:
+                    raise
+                _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
         self,
@@ -2807,8 +3157,12 @@ class _WebSocketMixin:
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
+                    downstream_sequence_request_state = upstream_control.downstream_sequence_request_state
+                    downstream_sequence_number = upstream_control.downstream_sequence_number
                     upstream_control.suppress_downstream_event = False
                     upstream_control.downstream_texts = None
+                    upstream_control.downstream_sequence_request_state = None
+                    upstream_control.downstream_sequence_number = None
                     if downstream_texts is not None:
                         for emitted_text in downstream_texts:
                             try:
@@ -2853,6 +3207,10 @@ class _WebSocketMixin:
                                 text=downstream_text,
                                 downstream_activity=downstream_activity,
                             )
+                            if downstream_sequence_request_state is not None and downstream_sequence_number is not None:
+                                downstream_sequence_request_state.last_downstream_sequence_number = (
+                                    downstream_sequence_number
+                                )
                         except Exception:
                             downstream_activity.mark_disconnected()
                             _facade().logger.debug(
@@ -2927,10 +3285,17 @@ class _WebSocketMixin:
                             )
                         break
                     continue
-                replay_request_state = await _pop_replayable_precreated_websocket_request_state(
-                    pending_requests,
-                    pending_lock=pending_lock,
-                )
+                replay_refusal_reasons: list[str] = []
+                replay_request_state = None
+                # A classified route/DNS receive failure happens after a
+                # completed send. Surface it account-neutrally rather than
+                # guessing that the upstream did not accept the request.
+                if message.error_code != "proxy_network_unavailable":
+                    replay_request_state = await _pop_replayable_precreated_websocket_request_state(
+                        pending_requests,
+                        pending_lock=pending_lock,
+                        replay_refusal_reasons=replay_refusal_reasons,
+                    )
                 if replay_request_state is not None:
                     upstream_control.reconnect_requested = True
                     upstream_control.replay_request_state = replay_request_state
@@ -2944,19 +3309,27 @@ class _WebSocketMixin:
                     except Exception:
                         _facade().logger.debug("Failed to close upstream websocket for replay", exc_info=True)
                     break
+                sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
                 await proxy._fail_pending_websocket_requests(
                     account=account,
                     account_id_value=account_id_value,
                     pending_requests=pending_requests,
                     pending_lock=pending_lock,
-                    error_code="stream_incomplete",
+                    error_code=message.error_code or "stream_incomplete",
                     error_message=_upstream_websocket_disconnect_message(message),
                     api_key=api_key,
                     websocket=websocket,
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
+                    penalize_account=message.error_code != "proxy_network_unavailable",
+                    suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
+                if sequenced_downstream_replay_refused:
+                    await _close_downstream_after_sequenced_replay_refusal(
+                        websocket,
+                        downstream_activity,
+                    )
                 break
         except asyncio.CancelledError:
             raise
@@ -3076,6 +3449,13 @@ class _WebSocketMixin:
             else:
                 release_create_gate = False
             if request_state is not None:
+                elapsed_ms = int((time.monotonic() - request_state.started_at) * 1000)
+                if request_state.latency_first_upstream_event_ms is None:
+                    request_state.latency_first_upstream_event_ms = elapsed_ms
+                if event_type == "response.created" and request_state.latency_response_created_ms is None:
+                    request_state.latency_response_created_ms = elapsed_ms
+                if event_type in _FIRST_TOKEN_EVENT_TYPES and request_state.latency_first_token_ms is None:
+                    request_state.latency_first_token_ms = elapsed_ms
                 actual_service_tier = _facade()._service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
@@ -3103,6 +3483,10 @@ class _WebSocketMixin:
                 if payload is not None:
                     payload = _rewrite_websocket_downstream_response_id(payload, request_state)
                     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+                    sequence_number = payload.get("sequence_number")
+                    if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
+                        upstream_control.downstream_sequence_request_state = request_state
+                        upstream_control.downstream_sequence_number = sequence_number
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -3422,6 +3806,7 @@ class _WebSocketMixin:
                 can_retry_security_work = (
                     not account.security_work_authorized
                     and not has_other_pending_requests
+                    and request_state.last_downstream_sequence_number is None
                     and request_state.response_id is None
                     and request_state.replay_count < 1
                     and bool(request_state.request_text)
@@ -3746,6 +4131,9 @@ class _WebSocketMixin:
             request_state.api_key_reservation,
             settlement,
             response_id,
+            # The reservation must be settled before the load-balancer
+            # health write below (settlement-ordering invariant).
+            wait_for_settlement=settlement.account_health_error,
         )
         if settlement.account_health_error:
             await proxy._handle_stream_error(
@@ -3976,6 +4364,7 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None = None,
         status: str = "error",
         penalize_account: bool = True,
+        suppress_sequenced_downstream_errors: bool = False,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4053,7 +4442,13 @@ class _WebSocketMixin:
                     )
                 )
                 await request_state.event_queue.put(None)
-            if websocket is not None and client_send_lock is not None:
+            if (
+                websocket is not None
+                and client_send_lock is not None
+                and not (
+                    suppress_sequenced_downstream_errors and request_state.last_downstream_sequence_number is not None
+                )
+            ):
                 await proxy._emit_websocket_terminal_error(
                     websocket,
                     client_send_lock=client_send_lock,

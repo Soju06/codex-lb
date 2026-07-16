@@ -75,6 +75,18 @@ def apply_usage_quota(
             else:
                 status = AccountStatus.ACTIVE
                 reset_at = None
+    elif status == AccountStatus.RATE_LIMITED and secondary_used is not None and secondary_used < 100.0:
+        # No primary data at all — upstream stopped reporting the short
+        # window. The long-window sample proves availability, so the block
+        # clears once its runtime reset elapses instead of pinning the
+        # account rate-limited indefinitely. Callers that cannot tie the
+        # sample to a reset deadline or post-block evidence must preserve
+        # the block themselves.
+        if runtime_reset and runtime_reset > time.time():
+            reset_at = runtime_reset
+        else:
+            status = AccountStatus.ACTIVE
+            reset_at = None
 
     return status, used_percent, reset_at
 

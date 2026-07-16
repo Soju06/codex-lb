@@ -74,8 +74,17 @@ from app.core.resilience.circuit_breaker import (
     _is_server_error,
     get_circuit_breaker_for_account,
 )
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+    is_pre_dispatch_connection_failure,
+    is_process_network_failure,
+    is_proxy_endpoint_failure,
+    process_network_error_code,
+)
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.usage.live_hub import publish_live_usage
+from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text, parse_rate_limit_headers
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -129,7 +138,13 @@ def _is_response_stream_terminal_event_type(event_type: str, *, enforce_openai_s
     return event_type == "error" and not enforce_openai_sdk_contract
 
 
-_SSE_READ_CHUNK_SIZE = 1 * 1024
+# 16 KiB reads: 1 KiB reads made a multi-MB SSE event cost thousands of
+# iterations, and each iteration's separator rescan froze the event loop
+# (see the scan cursor in _iter_sse_events).
+_SSE_READ_CHUNK_SIZE = 16 * 1024
+# Longest separator is 4 bytes; a separator can straddle a chunk boundary by
+# at most 3 bytes, so rescans back up this far into already-scanned bytes.
+_SSE_SEPARATOR_OVERLAP = 3
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
@@ -327,11 +342,29 @@ async def _service_circuit_breaker_context(
             ):
                 await cb._record_success()
             else:
-                await cb._record_failure(e)
+                await _record_account_circuit_breaker_failure(cb, e)
         raise
     finally:
         if is_probe and cb is not None:
             await cb.release_half_open_probe()
+
+
+def _is_process_network_transport_error(exc: BaseException) -> bool:
+    # A permanent lookup failure for the configured proxy hostname identifies
+    # that endpoint, not a host-wide outage; transient proxy DNS remains neutral.
+    return is_process_network_failure(
+        exc,
+        include_permanent_dns=not is_proxy_endpoint_failure(exc),
+    ) or (isinstance(exc, CodexTransportError) and exc.error_code == PROCESS_NETWORK_UNAVAILABLE_CODE)
+
+
+async def _record_account_circuit_breaker_failure(circuit_breaker: CircuitBreaker, exc: Exception) -> bool:
+    """Record endpoint/account failures while keeping host-network loss neutral."""
+
+    if _is_process_network_transport_error(exc):
+        return False
+    await circuit_breaker._record_failure(exc)
+    return True
 
 
 _HELD_HALF_OPEN_PROBE_FLAG = "_codex_lb_half_open_probe_held"
@@ -437,6 +470,7 @@ class ProxyResponseError(Exception):
         failure_exception_type: str | None = None,
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
+        failed_session: aiohttp.ClientSession | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -447,6 +481,38 @@ class ProxyResponseError(Exception):
         self.failure_exception_type = failure_exception_type
         self.upstream_status_code = upstream_status_code
         self.upstream_error_code = upstream_error_code
+        self.failed_session = failed_session
+
+
+def _process_network_failure_error(
+    message: str,
+    exc: Exception,
+    *,
+    retryable_same_contract: bool,
+    failed_session: aiohttp.ClientSession | None,
+) -> ProxyResponseError:
+    """Preserve replay provenance and failed shared generation independently."""
+
+    # Dispatch may make the request unsafe to replay, but it does not make the
+    # concrete failed generation safe for subsequent requests to keep using.
+    return ProxyResponseError(
+        502,
+        openai_error(PROCESS_NETWORK_UNAVAILABLE_CODE, message),
+        failure_phase="connect" if retryable_same_contract else "upstream",
+        retryable_same_contract=retryable_same_contract,
+        failure_detail="process_network_connect_error" if retryable_same_contract else "transport_error",
+        failure_exception_type=type(exc).__name__,
+        failed_session=failed_session,
+    )
+
+
+def _failed_shared_session_for_process_network_error(
+    error_code: str,
+    session: aiohttp.ClientSession,
+) -> aiohttp.ClientSession | None:
+    # Replay safety answers whether this request may run again; it must not
+    # decide whether later callers inherit a concrete failed generation.
+    return session if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
 
 
 @dataclass(frozen=True)
@@ -860,8 +926,8 @@ def _maybe_log_upstream_request_start(
     payload_summary: str,
     payload_json: str | None = None,
 ) -> None:
-    settings = get_settings()
-    if not settings.log_upstream_request_summary and not settings.log_upstream_request_payload:
+    trace_channels = get_settings().trace_channels
+    if "upstream_summary" not in trace_channels and "upstream_payload" not in trace_channels:
         return
 
     request_id = get_request_id()
@@ -869,7 +935,7 @@ def _maybe_log_upstream_request_start(
     account_id = _account_id_for_upstream_log(headers)
     header_keys = _interesting_upstream_header_keys(headers)
 
-    if settings.log_upstream_request_summary:
+    if "upstream_summary" in trace_channels:
         logger.info(
             "upstream_request_start request_id=%s kind=%s method=%s target=%s account_id=%s headers=%s payload=%s",
             request_id,
@@ -880,7 +946,7 @@ def _maybe_log_upstream_request_start(
             header_keys,
             payload_summary,
         )
-    if settings.log_upstream_request_payload and payload_json is not None:
+    if "upstream_payload" in trace_channels and payload_json is not None:
         logger.info(
             "upstream_request_payload request_id=%s kind=%s target=%s payload=%s",
             request_id,
@@ -906,8 +972,7 @@ def _maybe_log_upstream_request_complete(
     failure_exception_type: str | None = None,
     retryable_same_contract: bool | None = None,
 ) -> None:
-    settings = get_settings()
-    if not settings.log_upstream_request_summary:
+    if "upstream_summary" not in get_settings().trace_channels:
         return
 
     level = logging.INFO
@@ -1001,9 +1066,9 @@ def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, n
     return max(0.001, timeout_seconds - max(0.0, now - started_at))
 
 
-def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
+def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int, int] | None:
     separators = (b"\r\n\r\n", b"\n\n", b"\r\r")
-    positions = [(buffer.find(separator), len(separator)) for separator in separators]
+    positions = [(buffer.find(separator, start), len(separator)) for separator in separators]
     valid_positions = [position for position in positions if position[0] >= 0]
     if not valid_positions:
         return None
@@ -1039,6 +1104,7 @@ async def _iter_sse_events(
             pass
 
     buffer = bytearray()
+    scanned = 0
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
@@ -1061,11 +1127,22 @@ async def _iter_sse_events(
 
         buffer.extend(chunk)
         while True:
-            raw_event = _pop_sse_event(buffer)
-            if raw_event is None:
+            # `scanned` marks the prefix already known to hold no separator,
+            # so each new chunk only scans the new bytes (plus the straddle
+            # overlap). Without the cursor, a large event re-scanned the
+            # entire accumulated buffer on every read — O(n^2) byte scanning
+            # that blocked the event loop for every in-flight stream.
+            separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
+            if separator is None:
+                scanned = len(buffer)
                 if len(buffer) > max_event_bytes:
                     raise StreamEventTooLargeError(len(buffer), max_event_bytes)
                 break
+            index, separator_len = separator
+            event_end = index + separator_len
+            raw_event = bytes(buffer[:event_end])
+            del buffer[:event_end]
+            scanned = 0
 
             if len(raw_event) > max_event_bytes:
                 raise StreamEventTooLargeError(len(raw_event), max_event_bytes)
@@ -1532,6 +1609,7 @@ async def _open_upstream_websocket(
     is_probe = False
     if circuit_breaker is not None:
         is_probe = await circuit_breaker.pre_call_check()
+    probe_transferred = False
 
     request_obj = getattr(session, "request", None)
     if not callable(request_obj):
@@ -1547,13 +1625,16 @@ async def _open_upstream_websocket(
             websocket = await asyncio.wait_for(websocket_cm.__aenter__(), timeout=connect_timeout_seconds)
             if hold_half_open_probe and is_probe and circuit_breaker is not None:
                 _bind_half_open_probe(websocket, circuit_breaker)
+                probe_transferred = True
             return websocket_cm, websocket
         except Exception as exc:
             if circuit_breaker is not None:
-                await circuit_breaker._record_failure(exc)
+                await _record_account_circuit_breaker_failure(circuit_breaker, exc)
             raise
         finally:
-            if is_probe and circuit_breaker is not None and not hold_half_open_probe:
+            # Only a successfully opened websocket can own a held probe. A
+            # failed connect must release it so recovery can make another try.
+            if is_probe and circuit_breaker is not None and not probe_transferred:
                 await circuit_breaker.release_half_open_probe()
     request = cast(Callable[..., Awaitable[aiohttp.ClientResponse]], request_obj)
 
@@ -1576,7 +1657,7 @@ async def _open_upstream_websocket(
             )
         except Exception as exc:
             if circuit_breaker is not None:
-                await circuit_breaker._record_failure(exc)
+                await _record_account_circuit_breaker_failure(circuit_breaker, exc)
             raise
 
         async def _raise_handshake_error(message: str) -> None:
@@ -1630,8 +1711,7 @@ async def _open_upstream_websocket(
             writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
         except BaseException as exc:
             if circuit_breaker is not None and not _cb_recorded and isinstance(exc, Exception):
-                await circuit_breaker._record_failure(exc)
-                _cb_recorded = True
+                _cb_recorded = await _record_account_circuit_breaker_failure(circuit_breaker, exc)
             resp.close()
             raise
 
@@ -1650,9 +1730,10 @@ async def _open_upstream_websocket(
         )
         if hold_half_open_probe and is_probe and circuit_breaker is not None:
             _bind_half_open_probe(websocket, circuit_breaker)
+            probe_transferred = True
         return websocket, websocket
     finally:
-        if is_probe and circuit_breaker is not None and not hold_half_open_probe:
+        if is_probe and circuit_breaker is not None and not probe_transferred:
             await circuit_breaker.release_half_open_probe()
 
 
@@ -1747,7 +1828,14 @@ async def _stream_codex_websocket_events(
             if exc is None and isinstance(msg.data, BaseException):
                 exc = msg.data
             exc = exc or aiohttp.ClientError("Upstream websocket error")
-            raise CodexTransportError(codex_transport_error_message("websocket stream", None, exc)) from exc
+            raise CodexTransportError(
+                codex_transport_error_message("websocket stream", None, exc),
+                error_code=process_network_error_code(
+                    exc,
+                    fallback="upstream_unavailable",
+                    include_permanent_dns=False,
+                ),
+            ) from exc
         if msg.type == aiohttp.WSMsgType.TEXT:
             text = msg.data if isinstance(msg.data, str) else str(msg.data)
         elif msg.type == aiohttp.WSMsgType.BINARY:
@@ -1826,7 +1914,7 @@ async def _stream_responses_via_websocket(
         nonlocal lifecycle_recorded
         if circuit_breaker is None or lifecycle_recorded:
             return
-        await circuit_breaker._record_failure(exc)
+        await _record_account_circuit_breaker_failure(circuit_breaker, exc)
         lifecycle_recorded = True
 
     connect_timeout_seconds = min(
@@ -1875,17 +1963,49 @@ async def _stream_responses_via_websocket(
             await _record_lifecycle_failure(exc)
             if owns_codex_client:
                 await active_codex_client.close()
+            error_code = (
+                exc.error_code
+                if isinstance(exc, CodexTransportError) and exc.error_code is not None
+                else process_network_error_code(
+                    exc,
+                    fallback="upstream_unavailable",
+                    include_permanent_dns=False,
+                )
+            )
+            if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and not (
+                isinstance(exc, CodexTransportError) and exc.retryable_same_contract
+            ):
+                raise CodexTransportError(
+                    codex_transport_error_message("websocket connect", route.endpoint_id, exc),
+                    status_code=exc.status_code if isinstance(exc, CodexTransportError) else None,
+                    error_code=error_code,
+                    retryable_same_contract=True,
+                ) from exc
             raise
     else:
-        websocket_cm, websocket = await _open_upstream_websocket(
-            session=client_session,
-            url=websocket_url,
-            headers=headers,
-            connect_timeout_seconds=connect_timeout_seconds,
-            max_msg_size=max_event_bytes,
-            account_id=account_id,
-            hold_half_open_probe=True,
-        )
+        try:
+            websocket_cm, websocket = await _open_upstream_websocket(
+                session=client_session,
+                url=websocket_url,
+                headers=headers,
+                connect_timeout_seconds=connect_timeout_seconds,
+                max_msg_size=max_event_bytes,
+                account_id=account_id,
+                hold_half_open_probe=True,
+            )
+        except Exception as exc:
+            error_code = process_network_error_code(
+                exc,
+                fallback="upstream_unavailable",
+                include_permanent_dns=not is_proxy_endpoint_failure(exc),
+            )
+            if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+                raise CodexTransportError(
+                    codex_transport_error_message("websocket connect", None, exc),
+                    error_code=error_code,
+                    retryable_same_contract=True,
+                ) from exc
+            raise
 
     try:
         send_json = getattr(websocket, "send_json", None)
@@ -2032,8 +2152,11 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
         )
     if payload_size <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
         return request_payload
+    # 400, not 413: the Codex client surfaces 400 immediately as a non-retryable
+    # invalid request, while 413 burns five full-payload retries and then pins the
+    # session to HTTP transport.
     raise ProxyResponseError(
-        413,
+        400,
         _response_create_too_large_error_envelope(payload_size, _UPSTREAM_RESPONSE_CREATE_MAX_BYTES),
         failure_phase="validation",
         failure_detail=f"response.create_bytes={payload_size}",
@@ -2470,6 +2593,8 @@ async def stream_responses(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2488,7 +2613,15 @@ async def stream_responses(
             allow_direct_egress=effective_allow_direct_egress,
             codex_installation_id=codex_installation_id,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            codex_lb_account_id=codex_lb_account_id,
+            suppress_live_usage=suppress_live_usage,
         ):
+            if not suppress_live_usage and (codex_lb_account_id or account_id) and EVENT_MARKER in event_block:
+                publish_live_usage(
+                    parse_rate_limit_event_text(event_block),
+                    account_id=codex_lb_account_id,
+                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                )
             yield event_block
 
 
@@ -2507,6 +2640,8 @@ async def _stream_responses_with_session(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     headers = apply_codex_installation_headers(headers, codex_installation_id)
@@ -2623,6 +2758,15 @@ async def _stream_responses_with_session(
                 resp = _CodexSSEResponse(raw_resp)
                 status_code = resp.status
                 last_stream_activity_at = time.monotonic()
+                # Error responses (429/403) carry the saturated-window
+                # snapshot — exactly when freshness matters most — so headers
+                # are ingested regardless of status.
+                if not suppress_live_usage:
+                    publish_live_usage(
+                        parse_rate_limit_headers(getattr(raw_resp, "headers", None)),
+                        account_id=codex_lb_account_id,
+                        chatgpt_account_id=None if codex_lb_account_id else account_id,
+                    )
                 if resp.status >= 400:
                     if raise_for_status:
                         error_payload = await _error_payload_from_response(resp)
@@ -2711,6 +2855,12 @@ async def _stream_responses_with_session(
         ) as resp:
             status_code = resp.status
             last_stream_activity_at = time.monotonic()
+            if not suppress_live_usage:
+                publish_live_usage(
+                    parse_rate_limit_headers(getattr(resp, "headers", None)),
+                    account_id=codex_lb_account_id,
+                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                )
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)
@@ -2789,7 +2939,7 @@ async def _stream_responses_with_session(
         headers=upstream_headers,
         method=method,
         payload_summary=_summarize_json_payload(payload_dict),
-        payload_json=payload_json if settings.log_upstream_request_payload else None,
+        payload_json=payload_json if "upstream_payload" in settings.trace_channels else None,
     )
     if transport == "http":
         archive_json(
@@ -2852,7 +3002,7 @@ async def _stream_responses_with_session(
             headers=upstream_headers,
             method=method,
             payload_summary=_summarize_json_payload(payload_dict),
-            payload_json=payload_json if settings.log_upstream_request_payload else None,
+            payload_json=payload_json if "upstream_payload" in settings.trace_channels else None,
         )
         archive_json(
             direction="codex_to_server",
@@ -2972,7 +3122,8 @@ async def _stream_responses_with_session(
         )
         return
     except CodexTransportError as exc:
-        error_code = "upstream_unavailable"
+        routed_error_code = exc.error_code or "upstream_unavailable"
+        error_code = routed_error_code
         error_message = _codex_route_transport_error_message(
             route=route,
             route_trace=route_trace,
@@ -2980,16 +3131,29 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        failure_phase = "upstream"
+        failure_phase = exc.failure_phase or "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        retryable_same_contract = True
+        retryable_same_contract = exc.retryable_same_contract
+        if routed_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and exc.retryable_same_contract:
+            # Routed Codex sessions are private to this attempt, so recovery
+            # legitimately has no shared HTTP generation for compare-and-swap.
+            raise _process_network_failure_error(
+                response_error_message,
+                exc,
+                retryable_same_contract=True,
+                failed_session=None,
+            ) from exc
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
+            response_failed_event(routed_error_code, response_error_message, response_id=get_request_id()),
         )
         return
     except aiohttp.ClientError as exc:
-        error_code = "upstream_unavailable"
+        error_code = process_network_error_code(
+            exc,
+            fallback="upstream_unavailable",
+            include_permanent_dns=not is_proxy_endpoint_failure(exc),
+        )
         error_message = _codex_route_transport_error_message(
             route=route,
             route_trace=route_trace,
@@ -2997,12 +3161,24 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        failure_phase = "upstream"
+        retryable_same_contract = transport == "http" and is_pre_dispatch_connection_failure(exc)
+        failure_phase = "connect" if retryable_same_contract else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        retryable_same_contract = True
+        # Direct HTTP streams and direct upstream WebSockets both use this
+        # leased session. Transport decides replay safety above, not whether
+        # the concrete failed shared generation must be retired.
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+            raise _process_network_failure_error(
+                response_error_message,
+                exc,
+                retryable_same_contract=retryable_same_contract,
+                failed_session=client_session,
+            ) from exc
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
+            response_failed_event(
+                error_code or "upstream_unavailable", response_error_message, response_id=get_request_id()
+            ),
         )
         return
     except asyncio.CancelledError:
@@ -3024,7 +3200,7 @@ async def _stream_responses_with_session(
             failure_phase = "upstream"
             failure_detail = "transport_error"
             failure_exception_type = type(exc).__name__
-            retryable_same_contract = True
+            retryable_same_contract = is_pre_dispatch_connection_failure(exc)
             yield format_sse_event(
                 response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
             )
@@ -3067,7 +3243,7 @@ async def _stream_responses_with_session(
             failure_phase = "upstream"
             failure_detail = "transport_error"
             failure_exception_type = type(exc).__name__
-            retryable_same_contract = True
+            retryable_same_contract = False
             yield format_sse_event(
                 response_failed_event(
                     "upstream_unavailable",
@@ -3099,7 +3275,11 @@ async def _stream_responses_with_session(
         retryable_same_contract = False
         raise
     except OSError as exc:
-        error_code = "upstream_unavailable"
+        error_code = process_network_error_code(
+            exc,
+            fallback="upstream_unavailable",
+            include_permanent_dns=not is_proxy_endpoint_failure(exc),
+        )
         error_message = _codex_route_transport_error_message(
             route=route,
             route_trace=route_trace,
@@ -3107,12 +3287,21 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        failure_phase = "upstream"
+        retryable_same_contract = transport == "http" and is_pre_dispatch_connection_failure(exc)
+        failure_phase = "connect" if retryable_same_contract else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        retryable_same_contract = True
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+            raise _process_network_failure_error(
+                response_error_message,
+                exc,
+                retryable_same_contract=retryable_same_contract,
+                failed_session=client_session,
+            ) from exc
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
+            response_failed_event(
+                error_code or "upstream_unavailable", response_error_message, response_id=get_request_id()
+            ),
         )
         return
     except Exception as exc:
@@ -3274,10 +3463,6 @@ async def compact_responses(
         return await transport.execute()
 
 
-def _is_retryable_compact_status(status_code: int) -> bool:
-    return status_code in {500, 502, 503, 504}
-
-
 @dataclass(slots=True)
 class _CompactCommandTransport:
     payload: ResponsesCompactRequest
@@ -3367,7 +3552,7 @@ class _CompactCommandTransport:
             method="POST",
             payload_summary=_summarize_json_payload(payload_dict),
             payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-            if settings.log_upstream_request_payload
+            if "upstream_payload" in settings.trace_channels
             else None,
         )
         archive_json(
@@ -3418,7 +3603,7 @@ class _CompactCommandTransport:
                     error_code, error_message = _error_details_from_envelope(error_payload)
                     failure_phase = "status"
                     failure_detail = error_message
-                    retryable_same_contract = _is_retryable_compact_status(status_code)
+                    retryable_same_contract = False
                     raise ProxyResponseError(
                         status_code,
                         error_payload,
@@ -3496,7 +3681,7 @@ class _CompactCommandTransport:
                     error_code, error_message = _error_details_from_envelope(error_payload)
                     failure_phase = "status"
                     failure_detail = error_message
-                    retryable_same_contract = _is_retryable_compact_status(resp.status)
+                    retryable_same_contract = False
                     raise ProxyResponseError(
                         resp.status,
                         error_payload,
@@ -3507,22 +3692,27 @@ class _CompactCommandTransport:
                     )
                 try:
                     data = await resp.json(content_type=None)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                     message = str(exc) or "Request to upstream timed out"
-                    error_code = "upstream_unavailable"
+                    error_code = process_network_error_code(
+                        exc,
+                        fallback="upstream_unavailable",
+                        include_permanent_dns=not is_proxy_endpoint_failure(exc),
+                    )
                     error_message = message
                     failure_phase = "body_read"
                     failure_detail = message
                     failure_exception_type = type(exc).__name__
-                    retryable_same_contract = True
+                    retryable_same_contract = False
                     raise ProxyResponseError(
                         502,
-                        openai_error("upstream_unavailable", message),
+                        openai_error(error_code, message),
                         failure_phase=failure_phase,
                         retryable_same_contract=retryable_same_contract,
                         failure_detail=failure_detail,
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
+                        failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
                     ) from exc
                 except Exception as exc:
                     error_code = "upstream_error"
@@ -3588,21 +3778,68 @@ class _CompactCommandTransport:
                 failure_detail=failure_detail,
                 failure_exception_type=failure_exception_type,
             ) from exc
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            message = str(exc) or "Request to upstream timed out"
-            error_code = "upstream_unavailable"
-            error_message = message
-            failure_phase = "connect"
-            failure_detail = message
+        except CodexTransportError as exc:
+            error_code = exc.error_code or "upstream_unavailable"
+            error_message = _codex_route_transport_error_message(
+                route=self.route,
+                route_trace=self.route_trace,
+                operation="compact",
+                exc=exc,
+            )
+            failure_phase = exc.failure_phase or ("connect" if exc.retryable_same_contract else "upstream")
+            failure_detail = "transport_error"
             failure_exception_type = type(exc).__name__
-            retryable_same_contract = True
+            retryable_same_contract = exc.retryable_same_contract
             raise ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", message),
+                openai_error(error_code, error_message),
                 failure_phase=failure_phase,
                 retryable_same_contract=retryable_same_contract,
                 failure_detail=failure_detail,
                 failure_exception_type=failure_exception_type,
+                failed_session=None,
+            ) from exc
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            message = str(exc) or "Request to upstream timed out"
+            error_code = process_network_error_code(
+                exc,
+                fallback="upstream_unavailable",
+                include_permanent_dns=not is_proxy_endpoint_failure(exc),
+            )
+            error_message = message
+            retryable_same_contract = is_pre_dispatch_connection_failure(exc)
+            failure_phase = "connect" if retryable_same_contract else "request"
+            failure_detail = message
+            failure_exception_type = type(exc).__name__
+            raise ProxyResponseError(
+                502,
+                openai_error(error_code, message),
+                failure_phase=failure_phase,
+                retryable_same_contract=retryable_same_contract,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
+            ) from exc
+        except OSError as exc:
+            message = str(exc) or "Request to upstream failed"
+            error_code = process_network_error_code(
+                exc,
+                fallback="upstream_unavailable",
+                include_permanent_dns=not is_proxy_endpoint_failure(exc),
+            )
+            error_message = message
+            failure_phase = "request"
+            failure_detail = message
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = False
+            raise ProxyResponseError(
+                502,
+                openai_error(error_code, message),
+                failure_phase=failure_phase,
+                retryable_same_contract=False,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
             ) from exc
         except Exception as exc:
             if self.route is None:
@@ -3610,15 +3847,15 @@ class _CompactCommandTransport:
             message = str(exc) or "Request to upstream failed before response"
             error_code = "upstream_unavailable"
             error_message = message
-            failure_phase = "connect"
+            failure_phase = "request"
             failure_detail = message
             failure_exception_type = type(exc).__name__
-            retryable_same_contract = True
+            retryable_same_contract = False
             raise ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", message),
                 failure_phase=failure_phase,
-                retryable_same_contract=retryable_same_contract,
+                retryable_same_contract=False,
                 failure_detail=failure_detail,
                 failure_exception_type=failure_exception_type,
             ) from exc
@@ -3782,7 +4019,7 @@ async def thread_goal_request(
         method=request_method,
         payload_summary=_summarize_json_payload(payload_dict),
         payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
+        if "upstream_payload" in settings.trace_channels
         else None,
     )
     try:
@@ -4003,7 +4240,7 @@ async def codex_control_request(
         method=request_method,
         payload_summary=_summarize_json_payload(payload_summary or {}),
         payload_json=payload.decode("utf-8", errors="replace")
-        if payload is not None and settings.log_upstream_request_payload
+        if payload is not None and "upstream_payload" in settings.trace_channels
         else None,
     )
     try:
@@ -4238,7 +4475,7 @@ async def _transcribe_audio_with_session(
         method="POST",
         payload_summary=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
         payload_json=json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
+        if "upstream_payload" in settings.trace_channels
         else None,
     )
     try:

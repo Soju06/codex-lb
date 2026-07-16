@@ -14,6 +14,7 @@
     "automations": "自动化",
     "apis": "API",
     "settings": "设置",
+    "advanced": "高级",
     "openMenu": "打开菜单",
     "adminSignIn": "管理员登录",
     "showEmails": "显示邮箱",
@@ -75,11 +76,17 @@
   "settings": {
     "page": {
       "title": "设置",
-      "subtitle": "配置路由、鉴权、API Key 管理与防火墙。",
+      "subtitle": "配置外观、鉴权与 API Key。高级调优功能位于下方的高级设置分组中。",
       "readOnlyNotice": "你当前以只读访客身份查看仪表盘。管理员控制项已禁用。",
       "trustedHeaderNotice": "仪表盘访问由可信反向代理头部鉴权。密码与 TOTP 仅作为可选的回退登录方式保留。",
       "disabledNotice": "仪表盘鉴权已被配置完全跳过。请仅在网络受限或外部已有访问控制的场景下使用此模式。",
       "savingLabel": "保存设置中..."
+    },
+    "advanced": {
+      "title": "高级设置",
+      "description": "路由调优、上游代理、模型源、防火墙、配额规划器和粘性会话。",
+      "show": "显示高级设置",
+      "hide": "隐藏高级设置"
     },
     "guestAccess": {
       "title": "访客访问",
@@ -232,6 +239,17 @@
         "placeholder": "选择账户",
         "empty": "请先导入账户再启用单账户路由。"
       },
+      "accountCapacity": {
+        "title": "单账户容量限制",
+        "description": "限制每个账户上并发的 Responses 工作。将限制设为 0 表示不限量。",
+        "responseCreateLabel": "响应创建限制",
+        "responseCreateDescription": "每个账户允许的最大并发响应创建数；0 表示不限量。",
+        "streamLabel": "流限制",
+        "streamDescription": "每个账户允许的最大并发流数；0 表示不限量。",
+        "streamRecoveryReserveLabel": "流恢复预留",
+        "streamRecoveryReserveDescription": "为恢复和重新连接工作预留流槽位。0 表示不预留；预留不能超过非零的流限制。",
+        "save": "保存容量限制"
+      },
       "stickyThresholds": {
         "primaryLabel": "粘性主阈值",
         "primaryDescription": "当主配额使用率高于此百分比时重新分配粘性会话。",
@@ -270,6 +288,30 @@
         "cooldownAria": "预热冷却时间",
         "promptAria": "预热 prompt",
         "save": "保存",
+        "saveAria": "保存预热设置",
+        "shared": {
+          "windowsLabel": "窗口",
+          "windowsAria": "预热窗口",
+          "modelLabel": "模型",
+          "cooldownLabel": "冷却时间（秒）",
+          "promptLabel": "Prompt"
+        },
+        "resetConfirmed": {
+          "badge": "重置后",
+          "title": "重置确认预热",
+          "description": "当已耗尽的账户配额重置时触发。重置前使用量达到或超过此值的账户符合条件。",
+          "thresholdLabel": "最低使用量 %",
+          "thresholdAria": "最低使用量百分比"
+        },
+        "staggeredIdle": {
+          "badge": "主动",
+          "title": "空闲错峰预热",
+          "description": "在流量到达前为空闲账户预启动 5 小时窗口。使用量低于或等于此值的账户被视为空闲。",
+          "disabledDescription": "在流量到达前为空闲账户预启动 5 小时窗口。启用以配置。",
+          "thresholdLabel": "最高使用量 %",
+          "thresholdAria": "最高使用量百分比",
+          "toggleAria": "启用空闲错峰预热"
+        },
         "windows": {
           "both": "5 小时 + 周",
           "primary": "仅 5 小时",

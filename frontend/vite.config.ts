@@ -12,7 +12,10 @@ const appVersion = packageJson.version ?? "0.0.0";
 const manualChunkPackages: Record<string, string[]> = {
   "vendor-react": ["react", "react-dom", "react-router-dom"],
   "vendor-query": ["@tanstack/react-query"],
-  "vendor-charts": ["recharts"],
+  // recharts is intentionally NOT a manual chunk: forcing it into one made
+  // the bundler hoist shared helper modules into that group, which turned
+  // the (lazy-only) 580 KB chart bundle into a static import of the entry
+  // chunk, modulepreloaded before first paint.
   "vendor-ui": ["radix-ui"],
 };
 

@@ -112,10 +112,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
     _raise_http_bridge_incompatible_admission_handoff,
+    _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
     _refresh_reused_http_bridge_session_with_handoff,
+    _renew_durable_http_bridge_lease,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
     _track_alias_registration,
@@ -479,8 +481,8 @@ class _HTTPBridgeMixin(
             else None
         )
         old_account_id: str | None = None
-        force_durable_takeover_after_detach = False
-        own_fork_locally = False
+        force_durable_takeover_after_detach = own_fork_locally = used_session_header_fallback = False
+        model_transition_parent_key: _HTTPBridgeSessionKey | None = None
         while True:
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
@@ -490,7 +492,6 @@ class _HTTPBridgeMixin(
             owner_forward: _HTTPBridgeOwnerForward | None = None
             force_durable_takeover = force_durable_takeover_after_detach
             missing_turn_state_alias = False
-            used_session_header_fallback = False
             sessions_to_close_before_create: list[_HTTPBridgeSession] = []
             session_to_return_after_close: _HTTPBridgeSession | None = None
             preserve_durable_canonical_key = (
@@ -501,6 +502,10 @@ class _HTTPBridgeMixin(
                 and key.affinity_key == durable_lookup.canonical_key
                 and key.affinity_kind != "turn_state_header"
             )
+            preserve_internal_fork_key = key.affinity_kind in {
+                "internal_unanchored_parallel",
+                "internal_model_parallel",
+            }
             require_preferred_account = (previous_response_id is not None and preferred_account_id is not None) or (
                 preferred_account_id is not None
                 and (key.strength == "hard" or not fallback_on_preferred_account_unavailable)
@@ -510,6 +515,7 @@ class _HTTPBridgeMixin(
                     incoming_turn_state is not None
                     and forwarded_affinity is None
                     and not preserve_durable_canonical_key
+                    and not preserve_internal_fork_key
                 ):
                     alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
                     alias_key = self._http_bridge_turn_state_index.get(alias_index_key)
@@ -642,6 +648,7 @@ class _HTTPBridgeMixin(
                     else None
                 )
                 if model_fork_key is not None:
+                    model_transition_parent_key = key
                     key = model_fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
@@ -1175,6 +1182,8 @@ class _HTTPBridgeMixin(
                         ):
                             evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
                             for candidate_key, candidate_session in self._http_bridge_sessions.items():
+                                if candidate_key == model_transition_parent_key:
+                                    continue
                                 if getattr(candidate_session, "unanchored_reservation_id", None) is not None:
                                     continue
                                 pending_count = self._http_bridge_pending_count_nowait(
@@ -1236,7 +1245,6 @@ class _HTTPBridgeMixin(
                             )
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
-
             try:
                 for session_to_close in sessions_to_close_before_create:
                     await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
@@ -1321,7 +1329,7 @@ class _HTTPBridgeMixin(
                     request_scope_id=request_scope_id,
                 )
                 if model_fork_key is not None:
-                    key = model_fork_key
+                    model_transition_parent_key, key = key, model_fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
                     continue
@@ -1808,22 +1816,14 @@ class _HTTPBridgeMixin(
             raise
 
     async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
-        if session.durable_session_id is None or session.durable_owner_epoch is None:
-            return
-        try:
-            lookup = await self._durable_bridge.renew_live_session(
-                session_id=session.durable_session_id,
-                api_key_id=session.key.api_key_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=session.durable_owner_epoch,
-                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                latest_turn_state=session.downstream_turn_state,
-                latest_response_id=None,
-            )
-            if lookup is not None:
-                session.durable_owner_epoch = lookup.owner_epoch
-        except Exception:
-            logger.warning("Failed to renew durable HTTP bridge session lease", exc_info=True)
+        """Renew the durable lease; callers must hold ``self._http_bridge_lock``."""
+
+        await _renew_durable_http_bridge_lease(self, session)
+
+    async def reconcile_durable_http_bridge_ownership(self) -> int:
+        """Close local sessions whose durable row is owned by another instance/epoch."""
+
+        return await _reconcile_durable_http_bridge_ownership(self)
 
     async def _create_http_bridge_session(
         self,

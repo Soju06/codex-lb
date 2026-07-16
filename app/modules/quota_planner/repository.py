@@ -4,7 +4,8 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Integer, and_, cast, func, literal, select, update
+from sqlalchemy import ColumnElement, Integer, and_, cast, func, literal, or_, select, text, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
@@ -52,9 +53,50 @@ class DemandBin:
     request_count: int
 
 
+_WARMUP_BUDGET_LOCK_KEY = "quota_planner:warmup_budget"
+
+
+def _active_warmup_budget_clause(since: datetime) -> ColumnElement[bool]:
+    """Filter warmup decisions consuming the daily count budget since ``since``.
+
+    ``executed`` decisions count by ``executed_at`` (completion time).
+    In-flight ``executing`` decisions count by the claim timestamp that
+    ``claim_warmup_decision`` stamps into ``executed_at`` at the
+    planned -> executing transition — not by ``created_at``, because the
+    scheduler persists future-scheduled decisions whose ``created_at`` can
+    precede the daily boundary; a decision planned before midnight but claimed
+    after midnight must consume the claim day's budget. Executing rows without
+    a claim timestamp (claimed by a version that predates claim stamping) fall
+    back to ``created_at``.
+    """
+    return and_(
+        QuotaPlannerDecision.action == "warmup",
+        or_(
+            and_(
+                QuotaPlannerDecision.status == "executed",
+                QuotaPlannerDecision.executed_at >= since,
+            ),
+            and_(
+                QuotaPlannerDecision.status == "executing",
+                or_(
+                    QuotaPlannerDecision.executed_at >= since,
+                    and_(
+                        QuotaPlannerDecision.executed_at.is_(None),
+                        QuotaPlannerDecision.created_at >= since,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 class QuotaPlannerRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    def _dialect_name(self) -> str:
+        bind = self._session.get_bind()
+        return bind.dialect.name if bind else "sqlite"
 
     async def get_settings(self) -> PlannerSettings:
         row = await self._session.get(QuotaPlannerSettings, _SETTINGS_ID)
@@ -106,30 +148,41 @@ class QuotaPlannerRepository:
         status: str = "planned",
         executed_at: datetime | None = None,
     ) -> QuotaPlannerDecision:
-        existing = await self._session.scalar(
+        values = {
+            "mode": mode,
+            "action": action,
+            "account_id": account_id,
+            "scheduled_at": _to_db_naive_utc(scheduled_at),
+            "executed_at": _to_db_naive_utc(executed_at),
+            "score": score,
+            "reason": reason,
+            "forecast_snapshot_hash": forecast_snapshot_hash,
+            "state_before_json": state_before_json,
+            "state_after_json": state_after_json,
+            "status": status,
+            "idempotency_key": idempotency_key,
+        }
+        # Idempotency-key upsert: concurrent writers (e.g. overlapping planner
+        # leaders during a leadership handover) converge on the surviving row
+        # instead of raising IntegrityError and aborting the planning tick.
+        if self._dialect_name() == "postgresql":
+            insert_stmt = postgresql.insert(QuotaPlannerDecision).values(**values)
+        else:
+            insert_stmt = sqlite.insert(QuotaPlannerDecision).values(**values)
+        stmt = insert_stmt.on_conflict_do_nothing(index_elements=["idempotency_key"]).returning(QuotaPlannerDecision.id)
+        async with sqlite_writer_section():
+            inserted_id = await self._session.scalar(stmt)
+            await self._session.commit()
+        if inserted_id is not None:
+            row = await self._session.get(QuotaPlannerDecision, inserted_id)
+            if row is not None:
+                return row
+        surviving = await self._session.scalar(
             select(QuotaPlannerDecision).where(QuotaPlannerDecision.idempotency_key == idempotency_key)
         )
-        if existing is not None:
-            return existing
-        row = QuotaPlannerDecision(
-            mode=mode,
-            action=action,
-            account_id=account_id,
-            scheduled_at=_to_db_naive_utc(scheduled_at),
-            executed_at=_to_db_naive_utc(executed_at),
-            score=score,
-            reason=reason,
-            forecast_snapshot_hash=forecast_snapshot_hash,
-            state_before_json=state_before_json,
-            state_after_json=state_after_json,
-            status=status,
-            idempotency_key=idempotency_key,
-        )
-        self._session.add(row)
-        async with sqlite_writer_section():
-            await self._session.commit()
-            await self._session.refresh(row)
-        return row
+        if surviving is None:
+            raise RuntimeError(f"Quota planner decision vanished for idempotency key {idempotency_key!r}")
+        return surviving
 
     async def recent_decisions(self, limit: int = 50) -> list[QuotaPlannerDecision]:
         stmt = select(QuotaPlannerDecision).order_by(QuotaPlannerDecision.created_at.desc()).limit(limit)
@@ -138,6 +191,84 @@ class QuotaPlannerRepository:
 
     async def get_decision(self, decision_id: str) -> QuotaPlannerDecision | None:
         return await self._session.get(QuotaPlannerDecision, decision_id)
+
+    async def get_decision_fresh(self, decision_id: str) -> QuotaPlannerDecision | None:
+        """Re-read a decision bypassing the identity map (fresh DB state)."""
+        return await self._session.get(QuotaPlannerDecision, decision_id, populate_existing=True)
+
+    async def claim_warmup_decision(
+        self,
+        decision_id: str,
+        *,
+        since: datetime,
+        max_warmups: int,
+        max_credits: float,
+    ) -> QuotaPlannerDecision | None:
+        """Atomically claim a planned warmup decision within the daily budgets.
+
+        The planned -> executing transition is the single authoritative budget
+        enforcement point: one conditional UPDATE whose WHERE clause embeds both
+        daily guards. The count budget includes in-flight ``executing`` decisions
+        in addition to ``executed`` ones so a probe reserves budget the moment it
+        is claimed. The claim stamps its own timestamp into ``executed_at``
+        (overwritten with the completion time when the probe finishes), and
+        executing rows count against the day they were claimed: a decision the
+        scheduler planned before midnight but that is claimed after midnight
+        consumes the new day's budget even though its ``created_at`` is
+        yesterday.
+
+        PostgreSQL serializes concurrent claims with ``pg_advisory_xact_lock`` on
+        a fixed warmup-budget key (released at commit); under READ COMMITTED two
+        concurrent UPDATEs on different decision rows would otherwise each
+        evaluate the count subquery against their own snapshot and could both
+        pass. SQLite needs no lock: the whole UPDATE (subqueries included)
+        executes atomically under SQLite's database-level single-writer lock,
+        safe across processes sharing one file.
+
+        Returns the claimed decision, or ``None`` when the claim was refused
+        (already claimed elsewhere, or a budget guard failed).
+        """
+        since = to_utc_naive(since)
+        active_warmups = (
+            select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since)).scalar_subquery()
+        )
+        warmup_cost = (
+            select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0))
+            .where(
+                and_(
+                    RequestLog.request_kind == "warmup",
+                    RequestLog.requested_at >= since,
+                    RequestLog.deleted_at.is_(None),
+                )
+            )
+            .scalar_subquery()
+        )
+        stmt = (
+            update(QuotaPlannerDecision)
+            .where(
+                QuotaPlannerDecision.id == decision_id,
+                QuotaPlannerDecision.status == "planned",
+                active_warmups < max_warmups,
+                warmup_cost < max_credits,
+            )
+            .values(status="executing", reason="warmup_executing", executed_at=to_utc_naive(utcnow()))
+            .returning(QuotaPlannerDecision.id)
+        )
+        async with sqlite_writer_section():
+            # Issue the claim at the start of a fresh transaction so its
+            # statement snapshot (and, on PostgreSQL, the advisory lock scope)
+            # is not tied to earlier reads on this session.
+            await self._session.commit()
+            if self._dialect_name() == "postgresql":
+                await self._session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                    {"key": _WARMUP_BUDGET_LOCK_KEY},
+                )
+            claimed_id = await self._session.scalar(stmt)
+            await self._session.commit()
+        if claimed_id is None:
+            return None
+        return await self._session.get(QuotaPlannerDecision, claimed_id, populate_existing=True)
 
     async def update_decision_status(
         self,
@@ -173,6 +304,18 @@ class QuotaPlannerRepository:
             return None
         await self._session.refresh(row)
         return row
+
+    async def count_active_warmups_since(self, since: datetime) -> int:
+        """Count warmup decisions consuming the daily count budget.
+
+        Includes ``executed`` decisions (by ``executed_at``) and in-flight
+        ``executing`` decisions by the claim timestamp stamped into
+        ``executed_at`` when they were claimed (see
+        ``_active_warmup_budget_clause``).
+        """
+        since = to_utc_naive(since)
+        stmt = select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since))
+        return int(await self._session.scalar(stmt) or 0)
 
     async def count_executed_warmups_since(self, since: datetime) -> int:
         since = to_utc_naive(since)

@@ -35,8 +35,15 @@ _TERMINAL_ERROR_EVENTS = {"response.failed", "response.incomplete", "error"}
 _QUOTA_ERROR_CODES = {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "usage_limit_reached"}
 _MAX_CONCURRENT_WARMUP_SENDS = 4
 _ROLLING_WINDOW_SECONDS = 300 * 60
+_SHORT_WINDOW_MAX_MINUTES = 24 * 60
 _STAGGER_SLOT_GRACE_SECONDS = 60
 _IDLE_PRIMARY_WINDOW = "primary_idle"
+# Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
+# Upstream timestamp jitter of ~1 second must not trigger a warm-up.
+_RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
+# Persist the upstream value, but treat nearby values as the same staggered-idle
+# cycle. This avoids every boundary inherent in stateless timestamp bucketing.
+_IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +86,7 @@ class LimitWarmupAttemptsRepository(Protocol):
         model: str,
         attempted_at,
         status: str = "pending",
+        reset_at_tolerance_seconds: int = 0,
     ) -> AccountLimitWarmup | None: ...
 
     async def complete_attempt(
@@ -219,6 +227,7 @@ class StreamingLimitWarmupSender:
                 route=route,
                 route_trace=route_trace,
                 allow_direct_egress=route is None,
+                codex_lb_account_id=fresh_account.id,
             ):
                 event = parse_sse_event(event_block)
                 if event is None:
@@ -370,6 +379,7 @@ class LimitWarmupService:
                         after_primary=after_primary,
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
+                        idle_threshold_percent=settings.limit_warmup_idle_threshold_percent,
                     )
                 if candidate is None:
                     continue
@@ -382,6 +392,7 @@ class LimitWarmupService:
                         reset_at=candidate.reset_at,
                         model="auto",
                         attempted_at=utcnow(),
+                        reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
                     )
                     if skipped is not None:
                         completed = await self._warmup_repo.complete_attempt(
@@ -400,6 +411,7 @@ class LimitWarmupService:
                     reset_at=candidate.reset_at,
                     model=model,
                     attempted_at=utcnow(),
+                    reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
                 )
                 if attempt is None:
                     continue
@@ -677,7 +689,10 @@ def _build_candidate(
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
-    if after.reset_at <= before.reset_at:
+    # Require a meaningful reset_at forward jump (not just upstream timestamp jitter).
+    # Upstream can report reset_at values that fluctuate by ~1 second between
+    # refresh cycles; only treat a jump of at least 60 seconds as a real reset.
+    if after.reset_at - before.reset_at < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
         return None
     return _WarmupCandidate(reset_at=after.reset_at, window=window)
 
@@ -690,17 +705,21 @@ def _build_staggered_idle_candidate(
     after_primary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
     usage_refresh_interval_seconds: int,
+    idle_threshold_percent: float = 1.0,
 ) -> _WarmupCandidate | None:
     after = after_primary.get(account.id)
     if after is None:
         return None
     if after.reset_at is None:
         return None
-    if usage_core.is_weekly_window_minutes(after.window_minutes):
+    if after.window_minutes is not None and after.window_minutes > _SHORT_WINDOW_MAX_MINUTES:
+        # Any long window (weekly, monthly, or a nonstandard duration over
+        # 24h) has no short phase to pre-start.
         return None
-    if after.used_percent > 0.0:
+    if after.used_percent > idle_threshold_percent:
         return None
 
+    window_seconds = _rolling_window_seconds(after)
     due = _staggered_idle_due(
         account.id,
         [candidate.id for candidate in accounts],
@@ -708,6 +727,7 @@ def _build_staggered_idle_candidate(
         reset_at=after.reset_at,
         interval_started_at=refresh_started_at,
         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
+        window_seconds=window_seconds,
     )
     if due is None:
         return None
@@ -715,6 +735,7 @@ def _build_staggered_idle_candidate(
         after,
         refresh_started_at=refresh_started_at,
         cycle_end=due.cycle_end,
+        window_seconds=window_seconds,
     ):
         return None
     return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
@@ -726,6 +747,15 @@ class _StaggeredIdleDue:
     slot_offset_seconds: int
 
 
+def _rolling_window_seconds(entry: UsageHistory) -> int:
+    # Derive the rolling cycle from the observed primary window duration so
+    # the stagger tracks whatever short window upstream reports; 300 minutes
+    # remains the fallback when duration metadata is missing.
+    if entry.window_minutes is not None and entry.window_minutes > 0:
+        return int(entry.window_minutes) * 60
+    return _ROLLING_WINDOW_SECONDS
+
+
 def _staggered_idle_due(
     account_id: str,
     account_ids: list[str],
@@ -734,6 +764,7 @@ def _staggered_idle_due(
     reset_at: int,
     interval_started_at: datetime | None = None,
     usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
+    window_seconds: int = _ROLLING_WINDOW_SECONDS,
 ) -> _StaggeredIdleDue | None:
     if not account_ids:
         return None
@@ -744,11 +775,11 @@ def _staggered_idle_due(
         return None
 
     now_epoch = naive_utc_to_epoch(now)
-    cycle_start = reset_at - _ROLLING_WINDOW_SECONDS
+    cycle_start = reset_at - window_seconds
     if now_epoch < cycle_start or now_epoch >= reset_at:
         return None
     elapsed = now_epoch - cycle_start
-    slot_offset = int(account_index * _ROLLING_WINDOW_SECONDS / len(ordered_account_ids))
+    slot_offset = int(account_index * window_seconds / len(ordered_account_ids))
     grace_seconds = max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds)
     interval_start_epoch = naive_utc_to_epoch(interval_started_at) if interval_started_at is not None else now_epoch
     interval_start_epoch = min(interval_start_epoch, now_epoch)
@@ -758,7 +789,7 @@ def _staggered_idle_due(
     if slot_offset + grace_seconds <= interval_start_elapsed:
         return None
     return _StaggeredIdleDue(
-        cycle_end=cycle_start + _ROLLING_WINDOW_SECONDS,
+        cycle_end=cycle_start + window_seconds,
         slot_offset_seconds=slot_offset,
     )
 
@@ -768,11 +799,12 @@ def _usage_entry_refreshed_for_cycle(
     *,
     refresh_started_at: datetime | None,
     cycle_end: int | None,
+    window_seconds: int = _ROLLING_WINDOW_SECONDS,
 ) -> bool:
     if entry.recorded_at is None:
         return False
     if cycle_end is not None:
-        cycle_start = cycle_end - _ROLLING_WINDOW_SECONDS
+        cycle_start = cycle_end - window_seconds
         if entry.recorded_at < datetime.fromtimestamp(cycle_start, tz=timezone.utc).replace(tzinfo=None):
             return False
         if entry.reset_at is not None and entry.reset_at <= cycle_start:
@@ -825,3 +857,9 @@ def _truncate(value: str | None, limit: int = 1000) -> str | None:
     if len(value) <= limit:
         return value
     return value[: limit - 1] + "..."
+
+
+def _attempt_reset_at_tolerance(candidate: _WarmupCandidate) -> int:
+    if candidate.window == _IDLE_PRIMARY_WINDOW:
+        return _IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS
+    return 0

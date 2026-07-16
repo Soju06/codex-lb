@@ -62,6 +62,7 @@ def _settings(**overrides: object) -> DashboardSettings:
         "limit_warmup_prompt": "Say OK.",
         "limit_warmup_cooldown_seconds": 3600,
         "limit_warmup_exhausted_threshold_percent": 99.0,
+        "limit_warmup_idle_threshold_percent": 1.0,
         "limit_warmup_min_available_percent": 100.0,
         "limit_warmup_staggered_idle_enabled": False,
     }
@@ -92,8 +93,14 @@ class FakeWarmupRepo:
         model: str,
         attempted_at,
         status: str = "pending",
+        reset_at_tolerance_seconds: int = 0,
     ) -> AccountLimitWarmup | None:
-        if any(row.account_id == account_id and row.window == window and row.reset_at == reset_at for row in self.rows):
+        if any(
+            row.account_id == account_id
+            and row.window == window
+            and abs(row.reset_at - reset_at) <= reset_at_tolerance_seconds
+            for row in self.rows
+        ):
             return None
         row = AccountLimitWarmup(
             id=self.next_id,
@@ -921,6 +928,43 @@ def test_staggered_idle_slot_is_stable_and_spread() -> None:
     assert other.slot_offset_seconds == 6000
 
 
+def test_staggered_idle_slot_uses_observed_window_duration() -> None:
+    # A 60-minute observed window spreads slots across 3600 seconds instead
+    # of the 300-minute fallback.
+    reset_at = 10_000
+    window_seconds = 3_600
+    window_start = reset_at - window_seconds
+
+    first = limit_warmup_service._staggered_idle_due(
+        "acc_1",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+    second = limit_warmup_service._staggered_idle_due(
+        "acc_2",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start + 1_200, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+    outside = limit_warmup_service._staggered_idle_due(
+        "acc_1",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start - 1, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+
+    assert first is not None
+    assert first.cycle_end == reset_at
+    assert first.slot_offset_seconds == 0
+    assert second is not None
+    assert second.slot_offset_seconds == 1_200
+    assert outside is None
+
+
 def test_staggered_idle_slot_uses_account_reset_window() -> None:
     reset_at = 20_000
     window_start = reset_at - 18_000
@@ -1055,6 +1099,43 @@ async def test_staggered_idle_warmup_skips_when_reset_at_is_missing(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_staggered_idle_warmup_skips_long_nonstandard_windows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={
+            account.id: UsageHistory(
+                account_id=account.id,
+                used_percent=0,
+                reset_at=90_000,
+                window="primary",
+                # A 25h window is neither the weekly nor monthly default but
+                # is still too long to phase-plan.
+                window_minutes=1500,
+                recorded_at=utcnow(),
+            )
+        },
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_staggered_idle_warmup_ignores_selected_reset_windows(monkeypatch) -> None:
     monkeypatch.setattr(
         limit_warmup_service,
@@ -1085,7 +1166,7 @@ async def test_staggered_idle_warmup_ignores_selected_reset_windows(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_staggered_idle_warmup_requires_fully_unused_primary_window(monkeypatch) -> None:
+async def test_staggered_idle_warmup_requires_unused_primary_window(monkeypatch) -> None:
     monkeypatch.setattr(
         limit_warmup_service,
         "utcnow",
@@ -1101,6 +1182,7 @@ async def test_staggered_idle_warmup_requires_fully_unused_primary_window(monkey
         accounts=accounts,
         settings=_settings(
             limit_warmup_min_available_percent=80.0,
+            limit_warmup_idle_threshold_percent=1.0,
             limit_warmup_staggered_idle_enabled=True,
         ),
         before_primary={account.id: _usage(account.id, used_percent=10, reset_at=18_000)},
@@ -1111,6 +1193,187 @@ async def test_staggered_idle_warmup_requires_fully_unused_primary_window(monkey
 
     assert sender.calls == []
     assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_accepts_upstream_idle_floor(monkeypatch) -> None:
+    """Upstream reports a 1.0% floor for idle primary windows; the configurable
+    idle threshold lets operators treat that as idle so staggered idle
+    warm-up actually fires instead of being dead code."""
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(
+            limit_warmup_idle_threshold_percent=1.0,
+            limit_warmup_staggered_idle_enabled=True,
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert len(repo.rows) == 1
+    assert repo.rows[0].window == "primary_idle"
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_dedupes_across_reset_at_jitter(monkeypatch) -> None:
+    """Upstream reset_at can jitter by ~1 second between refresh cycles.
+    The dedupe key must be stable so a second refresh cycle within the same
+    5h window does not create a duplicate primary_idle attempt."""
+    now = datetime.fromtimestamp(6005, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    # Disable cooldown so the second refresh actually reaches the dedupe path
+    settings = _settings(limit_warmup_staggered_idle_enabled=True, limit_warmup_cooldown_seconds=0)
+
+    # First refresh: reset_at = 18000
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=settings,
+        before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000, recorded_at=now)},
+        after_secondary={},
+    )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+
+    # Second refresh: reset_at jitters by 1 second to 18001
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=settings,
+        before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_001)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_001, recorded_at=now)},
+        after_secondary={},
+    )
+
+    # Should NOT create a second attempt — the persisted first reset is within
+    # the staggered-idle tolerance of the refreshed value.
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].reset_at == 18000
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_dedupe_has_no_minute_boundary(monkeypatch) -> None:
+    """Adjacent jitter values remain one attempt even when they straddle a
+    minute boundary, where floor- or round-based canonicalization would split."""
+    now = datetime.fromtimestamp(6060, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+    settings = _settings(limit_warmup_staggered_idle_enabled=True, limit_warmup_cooldown_seconds=0)
+
+    for reset_at in (18_059, 18_060):
+        await service.run_after_usage_refresh(
+            accounts=accounts,
+            settings=settings,
+            before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=reset_at)},
+            before_secondary={},
+            after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=reset_at, recorded_at=now)},
+            after_secondary={},
+        )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].reset_at == 18_059
+
+
+@pytest.mark.asyncio
+async def test_regular_warmup_ignores_reset_at_jitter(monkeypatch) -> None:
+    """Upstream reset_at can fluctuate by ~1 second between refresh cycles.
+    A 1-second jitter must not trigger a reset-confirmed warm-up."""
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_windows="primary",
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1783829221)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1783829222)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_regular_warmup_boundary_59_seconds_rejected(monkeypatch) -> None:
+    """A reset_at jump of exactly 59 seconds must NOT trigger a warm-up."""
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_windows="primary",
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=1059)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_regular_warmup_boundary_60_seconds_accepted(monkeypatch) -> None:
+    """A reset_at jump of exactly 60 seconds MUST trigger a warm-up."""
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_windows="primary",
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=1060)},
+        after_secondary={},
+    )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].window == "primary"
 
 
 @pytest.mark.asyncio

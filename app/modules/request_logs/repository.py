@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.config.settings import get_settings
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
-from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
+from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestKind, RequestLog
@@ -22,6 +25,38 @@ from app.db.session import sqlite_writer_section
 class _RequestLogFilters:
     conditions: list
     needs_related_search_joins: bool
+
+
+# The exact COUNT(*) behind the request-log listing's "X-Y of N" scans the
+# whole filtered set on PostgreSQL; the dashboard re-runs it on every 30s
+# poll and every pagination click even though the displayed total is
+# tolerant of short staleness. Cache it per filter signature for a small
+# TTL (configurable; 0 disables, which the test suite uses so totals stay
+# exact within a test).
+_COUNT_CACHE_MAX_ENTRIES = 256
+_recent_count_cache: dict[tuple, tuple[int, float]] = {}
+
+
+def _clear_recent_count_cache() -> None:
+    _recent_count_cache.clear()
+
+
+def _cached_recent_count(key: tuple) -> int | None:
+    entry = _recent_count_cache.get(key)
+    if entry is None:
+        return None
+    total, expires_at = entry
+    if time.monotonic() >= expires_at:
+        _recent_count_cache.pop(key, None)
+        return None
+    return total
+
+
+def _store_recent_count(key: tuple, total: int, ttl_seconds: float) -> None:
+    if len(_recent_count_cache) >= _COUNT_CACHE_MAX_ENTRIES:
+        oldest = min(_recent_count_cache, key=lambda existing: _recent_count_cache[existing][1])
+        _recent_count_cache.pop(oldest, None)
+    _recent_count_cache[key] = (total, time.monotonic() + ttl_seconds)
 
 
 class RequestLogsRepository:
@@ -183,6 +218,88 @@ class RequestLogsRepository:
         row = result.first()
         return str(row[0]) if row and row[0] else None
 
+    async def aggregate_usage_metrics_since(self, since: datetime) -> UsageSummaryLogsAggregate:
+        """Aggregate the usage-summary window in SQL instead of hydrating
+        every RequestLog row (the secondary window is typically 7 days).
+
+        Matches the Python log helpers exactly: output tokens fall back to
+        reasoning tokens, cached tokens clamp per-row to [0, input_tokens],
+        and models whose costs are all NULL are omitted from per-model cost.
+        """
+        dialect = self._session.get_bind().dialect.name
+        # SQLite's two-argument min()/max() scalar functions are its
+        # least()/greatest().
+        least = func.least if dialect == "postgresql" else func.min
+        greatest = func.greatest if dialect == "postgresql" else func.max
+
+        window = [RequestLog.requested_at >= since, self._exclude_warmup_clause()]
+        output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        tokens_expr = func.coalesce(RequestLog.input_tokens, 0) + output_expr
+        cached_expr = case(
+            (RequestLog.cached_input_tokens.is_(None), 0),
+            (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
+            else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
+        )
+        # ONE statement = one snapshot: totals, top error, and per-model cost
+        # must describe the same committed row set (the legacy path read one
+        # SELECT and reduced it in Python, which was internally consistent;
+        # separate statements under READ COMMITTED are not). The grouped
+        # result stays tiny (models x error codes) and everything derives
+        # from it in Python.
+        is_error_expr = (RequestLog.status != literal_column("'success'")).label("is_error")
+        rows = (
+            await self._session.execute(
+                select(
+                    RequestLog.model,
+                    is_error_expr,
+                    RequestLog.error_code,
+                    func.count().label("request_count"),
+                    func.coalesce(func.sum(tokens_expr), 0).label("total_tokens"),
+                    func.coalesce(func.sum(cached_expr), 0).label("cached_input_tokens"),
+                    func.sum(RequestLog.cost_usd).label("cost_usd"),
+                    func.count(RequestLog.cost_usd).label("cost_count"),
+                )
+                .where(*window)
+                .group_by(RequestLog.model, is_error_expr, RequestLog.error_code)
+            )
+        ).all()
+
+        request_count = 0
+        error_count = 0
+        total_tokens = 0
+        cached_input_tokens = 0
+        error_code_counts: dict[str, int] = {}
+        cost_sums: dict[str, float] = {}
+        cost_counts: dict[str, int] = {}
+        for model, is_error, error_code, group_count, group_tokens, group_cached, group_cost, cost_count in rows:
+            group_count = int(group_count or 0)
+            request_count += group_count
+            total_tokens += int(group_tokens or 0)
+            cached_input_tokens += int(group_cached or 0)
+            if is_error:
+                error_count += group_count
+                if error_code:
+                    error_code_counts[error_code] = error_code_counts.get(error_code, 0) + group_count
+            cost_sums[model] = cost_sums.get(model, 0.0) + float(group_cost or 0.0)
+            cost_counts[model] = cost_counts.get(model, 0) + int(cost_count or 0)
+
+        top_error = None
+        if error_code_counts:
+            # Deterministic tie-break: highest count, then code ascending
+            # (the same rule _top_error_stmt uses for the dashboard).
+            top_error = min(error_code_counts, key=lambda code: (-error_code_counts[code], code))
+
+        return UsageSummaryLogsAggregate(
+            request_count=request_count,
+            error_count=error_count,
+            total_tokens=total_tokens,
+            cached_input_tokens=cached_input_tokens,
+            top_error=top_error,
+            # Models whose costs are all NULL stay out, matching the legacy
+            # per-row skip of None costs.
+            cost_by_model=sorted((model, cost_sums[model]) for model, count in cost_counts.items() if count > 0),
+        )
+
     async def top_error_between(self, since: datetime, until: datetime) -> str | None:
         stmt = self._top_error_stmt(since, until)
         result = await self._session.execute(stmt)
@@ -223,6 +340,7 @@ class RequestLogsRepository:
         status: str,
         error_code: str | None,
         latency_first_token_ms: int | None = None,
+        latency_queue_ms: int | None = None,
         latency_response_created_ms: int | None = None,
         latency_first_upstream_event_ms: int | None = None,
         latency_response_create_gate_wait_ms: int | None = None,
@@ -305,6 +423,7 @@ class RequestLogsRepository:
                 reasoning_effort=reasoning_effort,
                 latency_ms=latency_ms,
                 latency_first_token_ms=latency_first_token_ms,
+                latency_queue_ms=latency_queue_ms,
                 latency_response_created_ms=latency_response_created_ms,
                 latency_first_upstream_event_ms=latency_first_upstream_event_ms,
                 latency_response_create_gate_wait_ms=latency_response_create_gate_wait_ms,
@@ -340,7 +459,9 @@ class RequestLogsRepository:
             self._session.add(log)
             try:
                 await self._session.commit()
-                await self._session.refresh(log)
+                # No refresh: every column is set explicitly before insert and
+                # expire_on_commit=False, so the round trip was pure overhead
+                # on every request's log write.
                 return log
             except sa_exc.ResourceClosedError:
                 return log
@@ -426,7 +547,28 @@ class RequestLogsRepository:
             stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         logs = list(result.scalars().all())
-        total = await self._count_recent(filters)
+
+        ttl_seconds = get_settings().request_log_count_cache_ttl_seconds
+        if ttl_seconds <= 0:
+            return logs, await self._count_recent(filters)
+        cache_key = (
+            search,
+            since,
+            until,
+            tuple(account_ids or ()),
+            tuple(api_key_ids or ()),
+            tuple(model_options or ()),
+            tuple(models or ()),
+            tuple(reasoning_efforts or ()),
+            include_success,
+            include_error_other,
+            tuple(sorted(error_codes_in)) if error_codes_in else None,
+            tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
+        )
+        total = _cached_recent_count(cache_key)
+        if total is None:
+            total = await self._count_recent(filters)
+            _store_recent_count(cache_key, total, ttl_seconds)
         return logs, total
 
     async def _count_recent(self, filters: _RequestLogFilters) -> int:
@@ -480,6 +622,23 @@ class RequestLogsRepository:
             exclude_soft_deleted=True,
         )
 
+        unfiltered = not any((since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts))
+        if unfiltered:
+            # PostgreSQL has no loose index scan: with no user filters each
+            # DISTINCT below is a full pass over request_logs, four times per
+            # filter-panel load. Emulate the skip scan instead — one indexed
+            # probe per distinct value.
+            return (
+                [value for value in await self._distinct_skip_scan(RequestLog.account_id, filters.conditions) if value],
+                await self._pair_facet_skip_scan(RequestLog.model, RequestLog.reasoning_effort, filters.conditions),
+                [
+                    value
+                    for value in await self._distinct_skip_scan(RequestLog.api_key_id, api_key_facet_filters.conditions)
+                    if value
+                ],
+                await self._pair_facet_skip_scan(RequestLog.status, RequestLog.error_code, filters.conditions),
+            )
+
         account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
         model_stmt = (
             select(RequestLog.model, RequestLog.reasoning_effort)
@@ -510,6 +669,51 @@ class RequestLogsRepository:
         api_key_ids = [row[0] for row in api_key_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
         return account_ids, model_options, api_key_ids, status_values
+
+    async def _distinct_skip_scan(
+        self,
+        column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
+        conditions: list,
+    ) -> list[str]:
+        """Loose-index-scan emulation: seed min(column), then min(column) >
+        previous, one btree probe per distinct value. NULLs never seed or
+        chain (min() skips them); empty strings are preserved — the legacy
+        DISTINCT path only drops falsy values per facet, in the callers."""
+        seed = select(func.min(column).label("val")).where(*conditions)
+        skip = seed.cte("facet_skip", recursive=True)
+        successor = select(func.min(column)).where(*conditions, column > skip.c.val).scalar_subquery()
+        skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
+        stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
+        rows = await self._session.execute(stmt)
+        return [value for (value,) in rows.all() if value is not None]
+
+    async def _pair_facet_skip_scan(
+        self,
+        leading: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
+        second: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
+        conditions: list,
+    ) -> list[tuple[str, str | None]]:
+        """(leading, second) facet: skip-scan the leading column, then per
+        value probe a `(value, NULL)` pair and skip-scan the non-NULL second
+        values. NULL pair placement follows the backend's ORDER BY ASC NULL
+        ordering (SQLite: first, PostgreSQL: last) so results match the
+        legacy DISTINCT path exactly."""
+        nulls_first = self._session.get_bind().dialect.name == "sqlite"
+        pairs: list[tuple[str, str | None]] = []
+        for value in await self._distinct_skip_scan(leading, conditions):
+            if not value:
+                # Legacy DISTINCT drops falsy leading values in Python.
+                continue
+            value_conditions = [*conditions, leading == value]
+            null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
+            has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
+            second_values = await self._distinct_skip_scan(second, value_conditions)
+            if has_null and nulls_first:
+                pairs.append((value, None))
+            pairs.extend((value, second_value) for second_value in second_values)
+            if has_null and not nulls_first:
+                pairs.append((value, None))
+        return pairs
 
     async def get_api_key_names_by_ids(self, api_key_ids: list[str]) -> dict[str, str]:
         unique_ids = sorted({key_id for key_id in api_key_ids if key_id})

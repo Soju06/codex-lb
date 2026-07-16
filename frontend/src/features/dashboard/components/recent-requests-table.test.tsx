@@ -120,6 +120,9 @@ describe("RecentRequestsTable", () => {
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
+             outputTokensRaw: null,
+             latencyFirstTokenMs: null,
+            latencyQueueMs: null,
              cachedInputTokens: 200,
              reasoningEffort: "high",
              costUsd: 0.01,
@@ -171,6 +174,103 @@ describe("RecentRequestsTable", () => {
     expect(writeText).toHaveBeenCalledWith(longError);
   });
 
+  it("shows TTFT and output-token TPS beside tokens", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-speed",
+            planType: "plus",
+            apiKeyName: "Key Speed",
+            apiKeyId: "key-speed",
+            requestId: "req-speed",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1200,
+            inputTokens: 1000,
+            outputTokens: 200,
+            outputTokensRaw: 200,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1000,
+            latencyFirstTokenMs: 200,
+            latencyQueueMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const row = screen.getByText("gpt-5.1").closest("tr");
+
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("200ms")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("250.0")).toBeInTheDocument();
+  });
+
+  it("does not calculate TPS from fallback output tokens", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-reasoning",
+            planType: "plus",
+            apiKeyName: "Key Reasoning",
+            apiKeyId: "key-reasoning",
+            requestId: "req-reasoning",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1200,
+            inputTokens: 1000,
+            outputTokens: 200,
+            outputTokensRaw: null,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1000,
+            latencyFirstTokenMs: 200,
+            latencyQueueMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const row = screen.getByText("gpt-5.1").closest("tr");
+
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("200ms")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("--")).toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByText("250.0")).not.toBeInTheDocument();
+  });
+
   it("renders empty state", () => {
     render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
@@ -206,6 +306,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
@@ -234,6 +337,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
@@ -276,6 +382,9 @@ describe("RecentRequestsTable", () => {
              tokens: 1,
              inputTokens: 1,
              outputTokens: 0,
+             outputTokensRaw: null,
+             latencyFirstTokenMs: null,
+            latencyQueueMs: null,
              cachedInputTokens: null,
              reasoningEffort: null,
              costUsd: 0,
@@ -319,6 +428,9 @@ describe("RecentRequestsTable", () => {
              tokens: 1,
              inputTokens: 1,
              outputTokens: 0,
+             outputTokensRaw: null,
+             latencyFirstTokenMs: null,
+            latencyQueueMs: null,
              cachedInputTokens: null,
              reasoningEffort: null,
              costUsd: 0,
@@ -363,6 +475,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1400,
             inputTokens: 1000,
             outputTokens: 400,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: 200,
             reasoningEffort: null,
             costUsd: 0.01,
@@ -418,6 +533,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
@@ -477,6 +595,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
@@ -528,6 +649,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: 0,
             reasoningEffort: null,
             costUsd: 0.01,
@@ -576,6 +700,9 @@ describe("RecentRequestsTable", () => {
             tokens: 700,
             inputTokens: 700,
             outputTokens: null,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: 200,
             reasoningEffort: null,
             costUsd: 0.01,
@@ -629,6 +756,9 @@ describe("RecentRequestsTable", () => {
             tokens: null,
             inputTokens: 1000,
             outputTokens: null,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: 200,
             reasoningEffort: null,
             costUsd: null,
@@ -684,6 +814,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
@@ -741,6 +874,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1,
             inputTokens: 1,
             outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 0,
@@ -794,6 +930,9 @@ describe("RecentRequestsTable", () => {
             tokens: 1500,
             inputTokens: 1000,
             outputTokens: 500,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
             cachedInputTokens: null,
             reasoningEffort: null,
             costUsd: 4.321234,

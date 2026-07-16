@@ -4,10 +4,11 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 RING_HEARTBEAT_INTERVAL_SECONDS = 10
 RING_STALE_THRESHOLD_SECONDS = 30
 RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
+RING_MEMBER_RETENTION_SECONDS = 24 * 60 * 60
 
 
 class RingMembershipService:
@@ -162,6 +164,17 @@ class RingMembershipService:
             )
             await session.execute(stmt)
             await session.commit()
+
+    async def purge_stale_before(self, cutoff: datetime) -> int:
+        """Delete ring rows whose heartbeat predates the cutoff (dead replicas)."""
+
+        async with self._session() as session:
+            result = cast(
+                CursorResult[Any],
+                await session.execute(delete(BridgeRingMember).where(BridgeRingMember.last_heartbeat_at < cutoff)),
+            )
+            await session.commit()
+        return int(result.rowcount or 0)
 
     async def list_active(
         self,

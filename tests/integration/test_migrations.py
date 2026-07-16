@@ -514,6 +514,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_exhausted_threshold_percent" in dashboard_columns
+            assert "limit_warmup_idle_threshold_percent" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
             exhausted_threshold = (
                 await session.execute(
@@ -521,6 +522,12 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 )
             ).scalar_one()
             assert exhausted_threshold == 99.0
+            idle_threshold = (
+                await session.execute(
+                    text("SELECT limit_warmup_idle_threshold_percent FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert idle_threshold == 1.0
             assert "hide_upstream_quota_from_api_keys" in dashboard_columns
             assert dashboard_column_defaults["hide_upstream_quota_from_api_keys"] in ("0", 0, False)
             assert "single_account_id" in dashboard_columns
@@ -949,3 +956,154 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
 
     assert free_windows == ["old-primary", "old-secondary", "old-primary"]
     assert paid_windows == ["primary", "secondary", None]
+
+
+@pytest.mark.asyncio
+async def test_reset_credit_redeem_tables_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command as alembic_command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'reset-credit-redeem-tables.sqlite'}"
+    revision = "20260713_070000_add_reset_credit_redeem_tables"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=True))
+
+    async def _table_names() -> set[str]:
+        engine = create_async_engine(db_url, future=True)
+        try:
+            async with engine.connect() as conn:
+                rows = await conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'"))
+                return {row[0] for row in rows}
+        finally:
+            await engine.dispose()
+
+    upgraded_tables = await _table_names()
+    assert "reset_credit_redeem_requests" in upgraded_tables
+    assert "reset_credit_redeem_claims" in upgraded_tables
+
+    await to_thread.run_sync(lambda: alembic_command.downgrade(_build_alembic_config(db_url), parent_revision))
+
+    downgraded_tables = await _table_names()
+    assert "reset_credit_redeem_requests" not in downgraded_tables
+    assert "reset_credit_redeem_claims" not in downgraded_tables
+
+    # Upgrading again after the downgrade must succeed (round-trip safety).
+    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+    assert "reset_credit_redeem_requests" in await _table_names()
+
+
+@pytest.mark.asyncio
+async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-registry-snapshot.sqlite'}"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+
+    def _table_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_registry_snapshot"):
+            return None
+        return {column["name"] for column in inspector.get_columns("model_registry_snapshot")}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_table_state)
+        assert columns == {"id", "schema_version", "content_hash", "payload", "refreshed_at", "leader_id"}
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_account_refresh_claims_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade creates the refresh-claim coordination table; downgrade drops it;
+    a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'refresh-claims.sqlite'}"
+    parent_revision = "20260713_020000_add_model_registry_snapshot"
+    claim_revision = "20260713_040000_add_account_refresh_claims"
+
+    async def _has_claims_table(engine) -> bool:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'account_refresh_claims'")
+            )
+            return result.scalar_one_or_none() is not None
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert not await _has_claims_table(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, claim_revision, bootstrap_legacy=False))
+        assert await _has_claims_table(engine)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert not await _has_claims_table(engine)
+
+        # Single-head sanity: upgrading to "head" from the parent must pass
+        # through the claim revision without a multi-head failure.
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert await _has_claims_table(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_oauth_flow_states_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade creates the OAuth flow-state coordination table; downgrade drops
+    it; a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'oauth-flow-states.sqlite'}"
+    parent_revision = "20260713_040000_add_account_refresh_claims"
+    flow_revision = "20260714_000000_add_oauth_flow_states"
+
+    async def _has_flow_table(engine) -> bool:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oauth_flow_states'")
+            )
+            return result.scalar_one_or_none() is not None
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert not await _has_flow_table(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, flow_revision, bootstrap_legacy=False))
+        assert await _has_flow_table(engine)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert not await _has_flow_table(engine)
+
+        # Single-head sanity: upgrading to "head" from the parent must pass
+        # through the flow revision without a multi-head failure.
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert await _has_flow_table(engine)
+    finally:
+        await engine.dispose()

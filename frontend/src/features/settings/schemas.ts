@@ -73,6 +73,9 @@ export const DashboardSettingsSchema = z
       .optional()
       .default(5),
     singleAccountId: z.string().nullable().optional().default(null),
+    proxyAccountResponseCreateLimit: z.number().int().min(0).optional().default(4),
+    proxyAccountStreamLimit: z.number().int().min(0).optional().default(8),
+    proxyAccountStreamRecoveryReserve: z.number().int().min(0).optional().default(1),
     openaiCacheAffinityMaxAgeSeconds: z
       .number()
       .int()
@@ -109,6 +112,12 @@ export const DashboardSettingsSchema = z
       .max(100)
       .optional()
       .default(99),
+    limitWarmupIdleThresholdPercent: z
+      .number()
+      .positive()
+      .max(100)
+      .optional()
+      .default(1),
     limitWarmupMinAvailablePercent: z
       .number()
       .positive()
@@ -120,6 +129,7 @@ export const DashboardSettingsSchema = z
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
+    version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
@@ -144,44 +154,64 @@ export const DashboardSettingsSchema = z
     };
   });
 
-export const SettingsUpdateRequestSchema = z.object({
-  stickyThreadsEnabled: z.boolean().optional(),
-  upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
-  prohibitFastMode: z.boolean().optional(),
-  httpDownstreamTransportPolicy: HttpDownstreamTransportPolicySchema.optional(),
-  upstreamProxyRoutingEnabled: z.boolean().optional(),
-  upstreamProxyDefaultPoolId: z.string().nullable().optional(),
-  preferEarlierResetAccounts: z.boolean().optional(),
-  preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
-  routingStrategy: RoutingStrategySchema.optional(),
-  relativeAvailabilityPower: z.number().positive().optional(),
-  relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
-  singleAccountId: z.string().nullable().optional(),
-  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
-  dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
-  stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
-  stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
-  stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
-  additionalQuotaRoutingPolicies: z
-    .record(z.string(), AdditionalQuotaRoutingPolicySchema)
-    .optional(),
-  warmupModel: z.string().trim().min(1).optional(),
-  importWithoutOverwrite: z.boolean().optional(),
-  totpRequiredOnLogin: z.boolean().optional(),
-  apiKeyAuthEnabled: z.boolean().optional(),
-  hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
-  limitWarmupEnabled: z.boolean().optional(),
-  limitWarmupWindows: LimitWarmupWindowsSchema.optional(),
-  limitWarmupModel: LimitWarmupModelSchema.optional(),
-  limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
-  limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
-  limitWarmupExhaustedThresholdPercent: z.number().positive().max(100).optional(),
-  limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
-  weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
-  weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional(),
-  guestAccessEnabled: z.boolean().optional(),
-  limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
-});
+export const SettingsUpdateRequestSchema = z
+  .object({
+    expectedVersion: z.number().int().min(1).optional(),
+    stickyThreadsEnabled: z.boolean().optional(),
+    upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
+    prohibitFastMode: z.boolean().optional(),
+    httpDownstreamTransportPolicy: HttpDownstreamTransportPolicySchema.optional(),
+    upstreamProxyRoutingEnabled: z.boolean().optional(),
+    upstreamProxyDefaultPoolId: z.string().nullable().optional(),
+    preferEarlierResetAccounts: z.boolean().optional(),
+    preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
+    routingStrategy: RoutingStrategySchema.optional(),
+    relativeAvailabilityPower: z.number().positive().optional(),
+    relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
+    singleAccountId: z.string().nullable().optional(),
+    proxyAccountResponseCreateLimit: z.number().int().min(0).optional(),
+    proxyAccountStreamLimit: z.number().int().min(0).optional(),
+    proxyAccountStreamRecoveryReserve: z.number().int().min(0).optional(),
+    openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
+    dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
+    stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    additionalQuotaRoutingPolicies: z
+      .record(z.string(), AdditionalQuotaRoutingPolicySchema)
+      .optional(),
+    warmupModel: z.string().trim().min(1).optional(),
+    importWithoutOverwrite: z.boolean().optional(),
+    totpRequiredOnLogin: z.boolean().optional(),
+    apiKeyAuthEnabled: z.boolean().optional(),
+    hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
+    limitWarmupEnabled: z.boolean().optional(),
+    limitWarmupWindows: LimitWarmupWindowsSchema.optional(),
+    limitWarmupModel: LimitWarmupModelSchema.optional(),
+    limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
+    limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
+    limitWarmupExhaustedThresholdPercent: z.number().positive().max(100).optional(),
+    limitWarmupIdleThresholdPercent: z.number().positive().max(100).optional(),
+    limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
+    weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
+    weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional(),
+    guestAccessEnabled: z.boolean().optional(),
+    limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
+  })
+  .superRefine((settings, ctx) => {
+    if (
+      settings.proxyAccountStreamLimit !== undefined &&
+      settings.proxyAccountStreamLimit > 0 &&
+      settings.proxyAccountStreamRecoveryReserve !== undefined &&
+      settings.proxyAccountStreamRecoveryReserve > settings.proxyAccountStreamLimit
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["proxyAccountStreamRecoveryReserve"],
+        message: "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
+      });
+    }
+  });
 
 type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 type StickyThresholdPresenceFlags = Pick<

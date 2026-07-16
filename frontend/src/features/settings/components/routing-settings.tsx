@@ -2,6 +2,7 @@ import { useReducer } from "react";
 import { Route, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -22,6 +23,7 @@ import type {
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { isSingleAccountRoutingSelectable } from "@/utils/account-status";
+import { cn } from "@/lib/utils";
 
 const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
@@ -42,6 +44,17 @@ const WEEKLY_PACE_SMOOTHING_OPTIONS = [
   { value: 120, label: "2h" },
   { value: 240, label: "4h" },
 ] as const;
+
+const STRATEGY_GUIDE_VALUES: Record<string, string> = {
+  capacityWeighted: "capacity_weighted",
+  relativeAvailability: "relative_availability",
+  usageWeighted: "usage_weighted",
+  roundRobin: "round_robin",
+  fillFirst: "fill_first",
+  sequentialDrain: "sequential_drain",
+  resetDrain: "reset_drain",
+  singleAccount: "single_account",
+};
 
 function parseWorkingDays(value: string): Set<number> {
   const days = new Set(
@@ -76,6 +89,9 @@ function accountLabel(account: AccountSummary): string {
 type RoutingSettingsDraft = {
   warmupModel: string;
   cacheAffinityTtl: string;
+  proxyAccountResponseCreateLimit: string;
+  proxyAccountStreamLimit: string;
+  proxyAccountStreamRecoveryReserve: string;
   relativeAvailabilityPower: string;
   relativeAvailabilityTopK: string;
   stickyPrimaryThreshold: string;
@@ -84,6 +100,7 @@ type RoutingSettingsDraft = {
   limitWarmupPrompt: string;
   limitWarmupCooldown: string;
   limitWarmupExhaustedThreshold: string;
+  limitWarmupIdleThreshold: string;
   additionalQuotaKey: string;
   additionalQuotaPolicy: AdditionalQuotaRoutingPolicy;
 };
@@ -92,6 +109,9 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
   return {
     warmupModel: settings.warmupModel,
     cacheAffinityTtl: String(settings.openaiCacheAffinityMaxAgeSeconds),
+    proxyAccountResponseCreateLimit: String(settings.proxyAccountResponseCreateLimit),
+    proxyAccountStreamLimit: String(settings.proxyAccountStreamLimit),
+    proxyAccountStreamRecoveryReserve: String(settings.proxyAccountStreamRecoveryReserve),
     relativeAvailabilityPower: String(settings.relativeAvailabilityPower),
     relativeAvailabilityTopK: String(settings.relativeAvailabilityTopK),
     stickyPrimaryThreshold: String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
@@ -100,6 +120,7 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldown: String(settings.limitWarmupCooldownSeconds),
     limitWarmupExhaustedThreshold: String(settings.limitWarmupExhaustedThresholdPercent),
+    limitWarmupIdleThreshold: String(settings.limitWarmupIdleThresholdPercent),
     additionalQuotaKey: "",
     additionalQuotaPolicy: "inherit",
   };
@@ -110,6 +131,15 @@ function routingSettingsDraftReducer(
   patch: Partial<RoutingSettingsDraft>,
 ): RoutingSettingsDraft {
   return { ...state, ...patch };
+}
+
+function parseNonnegativeInteger(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 export function RoutingSettings({
@@ -153,6 +183,22 @@ export function RoutingSettings({
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const parsedProxyAccountResponseCreateLimit = parseNonnegativeInteger(draft.proxyAccountResponseCreateLimit);
+  const parsedProxyAccountStreamLimit = parseNonnegativeInteger(draft.proxyAccountStreamLimit);
+  const parsedProxyAccountStreamRecoveryReserve = parseNonnegativeInteger(
+    draft.proxyAccountStreamRecoveryReserve,
+  );
+  const accountCapacityLimitsValid =
+    parsedProxyAccountResponseCreateLimit !== null &&
+    parsedProxyAccountStreamLimit !== null &&
+    parsedProxyAccountStreamRecoveryReserve !== null &&
+    (parsedProxyAccountStreamLimit === 0 ||
+      parsedProxyAccountStreamRecoveryReserve <= parsedProxyAccountStreamLimit);
+  const accountCapacityLimitsChanged =
+    accountCapacityLimitsValid &&
+    (parsedProxyAccountResponseCreateLimit !== settings.proxyAccountResponseCreateLimit ||
+      parsedProxyAccountStreamLimit !== settings.proxyAccountStreamLimit ||
+      parsedProxyAccountStreamRecoveryReserve !== settings.proxyAccountStreamRecoveryReserve);
   const warmupModelChanged = draft.warmupModel.trim() !== settings.warmupModel;
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
@@ -162,11 +208,18 @@ export function RoutingSettings({
     Number.isFinite(parsedLimitWarmupExhaustedThreshold) &&
     parsedLimitWarmupExhaustedThreshold > 0 &&
     parsedLimitWarmupExhaustedThreshold <= 100;
+  const parsedLimitWarmupIdleThreshold = Number(draft.limitWarmupIdleThreshold);
+  const limitWarmupIdleThresholdValid =
+    Number.isFinite(parsedLimitWarmupIdleThreshold) &&
+    parsedLimitWarmupIdleThreshold > 0 &&
+    parsedLimitWarmupIdleThreshold <= 100;
   const limitWarmupFieldsChanged =
     draft.limitWarmupModel.trim() !== settings.limitWarmupModel ||
     draft.limitWarmupPrompt.trim() !== settings.limitWarmupPrompt ||
     (limitWarmupExhaustedThresholdValid &&
       parsedLimitWarmupExhaustedThreshold !== settings.limitWarmupExhaustedThresholdPercent) ||
+    (limitWarmupIdleThresholdValid &&
+      parsedLimitWarmupIdleThreshold !== settings.limitWarmupIdleThresholdPercent) ||
     (limitWarmupCooldownValid && parsedLimitWarmupCooldown !== settings.limitWarmupCooldownSeconds);
   const limitWarmupFieldsValid =
     draft.limitWarmupModel.trim().length > 0 &&
@@ -174,6 +227,7 @@ export function RoutingSettings({
     draft.limitWarmupPrompt.trim().length > 0 &&
     draft.limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
     limitWarmupExhaustedThresholdValid &&
+    limitWarmupIdleThresholdValid &&
     limitWarmupCooldownValid;
 
   const parsedRelativeAvailabilityPower = Number.parseFloat(draft.relativeAvailabilityPower);
@@ -362,51 +416,12 @@ export function RoutingSettings({
             </Select>
           </div>
 
-          <div className="flex items-center justify-between gap-4 p-3">
+          <div className="space-y-2 p-3">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.strategy.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.description")}</p>
             </div>
-            <Select
-              value={settings.routingStrategy}
-              onValueChange={(value) => {
-                const routingStrategy = value as DashboardSettings["routingStrategy"];
-                if (routingStrategy === "single_account") {
-                  const selectedAccountId = settings.singleAccountId ?? firstAccountId;
-                  if (!selectedAccountId) {
-                    return;
-                  }
-                  save({
-                    routingStrategy,
-                    singleAccountId: selectedAccountId,
-                  });
-                  return;
-                }
-                save({
-                  routingStrategy,
-                });
-              }}
-            >
-              <SelectTrigger className="h-8 w-48 text-xs" disabled={busy}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                <SelectItem value="capacity_weighted">{t("settings.routing.strategy.capacityWeighted")}</SelectItem>
-                <SelectItem value="relative_availability">{t("settings.routing.strategy.relativeAvailability")}</SelectItem>
-                <SelectItem value="fill_first">{t("settings.routing.strategy.fillFirst")}</SelectItem>
-                <SelectItem value="sequential_drain">{t("settings.routing.strategy.sequentialDrain")}</SelectItem>
-                <SelectItem value="reset_drain">{t("settings.routing.strategy.resetDrain")}</SelectItem>
-                <SelectItem value="single_account" disabled={!settings.singleAccountId && !firstAccountId}>
-                  {t("settings.routing.strategy.singleAccount")}
-                </SelectItem>
-                <SelectItem value="usage_weighted">{t("settings.routing.strategy.usageWeighted")}</SelectItem>
-                <SelectItem value="round_robin">{t("settings.routing.strategy.roundRobin")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2 px-3 pb-3 text-xs text-muted-foreground">
-            <p className="font-medium text-foreground">{t("settings.routing.strategy.guideTitle")}</p>
-            <dl className="grid gap-2 md:grid-cols-2">
+            <div className="grid gap-2 md:grid-cols-2">
               {[
                 "capacityWeighted",
                 "relativeAvailability",
@@ -416,14 +431,43 @@ export function RoutingSettings({
                 "sequentialDrain",
                 "resetDrain",
                 "singleAccount",
-              ].map((strategy) => (
-                <div key={strategy} className="space-y-0.5">
-                  <dt className="font-medium text-foreground">{t(`settings.routing.strategy.${strategy}`)}</dt>
-                  <dd>{t(`settings.routing.strategy.guide.${strategy}`)}</dd>
-                </div>
-              ))}
-            </dl>
-            <p>{t("settings.routing.strategy.safetyNote")}</p>
+              ].map((strategy) => {
+                const strategyValue = STRATEGY_GUIDE_VALUES[strategy];
+                const isSelected = settings.routingStrategy === strategyValue;
+                const isDisabled = strategyValue === "single_account" && !settings.singleAccountId && !firstAccountId;
+                return (
+                  <button
+                    key={strategy}
+                    type="button"
+                    disabled={busy || isDisabled}
+                    onClick={() => {
+                      if (strategyValue === "single_account") {
+                        const selectedAccountId = settings.singleAccountId ?? firstAccountId;
+                        if (!selectedAccountId) return;
+                        save({ routingStrategy: strategyValue as DashboardSettings["routingStrategy"], singleAccountId: selectedAccountId });
+                        return;
+                      }
+                      save({ routingStrategy: strategyValue as DashboardSettings["routingStrategy"] });
+                    }}
+                    className={cn(
+                      "space-y-0.5 rounded-md border p-2 text-left text-xs transition-colors",
+                      isSelected
+                        ? "border-primary/40 bg-primary/5"
+                        : "border-border/40 hover:border-border hover:bg-muted/30",
+                      (busy || isDisabled) && "cursor-not-allowed opacity-50",
+                    )}
+                    aria-pressed={isSelected}
+                  >
+                    <span className="flex items-center gap-1.5 font-medium text-foreground text-xs">
+                      {isSelected && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
+                      {t(`settings.routing.strategy.${strategy}`)}
+                    </span>
+                    <span className="block pl-3 text-muted-foreground text-xs">{t(`settings.routing.strategy.guide.${strategy}`)}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.safetyNote")}</p>
           </div>
 
           <div className="space-y-3 p-3">
@@ -635,6 +679,90 @@ export function RoutingSettings({
             </div>
           ) : null}
 
+          <div className="space-y-3 p-3">
+            <div>
+              <p className="text-sm font-medium">{t("settings.routing.accountCapacity.title")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("settings.routing.accountCapacity.description")}
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.responseCreateLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.responseCreateLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyAccountResponseCreateLimit}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ proxyAccountResponseCreateLimit: event.target.value })}
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.responseCreateDescription")}
+                </span>
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.streamLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyAccountStreamLimit}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ proxyAccountStreamLimit: event.target.value })}
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamDescription")}
+                </span>
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamRecoveryReserveLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.streamRecoveryReserveLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyAccountStreamRecoveryReserve}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ proxyAccountStreamRecoveryReserve: event.target.value })}
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamRecoveryReserveDescription")}
+                </span>
+              </label>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs sm:w-40"
+              disabled={busy || !accountCapacityLimitsChanged}
+              onClick={() =>
+                void save({
+                  proxyAccountResponseCreateLimit: parsedProxyAccountResponseCreateLimit!,
+                  proxyAccountStreamLimit: parsedProxyAccountStreamLimit!,
+                  proxyAccountStreamRecoveryReserve: parsedProxyAccountStreamRecoveryReserve!,
+                })
+              }
+            >
+              {t("settings.routing.accountCapacity.save")}
+            </Button>
+          </div>
+
           <div className="flex items-center justify-between p-3">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.stickyThreads.label")}</p>
@@ -816,124 +944,173 @@ export function RoutingSettings({
             </Select>
           </div>
 
-          <div className="space-y-3 p-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex min-w-0 items-center gap-2.5">
-                <Zap className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                <div>
-                  <p className="text-sm font-medium">{t("settings.routing.limitWarmup.label")}</p>
-                  <p className="text-xs text-muted-foreground">{t("settings.routing.limitWarmup.description")}</p>
-                </div>
+          <div className="space-y-4 p-3">
+            {/* --- Section header --- */}
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-medium">{t("settings.routing.limitWarmup.label")}</p>
+                <p className="text-xs text-muted-foreground">{t("settings.routing.limitWarmup.description")}</p>
               </div>
               <Switch
                 aria-label={t("settings.routing.limitWarmup.ariaLabel")}
                 checked={settings.limitWarmupEnabled}
                 disabled={busy}
                 onCheckedChange={(checked) => save({ limitWarmupEnabled: checked })}
-              />
-            </div>
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-sm font-medium">Stagger idle warm-up</p>
-                <p className="text-xs text-muted-foreground">
-                  Spread opted-in account warm-ups across the rolling 5h window.
-                </p>
-              </div>
-              <Switch
-                aria-label="Enable staggered idle warm-up"
-                checked={settings.limitWarmupStaggeredIdleEnabled}
-                disabled={busy || !settings.limitWarmupEnabled}
-                onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
+                className="ml-auto"
               />
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
-              <div className="space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Windows</span>
-                <Select
-                  value={settings.limitWarmupWindows}
-                  onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
-                >
-                  <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label="Warm-up windows">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent align="start">
-                    <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
-                    <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
-                    <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <label className="block space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Model</span>
-                <Input
-                  value={draft.limitWarmupModel}
-                  disabled={busy}
-                  maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
-                  onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
-                  className="h-8 text-xs"
-                  aria-label={t("settings.routing.limitWarmup.modelAria")}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Exhausted at %</span>
-                <Input
-                  type="number"
-                  min={1}
-                  max={100}
-                  step={0.1}
-                  inputMode="decimal"
-                  value={draft.limitWarmupExhaustedThreshold}
-                  disabled={busy}
-                  onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
-                  className="h-8 text-xs"
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Cooldown (sec)</span>
-                <Input
-                  type="number"
-                  min={60}
-                  step={60}
-                  inputMode="numeric"
-                  value={draft.limitWarmupCooldown}
-                  disabled={busy}
-                  onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
-                  className="h-8 text-xs"
-                  aria-label={t("settings.routing.limitWarmup.cooldownAria")}
-                />
-              </label>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-              <label className="block space-y-1 sm:flex-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Prompt</span>
-                <Input
-                  value={draft.limitWarmupPrompt}
-                  disabled={busy}
-                  maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
-                  onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
-                  className="h-8 text-xs"
-                  aria-label={t("settings.routing.limitWarmup.promptAria")}
-                />
-              </label>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 text-xs sm:w-24"
-                disabled={busy || !limitWarmupFieldsChanged || !limitWarmupFieldsValid}
-                onClick={() =>
-                  void save({
-                    limitWarmupModel: draft.limitWarmupModel.trim(),
-                    limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
-                    limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
-                    limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
-                  })
-                }
-              >
-                {t("settings.routing.limitWarmup.save")}
-              </Button>
-            </div>
+            <>
+                {/* --- Shared warm-up settings --- */}
+                <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
+                  <div className="space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.windowsLabel")}</span>
+                    <Select
+                      value={settings.limitWarmupWindows}
+                      onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
+                    >
+                      <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label={t("settings.routing.limitWarmup.shared.windowsAria")}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent align="start">
+                        <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
+                        <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
+                        <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <label className="block space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.modelLabel")}</span>
+                    <Input
+                      value={draft.limitWarmupModel}
+                      disabled={busy}
+                      maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
+                      onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
+                      className="h-8 text-xs"
+                      aria-label={t("settings.routing.limitWarmup.modelAria")}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.cooldownLabel")}</span>
+                    <Input
+                      type="number"
+                      min={60}
+                      step={60}
+                      inputMode="numeric"
+                      value={draft.limitWarmupCooldown}
+                      disabled={busy}
+                      onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
+                      className="h-8 text-xs"
+                      aria-label={t("settings.routing.limitWarmup.cooldownAria")}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.promptLabel")}</span>
+                    <Input
+                      value={draft.limitWarmupPrompt}
+                      disabled={busy}
+                      maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
+                      onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
+                      className="h-8 text-xs"
+                      aria-label={t("settings.routing.limitWarmup.promptAria")}
+                    />
+                  </label>
+                </div>
+
+                {/* --- Two warm-up modes side by side --- */}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {/* Mode 1: Reset-confirmed warm-up */}
+                  <div className="space-y-2 rounded-lg border border-border/60 p-2.5">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-[10px]">{t("settings.routing.limitWarmup.resetConfirmed.badge")}</Badge>
+                      <p className="text-xs font-medium">{t("settings.routing.limitWarmup.resetConfirmed.title")}</p>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {t("settings.routing.limitWarmup.resetConfirmed.description")}
+                    </p>
+                    <label className="flex items-center gap-2">
+                      <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">{t("settings.routing.limitWarmup.resetConfirmed.thresholdLabel")}</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={0.1}
+                        inputMode="decimal"
+                        value={draft.limitWarmupExhaustedThreshold}
+                        disabled={busy}
+                        onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
+                        className="h-8 w-full text-xs"
+                        aria-label={t("settings.routing.limitWarmup.resetConfirmed.thresholdAria")}
+                      />
+                    </label>
+                  </div>
+
+                  {/* Mode 2: Staggered idle warm-up */}
+                  <div className="space-y-2 rounded-lg border border-border/60 p-2.5">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-[10px]">{t("settings.routing.limitWarmup.staggeredIdle.badge")}</Badge>
+                      <p className="text-xs font-medium">{t("settings.routing.limitWarmup.staggeredIdle.title")}</p>
+                      <Switch
+                        aria-label={t("settings.routing.limitWarmup.staggeredIdle.toggleAria")}
+                        checked={settings.limitWarmupStaggeredIdleEnabled}
+                        disabled={busy}
+                        onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
+                        className="ml-auto"
+                      />
+                    </div>
+                    {settings.limitWarmupStaggeredIdleEnabled ? (
+                      <>
+                        <p className="text-[11px] text-muted-foreground">
+                          {t("settings.routing.limitWarmup.staggeredIdle.description")}
+                        </p>
+                        <label className="flex items-center gap-2">
+                          <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">{t("settings.routing.limitWarmup.staggeredIdle.thresholdLabel")}</span>
+                          <Input
+                            type="number"
+                            min={0.1}
+                            max={100}
+                            step={0.1}
+                            inputMode="decimal"
+                            value={draft.limitWarmupIdleThreshold}
+                            disabled={busy}
+                            onChange={(event) => updateDraft({ limitWarmupIdleThreshold: event.target.value })}
+                            className="h-8 w-full text-xs"
+                            aria-label={t("settings.routing.limitWarmup.staggeredIdle.thresholdAria")}
+                          />
+                        </label>
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("settings.routing.limitWarmup.staggeredIdle.disabledDescription")}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* --- Save button --- */}
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs sm:w-24"
+                    disabled={busy || !limitWarmupFieldsChanged || !limitWarmupFieldsValid}
+                    aria-label={t("settings.routing.limitWarmup.saveAria")}
+                    onClick={() =>
+                      void save({
+                        limitWarmupModel: draft.limitWarmupModel.trim(),
+                        limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
+                        limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
+                        limitWarmupIdleThresholdPercent: parsedLimitWarmupIdleThreshold,
+                        limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
+                      })
+                    }
+                  >
+                    {t("settings.routing.limitWarmup.save")}
+                  </Button>
+                </div>
+              </>
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

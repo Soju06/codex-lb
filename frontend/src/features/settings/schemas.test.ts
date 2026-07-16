@@ -19,6 +19,9 @@ describe("DashboardSettingsSchema", () => {
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
       singleAccountId: "acc-1",
+      proxyAccountResponseCreateLimit: 6,
+      proxyAccountStreamLimit: 12,
+      proxyAccountStreamRecoveryReserve: 2,
       weeklyPaceWorkingDays: "0,1,2,3,4",
       weeklyPaceSmoothingMinutes: 60,
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -40,6 +43,7 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
       limitWarmupExhaustedThresholdPercent: 99,
+      limitWarmupIdleThresholdPercent: 1,
       limitWarmupMinAvailablePercent: 100,
       limitWarmupStaggeredIdleEnabled: true,
     });
@@ -53,6 +57,9 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.relativeAvailabilityPower).toBe(2);
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.singleAccountId).toBe("acc-1");
+    expect(parsed.proxyAccountResponseCreateLimit).toBe(6);
+    expect(parsed.proxyAccountStreamLimit).toBe(12);
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(60);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
@@ -89,6 +96,9 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.singleAccountId).toBeNull();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(31536000);
+    expect(parsed.proxyAccountResponseCreateLimit).toBe(4);
+    expect(parsed.proxyAccountStreamLimit).toBe(8);
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBe(1);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
     expect(parsed.limitWarmupModel).toBe("auto");
@@ -159,6 +169,9 @@ describe("SettingsUpdateRequestSchema", () => {
       relativeAvailabilityPower: 1.5,
       relativeAvailabilityTopK: 7,
       singleAccountId: "acc-1",
+      proxyAccountResponseCreateLimit: 6,
+      proxyAccountStreamLimit: 12,
+      proxyAccountStreamRecoveryReserve: 2,
       weeklyPaceWorkingDays: "0,1,2,3,4",
       weeklyPaceSmoothingMinutes: 120,
       openaiCacheAffinityMaxAgeSeconds: 120,
@@ -195,6 +208,9 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.relativeAvailabilityPower).toBe(1.5);
     expect(parsed.relativeAvailabilityTopK).toBe(7);
     expect(parsed.singleAccountId).toBe("acc-1");
+    expect(parsed.proxyAccountResponseCreateLimit).toBe(6);
+    expect(parsed.proxyAccountStreamLimit).toBe(12);
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(120);
     expect(parsed.totpRequiredOnLogin).toBe(true);
@@ -233,6 +249,9 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.singleAccountId).toBeUndefined();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBeUndefined();
     expect(parsed.dashboardSessionTtlSeconds).toBeUndefined();
+    expect(parsed.proxyAccountResponseCreateLimit).toBeUndefined();
+    expect(parsed.proxyAccountStreamLimit).toBeUndefined();
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBeUndefined();
     expect(parsed.warmupModel).toBeUndefined();
     expect(parsed.weeklyPaceWorkingDays).toBeUndefined();
     expect(parsed.weeklyPaceSmoothingMinutes).toBeUndefined();
@@ -245,6 +264,49 @@ describe("SettingsUpdateRequestSchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("rejects negative and fractional account capacity limits", () => {
+    for (const payload of [
+      { proxyAccountResponseCreateLimit: -1 },
+      { proxyAccountStreamLimit: 1.5 },
+      { proxyAccountStreamRecoveryReserve: -1 },
+    ]) {
+      expect(
+        SettingsUpdateRequestSchema.safeParse({
+          stickyThreadsEnabled: false,
+          preferEarlierResetAccounts: true,
+          ...payload,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects a recovery reserve above a nonzero stream limit", () => {
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        proxyAccountStreamLimit: 2,
+        proxyAccountStreamRecoveryReserve: 3,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a legacy inherited reserve above the stream limit in settings responses", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: true,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+      proxyAccountStreamLimit: 1,
+      proxyAccountStreamRecoveryReserve: 2,
+    });
+
+    expect(parsed.proxyAccountStreamLimit).toBe(1);
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
   });
 
   it("accepts fill_first as a valid routing strategy", () => {

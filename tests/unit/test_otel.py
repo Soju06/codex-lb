@@ -269,6 +269,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     call_order: list[str] = []
 
@@ -294,6 +295,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "init_background_db", init_background_db)
     monkeypatch.setattr(main, "init_http_client", init_http_client)
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -328,6 +330,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
     import app.core.startup as startup_module
     import app.main as main
+    from app.core.cache.invalidation import get_cache_invalidation_poller
 
     settings = Settings(
         otel_enabled=False,
@@ -358,9 +361,11 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -374,6 +379,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -405,6 +411,10 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         grace_seconds=main.RING_STALE_GRACE_SECONDS,
     )
     ring_service.unregister.assert_not_called()
+    cache_poller.stop.assert_awaited_once()
+    # Shutdown must clear the process-global poller so bump_cache_invalidation
+    # is a no-op (not a call through this test's fake) after lifespan exit.
+    assert get_cache_invalidation_poller() is None
 
 
 @pytest.mark.asyncio
@@ -443,9 +453,11 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -459,6 +471,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -614,9 +627,11 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -630,6 +645,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -684,9 +700,11 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -702,6 +720,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -782,6 +801,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
     monkeypatch.setattr(
         main, "_ensure_bridge_durable_schema_ready", AsyncMock(side_effect=RuntimeError("missing schema"))
     )
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
 
     with pytest.raises(RuntimeError, match="missing schema"):
         async with main.lifespan(main.app):
@@ -809,9 +829,13 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
     ring_service = SimpleNamespace(
-        register=AsyncMock(), mark_stale=AsyncMock(), unregister=AsyncMock(), heartbeat=AsyncMock()
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
-    cache_poller = SimpleNamespace(on_invalidation=Mock(), start=AsyncMock(), stop=AsyncMock())
+    cache_poller = SimpleNamespace(on_invalidation=Mock(), prime=AsyncMock(), start=AsyncMock(), stop=AsyncMock())
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -829,6 +853,7 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "mark_process_dead", Mock())
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",

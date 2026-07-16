@@ -28,6 +28,7 @@ const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupCooldownSeconds: 3600,
   limitWarmupMinAvailablePercent: 100,
   limitWarmupStaggeredIdleEnabled: false,
+  limitWarmupIdleThresholdPercent: 1,
 };
 
 const BASE_SETTINGS: DashboardSettings = {
@@ -40,6 +41,46 @@ const BASE_SETTINGS: DashboardSettings = {
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
+  it("saves per-account capacity limits including zero for unlimited", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Response-create limit" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Response-create limit" }), "0");
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }), "2");
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      proxyAccountResponseCreateLimit: 0,
+      proxyAccountStreamLimit: 12,
+      proxyAccountStreamRecoveryReserve: 2,
+    });
+  });
+
+  it("rejects invalid account capacity limits before saving", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    const streamLimit = screen.getByRole("spinbutton", { name: "Stream limit" });
+    const recoveryReserve = screen.getByRole("spinbutton", { name: "Stream recovery reserve" });
+    const saveButton = screen.getByRole("button", { name: "Save capacity limits" });
+
+    await user.clear(streamLimit);
+    await user.type(streamLimit, "2");
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "3");
+    expect(saveButton).toBeDisabled();
+
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "1.5");
+    expect(saveButton).toBeDisabled();
+  });
+
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -246,7 +287,7 @@ describe("RoutingSettings", () => {
     const warmupModelInput = screen.getByLabelText("Warmup model");
     await user.clear(warmupModelInput);
     await user.type(warmupModelInput, "gpt-5.4-pro");
-    await user.click(screen.getByRole("button", { name: "Save warmup model" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -344,14 +385,7 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    const routingStrategySelect = screen
-      .getAllByRole("combobox")
-      .find((element) => element.textContent?.includes("Capacity weighted"));
-    if (!routingStrategySelect) {
-      throw new Error("Routing strategy select not found");
-    }
-    await user.click(routingStrategySelect);
-    await user.click(await screen.findByRole("option", { name: "Single account" }));
+    await user.click(screen.getByRole("button", { name: /Single account/i }));
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
@@ -361,17 +395,23 @@ describe("RoutingSettings", () => {
   });
 
   it("names limit warm-up controls for assistive technology", () => {
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Pace gap average" })).toBeInTheDocument();
     expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
-    expect(screen.getByLabelText("Exhausted at %")).toHaveAttribute("max", "100");
+    expect(screen.getByLabelText("Min usage percent")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
 
@@ -423,26 +463,39 @@ describe("RoutingSettings", () => {
   it("does not silently truncate decimal warm-up cooldown values", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
 
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
 
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
   });
 
   it("saves warm-up exhausted threshold changes", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
 
-    await user.clear(screen.getByLabelText("Exhausted at %"));
-    await user.type(screen.getByLabelText("Exhausted at %"), "98.5");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "98.5");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
       limitWarmupExhaustedThresholdPercent: 98.5,
     });
   });
@@ -450,13 +503,42 @@ describe("RoutingSettings", () => {
   it("rejects invalid warm-up exhausted thresholds", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
 
-    await user.clear(screen.getByLabelText("Exhausted at %"));
-    await user.type(screen.getByLabelText("Exhausted at %"), "100.1");
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "100.1");
 
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves staggered idle warm-up idle threshold changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Max usage percent"));
+    await user.type(screen.getByLabelText("Max usage percent"), "2.5");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
+      limitWarmupStaggeredIdleEnabled: true,
+      limitWarmupIdleThresholdPercent: 2.5,
+    });
   });
 
   it("saves the reset preference window", async () => {
@@ -510,7 +592,6 @@ describe("RoutingSettings", () => {
   it("explains routing strategy trade-offs and account-safety guidance", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
-    expect(screen.getByText("Strategy guide")).toBeInTheDocument();
     expect(screen.getByText(/Good default for compliant mixed-account pools/i)).toBeInTheDocument();
     expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
   });

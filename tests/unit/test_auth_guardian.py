@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -49,8 +49,8 @@ class _Repo:
 
 
 class _Leader:
-    async def try_acquire(self) -> bool:
-        return True
+    async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+        return await fn()
 
 
 class _AuthManager:
@@ -112,6 +112,7 @@ def test_build_auth_guardian_scheduler_allows_single_replica_without_leader_elec
 
 def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replica(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     settings = _settings(
         auth_guardian_enabled=True,
@@ -120,9 +121,16 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     )
     monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
 
-    scheduler = build_auth_guardian_scheduler()
+    with caplog.at_level(logging.WARNING, logger=guardian_module.logger.name):
+        scheduler = build_auth_guardian_scheduler()
 
     assert scheduler.enabled is False
+    # Operators must be told the guardian was disabled instead of silently
+    # losing proactive refresh work.
+    assert any(
+        "Auth Guardian disabled" in record.getMessage() and "without leader election" in record.getMessage()
+        for record in caplog.records
+    )
 
     settings.leader_election_enabled = True
     scheduler = build_auth_guardian_scheduler()
@@ -133,6 +141,60 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     scheduler = build_auth_guardian_scheduler()
 
     assert scheduler.enabled is False
+
+
+def test_build_auth_guardian_scheduler_wires_leader_election_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(auth_guardian_enabled=True, leader_election_enabled=False)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    scheduler = build_auth_guardian_scheduler()
+    assert scheduler.leader_election_enabled is False
+
+    settings.leader_election_enabled = True
+    scheduler = build_auth_guardian_scheduler()
+    assert scheduler.leader_election_enabled is True
+
+
+def test_build_auth_guardian_scheduler_warns_when_self_disabling_without_leader_election(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=False,
+        instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is False
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "Auth Guardian disabled" in message
+    assert "CODEX_LB_LEADER_ELECTION_ENABLED" in message
+
+
+def test_build_auth_guardian_scheduler_does_not_warn_when_leader_election_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=True,
+        instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is True
+    assert not [record for record in caplog.records if record.levelno == logging.WARNING]
 
 
 @pytest.mark.asyncio
@@ -167,6 +229,122 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     await scheduler._refresh_once()
 
     assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replicas(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _two_live_replicas() -> int:
+        return 2
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=False,
+        live_replica_count=_two_live_replicas,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        await scheduler._refresh_once()
+
+    assert calls == []
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "CODEX_LB_LEADER_ELECTION_ENABLED" in message
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _one_live_replica() -> int:
+        return 1
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=False,
+        live_replica_count=_one_live_replica,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_ignores_dynamic_ring_when_leader_election_enabled() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+    ring_counted = False
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _count_ring() -> int:
+        nonlocal ring_counted
+        ring_counted = True
+        return 5
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=True,
+        live_replica_count=_count_ring,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == ["stale-active"]
+    assert ring_counted is False
 
 
 @pytest.mark.asyncio
@@ -440,11 +618,4 @@ def _settings(
         auth_guardian_enabled=auth_guardian_enabled,
         leader_election_enabled=leader_election_enabled,
         http_responses_session_bridge_instance_ring=instance_ring or [],
-        auth_guardian_interval_seconds=21600,
-        auth_guardian_max_refresh_age_seconds=12 * 3600,
-        auth_guardian_batch_size=10,
-        auth_guardian_concurrency=1,
-        auth_guardian_jitter_seconds=0.0,
-        auth_guardian_failure_backoff_base_seconds=300.0,
-        auth_guardian_failure_backoff_max_seconds=3600.0,
     )

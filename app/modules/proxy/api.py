@@ -41,12 +41,16 @@ from app.core.auth.dependencies import (
     validate_usage_api_key,
 )
 from app.core.auth.refresh import RefreshError
+from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
+    ResetCreditFetchError,
     ResetCreditItem,
+    build_snapshot,
     consume_reset_credit,
+    fetch_reset_credits,
 )
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
@@ -191,6 +195,7 @@ from app.modules.proxy.schemas import (
     AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
+    CodexTruncationPolicy,
     ConsumeRateLimitResetCreditRequest,
     ConsumeRateLimitResetCreditResponse,
     FileCreateRequest,
@@ -217,6 +222,7 @@ from app.modules.proxy.types import (
     RateLimitWindowSnapshotData,
 )
 from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
+from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.mappers import usage_history_to_window_row
@@ -1021,19 +1027,46 @@ def _is_reset_credit_account_in_api_key_pool(account: Account | None, api_key: A
     return account.id in assigned_ids
 
 
-def _select_available_reset_credit_by_id(account_id: str, redeem_id: str) -> ResetCreditItem | None:
-    snapshot = get_rate_limit_reset_credits_store().get(account_id)
-    if snapshot is None or snapshot.available_count <= 0:
-        return None
-    for credit in snapshot.credits:
-        if credit.id == redeem_id and credit.status == "available":
-            return credit
-    return None
-
-
 def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HTTPException:
     status_code = exc.status_code if exc.status_code > 0 else 503
     return HTTPException(status_code=status_code, detail=exc.message)
+
+
+def _translate_v1_reset_credit_fetch_error(exc: ResetCreditFetchError) -> HTTPException:
+    status_code = exc.status_code if exc.status_code > 0 else 503
+    return HTTPException(status_code=status_code, detail=exc.message)
+
+
+async def _fetch_authoritative_reset_credit(
+    *,
+    account_id: str,
+    redeem_id: str,
+    access_token: str,
+    chatgpt_account_id: str | None,
+    route: ResolvedUpstreamRoute | None,
+) -> ResetCreditItem | None:
+    """Resolve a redeem_id against a live upstream fetch when the local snapshot misses.
+
+    A replica-local snapshot can be empty (fresh replica) or stale (peer
+    redeemed), so upstream is authoritative before returning a 409. The fresh
+    snapshot replaces whatever this replica had cached either way.
+    """
+    try:
+        credits_response = await fetch_reset_credits(
+            access_token,
+            chatgpt_account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+    except ResetCreditFetchError as exc:
+        raise _translate_v1_reset_credit_fetch_error(exc) from exc
+    await get_rate_limit_reset_credits_store().set(account_id, build_snapshot(credits_response))
+    if credits_response.available_count <= 0:
+        return None
+    for credit in credits_response.credits:
+        if credit.id == redeem_id and credit.status == "available":
+            return credit
+    return None
 
 
 def _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc: ConsumeResetCreditError) -> bool:
@@ -1047,6 +1080,25 @@ def _translate_v1_reset_credit_refresh_error(exc: RefreshError) -> HTTPException
         status_code=409,
         detail=f"Reset credit redeem could not refresh account credentials: {exc.message}",
     )
+
+
+@asynccontextmanager
+async def _serialize_v1_reset_credit_redeem(account_id: str, *, session: AsyncSession) -> AsyncIterator[None]:
+    """Serialize the v1 redeem section, mapping claim contention to the OpenAI envelope.
+
+    The shared serializer raises ``RedeemClaimTimeoutError`` on SQLite claim
+    contention; on this surface that must surface as an ``HTTPException`` so
+    the ``/v1/*`` handler renders the OpenAI error envelope instead of the
+    dashboard one.
+    """
+    try:
+        async with serialize_reset_credit_redeem(account_id, session=session):
+            yield
+    except RedeemClaimTimeoutError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Another reset credit redemption is already in progress for this account",
+        ) from exc
 
 
 @asynccontextmanager
@@ -1099,10 +1151,7 @@ async def v1_redeem_reset_credit(
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         account_id = account.id
 
-        async with serialize_reset_credit_redeem(account_id, session=session):
-            credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
-            if credit is None:
-                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
+        async with _serialize_v1_reset_credit_redeem(account_id, session=session):
             try:
                 route = await _resolve_reset_credit_route(session, account_id)
             except UpstreamProxyRouteError as exc:
@@ -1112,6 +1161,21 @@ async def v1_redeem_reset_credit(
             except RefreshError as exc:
                 raise _translate_v1_reset_credit_refresh_error(exc) from exc
             access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
+            # Re-validate against upstream AFTER winning the cross-replica claim
+            # rather than trusting the replica-local snapshot. A peer replica may
+            # have redeemed this redeem_id while we waited for the claim, and our
+            # cached snapshot can still show it as available until the
+            # invalidation poll clears it; consuming from the stale cache would
+            # send a second upstream consume for an already-redeemed credit.
+            credit = await _fetch_authoritative_reset_credit(
+                account_id=account_id,
+                redeem_id=payload.redeem_id,
+                access_token=access_token,
+                chatgpt_account_id=redeem_credentials.chatgpt_account_id,
+                route=route,
+            )
+            if credit is None:
+                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
             try:
                 result = await consume_reset_credit(
                     access_token,
@@ -1123,8 +1187,10 @@ async def v1_redeem_reset_credit(
             except ConsumeResetCreditError as exc:
                 if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
                     await get_rate_limit_reset_credits_store().invalidate(account_id)
+                    await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
                 raise _translate_v1_reset_credit_consume_error(exc) from exc
             await get_rate_limit_reset_credits_store().invalidate(account_id)
+            await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
             try:
                 await _refresh_usage_after_v1_reset_credit_redeem(account_id)
             except Exception:
@@ -2899,6 +2965,23 @@ def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
     return model.raw.get("shell_type") == "shell_command"
 
 
+def _codex_model_truncation_policy(model: UpstreamModel) -> CodexTruncationPolicy:
+    if "truncation_policy" in model.raw:
+        try:
+            return CodexTruncationPolicy.model_validate(model.raw["truncation_policy"])
+        except ValidationError:
+            pass
+    mode = "bytes" if model.slug == "gpt-5.2" else "tokens"
+    return CodexTruncationPolicy(mode=mode, limit=10_000)
+
+
+def _codex_model_experimental_supported_tools(model: UpstreamModel) -> list[str]:
+    tools = model.raw.get("experimental_supported_tools")
+    if not is_json_list(tools):
+        return []
+    return [tool for tool in tools if isinstance(tool, str)]
+
+
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
     raw = model.raw
 
@@ -2922,6 +3005,8 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         "available_in_plans",
         "prefer_websockets",
         "visibility",
+        "truncation_policy",
+        "experimental_supported_tools",
     }
     for key, value in raw.items():
         if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
@@ -2954,6 +3039,11 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
         visibility=visibility or _model_visibility(model),
+        # Codex deserializes the complete catalog atomically. Repair legacy
+        # bootstrap/retained metadata at this final wire boundary so one hidden
+        # entry cannot invalidate otherwise-current live model metadata.
+        truncation_policy=_codex_model_truncation_policy(model),
+        experimental_supported_tools=_codex_model_experimental_supported_tools(model),
         **extra,
     )
 
@@ -6040,14 +6130,18 @@ async def _normalize_public_responses_stream(
     # not attached to the later response.
     pre_created_buffer: list[dict[str, JsonValue]] = []
 
-    def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
-        return [
-            *[
-                format_sse_event(synthetic_payload)
-                for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
-            ],
-            format_sse_event(payload),
+    def formatted_payloads_with_synthetic_deltas(
+        payload: dict[str, JsonValue], raw_block: str | None = None
+    ) -> list[str]:
+        synthetic_blocks = [
+            format_sse_event(synthetic_payload)
+            for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
         ]
+        if raw_block is not None and not synthetic_blocks:
+            # Nothing rewrote the payload and nothing synthetic precedes it:
+            # pass the upstream block through instead of re-serializing.
+            return [raw_block]
+        return [*synthetic_blocks, format_sse_event(payload)]
 
     def buffered_pre_created_payloads_to_replay(response_id: str | None) -> list[str]:
         try:
@@ -6075,6 +6169,7 @@ async def _normalize_public_responses_stream(
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
+        parsed_payload = payload
         raw_event_type = payload.get("type")
         if (
             enforce_openai_sdk_contract
@@ -6157,7 +6252,19 @@ async def _normalize_public_responses_stream(
         _collect_output_item_event(normalized_payload, output_items)
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
-        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
+        # Both the backfill branch and _normalize_public_stream_payload copy
+        # the dict when they change anything, so identity with the parsed
+        # payload proves the event is unmutated. Pass-through additionally
+        # requires the block to already carry the canonical `event: <type>`
+        # framing that format_sse_event would add: bridge rewrite paths can
+        # enqueue data-only blocks, and named-event (EventSource) clients
+        # would otherwise lose the event name re-serialization used to add.
+        unmutated_block = (
+            event_block
+            if normalized_payload is parsed_payload and _has_canonical_event_framing(event_block, event_type)
+            else None
+        )
+        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload, unmutated_block):
             yield formatted_payload
         if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
             terminal_seen = True
@@ -6410,6 +6517,15 @@ def _synthetic_pre_created_item_id(response_id: str | None) -> str:
     if response_id:
         return f"msg_{response_id}_precreated"
     return "msg_precreated"
+
+
+def _has_canonical_event_framing(event_block: str, event_type: JsonValue) -> bool:
+    """True when the block already carries the `event: <type>` line that
+    format_sse_event would emit (or the payload has no type, where canonical
+    framing is data-only)."""
+    if not isinstance(event_type, str) or not event_type:
+        return event_block.startswith("data: ")
+    return event_block.startswith(f"event: {event_type}\n")
 
 
 def _normalize_public_stream_payload(
@@ -6755,17 +6871,19 @@ def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> b
 
 
 async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    pending: dict[tuple[str | None, int | None, int | None], list[dict[str, JsonValue]]] = {}
+    pending: dict[tuple[str | None, int | None, int | None], list[tuple[dict[str, JsonValue], str]]] = {}
 
     def flush(key: tuple[str | None, int | None, int | None]) -> list[str]:
-        payloads = pending.pop(key, [])
-        text = "".join(cast(str, payload.get("delta")) for payload in payloads)
+        entries = pending.pop(key, [])
+        text = "".join(cast(str, payload.get("delta")) for payload, _ in entries)
         cleaned = _strip_blank_html_comment_lines(text)
         if cleaned == text:
-            return [format_sse_event(payload) for payload in payloads]
-        if not cleaned or not payloads:
+            # Nothing changed: replay the original upstream blocks instead of
+            # re-serializing every buffered payload.
+            return [raw_block for _, raw_block in entries]
+        if not cleaned or not entries:
             return []
-        normalized = dict(payloads[0])
+        normalized = dict(entries[0][0])
         normalized["delta"] = cleaned
         return [format_sse_event(normalized)]
 
@@ -6793,8 +6911,8 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
                 continue
             key = event_key
             if key in pending:
-                pending[key].append(payload)
-                buffered_text = "".join(cast(str, item.get("delta")) for item in pending[key])
+                pending[key].append((payload, event_block))
+                buffered_text = "".join(cast(str, item.get("delta")) for item, _ in pending[key])
                 if _strip_blank_html_comment_lines(buffered_text) != buffered_text:
                     for buffered in flush(key):
                         yield buffered
@@ -6811,7 +6929,7 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
                 yield format_sse_event(normalized_payload)
                 continue
             if _could_be_blank_html_comment_line(delta):
-                pending[key] = [payload]
+                pending[key] = [(payload, event_block)]
                 continue
             yield event_block
             continue

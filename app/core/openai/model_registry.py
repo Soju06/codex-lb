@@ -62,6 +62,17 @@ class ModelRegistrySnapshot:
     suppressed_model_slugs: frozenset[str] = field(default_factory=frozenset)
 
 
+@dataclass(slots=True)
+class ModelRegistryExport:
+    """Complete registry state as exchanged with the persisted snapshot store.
+
+    ``snapshot is None`` represents the cleared/bootstrap-floor state.
+    """
+
+    snapshot: ModelRegistrySnapshot | None
+    metadata_models: dict[str, UpstreamModel] | None
+
+
 _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
     "gpt-5.6-*",
     "gpt-5.5",
@@ -176,6 +187,8 @@ def _bootstrap_model(
         "visibility": visibility,
         "availability_nux": None,
         "max_context_window": context_window,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "experimental_supported_tools": [],
     }
     if raw:
         raw_fields.update(raw)
@@ -331,6 +344,7 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         "GPT-5.2",
         prefer_websockets=True,
         minimal_client_version="0.0.1",
+        raw={"truncation_policy": {"mode": "bytes", "limit": 10_000}},
     ),
     _bootstrap_model(
         "codex-auto-review",
@@ -490,7 +504,27 @@ class ModelRegistry:
         self._snapshot: ModelRegistrySnapshot | None = None
         self._bootstrap_models: dict[str, UpstreamModel] = {m.slug: m for m in _BOOTSTRAP_STATIC_MODELS}
         self._metadata_models: dict[str, UpstreamModel] | None = None
+        self._applied_content_hash: str | None = None
         self._lock = anyio.Lock()
+
+    @property
+    def applied_content_hash(self) -> str | None:
+        """Content hash of the persisted snapshot this registry last applied or persisted."""
+        return self._applied_content_hash
+
+    def note_applied_content_hash(self, content_hash: str | None) -> None:
+        self._applied_content_hash = content_hash
+
+    async def export_state(self) -> ModelRegistryExport:
+        async with self._lock:
+            return ModelRegistryExport(snapshot=self._snapshot, metadata_models=self._metadata_models)
+
+    async def import_state(self, state: ModelRegistryExport, *, content_hash: str) -> None:
+        """Replace the registry state with a decoded persisted snapshot."""
+        async with self._lock:
+            self._snapshot = state.snapshot
+            self._metadata_models = state.metadata_models
+            self._applied_content_hash = content_hash
 
     def get_snapshot(self) -> ModelRegistrySnapshot | None:
         return self._snapshot
@@ -639,6 +673,7 @@ class ModelRegistry:
         async with self._lock:
             self._snapshot = None
             self._metadata_models = None
+            self._applied_content_hash = None
 
     async def update(
         self,

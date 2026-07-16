@@ -2,13 +2,20 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, Base, RequestLog
-from app.modules.reports.repository import DailyReportRangeTooLargeError, ReportsRepository
+from app.modules.reports.repository import (
+    DailyReportRangeTooLargeError,
+    ReportsRepository,
+    _daily_speed_medians_stmt,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -63,6 +70,9 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
                 output_tokens=4,
                 cached_input_tokens=2,
                 cost_usd=0.25,
+                latency_ms=1200,
+                latency_first_token_ms=200,
+                latency_queue_ms=350,
             ),
             RequestLog(
                 account_id=None,
@@ -74,6 +84,8 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
                 output_tokens=1,
                 cached_input_tokens=0,
                 cost_usd=0.1,
+                latency_ms=2600,
+                latency_first_token_ms=600,
             ),
         ]
     )
@@ -93,6 +105,9 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[0].cost_usd == 0.25
     assert rows[0].active_accounts == 1
     assert rows[0].error_count == 0
+    assert rows[0].median_ttft_ms == 200
+    assert rows[0].median_tps == 4
+    assert rows[0].median_queue_ms == 350
 
     assert rows[1].requests == 1
     assert rows[1].input_tokens == 5
@@ -101,6 +116,259 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[1].cost_usd == 0.1
     assert rows[1].active_accounts == 0
     assert rows[1].error_count == 1
+    assert rows[1].median_ttft_ms == 600
+    assert rows[1].median_tps == 0.5
+    # No queue samples on this day: zero-filled rather than null.
+    assert rows[1].median_queue_ms == 0.0
+
+
+@pytest.mark.asyncio
+async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_invalid_speed_samples(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    account_id = "acc_reports_speed_medians"
+    async_session.add(_make_account(account_id, "reports-speed-medians@example.com"))
+    async_session.add_all(
+        [
+            # Day one ignores missing TTFT and invalid TPS samples: TTFT [100, 200, 300], TPS [10].
+            # Reasoning tokens are not used for the existing output TPS metric.
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-even-1",
+                requested_at=datetime(2026, 6, 1, 9, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=None,
+                reasoning_tokens=10,
+                latency_ms=1100,
+                latency_first_token_ms=100,
+                latency_queue_ms=40,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-even-2",
+                requested_at=datetime(2026, 6, 1, 10, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=12,
+                reasoning_tokens=999,
+                latency_ms=1500,
+                latency_first_token_ms=300,
+                latency_queue_ms=60,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-even-missing-ttft",
+                requested_at=datetime(2026, 6, 1, 11, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=None,
+                reasoning_tokens=None,
+                latency_ms=1500,
+                latency_first_token_ms=None,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-even-invalid-generation",
+                requested_at=datetime(2026, 6, 1, 12, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=9,
+                latency_ms=200,
+                latency_first_token_ms=200,
+            ),
+            # Day two ignores reasoning-only and zero-output rows for TPS: TTFT [100, 200, 300, 400], TPS [4, 20].
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-odd-1",
+                requested_at=datetime(2026, 6, 2, 9, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=20,
+                latency_ms=1100,
+                latency_first_token_ms=100,
+                latency_queue_ms=10,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-odd-2",
+                requested_at=datetime(2026, 6, 2, 10, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=3,
+                latency_ms=950,
+                latency_first_token_ms=200,
+                latency_queue_ms=30,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-odd-invalid-output",
+                requested_at=datetime(2026, 6, 2, 11, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=0,
+                reasoning_tokens=50,
+                latency_ms=700,
+                latency_first_token_ms=300,
+                latency_queue_ms=500,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-odd-reasoning-only",
+                requested_at=datetime(2026, 6, 2, 12, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=None,
+                reasoning_tokens=40,
+                latency_ms=800,
+                latency_first_token_ms=400,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    rows = await repo.aggregate_daily_rows(date(2026, 6, 1), date(2026, 6, 2), timezone.utc)
+
+    assert [(row.date, row.median_ttft_ms, row.median_tps, row.median_queue_ms) for row in rows] == [
+        ("2026-06-01", 200.0, 10.0, 50.0),
+        ("2026-06-02", 250.0, 12.0, 30.0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_daily_rows_speed_medians_preserve_filters_and_timezone_buckets(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    async_session.add_all(
+        [
+            _make_account("acc_reports_speed_filter", "reports-speed-filter@example.com"),
+            _make_account("acc_reports_speed_other", "reports-speed-other@example.com"),
+            RequestLog(
+                account_id="acc_reports_speed_filter",
+                request_id="report-speed-filter-match",
+                requested_at=datetime(2026, 6, 1, 7, 0),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                status="success",
+                output_tokens=4,
+                latency_ms=1100,
+                latency_first_token_ms=100,
+            ),
+            RequestLog(
+                account_id="acc_reports_speed_filter",
+                request_id="report-speed-filter-before-local-day",
+                requested_at=datetime(2026, 6, 1, 6, 59, 59),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                status="success",
+                output_tokens=9,
+                latency_ms=1000,
+                latency_first_token_ms=900,
+            ),
+            RequestLog(
+                account_id="acc_reports_speed_other",
+                request_id="report-speed-filter-other-account",
+                requested_at=datetime(2026, 6, 1, 7, 0),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                status="success",
+                output_tokens=8,
+                latency_ms=1000,
+                latency_first_token_ms=800,
+            ),
+            RequestLog(
+                account_id="acc_reports_speed_filter",
+                request_id="report-speed-filter-other-model",
+                requested_at=datetime(2026, 6, 1, 7, 0),
+                model="gpt-5.2",
+                useragent_group="opencode",
+                status="success",
+                output_tokens=7,
+                latency_ms=1000,
+                latency_first_token_ms=700,
+            ),
+            RequestLog(
+                account_id="acc_reports_speed_filter",
+                request_id="report-speed-filter-other-useragent",
+                requested_at=datetime(2026, 6, 1, 7, 0),
+                model="gpt-5.1",
+                useragent_group="CodexCLI",
+                status="success",
+                output_tokens=6,
+                latency_ms=1000,
+                latency_first_token_ms=600,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    rows = await repo.aggregate_daily_rows(
+        date(2026, 6, 1),
+        date(2026, 6, 1),
+        ZoneInfo("America/Los_Angeles"),
+        account_ids=["acc_reports_speed_filter"],
+        model="gpt-5.1",
+        useragent_group="opencode",
+    )
+
+    assert [(row.date, row.requests, row.median_ttft_ms, row.median_tps) for row in rows] == [
+        ("2026-06-01", 1, 100.0, 4.0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_daily_speed_medians_stmt_returns_only_one_row_per_populated_day_at_high_cardinality(
+    async_session: AsyncSession,
+) -> None:
+    day_ranges = [
+        ("2026-06-01", datetime(2026, 6, 1), datetime(2026, 6, 2)),
+        ("2026-06-02", datetime(2026, 6, 2), datetime(2026, 6, 3)),
+    ]
+    async_session.add_all(
+        [
+            RequestLog(
+                request_id=f"report-speed-many-{day}-{sample}",
+                requested_at=datetime(2026, 6, day, 12, sample % 60),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=sample + 1,
+                latency_ms=1000 + sample,
+                latency_first_token_ms=sample,
+            )
+            for day in (1, 2)
+            for sample in range(512)
+        ]
+    )
+    await async_session.commit()
+
+    result = await async_session.execute(_daily_speed_medians_stmt(day_ranges, None, None, None))
+    rows = result.all()
+
+    assert [(row.report_date, row.median_ttft_ms, row.median_tps) for row in rows] == [
+        ("2026-06-01", 255.5, 256.5),
+        ("2026-06-02", 255.5, 256.5),
+    ]
+    assert len(rows) == len(day_ranges)
+
+
+def test_daily_speed_medians_stmt_compiles_to_portable_window_sql() -> None:
+    statement = _daily_speed_medians_stmt(
+        [("2026-06-01", datetime(2026, 6, 1), datetime(2026, 6, 2))],
+        None,
+        None,
+        None,
+    )
+
+    for dialect in (sqlite_dialect(), postgresql_dialect()):
+        sql = str(statement.compile(dialect=dialect, compile_kwargs={"literal_binds": True})).lower()
+
+        assert "row_number() over" in sql
+        assert "count(*) over" in sql
+        assert "group by daily_ttft_ranks.report_date" in sql
+        assert "group by daily_tps_ranks.report_date" in sql
+        assert "percentile_cont" not in sql
 
 
 @pytest.mark.asyncio

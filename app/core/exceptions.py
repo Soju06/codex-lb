@@ -65,6 +65,11 @@ class DashboardConflictError(AppError):
     code = "conflict"
 
 
+class DashboardSettingsConflictError(DashboardConflictError):
+    code = "settings_conflict"
+    message = "Settings were modified by another writer; reload and retry"
+
+
 class DashboardBadRequestError(AppError):
     status_code = 400
     code = "bad_request"

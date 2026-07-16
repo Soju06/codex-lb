@@ -133,3 +133,22 @@ class RequestActivityAggregate:
     output_tokens: int
     cached_input_tokens: int
     cost_usd: float
+
+
+@dataclass(frozen=True)
+class UsageSummaryLogsAggregate:
+    """SQL-side replacement for summing a window of RequestLog ORM rows in
+    Python; field semantics mirror the log helpers exactly (reasoning-token
+    fallback for output, per-row cached<=input clamp, None-cost rows excluded
+    from per-model cost)."""
+
+    request_count: int
+    error_count: int
+    total_tokens: int
+    cached_input_tokens: int
+    top_error: str | None
+    cost_by_model: list[tuple[str, float]]
+
+    @property
+    def cost_total_usd(self) -> float:
+        return sum(cost for _, cost in self.cost_by_model)

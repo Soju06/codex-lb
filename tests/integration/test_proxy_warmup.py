@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
@@ -416,6 +417,130 @@ async def test_warmup_route_failure_records_fail_closed_reason(async_client, mon
     assert row.status == "error"
     assert row.error_code == "upstream_proxy_unavailable"
     assert row.upstream_proxy_fail_closed_reason == "no_healthy_endpoint"
+
+
+@pytest.mark.asyncio
+async def test_warmup_refresh_claim_contention_surfaces_upstream_unavailable(async_client, monkeypatch):
+    """Regression (finding #6): a cross-replica refresh-claim contention on the
+    warmup path (a peer replica holds the account's refresh claim) is NOT an auth
+    failure -- the account's OAuth credentials are healthy. Warmup previously
+    squashed every non-permanent RefreshError into ``invalid_api_key``, presenting
+    a healthy account as an auth failure in the warmup result and request log. It
+    MUST instead surface the retryable ``upstream_unavailable`` (matching the five
+    core proxy request paths) via ``is_refresh_claim_contention``."""
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-claim-contention"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-claim@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-claim")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "refresh_claim_timeout",
+            "peer replica holds the refresh claim",
+            False,
+            transport_error=True,
+        )
+
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["submitted"] == []
+    assert payload["failed"][0]["account_id"] == eligible_id
+    # Retryable upstream-unavailable, NOT a bogus invalid_api_key auth failure.
+    assert payload["failed"][0]["error_code"] == "upstream_unavailable"
+    compact.assert_not_awaited()
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.status == "error"
+    assert row.error_code == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_warmup_post_exchange_persist_conflict_surfaces_upstream_unavailable_and_logs_distinctly(
+    async_client, monkeypatch, caplog
+):
+    """A post-exchange ``token_persist_conflict`` shares the SAME external outcome
+    as benign claim contention (retryable ``upstream_unavailable``, no health
+    penalty, no bogus ``invalid_api_key``) but MUST be logged DISTINCTLY -- it
+    signals a rarer, more-serious internal race than benign contention."""
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-persist-conflict"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-persist@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-persist")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "token_persist_conflict",
+            "guarded persist CAS never landed",
+            False,
+            transport_error=True,
+        )
+
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    with caplog.at_level("WARNING"):
+        response = await async_client.post(
+            "/v1/warmup",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"mode": "normal"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["failed"][0]["account_id"] == eligible_id
+    # Same external outcome as benign claim contention: retryable, unpenalized.
+    assert payload["failed"][0]["error_code"] == "upstream_unavailable"
+    compact.assert_not_awaited()
+
+    # Distinct observability: the post-exchange persist conflict is logged with a
+    # message that names it, unlike benign claim contention.
+    assert any(
+        "persist conflict" in record.getMessage() and "token_persist_conflict" in record.getMessage()
+        for record in caplog.records
+    )
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.status == "error"
+    assert row.error_code == "upstream_unavailable"
 
 
 @pytest.mark.asyncio

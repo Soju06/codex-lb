@@ -12,6 +12,7 @@ from app.core.usage.types import (
     UsageCostByModel,
     UsageCostSummary,
     UsageMetricsSummary,
+    UsageSummaryLogsAggregate,
     UsageSummaryPayload,
     UsageWindowRow,
     UsageWindowSnapshot,
@@ -286,6 +287,36 @@ def _build_account_history(
             )
         )
     return results
+
+
+def build_usage_metrics_from_aggregate(aggregate: UsageSummaryLogsAggregate | None) -> UsageMetricsSummary:
+    """SQL-aggregate twin of `_usage_metrics`; `None` mirrors an empty window."""
+    if aggregate is None or aggregate.request_count == 0:
+        requests = aggregate.request_count if aggregate else 0
+        return UsageMetricsSummary(
+            requests_7d=requests,
+            tokens_secondary_window=aggregate.total_tokens if aggregate else 0,
+            cached_tokens_secondary_window=aggregate.cached_input_tokens if aggregate else 0,
+            error_rate_7d=None,
+            top_error=aggregate.top_error if aggregate else None,
+        )
+    return UsageMetricsSummary(
+        requests_7d=aggregate.request_count,
+        tokens_secondary_window=aggregate.total_tokens,
+        cached_tokens_secondary_window=aggregate.cached_input_tokens,
+        error_rate_7d=aggregate.error_count / aggregate.request_count,
+        top_error=aggregate.top_error,
+    )
+
+
+def build_usage_cost_from_aggregate(aggregate: UsageSummaryLogsAggregate | None) -> UsageCostSummary:
+    """SQL-aggregate twin of `_cost_summary_from_logs`."""
+    by_model = aggregate.cost_by_model if aggregate else []
+    return UsageCostSummary(
+        currency="USD",
+        total_usd_7d=round(sum(cost for _, cost in by_model), 6),
+        by_model=[UsageCostByModel(model=model, usd=round(cost, 6)) for model, cost in sorted(by_model)],
+    )
 
 
 def _cost_summary_from_logs(logs: list[RequestLog]) -> UsageCostSummary:

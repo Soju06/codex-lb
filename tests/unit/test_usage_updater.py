@@ -5,7 +5,7 @@ import time
 from collections.abc import Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -708,6 +708,135 @@ async def test_force_refresh_usage_keeps_rate_limited_account_without_primary_or
     assert accounts_repo.status_updates == []
     assert account.status == AccountStatus.RATE_LIMITED
     assert account.reset_at == 12345
+
+
+@pytest.mark.asyncio
+async def test_recover_keeps_rate_limited_account_during_persisted_retry_after_cooldown() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_retry_after_cooldown", "workspace_retry_after_cooldown")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    # A 429 with a 20-minute Retry-After persisted blocked_at + reset_at.
+    account.blocked_at = now - 60
+    account.reset_at = now + 1140
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == now + 1140
+    assert account.blocked_at == now - 60
+
+
+@pytest.mark.asyncio
+async def test_recover_keeps_rate_limited_account_during_legacy_blocked_at_floor() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_legacy_floor", "workspace_legacy_floor")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    # Legacy 429 row written before cooldown persistence: blocked_at only.
+    account.blocked_at = now - 5
+    account.reset_at = None
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.blocked_at == now - 5
+
+
+@pytest.mark.asyncio
+async def test_recover_restores_rate_limited_account_after_persisted_cooldown_elapses() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_cooldown_elapsed", "workspace_cooldown_elapsed")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    account.blocked_at = now - 1300
+    account.reset_at = now - 10
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": account.id,
+            "status": AccountStatus.ACTIVE,
+            "deactivation_reason": None,
+            "reset_at": None,
+            "blocked_at": None,
+        },
+    ]
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_keeps_rate_limited_retry_after_cooldown(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    # 60s after the 429, well before the 20-minute Retry-After deadline.
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: 1735600060.0)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_rate_limited_retry_after", "workspace_shared")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = 1735601200
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries, "expected the refresh to fetch and store fresh usage"
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 1735601200
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
 
 
 @pytest.mark.asyncio
@@ -1525,7 +1654,7 @@ async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypa
         account.id,
         100.0,
         window="monthly",
-        recorded_at=datetime.now(),
+        recorded_at=usage_updater_module.utcnow(),
         reset_at=int(time.time()) + 3600,
         window_minutes=43_200,
     )
@@ -1577,7 +1706,7 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
     assert usage_repo.entries == []
     assert additional_repo.deleted_account_ids == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.status == AccountStatus.ACTIVE
     assert account.plan_type == "business"
     assert account.workspace_id == "ws_team"
@@ -1632,7 +1761,7 @@ async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> 
     assert account.workspace_label is None
     assert account.seat_type is None
     assert account.plan_type == original_plan_type
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
 
 
 @pytest.mark.asyncio
@@ -1711,7 +1840,7 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
     assert usage_repo.entries == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.workspace_id == "ws_team"
     assert account.plan_type == "business"
 
@@ -1754,7 +1883,7 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
     assert usage_repo.entries == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.workspace_id == "ws_team"
     assert account.plan_type == "business"
 
@@ -1878,7 +2007,7 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
     await updater.refresh_accounts([account], latest_usage={})
 
     assert usage_repo.entries == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.plan_type == "unknown"
     assert account.workspace_id is None
 
@@ -1886,11 +2015,14 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
-        self.token_updates: list[dict[str, Any]] = []
+        self.metadata_updates: list[dict[str, Any]] = []
         self.accounts_by_id: dict[str, Account] = {}
         self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
 
     async def get_by_id(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
     async def update_status(
@@ -1930,6 +2062,7 @@ class StubAccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self.accounts_by_id.get(account_id)
         if (
@@ -1942,16 +2075,34 @@ class StubAccountsRepository:
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)
 
-    async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        # The usage updater never rotates token material through its accounts
+        # repo (that path lives in AuthManager). Present only to satisfy the
+        # AccountsRepositoryPort protocol.
+        return True
+
+    async def update_account_metadata(self, *args: Any, **kwargs: Any) -> bool:
         account_id = args[0] if args else kwargs.get("account_id")
         if not isinstance(account_id, str):
             return True
         account = self.accounts_by_id.get(account_id)
         if account is not None:
-            account.access_token_encrypted = kwargs["access_token_encrypted"]
-            account.refresh_token_encrypted = kwargs["refresh_token_encrypted"]
-            account.id_token_encrypted = kwargs["id_token_encrypted"]
-            account.last_refresh = kwargs["last_refresh"]
             plan_type = kwargs.get("plan_type")
             email = kwargs.get("email")
             chatgpt_account_id = kwargs.get("chatgpt_account_id")
@@ -1970,7 +2121,7 @@ class StubAccountsRepository:
                 account.workspace_label = workspace_label
             if isinstance(seat_type, str):
                 account.seat_type = seat_type
-        self.token_updates.append({"account_id": account_id, **kwargs})
+        self.metadata_updates.append({"account_id": account_id, **kwargs})
         return True
 
     async def workspace_slot_taken(
@@ -2389,7 +2540,7 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
 
     assert usage_written is False
     assert acc.plan_type == "plus"
-    assert accounts_repo.token_updates[0]["plan_type"] == "plus"
+    assert accounts_repo.metadata_updates[0]["plan_type"] == "plus"
     assert usage_repo.entries == []
 
 
@@ -3367,6 +3518,344 @@ def test_latest_usage_is_fresh_returns_false_when_reset_at_has_passed() -> None:
     )
 
     assert usage_updater_module._latest_usage_is_fresh(entry, now=now, interval_seconds=60) is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_fetches_when_additional_usage_ages_despite_fresh_main_rows(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # Live traffic keeps the main rows fresh...
+    await usage_repo.add_entry(
+        "acc_gated",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_gated", window="primary")
+    assert latest is not None
+
+    # ...but the additional (per-model) rows have aged past the interval:
+    # only the upstream fetch syncs them, so the fetch must still happen.
+    additional_repo = StubAdditionalUsageRepository()
+    await additional_repo.add_entry(
+        "acc_gated",
+        limit_name="codex_other",
+        metered_feature="gpt-gated",
+        window="primary",
+        used_percent=10.0,
+        recorded_at=now - timedelta(minutes=10),
+    )
+    stale_recorded_at = now - timedelta(minutes=10)
+
+    async def aged_latest_recorded_at(account_id: str):
+        return stale_recorded_at if account_id == "acc_gated" else None
+
+    monkeypatch.setattr(additional_repo, "latest_recorded_at_for_account", aged_latest_recorded_at)
+
+    acc = _make_account("acc_gated", "workspace_gated", email="gated@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_gated": latest})
+
+    assert fetch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_fetches_when_no_additional_rows_were_ever_synced(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_undiscovered",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_undiscovered", window="primary")
+    assert latest is not None
+
+    # An additional-usage repo is configured but no rows were ever synced:
+    # live rows alone must not suppress the discovery fetch.
+    additional_repo = StubAdditionalUsageRepository()
+
+    acc = _make_account("acc_undiscovered", "workspace_undiscovered", email="undiscovered@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_undiscovered": latest})
+
+    assert fetch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_skips_fetch_when_additional_usage_is_fresh(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_gated_fresh",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_gated_fresh", window="primary")
+    assert latest is not None
+
+    additional_repo = StubAdditionalUsageRepository()
+    await additional_repo.add_entry(
+        "acc_gated_fresh",
+        limit_name="codex_other",
+        metered_feature="gpt-gated",
+        window="primary",
+        used_percent=10.0,
+        recorded_at=now - timedelta(seconds=5),
+    )
+
+    acc = _make_account("acc_gated_fresh", "workspace_gated_fresh", email="gated-fresh@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_gated_fresh": latest})
+
+    assert fetch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_skips_fetch_when_newer_sibling_row_supersedes_elapsed_primary(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # Upstream stopped reporting the primary window: the primary row keeps
+    # its elapsed reset while a later fetch wrote only a secondary row.
+    await usage_repo.add_entry(
+        "acc_sibling",
+        87.0,
+        recorded_at=now - timedelta(hours=3),
+        window="primary",
+        reset_at=now_epoch - 7200,
+        window_minutes=300,
+    )
+    await usage_repo.add_entry(
+        "acc_sibling",
+        40.0,
+        recorded_at=now - timedelta(seconds=10),
+        window="secondary",
+        reset_at=now_epoch + 5 * 24 * 3600,
+        window_minutes=10080,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_sibling", window="primary")
+    assert latest is not None
+
+    acc = _make_account("acc_sibling", "workspace_sibling", email="sibling@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={"acc_sibling": latest})
+
+    assert fetch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_skips_fetch_when_only_fresh_secondary_row_exists(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # Upstream omitted the short window from the very first fetch: the
+    # account has only a fresh secondary row and no primary row at all.
+    await usage_repo.add_entry(
+        "acc_secondary_only",
+        40.0,
+        recorded_at=now - timedelta(seconds=10),
+        window="secondary",
+        reset_at=now_epoch + 5 * 24 * 3600,
+        window_minutes=10080,
+    )
+
+    acc = _make_account("acc_secondary_only", "workspace_secondary_only", email="secondary-only@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert fetch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_ignores_lingering_monthly_rows_for_paid_plans(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # A stale primary row plus a lingering monthly row from a former free
+    # plan: the monthly row is not applicable to a plus account and must
+    # not suppress the refresh.
+    await usage_repo.add_entry(
+        "acc_upgraded",
+        87.0,
+        recorded_at=now - timedelta(hours=3),
+        window="primary",
+        reset_at=now_epoch - 7200,
+        window_minutes=300,
+    )
+    await usage_repo.add_entry(
+        "acc_upgraded",
+        40.0,
+        recorded_at=now - timedelta(seconds=10),
+        window="monthly",
+        reset_at=now_epoch + 30 * 24 * 3600,
+        window_minutes=43200,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_upgraded", window="primary")
+    assert latest is not None
+
+    acc = _make_account("acc_upgraded", "workspace_upgraded", email="upgraded@example.com")
+    acc.plan_type = "plus"
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={"acc_upgraded": latest})
+
+    assert fetch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_still_fetches_when_elapsed_primary_has_no_newer_sibling(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # Both rows came from the same fetch (sub-second apart): the elapsed
+    # primary reset must still force an upstream fetch.
+    await usage_repo.add_entry(
+        "acc_same_fetch",
+        87.0,
+        recorded_at=now - timedelta(seconds=10),
+        window="primary",
+        reset_at=now_epoch - 5,
+        window_minutes=300,
+    )
+    await usage_repo.add_entry(
+        "acc_same_fetch",
+        40.0,
+        recorded_at=now - timedelta(seconds=9),
+        window="secondary",
+        reset_at=now_epoch + 5 * 24 * 3600,
+        window_minutes=10080,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_same_fetch", window="primary")
+    assert latest is not None
+
+    acc = _make_account("acc_same_fetch", "workspace_same_fetch", email="same-fetch@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={"acc_same_fetch": latest})
+
+    assert fetch_calls == 1
 
 
 @pytest.mark.asyncio

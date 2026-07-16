@@ -14,6 +14,9 @@ class DailyReportRow(DashboardModel):
     cost_usd: float
     active_accounts: int
     error_count: int = 0
+    median_ttft_ms: float = 0.0
+    median_tps: float = 0.0
+    median_queue_ms: float = 0.0
 
 
 class ModelCostEntry(DashboardModel):

@@ -89,5 +89,44 @@ def test_warn_removed_settings_scans_env_files(tmp_path, monkeypatch, caplog):
 
 
 def test_removed_settings_tuple_covers_all_five_groups():
-    assert len(_REMOVED_SETTINGS) == 24
+    assert len(_REMOVED_SETTINGS) == 39
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
+    assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
+
+
+def test_phase_2_removed_settings_are_listed_and_ignored(monkeypatch):
+    phase_2_names = (
+        "CODEX_LB_QUOTA_PLANNER_TICK_SECONDS",
+        "CODEX_LB_AUTOMATIONS_SCHEDULER_INTERVAL_SECONDS",
+        "CODEX_LB_MODEL_REGISTRY_REFRESH_INTERVAL_SECONDS",
+        "CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS",
+        "CODEX_LB_CODEX_FINGERPRINT_OS",
+        "CODEX_LB_CODEX_FINGERPRINT_ARCH",
+        "CODEX_LB_CODEX_FINGERPRINT_TERMINAL",
+        "CODEX_LB_LIVE_USAGE_WRITE_MIN_INTERVAL_SECONDS",
+        "CODEX_LB_LIVE_USAGE_QUEUE_SIZE",
+        "CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS",
+        "CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+        "CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS",
+        "CODEX_LB_MEMORY_WARNING_THRESHOLD_MB",
+        "CODEX_LB_IMAGES_HOST_MODEL",
+        "CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES",
+    )
+    for name in phase_2_names:
+        assert name in _REMOVED_SETTINGS
+
+    monkeypatch.setenv("CODEX_LB_QUOTA_PLANNER_TICK_SECONDS", "60")
+    monkeypatch.setenv("CODEX_LB_IMAGES_HOST_MODEL", "gpt-5.6")
+    settings = Settings()
+    assert not hasattr(settings, "quota_planner_tick_seconds")
+    assert not hasattr(settings, "images_host_model")
+    found = warn_removed_settings(
+        {
+            "CODEX_LB_QUOTA_PLANNER_TICK_SECONDS": "60",
+            "CODEX_LB_IMAGES_HOST_MODEL": "gpt-5.6",
+        }
+    )
+    assert found == [
+        "CODEX_LB_QUOTA_PLANNER_TICK_SECONDS",
+        "CODEX_LB_IMAGES_HOST_MODEL",
+    ]

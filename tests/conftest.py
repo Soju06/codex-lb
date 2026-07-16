@@ -22,7 +22,6 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
-os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
 # The app-level automations scheduler ticks on the real clock; with leader
 # election enabled its startup tick runs as a background task and can land
 # inside a test that stages its own due-now jobs, racing the test's
@@ -128,6 +127,16 @@ async def app_instance(_reset_db_state, monkeypatch):
     monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
     app = create_app()
     return app
+
+
+@pytest.fixture(autouse=True)
+def _disable_request_log_count_cache(monkeypatch):
+    """Zero the request-log COUNT cache TTL so listing totals stay exact
+    within a test. The TTL is a fixed constant in production (issue #1340
+    phase 2); the cache-behavior test patches it back to a positive value."""
+    import app.modules.request_logs.repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)

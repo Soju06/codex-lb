@@ -38,6 +38,7 @@ OAUTH_CALLBACK_PORT = 1455  # Do not change the port. OpenAI dislikes changes.
 # PRINCIPLES.md P2). ``extra="ignore"`` already makes them harmless; startup
 # emits one WARN for one release as a courtesy to operators who still set them.
 _REMOVED_SETTINGS: tuple[str, ...] = (
+    # Phase 1 (reduce-settings-surface-phase-1)
     "CODEX_LB_AUTH_BASE_URL",
     "CODEX_LB_OAUTH_CLIENT_ID",
     "CODEX_LB_OAUTH_ORIGINATOR",
@@ -62,6 +63,22 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT",
     "CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS",
     "CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS",
+    # Phase 2 (reduce-settings-surface-phase-2)
+    "CODEX_LB_QUOTA_PLANNER_TICK_SECONDS",
+    "CODEX_LB_AUTOMATIONS_SCHEDULER_INTERVAL_SECONDS",
+    "CODEX_LB_MODEL_REGISTRY_REFRESH_INTERVAL_SECONDS",
+    "CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS",
+    "CODEX_LB_CODEX_FINGERPRINT_OS",
+    "CODEX_LB_CODEX_FINGERPRINT_ARCH",
+    "CODEX_LB_CODEX_FINGERPRINT_TERMINAL",
+    "CODEX_LB_LIVE_USAGE_WRITE_MIN_INTERVAL_SECONDS",
+    "CODEX_LB_LIVE_USAGE_QUEUE_SIZE",
+    "CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS",
+    "CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+    "CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS",
+    "CODEX_LB_MEMORY_WARNING_THRESHOLD_MB",
+    "CODEX_LB_IMAGES_HOST_MODEL",
+    "CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES",
 )
 
 
@@ -256,8 +273,6 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     live_usage_ingestion_enabled: bool = True
-    live_usage_write_min_interval_seconds: float = Field(default=5.0, ge=0)
-    live_usage_queue_size: int = Field(default=512, gt=0)
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
@@ -286,17 +301,12 @@ class Settings(BaseSettings):
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
     sticky_session_cleanup_enabled: bool = True
-    sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     # Data retention (0 = disabled). Non-zero values have safety floors so
     # every in-product consumer window stays inside retained data.
-    # Display-only pagination total for the request-log listing; 0 disables.
-    request_log_count_cache_ttl_seconds: float = Field(default=30.0, ge=0)
     request_log_retention_days: int = Field(default=0, ge=0, le=3650)
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
-    quota_planner_tick_seconds: int = Field(default=300, gt=0)
     automations_scheduler_enabled: bool = True
-    automations_scheduler_interval_seconds: int = Field(default=30, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     # Startup cross-replica encryption-key consistency check against the shared
     # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an
@@ -319,20 +329,17 @@ class Settings(BaseSettings):
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # OpenAI Images API compatibility (POST /v1/images/{generations,edits})
-    # ``images_host_model`` is the internal Responses model used to invoke the
-    # built-in ``image_generation`` tool. It is never echoed to clients.
     # ``images_default_model`` is the public model returned to clients when
-    # they omit ``model``; it must remain in the ``gpt-image-*`` family.
-    images_host_model: str = "gpt-5.5"
+    # they omit ``model``; it must remain in the ``gpt-image-*`` family. The
+    # internal Responses host model used to invoke the ``image_generation``
+    # tool is a fixed constant in ``app/modules/proxy/api.py``.
     images_default_model: str = "gpt-image-2"
-    images_max_partial_images: int = Field(default=3, ge=0, le=3)
     # NOTE: there is intentionally no ``images_max_n`` setting. The
     # upstream ``image_generation`` tool path accepts only a single
     # image per call and codex-lb does not yet implement client-side
     # fan-out, so ``n > 1`` is hard-rejected at the API boundary. The
     # cap is lifted in the same change that introduces fan-out.
     model_registry_enabled: bool = True
-    model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     # Fallback Codex client version used when the live release lookup fails.
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
@@ -341,9 +348,6 @@ class Settings(BaseSettings):
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
-    codex_fingerprint_os: str = "Mac OS 26.5.0"
-    codex_fingerprint_arch: str = "arm64"
-    codex_fingerprint_terminal: str = "iTerm.app/3.6.10"
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False
@@ -371,10 +375,9 @@ class Settings(BaseSettings):
     leader_election_enabled: bool = True
     leader_election_ttl_seconds: int = Field(default=60, ge=5)
 
-    # Circuit breaker
+    # Circuit breaker (failure threshold and recovery timeout are fixed
+    # constants in ``app/core/resilience/circuit_breaker.py``)
     circuit_breaker_enabled: bool = False
-    circuit_breaker_failure_threshold: int = 5
-    circuit_breaker_recovery_timeout_seconds: int = 60
 
     # Soft drain & deterministic failover
     soft_drain_enabled: bool = True
@@ -420,7 +423,9 @@ class Settings(BaseSettings):
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 
-    memory_warning_threshold_mb: int = 0
+    # Local memory-pressure guard (0 = disabled). Requests are rejected with
+    # 503 once RSS reaches the threshold; a warning is logged from 80% of it
+    # (``app/core/resilience/memory_monitor.py`` derives the warning level).
     memory_reject_threshold_mb: int = 0
 
     # OpenTelemetry

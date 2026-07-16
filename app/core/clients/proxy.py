@@ -622,9 +622,13 @@ _SDK_FINGERPRINT_HEADER_KEYS: frozenset[str] = frozenset(
 _SDK_FINGERPRINT_HEADER_PREFIXES: tuple[str, ...] = ("x-stainless-",)
 _CODEX_CLI_ORIGINATOR = "codex_cli_rs"
 _CHATGPT_ACCOUNT_ID_HEADER = "ChatGPT-Account-Id"
-_DEFAULT_FINGERPRINT_OS = "Mac OS 26.5.0"
-_DEFAULT_FINGERPRINT_ARCH = "arm64"
-_DEFAULT_FINGERPRINT_TERMINAL = "iTerm.app/3.6.10"
+# Fixed Codex client fingerprint (issue #1340 / PRINCIPLES.md P2). These
+# values impersonate a plausible first-party Codex CLI install and are
+# maintained in lockstep with ``model_registry_client_version`` bumps; they
+# are not deployment tunables.
+_FINGERPRINT_OS = "Mac OS 26.5.0"
+_FINGERPRINT_ARCH = "arm64"
+_FINGERPRINT_TERMINAL = "iTerm.app/3.6.10"
 
 
 def build_codex_user_agent(version: str) -> str:
@@ -632,16 +636,10 @@ def build_codex_user_agent(version: str) -> str:
     ``openai/codex`` (``codex-rs/login/src/auth/default_client.rs``):
     ``codex_cli_rs/<version> (<os>; <arch>) <terminal>``.
 
-    OS/arch/terminal come from operator-configurable settings; the version is
-    the live Codex client version resolved by the caller. Settings access is
-    defensive (``getattr`` with built-in defaults) so header construction can
-    never raise and fail an otherwise-valid upstream request.
+    OS/arch/terminal are fixed fingerprint constants; the version is the live
+    Codex client version resolved by the caller.
     """
-    settings = get_settings()
-    os_name = getattr(settings, "codex_fingerprint_os", _DEFAULT_FINGERPRINT_OS)
-    arch = getattr(settings, "codex_fingerprint_arch", _DEFAULT_FINGERPRINT_ARCH)
-    terminal = getattr(settings, "codex_fingerprint_terminal", _DEFAULT_FINGERPRINT_TERMINAL)
-    return f"{_CODEX_CLI_ORIGINATOR}/{version} ({os_name}; {arch}) {terminal}"
+    return f"{_CODEX_CLI_ORIGINATOR}/{version} ({_FINGERPRINT_OS}; {_FINGERPRINT_ARCH}) {_FINGERPRINT_TERMINAL}"
 
 
 def _is_native_codex_user_agent(user_agent: str | None) -> bool:

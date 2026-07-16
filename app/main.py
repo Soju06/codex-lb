@@ -551,10 +551,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    configure_memory_monitor(
-        warning_threshold_mb=settings.memory_warning_threshold_mb,
-        reject_threshold_mb=settings.memory_reject_threshold_mb,
-    )
+    configure_memory_monitor(reject_threshold_mb=settings.memory_reject_threshold_mb)
     app = FastAPI(
         title="codex-lb",
         version="0.1.0",

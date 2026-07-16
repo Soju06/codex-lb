@@ -28,3 +28,13 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **WHEN** the first upstream `response.failed` or `error` event has `code="overloaded_error"` or `code="server_is_overloaded"`
 - **THEN** the bridge MUST retry the pre-created request before forwarding that terminal event
 - **AND** the bridge MUST preserve its existing no-replay behavior after downstream-visible output or for other fail-fast error codes
+
+#### Scenario: Native Codex bridge retries an accepted output-free overload
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted `response.created` and optionally `response.in_progress`, but no reasoning, text, item, or tool output
+- **WHEN** upstream terminates that response with `code="overloaded_error"` or `code="server_is_overloaded"`
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id`
+- **AND** the bridge MUST expose the successful replay's actual `response.completed` ID so the next continuation anchors on the successful response
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any model output, while another request is pending, or after the replay budget is exhausted

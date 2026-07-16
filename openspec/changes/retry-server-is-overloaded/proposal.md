@@ -13,6 +13,9 @@ using its bounded pre-visible retry and failover behavior.
   accompanies the streamed error envelope.
 - Allow the streaming retry path to handle `server_is_overloaded` with the same
   bounded retry behavior as other transient server errors.
+- Let the native Codex HTTP bridge wait briefly and retry once on the same
+  account when overload arrives after `response.created` but before any model
+  output, including continuation requests.
 - Add unit and externally routed integration coverage for the no-5xx SSE path.
 - Extend the Responses compatibility requirement to cover both known upstream
   overload codes.
@@ -23,4 +26,6 @@ using its bounded pre-visible retry and failover behavior.
   code instead of stopping an agent mid-task.
 - Retry remains bounded by the existing stream retry budget and remains disabled
   once downstream-visible output makes replay unsafe.
+- The accepted-response retry is limited to the native Codex stream contract;
+  public OpenAI SDK streams retain their single-response lifecycle.
 - No API, schema, or configuration changes are introduced.

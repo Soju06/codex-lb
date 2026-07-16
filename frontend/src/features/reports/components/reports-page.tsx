@@ -229,7 +229,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
       {reportsQuery.isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
-          {t("common.loading")}...
+          {t("common.loading")}
         </div>
       ) : reportsQuery.data ? (
         <>

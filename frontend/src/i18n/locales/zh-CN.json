@@ -184,6 +184,8 @@
   "apiKeys.accountSelect.limitLeft": "{{label}} 剩余 {{percent}}",
   "apiKeys.accountSelect.loading": "加载中",
   "apiKeys.accountSelect.selected": "已选择 {{count}} 个账户",
+  "apiKeys.accountSelect.selected_one": "已选择 {{count}} 个账户",
+  "apiKeys.accountSelect.selected_other": "已选择 {{count}} 个账户",
   "apiKeys.authToggle.description": "下游请求需要 API Key。",
   "apiKeys.authToggle.title": "API Key 认证",
   "apiKeys.createdDialog.description": "请立即复制该 key，之后不会再次显示。",

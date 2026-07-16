@@ -184,6 +184,8 @@
   "apiKeys.accountSelect.limitLeft": "{{label}} {{percent}} 남음",
   "apiKeys.accountSelect.loading": "불러오는 중",
   "apiKeys.accountSelect.selected": "{{count}}개 Account 선택됨",
+  "apiKeys.accountSelect.selected_one": "{{count}}개 Account 선택됨",
+  "apiKeys.accountSelect.selected_other": "{{count}}개 Account 선택됨",
   "apiKeys.authToggle.description": "downstream 요청에 API Key를 요구합니다.",
   "apiKeys.authToggle.title": "API Key 인증",
   "apiKeys.createdDialog.description": "이 key를 지금 복사하세요. 다시 표시되지 않습니다.",

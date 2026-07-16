@@ -184,6 +184,8 @@
   "apiKeys.accountSelect.limitLeft": "{{label}} {{percent}} left",
   "apiKeys.accountSelect.loading": "Loading",
   "apiKeys.accountSelect.selected": "{{count}} account selected",
+  "apiKeys.accountSelect.selected_one": "{{count}} account selected",
+  "apiKeys.accountSelect.selected_other": "{{count}} accounts selected",
   "apiKeys.authToggle.description": "Require API keys for downstream requests.",
   "apiKeys.authToggle.title": "API key authentication",
   "apiKeys.createdDialog.description": "Copy this key now. It will not be shown again after closing this dialog.",

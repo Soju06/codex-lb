@@ -76,6 +76,15 @@ retention MUST NOT run a pass.
 - **WHEN** an operator sets a dashboard retention window
 - **THEN** a subsequent scheduler tick runs a retention pass without a restart
 
+#### Scenario: Echoed effective values do not create overrides
+
+- **GIVEN** no dashboard override exists and an env alias supplies the
+  effective retention
+- **WHEN** a client performs a full GET-then-PUT save that echoes the
+  effective values back unchanged
+- **THEN** the stored dashboard values remain `NULL = inherit`, so later
+  changes to the deprecated env alias still take effect
+
 #### Scenario: Disabled effective retention skips the pass
 
 - **GIVEN** dashboard and env retention both resolve to 0

@@ -1120,3 +1120,54 @@ async def test_unrelated_settings_update_preserves_inherited_retention_nulls(asy
         assert settings is not None
         assert settings.request_log_retention_days is None
         assert settings.usage_history_retention_days is None
+
+
+@pytest.mark.asyncio
+async def test_full_save_echo_of_inherited_retention_does_not_create_override(async_client, monkeypatch):
+    """A GET-then-PUT full save echoing effective values must keep NULL = inherit."""
+    from app.modules.settings import service as settings_service
+
+    inherited = settings_service.get_settings().model_copy(
+        update={
+            "request_log_retention_days": 90,
+            "usage_history_retention_days": 45,
+        }
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requestLogRetentionDays"] == 90
+
+    # Echo the effective (env-inherited) values back, as a full-save client would.
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "requestLogRetentionDays": body["requestLogRetentionDays"],
+            "usageHistoryRetentionDays": body["usageHistoryRetentionDays"],
+        },
+    )
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.request_log_retention_days is None
+        assert settings.usage_history_retention_days is None
+
+    # An intentional edit (value differs from effective) still creates an override...
+    response = await async_client.put("/api/settings", json={"requestLogRetentionDays": 120})
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.request_log_retention_days == 120
+
+    # ...and once an override exists, echoing it back keeps it (no accidental clears).
+    response = await async_client.put("/api/settings", json={"requestLogRetentionDays": 120})
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.request_log_retention_days == 120

@@ -110,6 +110,11 @@ class SettingsService:
     def __init__(self, repository: SettingsRepository) -> None:
         self._repository = repository
 
+    async def get_stored_retention(self) -> tuple[int | None, int | None]:
+        """Raw dashboard-stored retention overrides (``None`` = inherit env alias)."""
+        row = await self._repository.get_or_create()
+        return row.request_log_retention_days, row.usage_history_retention_days
+
     async def get_settings(self) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
         return DashboardSettingsData(

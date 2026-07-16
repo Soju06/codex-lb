@@ -267,7 +267,8 @@ def build_owner_forward_headers(
         signature_version=signature_version,
     )
     forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = tools_bound_signature
-    forwarded[HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER] = tools_bound_signature
+    if not context.openai_sdk_request:
+        forwarded[HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER] = tools_bound_signature
     return forwarded
 
 

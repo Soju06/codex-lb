@@ -337,7 +337,9 @@ def _is_test_server_request(request: HTTPConnection) -> bool:
 
 
 def _has_forwarded_client_ip_hint(headers: Mapping[str, str]) -> bool:
-    return any(headers.get(header) for header in _FORWARDED_CLIENT_IP_HEADERS)
+    if isinstance(headers, Headers):
+        return any(value for header_name in _FORWARDED_CLIENT_IP_HEADERS for value in headers.getlist(header_name))
+    return any(headers.get(header_name) for header_name in _FORWARDED_CLIENT_IP_HEADERS)
 
 
 def _parse_host_header_hostname(host_header: str | None) -> str | None:
@@ -361,7 +363,14 @@ def is_local_request(request: HTTPConnection) -> bool:
         return True
 
     settings = get_settings()
-    client_host = resolve_request_client_host(request)
+    trusted_proxy_networks = parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
+    socket_ip = request.client.host if request.client else None
+    client_host = resolve_connection_client_ip(
+        request.headers,
+        socket_ip,
+        trust_proxy_headers=settings.firewall_trust_proxy_headers,
+        trusted_proxy_networks=trusted_proxy_networks,
+    )
     if not client_host:
         return False
     try:
@@ -371,6 +380,10 @@ def is_local_request(request: HTTPConnection) -> bool:
     if address.is_loopback:
         host_name = _parse_host_header_hostname(request.headers.get("host"))
         if settings.firewall_trust_proxy_headers:
-            return is_local_host(host_name) and _has_forwarded_client_ip_hint(request.headers)
+            return (
+                is_local_host(host_name)
+                and socket_ip is not None
+                and is_trusted_proxy_source(socket_ip, trusted_proxy_networks)
+            )
         return is_local_host(host_name) and not _has_forwarded_client_ip_hint(request.headers)
     return address.is_loopback

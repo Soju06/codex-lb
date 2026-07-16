@@ -34,6 +34,7 @@ class DailyReportAggregateRow:
     error_count: int
     median_ttft_ms: float
     median_tps: float
+    median_queue_ms: float
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ class ReportsRepository:
                 speed_row.report_date: (
                     float(speed_row.median_ttft_ms or 0.0),
                     float(speed_row.median_tps or 0.0),
+                    float(speed_row.median_queue_ms or 0.0),
                 )
                 for speed_row in speed_result.all()
             }
@@ -116,8 +118,9 @@ class ReportsRepository:
                     cost_usd=float(row.cost_usd or 0.0),
                     active_accounts=int(row.active_accounts or 0),
                     error_count=int(row.error_count or 0),
-                    median_ttft_ms=speed_values.get(row.report_date, (0.0, 0.0))[0],
-                    median_tps=speed_values.get(row.report_date, (0.0, 0.0))[1],
+                    median_ttft_ms=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[0],
+                    median_tps=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[1],
+                    median_queue_ms=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[2],
                 )
                 for row in result.all()
             )
@@ -408,6 +411,15 @@ def _daily_speed_medians_stmt(
         )
         .cte("daily_tps_values")
     )
+    queue_values_cte = (
+        select(
+            day_ranges_cte.c.report_date,
+            RequestLog.latency_queue_ms.label("queue_ms"),
+        )
+        .select_from(traffic_join)
+        .where(RequestLog.latency_queue_ms.is_not(None))
+        .cte("daily_queue_values")
+    )
     ttft_count = func.count().over(partition_by=ttft_values_cte.c.report_date)
     ttft_ranked_cte = select(
         ttft_values_cte.c.report_date,
@@ -426,6 +438,15 @@ def _daily_speed_medians_stmt(
         .over(partition_by=tps_values_cte.c.report_date, order_by=tps_values_cte.c.tps)
         .label("tps_rank"),
     ).cte("daily_tps_ranks")
+    queue_count = func.count().over(partition_by=queue_values_cte.c.report_date)
+    queue_ranked_cte = select(
+        queue_values_cte.c.report_date,
+        queue_values_cte.c.queue_ms,
+        queue_count.label("sample_count"),
+        func.row_number()
+        .over(partition_by=queue_values_cte.c.report_date, order_by=queue_values_cte.c.queue_ms)
+        .label("queue_rank"),
+    ).cte("daily_queue_ranks")
 
     # A median contains the one center row for odd samples and both center rows
     # for even samples. Multiplication avoids dialect-specific integer division.
@@ -436,6 +457,10 @@ def _daily_speed_medians_stmt(
     tps_is_middle = and_(
         tps_ranked_cte.c.tps_rank * 2 >= tps_ranked_cte.c.sample_count,
         tps_ranked_cte.c.tps_rank * 2 <= tps_ranked_cte.c.sample_count + 2,
+    )
+    queue_is_middle = and_(
+        queue_ranked_cte.c.queue_rank * 2 >= queue_ranked_cte.c.sample_count,
+        queue_ranked_cte.c.queue_rank * 2 <= queue_ranked_cte.c.sample_count + 2,
     )
     ttft_medians_cte = (
         select(
@@ -453,19 +478,33 @@ def _daily_speed_medians_stmt(
         .group_by(tps_ranked_cte.c.report_date)
         .cte("daily_tps_medians")
     )
+    queue_medians_cte = (
+        select(
+            queue_ranked_cte.c.report_date,
+            func.avg(case((queue_is_middle, queue_ranked_cte.c.queue_ms), else_=None)).label("median_queue_ms"),
+        )
+        .group_by(queue_ranked_cte.c.report_date)
+        .cte("daily_queue_medians")
+    )
     return (
         select(
             day_ranges_cte.c.report_date,
             func.coalesce(ttft_medians_cte.c.median_ttft_ms, 0.0).label("median_ttft_ms"),
             func.coalesce(tps_medians_cte.c.median_tps, 0.0).label("median_tps"),
+            func.coalesce(queue_medians_cte.c.median_queue_ms, 0.0).label("median_queue_ms"),
         )
         .select_from(
             day_ranges_cte.outerjoin(
                 ttft_medians_cte,
                 ttft_medians_cte.c.report_date == day_ranges_cte.c.report_date,
-            ).outerjoin(
+            )
+            .outerjoin(
                 tps_medians_cte,
                 tps_medians_cte.c.report_date == day_ranges_cte.c.report_date,
+            )
+            .outerjoin(
+                queue_medians_cte,
+                queue_medians_cte.c.report_date == day_ranges_cte.c.report_date,
             )
         )
         .order_by(day_ranges_cte.c.report_date)

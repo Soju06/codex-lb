@@ -16,6 +16,12 @@ class BackgroundAccountsRepository:
             detach_session_objects(session)
             return account
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        async with get_background_session() as session:
+            account = await AccountsRepository(session).get_by_id_fresh(account_id)
+            detach_session_objects(session)
+            return account
+
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
         async with get_background_session() as session:
             accounts = await AccountsRepository(session).list_accounts(refresh_existing=refresh_existing)
@@ -48,6 +54,7 @@ class BackgroundAccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
             repo = AccountsRepository(session)
@@ -55,6 +62,7 @@ class BackgroundAccountsRepository:
                 "expected_status": expected_status,
                 "expected_deactivation_reason": expected_deactivation_reason,
                 "expected_reset_at": expected_reset_at,
+                "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
             }
             if expected_blocked_at is not _UNSET:
                 kwargs["expected_blocked_at"] = expected_blocked_at
@@ -75,13 +83,15 @@ class BackgroundAccountsRepository:
                 **kwargs,
             )
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -91,12 +101,13 @@ class BackgroundAccountsRepository:
         seat_type: str | None = None,
     ) -> bool:
         async with get_background_session() as session:
-            return await AccountsRepository(session).update_tokens(
+            return await AccountsRepository(session).rotate_tokens(
                 account_id,
                 access_token_encrypted=access_token_encrypted,
                 refresh_token_encrypted=refresh_token_encrypted,
                 id_token_encrypted=id_token_encrypted,
                 last_refresh=last_refresh,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
                 plan_type=plan_type,
                 email=email,
                 chatgpt_account_id=chatgpt_account_id,
@@ -104,6 +115,32 @@ class BackgroundAccountsRepository:
                 workspace_id=workspace_id,
                 workspace_label=workspace_label,
                 seat_type=seat_type,
+            )
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
+    ) -> bool:
+        async with get_background_session() as session:
+            return await AccountsRepository(session).update_account_metadata(
+                account_id,
+                plan_type=plan_type,
+                email=email,
+                chatgpt_account_id=chatgpt_account_id,
+                chatgpt_user_id=chatgpt_user_id,
+                workspace_id=workspace_id,
+                workspace_label=workspace_label,
+                seat_type=seat_type,
+                last_refresh=last_refresh,
             )
 
     async def workspace_slot_taken(

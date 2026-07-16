@@ -4,9 +4,10 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core import startup as startup_module
 from app.core.config.settings import Settings, get_settings
@@ -20,9 +21,17 @@ from app.modules.settings.repository import SettingsRepository
 
 logger = logging.getLogger(__name__)
 
+# Cleanup poll cadence (fixed; issue #1340 / PRINCIPLES.md P2). The scheduler
+# keeps ``interval_seconds`` as a constructor field so tests can exercise the
+# loop with a short interval.
+_CLEANUP_INTERVAL_SECONDS = 300
+
+
+_T = TypeVar("_T")
+
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -85,8 +94,9 @@ class StickySessionCleanupScheduler:
                 continue
 
     async def _cleanup_once(self) -> None:
-        if not await _get_leader_election().try_acquire():
-            return
+        await _get_leader_election().run_if_leader(self._cleanup_as_leader)
+
+    async def _cleanup_as_leader(self) -> None:
         async with self._lock:
             try:
                 async with get_background_session() as session:
@@ -122,6 +132,6 @@ class StickySessionCleanupScheduler:
 def build_sticky_session_cleanup_scheduler() -> StickySessionCleanupScheduler:
     settings = get_settings()
     return StickySessionCleanupScheduler(
-        interval_seconds=settings.sticky_session_cleanup_interval_seconds,
+        interval_seconds=_CLEANUP_INTERVAL_SECONDS,
         enabled=settings.sticky_session_cleanup_enabled,
     )

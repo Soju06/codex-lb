@@ -11,6 +11,12 @@ from app.core.config.settings import Settings
 
 T = TypeVar("T")
 
+# Breaker tuning (fixed; issue #1340 / PRINCIPLES.md P2). ``CircuitBreaker``
+# keeps both as constructor fields so tests can exercise state transitions
+# with small values. ``circuit_breaker_enabled`` remains the single switch.
+_FAILURE_THRESHOLD = 5
+_RECOVERY_TIMEOUT_SECONDS = 60
+
 
 class CircuitState(Enum):
     CLOSED = "closed"
@@ -131,8 +137,8 @@ def get_circuit_breaker(settings: Settings | None = None) -> CircuitBreaker | No
     enabled = getattr(settings, "circuit_breaker_enabled", False)
     if enabled and _circuit_breaker is None:
         _circuit_breaker = CircuitBreaker(
-            failure_threshold=getattr(settings, "circuit_breaker_failure_threshold", 5),
-            recovery_timeout_seconds=getattr(settings, "circuit_breaker_recovery_timeout_seconds", 60),
+            failure_threshold=_FAILURE_THRESHOLD,
+            recovery_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
         )
 
     return _circuit_breaker if enabled else None
@@ -149,8 +155,8 @@ def get_circuit_breaker_for_account(
     breaker = _account_circuit_breakers.get(account_id)
     if breaker is None:
         breaker = CircuitBreaker(
-            failure_threshold=getattr(settings, "circuit_breaker_failure_threshold", 5),
-            recovery_timeout_seconds=getattr(settings, "circuit_breaker_recovery_timeout_seconds", 60),
+            failure_threshold=_FAILURE_THRESHOLD,
+            recovery_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
         )
         _account_circuit_breakers[account_id] = breaker
     return breaker

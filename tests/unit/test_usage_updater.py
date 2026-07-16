@@ -1706,7 +1706,7 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
     assert usage_repo.entries == []
     assert additional_repo.deleted_account_ids == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.status == AccountStatus.ACTIVE
     assert account.plan_type == "business"
     assert account.workspace_id == "ws_team"
@@ -1761,7 +1761,7 @@ async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> 
     assert account.workspace_label is None
     assert account.seat_type is None
     assert account.plan_type == original_plan_type
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
 
 
 @pytest.mark.asyncio
@@ -1840,7 +1840,7 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
     assert usage_repo.entries == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.workspace_id == "ws_team"
     assert account.plan_type == "business"
 
@@ -1883,7 +1883,7 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
     assert usage_repo.entries == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.workspace_id == "ws_team"
     assert account.plan_type == "business"
 
@@ -2007,7 +2007,7 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
     await updater.refresh_accounts([account], latest_usage={})
 
     assert usage_repo.entries == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.plan_type == "unknown"
     assert account.workspace_id is None
 
@@ -2015,11 +2015,14 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
-        self.token_updates: list[dict[str, Any]] = []
+        self.metadata_updates: list[dict[str, Any]] = []
         self.accounts_by_id: dict[str, Account] = {}
         self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
 
     async def get_by_id(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
     async def update_status(
@@ -2059,6 +2062,7 @@ class StubAccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self.accounts_by_id.get(account_id)
         if (
@@ -2071,16 +2075,34 @@ class StubAccountsRepository:
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)
 
-    async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        # The usage updater never rotates token material through its accounts
+        # repo (that path lives in AuthManager). Present only to satisfy the
+        # AccountsRepositoryPort protocol.
+        return True
+
+    async def update_account_metadata(self, *args: Any, **kwargs: Any) -> bool:
         account_id = args[0] if args else kwargs.get("account_id")
         if not isinstance(account_id, str):
             return True
         account = self.accounts_by_id.get(account_id)
         if account is not None:
-            account.access_token_encrypted = kwargs["access_token_encrypted"]
-            account.refresh_token_encrypted = kwargs["refresh_token_encrypted"]
-            account.id_token_encrypted = kwargs["id_token_encrypted"]
-            account.last_refresh = kwargs["last_refresh"]
             plan_type = kwargs.get("plan_type")
             email = kwargs.get("email")
             chatgpt_account_id = kwargs.get("chatgpt_account_id")
@@ -2099,7 +2121,7 @@ class StubAccountsRepository:
                 account.workspace_label = workspace_label
             if isinstance(seat_type, str):
                 account.seat_type = seat_type
-        self.token_updates.append({"account_id": account_id, **kwargs})
+        self.metadata_updates.append({"account_id": account_id, **kwargs})
         return True
 
     async def workspace_slot_taken(
@@ -2518,7 +2540,7 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
 
     assert usage_written is False
     assert acc.plan_type == "plus"
-    assert accounts_repo.token_updates[0]["plan_type"] == "plus"
+    assert accounts_repo.metadata_updates[0]["plan_type"] == "plus"
     assert usage_repo.entries == []
 
 
@@ -3496,6 +3518,156 @@ def test_latest_usage_is_fresh_returns_false_when_reset_at_has_passed() -> None:
     )
 
     assert usage_updater_module._latest_usage_is_fresh(entry, now=now, interval_seconds=60) is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_fetches_when_additional_usage_ages_despite_fresh_main_rows(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # Live traffic keeps the main rows fresh...
+    await usage_repo.add_entry(
+        "acc_gated",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_gated", window="primary")
+    assert latest is not None
+
+    # ...but the additional (per-model) rows have aged past the interval:
+    # only the upstream fetch syncs them, so the fetch must still happen.
+    additional_repo = StubAdditionalUsageRepository()
+    await additional_repo.add_entry(
+        "acc_gated",
+        limit_name="codex_other",
+        metered_feature="gpt-gated",
+        window="primary",
+        used_percent=10.0,
+        recorded_at=now - timedelta(minutes=10),
+    )
+    stale_recorded_at = now - timedelta(minutes=10)
+
+    async def aged_latest_recorded_at(account_id: str):
+        return stale_recorded_at if account_id == "acc_gated" else None
+
+    monkeypatch.setattr(additional_repo, "latest_recorded_at_for_account", aged_latest_recorded_at)
+
+    acc = _make_account("acc_gated", "workspace_gated", email="gated@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_gated": latest})
+
+    assert fetch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_fetches_when_no_additional_rows_were_ever_synced(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_undiscovered",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_undiscovered", window="primary")
+    assert latest is not None
+
+    # An additional-usage repo is configured but no rows were ever synced:
+    # live rows alone must not suppress the discovery fetch.
+    additional_repo = StubAdditionalUsageRepository()
+
+    acc = _make_account("acc_undiscovered", "workspace_undiscovered", email="undiscovered@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_undiscovered": latest})
+
+    assert fetch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_skips_fetch_when_additional_usage_is_fresh(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_gated_fresh",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_gated_fresh", window="primary")
+    assert latest is not None
+
+    additional_repo = StubAdditionalUsageRepository()
+    await additional_repo.add_entry(
+        "acc_gated_fresh",
+        limit_name="codex_other",
+        metered_feature="gpt-gated",
+        window="primary",
+        used_percent=10.0,
+        recorded_at=now - timedelta(seconds=5),
+    )
+
+    acc = _make_account("acc_gated_fresh", "workspace_gated_fresh", email="gated-fresh@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_gated_fresh": latest})
+
+    assert fetch_calls == 0
 
 
 @pytest.mark.asyncio

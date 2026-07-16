@@ -693,8 +693,8 @@ class TestImages:
         assert result.data[0].b64_json == "GENERATED_B64"
         # ``revised_prompt`` survives the translation layer.
         assert result.data[0].revised_prompt == "a clean red circle"
-        # Image routes hide the host model behind ``images_host_model``;
-        # ensure the upstream call really used the configured host model.
+        # Image routes hide the fixed internal host model from clients;
+        # ensure the upstream call really used a host model.
         assert captured["model"] not in {None, ""}
         tools = captured["tools"]
         assert tools, "image_generation tool must be forwarded to upstream"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import time
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 import pytest
@@ -146,8 +147,16 @@ class _StubLeaderElection:
     def __init__(self, *, leader: bool) -> None:
         self.leader = leader
 
-    async def try_acquire(self) -> bool:
-        return self.leader
+    async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object | None:
+        """Mirror the real gate: run the body only while leader, else no-op.
+
+        When ``leader`` is true the guarded body is awaited and its result
+        returned (bypassing the DB lease/heartbeat); when false the body is
+        never run and ``None`` is returned, matching ``LeaderElection``.
+        """
+        if not self.leader:
+            return None
+        return await fn()
 
 
 async def test_bus_propagated_refresh_is_visible_on_follower_v1_models(async_client) -> None:

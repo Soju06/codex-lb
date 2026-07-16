@@ -14,6 +14,7 @@
     "automations": "自动化",
     "apis": "API",
     "settings": "设置",
+    "advanced": "高级",
     "openMenu": "打开菜单",
     "adminSignIn": "管理员登录",
     "showEmails": "显示邮箱",
@@ -75,11 +76,17 @@
   "settings": {
     "page": {
       "title": "设置",
-      "subtitle": "配置路由、鉴权、API Key 管理与防火墙。",
+      "subtitle": "配置外观、鉴权与 API Key。高级调优功能位于下方的高级设置分组中。",
       "readOnlyNotice": "你当前以只读访客身份查看仪表盘。管理员控制项已禁用。",
       "trustedHeaderNotice": "仪表盘访问由可信反向代理头部鉴权。密码与 TOTP 仅作为可选的回退登录方式保留。",
       "disabledNotice": "仪表盘鉴权已被配置完全跳过。请仅在网络受限或外部已有访问控制的场景下使用此模式。",
       "savingLabel": "保存设置中..."
+    },
+    "advanced": {
+      "title": "高级设置",
+      "description": "路由调优、上游代理、模型源、防火墙、配额规划器和粘性会话。",
+      "show": "显示高级设置",
+      "hide": "隐藏高级设置"
     },
     "guestAccess": {
       "title": "访客访问",

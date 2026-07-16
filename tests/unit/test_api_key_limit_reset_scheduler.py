@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -31,9 +31,15 @@ async def test_reset_once_resets_expired_limits(monkeypatch: pytest.MonkeyPatch)
             pass
 
     scheduler = reset_scheduler.ApiKeyLimitResetScheduler(interval_seconds=3600, enabled=True)
-    leader = SimpleNamespace(try_acquire=AsyncMock(return_value=True))
+    gate_calls = 0
 
-    monkeypatch.setattr(reset_scheduler, "_get_leader_election", lambda: leader)
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            nonlocal gate_calls
+            gate_calls += 1
+            return await fn()
+
+    monkeypatch.setattr(reset_scheduler, "_get_leader_election", lambda: _Leader())
 
     with (
         patch.object(reset_scheduler, "get_background_session", FakeSession),
@@ -41,6 +47,6 @@ async def test_reset_once_resets_expired_limits(monkeypatch: pytest.MonkeyPatch)
     ):
         await scheduler._reset_once()
 
-    leader.try_acquire.assert_awaited_once()
+    assert gate_calls == 1
     repo.reset_expired_limits.assert_awaited_once()
     repo.release_stale_usage_reservations.assert_awaited_once()

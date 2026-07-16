@@ -4,8 +4,9 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
@@ -16,9 +17,17 @@ from app.modules.request_logs.repository import RequestLogsRepository
 
 logger = logging.getLogger(__name__)
 
+# Scheduler poll cadence (fixed; issue #1340 / PRINCIPLES.md P2). The
+# scheduler keeps ``interval_seconds`` as a constructor field so tests can
+# exercise the loop with a short interval.
+_INTERVAL_SECONDS = 30
+
+
+_T = TypeVar("_T")
+
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -60,8 +69,9 @@ class AutomationsScheduler:
                 continue
 
     async def _run_due_once(self) -> None:
-        if not await _get_leader_election().try_acquire():
-            return
+        await _get_leader_election().run_if_leader(self._run_due_as_leader)
+
+    async def _run_due_as_leader(self) -> None:
         async with self._lock:
             try:
                 async with get_background_session() as session:
@@ -77,6 +87,6 @@ class AutomationsScheduler:
 def build_automations_scheduler() -> AutomationsScheduler:
     settings = get_settings()
     return AutomationsScheduler(
-        interval_seconds=settings.automations_scheduler_interval_seconds,
+        interval_seconds=_INTERVAL_SECONDS,
         enabled=settings.automations_scheduler_enabled,
     )

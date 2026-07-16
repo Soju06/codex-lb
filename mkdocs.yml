@@ -66,4 +66,6 @@ nav:
       - Docker: deployment/docker.md
       - Kubernetes: deployment/kubernetes.md
       - Remote Access: deployment/remote.md
+  - Reference:
+      - Settings: reference/settings.md
   - Troubleshooting: troubleshooting.md

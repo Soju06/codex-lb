@@ -29,6 +29,14 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **THEN** the retry layer MUST treat the envelope as a transient overload even when the HTTP status is not 500
 - **AND** it MUST retry the same request within the bounded transient retry budget before returning the overload error to the client
 
+#### Scenario: Streaming Responses retries initial output-free EOF
+
+- **GIVEN** a streaming `/v1/responses` request is not anchored to a previous response
+- **WHEN** upstream closes before emitting the first SSE event
+- **THEN** the retry layer MUST treat the close as a transient output-free failure
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning `stream_incomplete`
+- **AND** it MUST NOT perform this retry for anchored continuations, after any downstream-visible output, or after the retry budget is exhausted
+
 #### Scenario: HTTP bridge retries a pre-created overload event
 
 - **GIVEN** the HTTP responses session bridge is enabled

@@ -185,7 +185,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES = frozenset({"overloaded_error", "server_is_overloaded"})
 _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_MESSAGES = (
     "selected model is at capacity",
-    "try a different model",
     "servers are currently overloaded",
 )
 

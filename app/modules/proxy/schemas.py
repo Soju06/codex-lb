@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -166,6 +167,13 @@ class ReasoningLevelSchema(BaseModel):
     description: str
 
 
+class CodexTruncationPolicy(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    mode: Literal["bytes", "tokens"]
+    limit: int = Field(strict=True, ge=-(2**63), le=2**63 - 1)
+
+
 class CodexModelEntry(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -187,6 +195,8 @@ class CodexModelEntry(BaseModel):
     available_in_plans: list[str] = []
     prefer_websockets: bool = False
     visibility: str = "list"
+    truncation_policy: CodexTruncationPolicy
+    experimental_supported_tools: list[str]
 
 
 class ModelMetadata(BaseModel):

@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import ssl
+import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -45,6 +46,8 @@ _http_client: _ManagedHttpClient | None = None
 _http_client_lock = asyncio.Lock()
 _retired_http_clients: list[_ManagedHttpClient] = []
 _closing_http_clients: list[_ManagedHttpClient] = []
+_last_generationless_network_rotation_at: float | None = None
+_GENERATIONLESS_NETWORK_ROTATION_COOLDOWN_SECONDS = 1.0
 
 
 def _socks_proxy_config(environ: Mapping[str, str | None] = os.environ) -> _SocksProxyConfig | None:
@@ -166,11 +169,11 @@ async def _build_http_client() -> HttpClient:
                 timeout=aiohttp.ClientTimeout(total=None),
                 trust_env=ws_trust_env,
             )
-        except Exception:
-            await ws_connector.close()
+        except BaseException:
+            await asyncio.shield(ws_connector.close())
             raise
-    except Exception:
-        await session.close()
+    except BaseException:
+        await asyncio.shield(session.close())
         raise
     retry_client = RetryClient(client_session=session, raise_for_status=False)
     return HttpClient(
@@ -296,11 +299,44 @@ async def refresh_http_client() -> HttpClient:
     return replacement_client
 
 
+async def refresh_http_client_after_network_failure(
+    *,
+    failed_session: aiohttp.ClientSession | None = None,
+) -> str:
+    """Rotate stale shared transport state once for a failed client generation."""
+
+    global _http_client, _last_generationless_network_rotation_at
+    async with _http_client_lock:
+        current = _http_client
+        if current is None:
+            return "not_initialized"
+        if (
+            failed_session is not None
+            and failed_session is not current.client.session
+            and failed_session is not current.client.websocket_session
+        ):
+            return "already_rotated"
+        now = time.monotonic()
+        if (
+            failed_session is None
+            and _last_generationless_network_rotation_at is not None
+            and now - _last_generationless_network_rotation_at < _GENERATIONLESS_NETWORK_ROTATION_COOLDOWN_SECONDS
+        ):
+            return "coalesced"
+        replacement_client = await _build_http_client()
+        replacement = _ManagedHttpClient(client=replacement_client)
+        _http_client = replacement
+        _last_generationless_network_rotation_at = now
+        _request_client_close_locked(current)
+        return "rotated"
+
+
 async def close_http_client() -> None:
-    global _http_client
+    global _http_client, _last_generationless_network_rotation_at
     async with _http_client_lock:
         client = _http_client
         _http_client = None
+        _last_generationless_network_rotation_at = None
         clients = (
             *((client,) if client is not None else ()),
             *_retired_http_clients,

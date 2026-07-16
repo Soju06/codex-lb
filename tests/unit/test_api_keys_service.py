@@ -1833,6 +1833,54 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "expected_reserved_microdollars", "expected_final_microdollars"),
+    [
+        ("gpt-5.6", 286_720, 31_000_000),
+        ("gpt-5.6-sol-snapshot", 286_720, 31_000_000),
+        ("gpt-5.6-terra-snapshot", 143_360, 15_500_000),
+        ("gpt-5.6-luna-snapshot", 57_344, 6_200_000),
+    ],
+)
+async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
+    model: str,
+    expected_reserved_microdollars: int,
+    expected_final_microdollars: int,
+) -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name=f"{model}-cost-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=100_000_000),
+            ],
+        )
+    )
+
+    reservation = await service.enforce_limits_for_request(
+        created.id,
+        request_model=model,
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8_192, output_tokens=8_192),
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert cost_limit.current_value == expected_reserved_microdollars
+
+    await service.finalize_usage_reservation(
+        reservation.reservation_id,
+        model=model,
+        input_tokens=200_000,
+        output_tokens=1_000_000,
+    )
+
+    assert cost_limit.current_value == expected_final_microdollars
+
+
+@pytest.mark.asyncio
 async def test_release_usage_reservation_restores_reserved_counter() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

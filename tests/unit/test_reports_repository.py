@@ -72,6 +72,7 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
                 cost_usd=0.25,
                 latency_ms=1200,
                 latency_first_token_ms=200,
+                latency_queue_ms=350,
             ),
             RequestLog(
                 account_id=None,
@@ -106,6 +107,7 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[0].error_count == 0
     assert rows[0].median_ttft_ms == 200
     assert rows[0].median_tps == 4
+    assert rows[0].median_queue_ms == 350
 
     assert rows[1].requests == 1
     assert rows[1].input_tokens == 5
@@ -116,6 +118,8 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[1].error_count == 1
     assert rows[1].median_ttft_ms == 600
     assert rows[1].median_tps == 0.5
+    # No queue samples on this day: zero-filled rather than null.
+    assert rows[1].median_queue_ms == 0.0
 
 
 @pytest.mark.asyncio
@@ -139,6 +143,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 reasoning_tokens=10,
                 latency_ms=1100,
                 latency_first_token_ms=100,
+                latency_queue_ms=40,
             ),
             RequestLog(
                 account_id=account_id,
@@ -150,6 +155,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 reasoning_tokens=999,
                 latency_ms=1500,
                 latency_first_token_ms=300,
+                latency_queue_ms=60,
             ),
             RequestLog(
                 account_id=account_id,
@@ -182,6 +188,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 output_tokens=20,
                 latency_ms=1100,
                 latency_first_token_ms=100,
+                latency_queue_ms=10,
             ),
             RequestLog(
                 account_id=account_id,
@@ -192,6 +199,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 output_tokens=3,
                 latency_ms=950,
                 latency_first_token_ms=200,
+                latency_queue_ms=30,
             ),
             RequestLog(
                 account_id=account_id,
@@ -203,6 +211,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 reasoning_tokens=50,
                 latency_ms=700,
                 latency_first_token_ms=300,
+                latency_queue_ms=500,
             ),
             RequestLog(
                 account_id=account_id,
@@ -221,9 +230,9 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
 
     rows = await repo.aggregate_daily_rows(date(2026, 6, 1), date(2026, 6, 2), timezone.utc)
 
-    assert [(row.date, row.median_ttft_ms, row.median_tps) for row in rows] == [
-        ("2026-06-01", 200.0, 10.0),
-        ("2026-06-02", 250.0, 12.0),
+    assert [(row.date, row.median_ttft_ms, row.median_tps, row.median_queue_ms) for row in rows] == [
+        ("2026-06-01", 200.0, 10.0, 50.0),
+        ("2026-06-02", 250.0, 12.0, 30.0),
     ]
 
 

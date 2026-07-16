@@ -21,6 +21,11 @@ from app.modules.settings.repository import SettingsRepository
 
 logger = logging.getLogger(__name__)
 
+# Cleanup poll cadence (fixed; issue #1340 / PRINCIPLES.md P2). The scheduler
+# keeps ``interval_seconds`` as a constructor field so tests can exercise the
+# loop with a short interval.
+_CLEANUP_INTERVAL_SECONDS = 300
+
 
 _T = TypeVar("_T")
 
@@ -127,6 +132,6 @@ class StickySessionCleanupScheduler:
 def build_sticky_session_cleanup_scheduler() -> StickySessionCleanupScheduler:
     settings = get_settings()
     return StickySessionCleanupScheduler(
-        interval_seconds=settings.sticky_session_cleanup_interval_seconds,
+        interval_seconds=_CLEANUP_INTERVAL_SECONDS,
         enabled=settings.sticky_session_cleanup_enabled,
     )

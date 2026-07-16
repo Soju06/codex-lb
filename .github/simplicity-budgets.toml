@@ -1,0 +1,28 @@
+# Simplicity budgets — enforced by .github/scripts/check_simplicity_budgets.py
+# (workflow: .github/workflows/simplicity-budgets.yml).
+#
+# Raising a number here is the intended escape hatch: a one-line, reviewable
+# diff. During review a maintainer can instead apply the
+# "simplicity-budget-approved" PR label to downgrade violations to warnings;
+# the label never applies to push/merge_group runs, so anything that leaves
+# main over budget must bump the number here in the same diff.
+
+[readme]
+path = "README.md"
+# Lines counted AFTER stripping the generated ALL-CONTRIBUTORS-LIST block
+# (bot-managed; not hand-written complexity).
+max_lines = 200
+# h1 + h2 only; lines inside fenced code blocks are excluded.
+max_top_level_headings = 10
+
+[env_example]
+path = ".env.example"
+max_lines = 60
+
+[core_nav]
+# Single source of truth for dashboard nav width. If the nav refactor moves or
+# renames this array, the checker exits 2 until path/array here are repointed —
+# that coupling is intentional.
+path = "frontend/src/components/layout/app-header.tsx"
+array = "CORE_NAV_ITEMS"
+max_items = 5

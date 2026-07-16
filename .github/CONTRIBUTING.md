@@ -240,6 +240,37 @@ Before a PR is squash-merged into `main`:
 5. **`Fixes #N` / `Closes #N` in the PR body** for anything that
    resolves an issue, so the issue close stays automatic and the merge
    stays traceable. Use `Refs #N` / `Related to #N` for partial cover.
+6. **Simplicity gates must pass** (see
+   [Simplicity gates](#simplicity-gates)): the five simplicity rules
+   (PRINCIPLES.md P1-P5). Budget exceptions need the
+   maintainer-applied `simplicity-budget-approved` label.
+
+### Simplicity gates
+
+These implement [PRINCIPLES.md](../PRINCIPLES.md); the normative spec is
+`openspec/specs/contribution-simplicity/spec.md` (created when the
+codify-simplicity-principles change is archived). Reviewers apply them to
+every PR (budget checks are enforced by CI as of the
+`ci-simplicity-budgets` change; reviewer-enforced before that):
+
+1. **New features default to off or zero-config.** No new required
+   setup step (env var, migration action, external account, manual
+   file edit) on the base install path without maintainer approval via
+   the `simplicity-budget-approved` label.
+2. **Every new `CODEX_LB_*` setting justifies not being a default.**
+   The PR body answers "why can't this be a hardcoded default?" for
+   each new setting; internals-only knobs stay out of `.env.example`.
+3. **README, `.env.example`, and dashboard nav are budgeted.** The
+   caps live in `.github/simplicity-budgets.toml` (introduced by the
+   `ci-simplicity-budgets` change; until that manifest exists on
+   `main`, reviewers judge growth of these surfaces directionally
+   rather than against numeric caps). Exceeding a cap requires the
+   maintainer-applied `simplicity-budget-approved` label before merge.
+4. **Feature docs go to `docs/` + OpenSpec, never new README
+   sections.** Each spec-governed docs page links back to its
+   `openspec/specs/<capability>/` entry.
+5. **Dashboard-visible PRs include before/after screenshots** (or a
+   short recording) in the PR body.
 
 ### Collaborator rules
 

@@ -414,6 +414,72 @@ async def test_refresh_http_client_keeps_active_previous_session_open_until_leas
 
 
 @pytest.mark.asyncio
+async def test_network_failure_rotation_is_compare_and_swap_by_failed_session() -> None:
+    await http_module.close_http_client()
+
+    initial = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+    )
+    replacement = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+    )
+
+    with patch(
+        "app.core.clients.http._build_http_client",
+        AsyncMock(side_effect=[initial, replacement]),
+    ) as build_client:
+        await http_module.init_http_client()
+        rotated = await http_module.refresh_http_client_after_network_failure(failed_session=initial.session)
+        already_rotated = await http_module.refresh_http_client_after_network_failure(failed_session=initial.session)
+
+    assert rotated == "rotated"
+    assert already_rotated == "already_rotated"
+    assert build_client.await_count == 2
+    lease = await http_module.acquire_http_client()
+    assert lease.client is replacement
+    await lease.close()
+    await http_module.close_http_client()
+    await _drain_close_tasks()
+
+
+@pytest.mark.asyncio
+async def test_generationless_network_failure_rotations_are_coalesced() -> None:
+    await http_module.close_http_client()
+
+    initial = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+    )
+    replacement = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+    )
+
+    with (
+        patch(
+            "app.core.clients.http._build_http_client",
+            AsyncMock(side_effect=[initial, replacement]),
+        ) as build_client,
+        patch("app.core.clients.http.time.monotonic", return_value=100.0),
+    ):
+        await http_module.init_http_client()
+        rotated = await http_module.refresh_http_client_after_network_failure()
+        coalesced = await http_module.refresh_http_client_after_network_failure()
+
+    assert rotated == "rotated"
+    assert coalesced == "coalesced"
+    assert build_client.await_count == 2
+    await http_module.close_http_client()
+    await _drain_close_tasks()
+
+
+@pytest.mark.asyncio
 async def test_close_http_client_force_closes_active_current_and_retired_sessions() -> None:
     await http_module.close_http_client()
 
@@ -469,3 +535,48 @@ async def test_close_http_client_force_closes_active_current_and_retired_session
     first_retry_client.close.assert_awaited_once()
     second_websocket_session.close.assert_awaited_once()
     second_retry_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_build_http_client_cancellation_closes_partial_sessions_and_connectors() -> None:
+    http_connector = MagicMock()
+    websocket_connector = MagicMock()
+    websocket_connector.close = AsyncMock()
+    http_session = MagicMock()
+    http_session.close = AsyncMock()
+
+    with (
+        patch("app.core.clients.http.get_settings", return_value=_settings()),
+        patch(
+            "app.core.clients.http.aiohttp.TCPConnector",
+            side_effect=[http_connector, websocket_connector],
+        ),
+        patch(
+            "app.core.clients.http.aiohttp.ClientSession",
+            side_effect=[http_session, asyncio.CancelledError()],
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await http_module._build_http_client()
+
+    websocket_connector.close.assert_awaited_once()
+    http_session.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_http_client_cancellation_keeps_current_generation() -> None:
+    await http_module.close_http_client()
+    initial = http_module.HttpClient(
+        session=MagicMock(),
+        websocket_session=MagicMock(close=AsyncMock()),
+        retry_client=MagicMock(close=AsyncMock()),
+    )
+    build = AsyncMock(side_effect=[initial, asyncio.CancelledError()])
+
+    with patch("app.core.clients.http._build_http_client", build):
+        await http_module.init_http_client()
+        with pytest.raises(asyncio.CancelledError):
+            await http_module.refresh_http_client()
+        assert http_module.get_http_client() is initial
+
+    await http_module.close_http_client()

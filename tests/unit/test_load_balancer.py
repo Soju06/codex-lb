@@ -20,6 +20,7 @@ from app.core.balancer import (
     handle_rate_limit,
     select_account,
 )
+from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import (
@@ -3290,27 +3291,23 @@ def test_background_recovery_state_keeps_rate_limited_without_persisted_reset(mo
     assert state.blocked_at == pytest.approx(blocked)
 
 
-def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch):
+def test_state_from_account_drains_at_fixed_primary_threshold(monkeypatch):
+    """Drain thresholds are the fixed constants in ``app.core.balancer.logic``
+    (85% primary by default); ``_state_from_account`` applies them without any
+    settings plumbing.
+    """
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings",
-        lambda: SimpleNamespace(
-            soft_drain_enabled=True,
-            drain_primary_threshold_pct=75.0,
-            drain_secondary_threshold_pct=90.0,
-            drain_error_window_seconds=60.0,
-            drain_error_count_threshold=2,
-            probe_quiet_seconds=60.0,
-            probe_success_streak_required=3,
-        ),
+        lambda: SimpleNamespace(soft_drain_enabled=True),
     )
 
     account = _make_test_account(status=AccountStatus.ACTIVE)
     primary = _make_test_usage(
         window="primary",
-        used_percent=80.0,
+        used_percent=DRAIN_PRIMARY_THRESHOLD_PCT + 1.0,
         reset_at=int(now + 3600),
         recorded_at=_epoch_to_naive_utc(now - 10),
     )
@@ -3325,27 +3322,19 @@ def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch)
     assert state.health_tier == 1
 
 
-def test_state_from_account_uses_configured_probe_quiet_seconds(monkeypatch):
+def test_state_from_account_promotes_to_probing_after_fixed_quiet_window(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings",
-        lambda: SimpleNamespace(
-            soft_drain_enabled=True,
-            drain_primary_threshold_pct=85.0,
-            drain_secondary_threshold_pct=90.0,
-            drain_error_window_seconds=60.0,
-            drain_error_count_threshold=2,
-            probe_quiet_seconds=10.0,
-            probe_success_streak_required=3,
-        ),
+        lambda: SimpleNamespace(soft_drain_enabled=True),
     )
 
     account = _make_test_account(status=AccountStatus.ACTIVE)
     runtime = RuntimeState(
         health_tier=1,
-        drain_entered_at=now - 11.0,
+        drain_entered_at=now - (PROBE_QUIET_SECONDS + 1.0),
         probe_success_streak=0,
     )
     primary = _make_test_usage(

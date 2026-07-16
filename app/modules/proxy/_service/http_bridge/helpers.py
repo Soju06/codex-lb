@@ -445,16 +445,24 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[str, str]:
+def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
-        return code, message
+        error_type = parsed.type if parsed and parsed.type else "server_error"
+        error_param = parsed.param if parsed else None
+        return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
-        return "upstream_unavailable", "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out"
+        return (
+            502,
+            "upstream_unavailable",
+            "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out",
+            "server_error",
+            None,
+        )
     message = str(exc).strip() or "HTTP bridge pre-created retry failed"
-    return "upstream_unavailable", message
+    return 502, "upstream_unavailable", message, "server_error", None
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
@@ -563,6 +571,17 @@ def _normalize_http_bridge_error_event(
             resets_in = raw_error.get("resets_in_seconds")
             if isinstance(resets_in, int | float):
                 rate_limit_metadata["resets_in_seconds"] = resets_in
+
+    if request_state is not None:
+        if request_state.error_code_override is not None:
+            error_code_value = request_state.error_code_override
+            explicit_error_code = True
+        if request_state.error_type_override is not None:
+            error_type_value = request_state.error_type_override
+        if request_state.error_message_override is not None:
+            error_message_value = request_state.error_message_override
+        if request_state.error_param_override is not None:
+            error_param_value = request_state.error_param_override
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":

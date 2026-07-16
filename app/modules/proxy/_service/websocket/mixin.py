@@ -3772,7 +3772,6 @@ class _WebSocketMixin:
                 request_state.error_param_override = _websocket_event_error_param(event_type, payload)
                 request_state.error_http_status_override = _facade()._http_error_status_from_payload(payload) or 400
                 await proxy._release_request_state_account_response_create_lease(request_state)
-                await _release_websocket_response_create_gate(request_state, response_create_gate)
                 request_state.excluded_account_ids.add(account.id)
                 request_state.affinity_policy = replace(
                     request_state.affinity_policy,

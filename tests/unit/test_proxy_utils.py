@@ -6567,6 +6567,45 @@ def test_normalize_http_bridge_error_event_preserves_explicit_error_code_from_pa
     assert error["message"] == "explicit"
 
 
+def test_normalize_http_bridge_error_event_prefers_selected_replacement_failure_overrides():
+    original_error = {
+        "type": "invalid_request_error",
+        "code": "invalid_request_error",
+        "message": "The requested model is not supported by this account.",
+    }
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_selected_replacement_failed",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        error_code_override="replacement_unavailable",
+        error_message_override="Selected replacement connection failed",
+        error_type_override="server_error",
+        error_param_override="model",
+        error_http_status_override=503,
+    )
+
+    _line, payload, parsed_event, event_type = proxy_service._normalize_http_bridge_error_event(
+        event=None,
+        payload={"type": "error", "status": 400, "error": original_error},
+        request_state=request_state,
+    )
+
+    assert event_type == "response.failed"
+    assert parsed_event is not None
+    assert payload is not None
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error == {
+        "code": "replacement_unavailable",
+        "message": "Selected replacement connection failed",
+        "type": "server_error",
+        "param": "model",
+    }
+
+
 @pytest.mark.asyncio
 async def test_stream_responses_websocket_rejects_oversized_response_create_before_connect(monkeypatch):
     class Settings:
@@ -19722,10 +19761,16 @@ async def test_process_upstream_websocket_text_retries_account_model_rejection_w
     assert pending_request.precreated_replay_account_id == account.id
     assert pending_request.error_http_status_override == 400
     assert pending_request.error_code_override == "invalid_request_error"
+    assert pending_request.response_create_gate is response_create_gate
+    assert pending_request.response_create_gate_acquired is True
+    assert response_create_gate.locked() is True
+    assert list(pending_requests) == []
+
+    await proxy_service._release_websocket_response_create_gate(pending_request, response_create_gate)
+
     assert pending_request.response_create_gate is None
     assert pending_request.response_create_gate_acquired is False
     assert response_create_gate.locked() is False
-    assert list(pending_requests) == []
 
 
 @pytest.mark.asyncio
@@ -31235,6 +31280,75 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
     assert session.downstream_turn_state == expected_turn_state
     assert session.headers.get("x-codex-turn-state") == expected_turn_state
     upstream.send_text.assert_awaited_once_with(request_state.request_text)
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_reacquires_replacement_response_create_lease(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected_account = _make_account("acc_bridge_retry_rejected")
+    replacement_account = _make_account("acc_bridge_retry_replacement")
+    replacement_upstream = AsyncMock()
+    replacement_lease = object()
+    release_lease = AsyncMock()
+    acquire_lease = AsyncMock(return_value=replacement_lease)
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_retry_replacement_lease",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        response_create_gate=response_create_gate,
+        response_create_gate_acquired=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-retry-replacement-lease", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=rejected_account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=response_create_gate,
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    async def reconnect(target_session, *, request_state):
+        del request_state
+        target_session.account = replacement_account
+        target_session.upstream = replacement_upstream
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", acquire_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    acquire_lease.assert_awaited_once_with(
+        account_id=replacement_account.id,
+        request_id=request_state.request_id,
+        surface="http_bridge",
+        concurrency_caps=proxy_service.effective_account_concurrency_caps(settings),
+    )
+    assert request_state.account_response_create_lease is replacement_lease
+    assert request_state.account_response_create_release is release_lease
+    replacement_upstream.send_text.assert_awaited_once_with(request_state.request_text)
+
+    await proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+
+    release_lease.assert_awaited_once_with(replacement_lease)
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
 
 
 @pytest.mark.asyncio

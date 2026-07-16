@@ -8693,6 +8693,81 @@ async def test_v1_responses_http_bridge_retries_stale_account_model_route_on_ano
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_surfaces_selected_replacement_failure(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_selected_replacement_rejected",
+        "http-bridge-selected-replacement-rejected@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_selected_replacement_failed",
+        "http-bridge-selected-replacement-failed@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    first_upstream = _ErrorOnlyUpstreamWebSocket()
+    connect_calls: list[str | None] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
+        account = second_account if first_account.id in excluded else first_account
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connect_calls.append(account_id_header)
+        if len(connect_calls) == 1:
+            return first_upstream
+        raise proxy_module.ProxyResponseError(
+            503,
+            proxy_module.openai_error(
+                "replacement_unavailable",
+                "Selected replacement connection failed",
+                error_type="server_error",
+            ),
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.3-codex-spark",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-selected-replacement-failure-key",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "message": "Selected replacement connection failed",
+            "type": "server_error",
+            "code": "replacement_unavailable",
+        }
+    }
+    assert len(connect_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_preserves_rate_limit_metadata_in_429(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(

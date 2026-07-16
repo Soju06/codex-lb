@@ -873,7 +873,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         settlement_event_type = event_type
         if event_type == "error" and normalize_error_event:
             http_status = _http_error_status_from_payload(payload)
-            if status_request_state is not None:
+            if status_request_state is not None and status_request_state.error_http_status_override is None:
                 status_request_state.error_http_status_override = http_status
             (
                 event_block,
@@ -890,7 +890,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             settlement_event_type = event_type
         elif event_type == "error":
             http_status = _http_error_status_from_payload(payload)
-            if status_request_state is not None:
+            if status_request_state is not None and status_request_state.error_http_status_override is None:
                 status_request_state.error_http_status_override = http_status
             (
                 _settlement_event_block,

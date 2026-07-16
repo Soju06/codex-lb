@@ -5,6 +5,7 @@ import hashlib
 import pytest
 
 from app.core.openai.requests import ResponsesRequest
+from app.modules.proxy import affinity
 from app.modules.proxy import http_bridge_forwarding as bridge
 
 
@@ -39,6 +40,25 @@ def test_shared_instruction_cache_skips_anchored_responses() -> None:
     payload = request.to_payload()
     assert payload["prompt_cache_key"] == "client-cache-key"
     assert payload["input"] == request.input
+
+
+def test_shared_instruction_cache_clears_state_for_anchored_model_copy() -> None:
+    request = _cacheable_lite_request()
+    assert request.enable_shared_instruction_cache() is True
+
+    anchored = request.model_copy(update={"previous_response_id": "resp_previous"})
+    affinity._sticky_key_for_responses_request(
+        anchored,
+        {},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=0,
+        sticky_threads_enabled=False,
+    )
+
+    payload = anchored.to_payload()
+    assert payload["prompt_cache_key"] == "client-cache-key"
+    assert payload["input"] == anchored.input
 
 
 def test_shared_instruction_cache_detects_breakpoint_before_instruction_hoist() -> None:
@@ -105,6 +125,31 @@ def test_owner_forward_rejects_sdk_header_downgrade(monkeypatch: pytest.MonkeyPa
     )
     headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
     headers[bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER] = "0"
+
+    forwarded, error = bridge.parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="owner",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+
+
+def test_owner_forward_rejects_sdk_header_without_v2_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bridge, "_sign_bridge_payload", _deterministic_signature)
+    payload = _cacheable_lite_request()
+    context = bridge.HTTPBridgeForwardContext(
+        origin_instance="new-origin",
+        target_instance="owner",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+        openai_sdk_request=True,
+    )
+    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER] = "0"
+    headers.pop(bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER)
 
     forwarded, error = bridge.parse_forwarded_request(
         headers,

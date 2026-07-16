@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import { AlertMessage } from "@/components/alert-message";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -34,6 +35,7 @@ const ApiKeyEditDialog = lazy(() =>
 );
 
 export function ApisPage() {
+	const { t } = useTranslation();
 	const [searchParams, setSearchParams] = useSearchParams();
 	const {
 		apiKeysQuery,
@@ -106,9 +108,9 @@ export function ApisPage() {
 	return (
 		<div className="animate-fade-in-up space-y-6">
 			<div>
-				<h1 className="text-2xl font-semibold tracking-tight">APIs</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">{t("apis.page.title")}</h1>
 				<p className="mt-1 text-sm text-muted-foreground">
-					Manage API keys for client access and usage monitoring.
+					{t("apis.page.subtitle")}
 				</p>
 			</div>
 
@@ -121,7 +123,7 @@ export function ApisPage() {
 			) : !apiKeysQuery.data ? (
 				<div className="space-y-3 rounded-xl border bg-card p-4">
 					<AlertMessage variant="error">
-						{listError ?? "Failed to load API keys"}
+						{listError ?? t("apiKeys.toasts.loadFailed")}
 					</AlertMessage>
 					<Button
 						type="button"
@@ -132,7 +134,7 @@ export function ApisPage() {
 						}}
 						disabled={apiKeysQuery.isFetching}
 					>
-						Retry
+						{t("common.actions.retry")}
 					</Button>
 				</div>
 			) : (
@@ -204,9 +206,9 @@ export function ApisPage() {
 
 			<ConfirmDialog
 				open={deleteDialog.open}
-				title="Delete API key"
-				description="This key will stop working immediately."
-				confirmLabel="Delete"
+				title={t("apiKeys.deleteDialog.title")}
+				description={t("apiKeys.deleteDialog.description")}
+				confirmLabel={t("common.actions.delete")}
 				onOpenChange={deleteDialog.onOpenChange}
 				onConfirm={() => {
 					if (!deleteDialog.data) return;
@@ -221,7 +223,7 @@ export function ApisPage() {
 
 			<LoadingOverlay
 				visible={!!apiKeysQuery.data && mutationBusy}
-				label="Updating API keys..."
+				label={t("apiKeys.page.updating")}
 			/>
 		</div>
 	);

@@ -1,6 +1,7 @@
+import { useTranslation } from "react-i18next";
+
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { STATUS_LABELS } from "@/utils/constants";
 
 type StatusValue = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated";
 
@@ -18,8 +19,9 @@ export type StatusBadgeProps = {
 };
 
 export function StatusBadge({ status }: StatusBadgeProps) {
+  const { t } = useTranslation();
   const className = statusClassMap[status] ?? statusClassMap.deactivated;
-  const label = STATUS_LABELS[status] ?? status;
+  const label = t(`common.status.${status}`, { defaultValue: status });
 
   return (
     <Badge className={cn("gap-1.5", className)} variant="outline">

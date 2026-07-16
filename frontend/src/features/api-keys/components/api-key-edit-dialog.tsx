@@ -1,6 +1,7 @@
 import { useMemo, useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
@@ -45,17 +46,15 @@ import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
 
 const TRANSPORT_POLICY_FOLLOW_GLOBAL = "follow_global";
 const TRANSPORT_POLICY_LABELS = {
-  smart: "Session-aware",
-  always_http: "Prefer request/response",
-  always_websocket: "Prefer persistent sessions",
+  smart: "apiKeys.transport.smart",
+  always_http: "apiKeys.transport.alwaysHttp",
+  always_websocket: "apiKeys.transport.alwaysWebsocket",
 } as const;
 
-const formSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  isActive: z.boolean(),
-});
-
-type FormValues = z.infer<typeof formSchema>;
+type FormValues = {
+  name: string;
+  isActive: boolean;
+};
 
 export type ApiKeyEditDialogProps = {
   open: boolean;
@@ -132,6 +131,11 @@ function apiKeyEditDraftReducer(
 }
 
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
+  const { t } = useTranslation();
+  const formSchema = z.object({
+    name: z.string().min(1, t("apiKeys.validation.nameRequired")),
+    isActive: z.boolean(),
+  });
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -193,14 +197,14 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
         <div className="grid gap-x-6 sm:grid-cols-2">
           {/* Left column — General */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2">
-            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">General</h4>
+            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.general")}</h4>
 
             <FormField
               control={form.control}
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Name</FormLabel>
+                  <FormLabel>{t("apiKeys.form.name")}</FormLabel>
                   <FormControl>
                     <Input {...field} autoComplete="off" />
                   </FormControl>
@@ -210,7 +214,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             />
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Allowed models</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.allowedModels")}</div>
               <ModelMultiSelect value={draft.selectedModels} onChange={(selectedModels) => updateDraft({ selectedModels })} />
             </div>
 
@@ -221,17 +225,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 onCheckedChange={(checked) => updateDraft({ applyToCodexModel: checked === true })}
               />
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
-                Apply to codex /model
+                {t("apiKeys.form.applyToCodexModel")}
               </label>
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Assigned accounts</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Assigned model sources</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.assignedModelSources")}</div>
               <ModelSourceMultiSelect
                 value={draft.selectedSourceIds}
                 onChange={(selectedSourceIds) => updateDraft({ selectedSourceIds })}
@@ -241,8 +245,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               draft.selectedSourceIds.length === 0 ? (
                 <div className="space-y-1 rounded-md border border-destructive/50 p-2 text-xs">
                   <p className="text-muted-foreground">
-                    This key is restricted to model sources that no longer exist, so it cannot
-                    access any source. Select sources above, or remove the restriction.
+                    {t("apiKeys.form.missingSourceRestriction")}
                   </p>
                   <div className="flex items-center gap-2">
                     <Checkbox
@@ -251,7 +254,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                       onCheckedChange={(checked) => updateDraft({ clearSourceScope: checked === true })}
                     />
                     <label htmlFor="edit-api-key-clear-source-scope" className="cursor-pointer">
-                      Remove source restriction (allow all sources)
+                      {t("apiKeys.form.removeSourceRestriction")}
                     </label>
                   </div>
                 </div>
@@ -259,12 +262,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Usage sections shown to client</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.usageSections")}</div>
               <UsageSectionsMultiSelect value={draft.usageSections} onChange={(usageSections) => updateDraft({ usageSections })} />
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Enforced model</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.enforcedModel")}</div>
               <Input
                 value={draft.enforcedModel}
                 onChange={(e) => updateDraft({ enforcedModel: e.target.value })}
@@ -274,58 +277,58 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Enforced reasoning</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.enforcedReasoning")}</div>
               <Select value={draft.enforcedReasoningEffort} onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort })}>
                 <SelectTrigger>
-                  <SelectValue placeholder="None" />
+                  <SelectValue placeholder={t("common.options.none")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  <SelectItem value="minimal">Minimal</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
-                  <SelectItem value="medium">Medium</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="xhigh">XHigh</SelectItem>
-                  <SelectItem value="max">Max</SelectItem>
-                  <SelectItem value="ultra">Ultra</SelectItem>
+                  <SelectItem value="none">{t("common.options.none")}</SelectItem>
+                  <SelectItem value="minimal">{t("common.reasoning.minimal")}</SelectItem>
+                  <SelectItem value="low">{t("common.reasoning.low")}</SelectItem>
+                  <SelectItem value="medium">{t("common.reasoning.medium")}</SelectItem>
+                  <SelectItem value="high">{t("common.reasoning.high")}</SelectItem>
+                  <SelectItem value="xhigh">{t("common.reasoning.xhigh")}</SelectItem>
+                  <SelectItem value="max">{t("common.reasoning.max")}</SelectItem>
+                  <SelectItem value="ultra">{t("common.reasoning.ultra")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Enforced service tier</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.enforcedServiceTier")}</div>
               <Select value={draft.enforcedServiceTier} onValueChange={(enforcedServiceTier) => updateDraft({ enforcedServiceTier })}>
                 <SelectTrigger>
-                  <SelectValue placeholder="None" />
+                  <SelectValue placeholder={t("common.options.none")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  <SelectItem value="auto">Auto</SelectItem>
-                  <SelectItem value="default">Default</SelectItem>
-                  <SelectItem value="priority">Priority</SelectItem>
-                  <SelectItem value="flex">Flex</SelectItem>
+                  <SelectItem value="none">{t("common.options.none")}</SelectItem>
+                  <SelectItem value="auto">{t("common.serviceTier.auto")}</SelectItem>
+                  <SelectItem value="default">{t("common.serviceTier.default")}</SelectItem>
+                  <SelectItem value="priority">{t("common.serviceTier.priority")}</SelectItem>
+                  <SelectItem value="flex">{t("common.serviceTier.flex")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-1">
               <label className="text-sm font-medium" htmlFor="edit-api-key-traffic-class">
-                Traffic class
+                {t("apiKeys.form.trafficClass")}
               </label>
               <Select value={draft.trafficClass} onValueChange={(value) => updateDraft({ trafficClass: value as TrafficClass })}>
                 <SelectTrigger id="edit-api-key-traffic-class">
-                  <SelectValue placeholder="Foreground" />
+                  <SelectValue placeholder={t("common.traffic.foreground")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="foreground">Foreground</SelectItem>
-                  <SelectItem value="opportunistic">Opportunistic</SelectItem>
+                  <SelectItem value="foreground">{t("common.traffic.foreground")}</SelectItem>
+                  <SelectItem value="opportunistic">{t("common.traffic.opportunistic")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-1">
               <label className="text-sm font-medium" htmlFor="edit-api-key-transport-policy">
-                HTTP client routing
+                {t("apiKeys.form.httpClientRouting")}
               </label>
               <Select
                 value={draft.transportPolicyOverride ?? TRANSPORT_POLICY_FOLLOW_GLOBAL}
@@ -337,13 +340,13 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 }
               >
                 <SelectTrigger id="edit-api-key-transport-policy">
-                  <SelectValue placeholder="Follow global default" />
+                  <SelectValue placeholder={t("apiKeys.transport.followGlobal")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={TRANSPORT_POLICY_FOLLOW_GLOBAL}>Follow global default</SelectItem>
+                  <SelectItem value={TRANSPORT_POLICY_FOLLOW_GLOBAL}>{t("apiKeys.transport.followGlobal")}</SelectItem>
                   {Object.entries(TRANSPORT_POLICY_LABELS).map(([value, label]) => (
                     <SelectItem key={value} value={value}>
-                      {label}
+                      {t(label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -351,7 +354,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">Expiry</div>
+              <div className="text-sm font-medium">{t("apiKeys.form.expiry")}</div>
               <ExpiryPicker value={draft.expiresAt} onChange={(expiresAt) => updateDraft({ expiresAt })} />
             </div>
 
@@ -360,7 +363,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               name="isActive"
               render={({ field }) => (
                 <div className="flex items-center justify-between rounded-md border p-2">
-                  <span className="text-sm">Active</span>
+                  <span className="text-sm">{t("common.states.active")}</span>
                   <Switch checked={field.value} onCheckedChange={field.onChange} />
                 </div>
               )}
@@ -369,12 +372,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
           {/* Right column — Limits */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
-            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Limits</h4>
+            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.limits")}</h4>
             <LimitRulesEditor rules={draft.limitRules} onChange={(limitRules) => updateDraft({ limitRules })} />
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">
-                <div className="text-xs font-medium text-muted-foreground">Current usage</div>
+                <div className="text-xs font-medium text-muted-foreground">{t("apiKeys.form.currentUsage")}</div>
                 <div className="space-y-1">
                   {apiKey.limits.map((limit) => (
                     <LimitUsageBar key={limit.id} limit={limit} />
@@ -387,7 +390,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
         <DialogFooter className="mt-4">
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
-            Save
+            {t("common.actions.save")}
           </Button>
         </DialogFooter>
       </form>
@@ -440,12 +443,13 @@ function formatTokenCount(n: number): string {
 }
 
 export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
+  const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Edit API key</DialogTitle>
-          <DialogDescription>Update restrictions and lifecycle settings.</DialogDescription>
+          <DialogTitle>{t("apiKeys.editDialog.title")}</DialogTitle>
+          <DialogDescription>{t("apiKeys.editDialog.description")}</DialogDescription>
         </DialogHeader>
 
         {apiKey ? (
@@ -457,7 +461,7 @@ export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }:
             onClose={() => onOpenChange(false)}
           />
         ) : (
-          <p className="text-sm text-muted-foreground">Select an API key to edit.</p>
+          <p className="text-sm text-muted-foreground">{t("apiKeys.editDialog.selectKey")}</p>
         )}
       </DialogContent>
     </Dialog>

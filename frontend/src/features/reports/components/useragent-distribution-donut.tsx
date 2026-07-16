@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, ResponsiveContainer, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 import type { UseragentCostEntry } from "../schemas";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
@@ -28,6 +29,7 @@ function getUseragentColor(useragent: string, index: number) {
 }
 
 export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
+  const { t } = useTranslation();
   const [metric, setMetric] = useState<DistributionMetric>("cost");
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -87,7 +89,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">Distribution by UserAgent</div>
+        <div className="text-sm font-semibold text-foreground">{t("reports.distribution.byUserAgent")}</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div className="mt-4 flex items-center gap-4">
@@ -97,7 +99,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
               className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
               data-testid="useragent-distribution-center-label"
             >
-              Total
+              {t("reports.distribution.total")}
             </span>
             <span
               className="max-w-[76px] text-sm font-semibold leading-tight tabular-nums text-foreground"

@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import {
@@ -12,6 +13,7 @@ import {
 import type { QuotaPlannerSettingsUpdateRequest, QuotaPlannerWarmNowRequest } from "@/features/quota-planner/schemas";
 
 export function useQuotaPlanner() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
 
   const {
@@ -88,7 +90,7 @@ export function useQuotaPlanner() {
   const updateSettingsMutation = useMutation({
     mutationFn: (payload: QuotaPlannerSettingsUpdateRequest) => updateQuotaPlannerSettings(payload),
     onSuccess: async () => {
-      toast.success("Quota planner settings saved");
+      toast.success(t("quotaPlanner.toasts.saved"));
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["quota-planner", "settings"] }),
         queryClient.invalidateQueries({ queryKey: ["quota-planner", "forecast"] }),
@@ -96,32 +98,32 @@ export function useQuotaPlanner() {
       ]);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to save quota planner settings");
+      toast.error(error.message || t("quotaPlanner.toasts.saveFailed"));
     },
   });
 
   const warmNowMutation = useMutation({
     mutationFn: (payload: QuotaPlannerWarmNowRequest) => warmQuotaPlannerAccount(payload),
     onSuccess: async (response) => {
-      toast.success(`Warmup ${response.status}: ${response.reason}`);
+      toast.success(t("quotaPlanner.toasts.warmupResult", { status: response.status, reason: response.reason }));
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["quota-planner", "decisions"] }),
         queryClient.invalidateQueries({ queryKey: ["quota-planner", "forecast"] }),
       ]);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to request quota warmup");
+      toast.error(error.message || t("quotaPlanner.toasts.warmupFailed"));
     },
   });
 
   const cancelDecisionMutation = useMutation({
     mutationFn: (decisionId: string) => cancelQuotaPlannerDecision(decisionId),
     onSuccess: async () => {
-      toast.success("Quota planner decision canceled");
+      toast.success(t("quotaPlanner.toasts.canceled"));
       await queryClient.invalidateQueries({ queryKey: ["quota-planner", "decisions"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to cancel quota planner decision");
+      toast.error(error.message || t("quotaPlanner.toasts.cancelFailed"));
     },
   });
 

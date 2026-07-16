@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
@@ -50,6 +52,7 @@ function isExpired(apiKey: ApiKey): boolean {
 }
 
 export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
+  const { t } = useTranslation();
   const expired = isExpired(apiKey);
   const primary = apiKey.pooledRemainingPercentPrimary ?? null;
   const secondary = apiKey.pooledRemainingPercentSecondary ?? null;
@@ -80,7 +83,7 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
               : "bg-emerald-500 text-white",
           )}
         >
-          {!apiKey.isActive ? "Disabled" : expired ? "Expired" : "Active"}
+          {!apiKey.isActive ? t("common.states.disabled") : expired ? t("common.states.expired") : t("common.states.active")}
         </Badge>
       </div>
       {visibleRows > 0 ? (
@@ -88,11 +91,11 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
           {hasPrimary ? (
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[11px]">
-                <span className="text-muted-foreground">Pooled 5h</span>
+                <span className="text-muted-foreground">{t("apis.listItem.pooled5h")}</span>
                 <span className="tabular-nums font-medium">{formatPercentNullable(primary)}</span>
               </div>
               <MiniQuotaBar
-                aria-label="Pooled 5h credits remaining"
+                aria-label={t("apis.listItem.pooled5hAria")}
                 percent={primary}
                 testId="pooled-quota-track-5h"
               />
@@ -101,11 +104,11 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
           {hasSecondary ? (
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[11px]">
-                <span className="text-muted-foreground">Pooled Weekly</span>
+                <span className="text-muted-foreground">{t("apis.listItem.pooledWeekly")}</span>
                 <span className="tabular-nums font-medium">{formatPercentNullable(secondary)}</span>
               </div>
               <MiniQuotaBar
-                aria-label="Pooled weekly credits remaining"
+                aria-label={t("apis.listItem.pooledWeeklyAria")}
                 percent={secondary}
                 testId="pooled-quota-track-weekly"
               />
@@ -116,7 +119,7 @@ export function ApiListItem({ apiKey, selected, onSelect }: ApiListItemProps) {
       {limitPct !== null ? (
         <div className="mt-1.5 space-y-1">
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-muted-foreground">API Limit</span>
+            <span className="text-muted-foreground">{t("apis.listItem.apiLimit")}</span>
             <span className="tabular-nums font-medium">{formatPercentNullable(limitPct)}</span>
           </div>
           <MiniUsageBar percent={limitPct} />

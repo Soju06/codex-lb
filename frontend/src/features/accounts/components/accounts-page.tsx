@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -35,6 +36,7 @@ const OauthDialog = lazy(() =>
 );
 
 export function AccountsPage() {
+  const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [accountSortMode, setAccountSortMode] = useState<AccountSortMode>(DEFAULT_ACCOUNT_SORT_MODE);
   const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
@@ -144,9 +146,9 @@ export function AccountsPage() {
     <div className="animate-fade-in-up space-y-6">
       {/* Page header */}
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Accounts</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("accounts.page.title")}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Manage imported accounts and authentication flows.
+          {t("accounts.page.subtitle")}
         </p>
       </div>
 
@@ -292,10 +294,10 @@ export function AccountsPage() {
 
       <ConfirmDialog
         open={deleteDialog.open}
-        title="Delete account"
-        description="This action removes the account from the load balancer configuration."
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
+        title={t("accounts.deleteDialog.title")}
+        description={t("accounts.deleteDialog.description")}
+        confirmLabel={t("common.actions.delete")}
+        cancelLabel={t("common.cancel")}
         onOpenChange={(open) => {
           deleteDialog.onOpenChange(open);
           if (!open) setDeleteHistory(false);
@@ -322,17 +324,17 @@ export function AccountsPage() {
             htmlFor="delete-history"
             className="text-sm text-muted-foreground cursor-pointer"
           >
-            Delete all history for this account
+            {t("accounts.deleteDialog.deleteHistory")}
           </label>
         </div>
       </ConfirmDialog>
 
       <ConfirmDialog
         open={usageResetDialog.open}
-        title="Reset usage"
-        description="This consumes one upstream usage reset credit for the selected account, then fetches fresh usage."
-        confirmLabel="Reset"
-        cancelLabel="Cancel"
+        title={t("accounts.usageResetDialog.title")}
+        description={t("accounts.usageResetDialog.description")}
+        confirmLabel={t("common.actions.reset")}
+        cancelLabel={t("common.cancel")}
         onOpenChange={usageResetDialog.onOpenChange}
         onConfirm={() => {
           if (!usageResetDialog.data) {
@@ -348,7 +350,7 @@ export function AccountsPage() {
 
       <LoadingOverlay
         visible={!!accountsQuery.data && mutationBusy}
-        label="Updating accounts..."
+        label={t("accounts.page.updating")}
       />
     </div>
   );

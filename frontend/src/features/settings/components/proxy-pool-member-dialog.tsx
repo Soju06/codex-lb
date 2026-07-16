@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,7 @@ type ProxyPoolMemberFormProps = {
 };
 
 function ProxyPoolMemberForm({ busy, pools, endpoints, onClose, onSubmit }: ProxyPoolMemberFormProps) {
+  const { t } = useTranslation();
   const [poolId, setPoolId] = useState(pools[0]?.id ?? "");
   const [endpointId, setEndpointId] = useState(endpoints[0]?.id ?? "");
 
@@ -77,10 +79,10 @@ function ProxyPoolMemberForm({ busy, pools, endpoints, onClose, onSubmit }: Prox
       }}
     >
       <div className="space-y-1.5">
-        <Label htmlFor="proxy-member-pool">Pool</Label>
-        <Select value={poolId} onValueChange={setPoolId} disabled={busy || pools.length === 0}>
-          <SelectTrigger id="proxy-member-pool" className="w-full">
-            <SelectValue placeholder="Select pool" />
+	        <Label htmlFor="proxy-member-pool">{t("upstreamProxy.memberDialog.pool")}</Label>
+	        <Select value={poolId} onValueChange={setPoolId} disabled={busy || pools.length === 0}>
+	          <SelectTrigger id="proxy-member-pool" className="w-full">
+	            <SelectValue placeholder={t("upstreamProxy.memberDialog.selectPool")} />
           </SelectTrigger>
           <SelectContent>
             {pools.map((pool) => (
@@ -93,10 +95,10 @@ function ProxyPoolMemberForm({ busy, pools, endpoints, onClose, onSubmit }: Prox
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="proxy-member-endpoint">Endpoint</Label>
-        <Select value={endpointId} onValueChange={setEndpointId} disabled={busy || endpoints.length === 0}>
-          <SelectTrigger id="proxy-member-endpoint" className="w-full">
-            <SelectValue placeholder="Select endpoint" />
+	        <Label htmlFor="proxy-member-endpoint">{t("upstreamProxy.memberDialog.endpoint")}</Label>
+	        <Select value={endpointId} onValueChange={setEndpointId} disabled={busy || endpoints.length === 0}>
+	          <SelectTrigger id="proxy-member-endpoint" className="w-full">
+	            <SelectValue placeholder={t("upstreamProxy.memberDialog.selectEndpoint")} />
           </SelectTrigger>
           <SelectContent>
             {endpoints.map((endpoint) => (
@@ -109,12 +111,12 @@ function ProxyPoolMemberForm({ busy, pools, endpoints, onClose, onSubmit }: Prox
       </div>
 
       {alreadyPresent && selectedPool ? (
-        <AlertMessage variant="warning">Endpoint is already in {selectedPool.name}.</AlertMessage>
+	        <AlertMessage variant="warning">{t("upstreamProxy.memberDialog.alreadyPresent", { pool: selectedPool.name })}</AlertMessage>
       ) : null}
 
       <DialogFooter className="mt-2">
         <Button type="submit" disabled={busy || !valid}>
-          Add member
+	          {t("upstreamProxy.actions.addMember")}
         </Button>
       </DialogFooter>
     </form>
@@ -129,13 +131,14 @@ export function ProxyPoolMemberDialog({
   onOpenChange,
   onSubmit,
 }: ProxyPoolMemberDialogProps) {
+  const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Add pool member</DialogTitle>
-            <DialogDescription>Attach an existing endpoint to a proxy pool.</DialogDescription>
+	          <DialogTitle>{t("upstreamProxy.memberDialog.title")}</DialogTitle>
+	          <DialogDescription>{t("upstreamProxy.memberDialog.description")}</DialogDescription>
           </DialogHeader>
           <ProxyPoolMemberForm
             busy={busy}

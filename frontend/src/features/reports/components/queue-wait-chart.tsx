@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   AreaChart,
   Area,
@@ -25,6 +27,7 @@ function formatQueueMs(value: number): string {
 }
 
 export function QueueWaitChart({ startDate, endDate, data }: QueueWaitChartProps) {
+  const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
     queue: d.medianQueueMs ?? 0,
@@ -32,7 +35,7 @@ export function QueueWaitChart({ startDate, endDate, data }: QueueWaitChartProps
 
   return (
     <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Queue Wait</div>
+      <div className="text-sm font-semibold text-foreground">{t("reports.charts.queueWait")}</div>
       <div className="mt-4 h-[200px]">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
@@ -57,7 +60,7 @@ export function QueueWaitChart({ startDate, endDate, data }: QueueWaitChartProps
             />
             <Tooltip
               content={
-                <ChartTooltip names={{ queue: "Median queue wait" }} formatValue={formatQueueMs} />
+                <ChartTooltip names={{ queue: t("reports.charts.medianQueueWait") }} formatValue={formatQueueMs} />
               }
             />
             <Area

@@ -16498,6 +16498,34 @@ def test_slim_response_create_slims_oversized_custom_and_apply_patch_string_outp
     assert second_item["status"] == "completed"
 
 
+def test_slim_response_create_ignores_malformed_unhashable_item_type():
+    malformed_type: list[JsonValue] = []
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "type": malformed_type,
+                "call_id": "call_1",
+                "content": [{"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_images_slimmed"] == 1
+    first_item = slimmed_input[0]
+    assert isinstance(first_item, dict)
+    assert first_item["type"] == []
+    assert first_item["content"] == [
+        {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+    ]
+
+
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
 

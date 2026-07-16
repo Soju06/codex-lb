@@ -397,7 +397,7 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
     images_slimmed = 0
 
     item_type = item_mapping.get("type")
-    if item_type in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
+    if isinstance(item_type, str) and item_type in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
         output = item_mapping.get("output")
         if isinstance(output, str):
             if _should_slim_historical_tool_output(output):
@@ -417,7 +417,7 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
         item_mapping["content"] = slimmed_content
         images_slimmed += content_images_slimmed
 
-    if item_mapping.get("type") == "input_image" and _is_inline_image_reference(item_mapping.get("image_url")):
+    if item_type == "input_image" and _is_inline_image_reference(item_mapping.get("image_url")):
         return _response_create_inline_image_notice_item(), tool_outputs_slimmed, images_slimmed + 1
 
     return item_mapping, tool_outputs_slimmed, images_slimmed

@@ -39,6 +39,7 @@ REQUIRED_SERVICE_MODULES = {
     "file_ops.py",
     "observability.py",
     "rate_limit.py",
+    "refresh.py",
     "request_log.py",
     "response_create.py",
     "support.py",

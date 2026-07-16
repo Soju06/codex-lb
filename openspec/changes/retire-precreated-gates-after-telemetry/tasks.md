@@ -1,0 +1,8 @@
+- [x] Add a regression that feeds leading `codex.rate_limits` through the HTTP bridge event processor.
+- [x] Prove the telemetry records first-event latency without releasing the response-create gate.
+- [x] Retire the old pre-created session when a later gate attempt times out past the threshold.
+- [x] Preserve the existing healthy-created-stream non-retirement coverage.
+- [x] Replace the retired session for a definitively unsubmitted hard-affinity waiter.
+- [x] Preserve the original request deadline and previous-response account ownership on replacement.
+- [x] Add negative guards for every upstream/downstream ambiguity marker.
+- [x] Run focused unit/integration, lint, type, and strict OpenSpec validation.

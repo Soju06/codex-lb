@@ -14,6 +14,7 @@
     "automations": "Automations",
     "apis": "APIs",
     "settings": "Settings",
+    "advanced": "Advanced",
     "openMenu": "Open menu",
     "adminSignIn": "Admin Sign In",
     "showEmails": "Show Emails",
@@ -75,11 +76,17 @@
   "settings": {
     "page": {
       "title": "Settings",
-      "subtitle": "Configure routing, auth, API key management, and firewall.",
+      "subtitle": "Configure appearance, auth, and API keys. Power-user tuning lives in the Advanced settings group below.",
       "readOnlyNotice": "You are viewing the dashboard with read-only guest access. Admin controls are disabled.",
       "trustedHeaderNotice": "Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay available only as optional fallback login.",
       "disabledNotice": "Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions or external access control.",
       "savingLabel": "Saving settings..."
+    },
+    "advanced": {
+      "title": "Advanced settings",
+      "description": "Routing tuning, upstream proxies, model sources, firewall, quota planner, and sticky sessions.",
+      "show": "Show advanced settings",
+      "hide": "Hide advanced settings"
     },
     "guestAccess": {
       "title": "Guest access",

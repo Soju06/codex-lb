@@ -14,6 +14,7 @@ from starlette.requests import Request
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.auth.refresh import RefreshError
 from app.core.clients import proxy as core_proxy
 from app.core.clients.proxy import ProxyResponseError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME
@@ -587,6 +588,106 @@ async def test_codex_control_json_endpoints_forward_upstream(
 
 
 @pytest.mark.asyncio
+async def test_codex_alpha_search_forwards_request_and_response(async_client, monkeypatch):
+    await _import_account(async_client, "acc_codex_search", "codex-search@example.com")
+    calls = []
+    upstream_body = b'{"results":[{"title":"OpenAI","url":"https://openai.com/"}]}'
+
+    async def fake_codex_control_request(
+        path,
+        *,
+        method,
+        payload: bytes | None,
+        query_params,
+        headers,
+        access_token,
+        account_id,
+        timeout_seconds=None,
+        **_kwargs,
+    ):
+        calls.append(
+            {
+                "path": path,
+                "method": method,
+                "payload": payload,
+                "query_params": list(query_params),
+                "session_id": headers.get("session_id"),
+                "access_token": access_token,
+                "account_id": account_id,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return core_proxy.CodexControlResponse(
+            status_code=200,
+            body=upstream_body,
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "search-request",
+                "set-cookie": "must-not-leak=1",
+            },
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    payload = b'{ "query": "OpenAI official website" }'
+
+    response = await async_client.post(
+        "/backend-api/codex/alpha/search?result_count=10",
+        content=payload,
+        headers={"content-type": "application/json", "session_id": "search-session"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == upstream_body
+    assert response.headers["x-request-id"] == "search-request"
+    assert "set-cookie" not in response.headers
+    assert calls == [
+        {
+            "path": "alpha/search",
+            "method": "POST",
+            "payload": payload,
+            "query_params": [("result_count", "10")],
+            "session_id": "search-session",
+            "access_token": "access-token",
+            "account_id": "acc_codex_search",
+            "timeout_seconds": calls[0]["timeout_seconds"],
+        }
+    ]
+    assert isinstance(calls[0]["timeout_seconds"], float)
+    assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_preserves_normalized_control_error_contract(async_client, monkeypatch):
+    async def fake_codex_control_request(*_args, **_kwargs):
+        raise ProxyResponseError(
+            429,
+            {
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Search rate limit exceeded",
+                    "type": "rate_limit_error",
+                }
+            },
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", fake_codex_control_request)
+
+    response = await async_client.post(
+        "/backend-api/codex/alpha/search",
+        json={"query": "OpenAI official website"},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "error": {
+            "code": "rate_limit_exceeded",
+            "message": "Search rate limit exceeded",
+            "type": "rate_limit_error",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, monkeypatch):
     await _import_account(async_client, "acc_codex_realtime", "codex-realtime@example.com")
     calls = []
@@ -705,6 +806,47 @@ async def test_codex_control_repeated_401_after_refresh_fails_over(async_client,
     assert response.json() == {"ok": True}
     assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
     assert captured_account_ids[2] != invalidated_account_id
+
+
+@pytest.mark.asyncio
+async def test_codex_control_post_401_forced_refresh_claim_timeout_reports_upstream_unavailable(
+    async_client, monkeypatch
+):
+    """Regression (P2 forced-refresh surfaces): when the codex-control post-401
+    forced refresh on the failover account hits a transient cross-replica
+    refresh-CLAIM-CONTENTION timeout, the surface routes through
+    ``_ensure_fresh_with_budget_or_auth_error``, which MUST surface a retryable
+    ``upstream_unavailable`` (502) rather than a bogus 401 ``invalid_api_key``."""
+    await _import_account(async_client, "acc_codex_claim_a", "codex-claim-a@example.com")
+    await _import_account(async_client, "acc_codex_claim_b", "codex-claim-b@example.com")
+
+    async def fake_codex_control_request(*_args, account_id=None, **_kwargs):
+        del _args, account_id, _kwargs
+        # Always 401 so the surface fails over and forces a refresh on the peer.
+        raise ProxyResponseError(401, {"error": {"code": "invalid_api_key", "message": "token invalidated"}})
+
+    first_fresh_account: dict[str, str | None] = {"id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_fresh_account["id"] is None:
+            first_fresh_account["id"] = account.id
+        if account.id != first_fresh_account["id"]:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post("/backend-api/codex/safety/arc", json={"decision": "allow"})
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio

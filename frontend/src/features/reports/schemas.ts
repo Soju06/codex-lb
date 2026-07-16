@@ -11,6 +11,7 @@ const DailyReportRowSchema = z.object({
   errorCount: z.number(),
   medianTtftMs: z.number().optional().default(0),
   medianTps: z.number().optional().default(0),
+  medianQueueMs: z.number().optional().default(0),
 });
 
 const ModelCostEntrySchema = z.object({

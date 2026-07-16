@@ -1339,14 +1339,35 @@ async def test_run_if_leader_preserves_shared_lease_renewed_by_concurrent_heartb
     # touching the database, even though the DB lease is freshly held by the same
     # process. B may stop trusting its own renewals, but shared leadership must
     # survive on the authoritative shared lease state.
-    ttl = 6  # renew_interval = 2s, renew_timeout = ttl / 6 = 1.0s
+    # A large TTL keeps this test's assertions off the wall clock. The behaviour
+    # under test is purely ordering (a sibling advances the SHARED
+    # ``_lease_deadline`` while THIS heartbeat's renewals fail, so shared
+    # leadership must survive) and does not depend on the absolute lease size.
+    # With ttl=60 the renewal time-box is ``ttl / 6 = 10s``, so seeding the lease
+    # only ``_LEASE_MARGIN`` (5s) ahead still keeps every heartbeat sleep at 0
+    # (``max(0, remaining - renew_timeout)`` clamps to 0 whenever
+    # ``remaining <= renew_timeout``), i.e. renewals still fire back-to-back
+    # promptly — but the heartbeat's ``remaining <= 0`` demotion and the trailing
+    # ``_lease_deadline > loop.time()`` assertion now have a full 5s of slack
+    # instead of 0.3s. That margin is what makes the test deterministic on loaded
+    # CI runners: the original 0.3s window flaked (``run_if_leader`` returned
+    # ``None`` -> ``assert None == 'ran'``) whenever an event-loop stall between
+    # the acquire and the first heartbeat tick, or between two renewals, exceeded
+    # 0.3s. A 5s event-loop stall inside a unit test does not happen without a
+    # true hang (which the suite's ``--timeout`` catches).
+    ttl = 60  # renew_interval = 20s, renew_timeout = ttl / 6 = 10s
+    _LEASE_MARGIN = 5.0
     loop = asyncio.get_running_loop()
 
     class _SiblingRenewedSession(_FakeSession):
         # The acquire succeeds; every renewal on THIS heartbeat then raises a
         # transient error, but each attempt first advances the SHARED
-        # self._lease_deadline slightly into the future to model a concurrent
-        # sibling heartbeat that just renewed the row on the same election.
+        # self._lease_deadline into the future to model a concurrent sibling
+        # heartbeat that just renewed the row on the same election. Because
+        # monotonic time strictly advances between renewals, the freshly stamped
+        # deadline is always beyond this heartbeat's currently-adopted local
+        # deadline, which is exactly the "sibling kept the shared lease fresh"
+        # ordering the preservation branch must honour.
         def __init__(self) -> None:
             super().__init__("postgresql", [1])
             self.election: leader_election_module.LeaderElection | None = None
@@ -1362,14 +1383,16 @@ async def test_run_if_leader_preserves_shared_lease_renewed_by_concurrent_heartb
             # the shared lease fresh (advancing it just ahead of this
             # heartbeat's local deadline), then this attempt fails transiently.
             assert self.election is not None
-            self.election._lease_deadline = loop.time() + 0.3
+            self.election._lease_deadline = loop.time() + _LEASE_MARGIN
             self.renew_errors += 1
             raise RuntimeError("db down")
 
     session = _SiblingRenewedSession()
     _install(monkeypatch, session, ttl=ttl)
-    # A short acquire remaining so the heartbeat's first renewal fires promptly.
-    session._remaining = 0.3
+    # A small acquire remaining (< renew_timeout) so the heartbeat's first
+    # renewal still fires promptly (sleep budget 0), but with 5s of slack against
+    # event-loop stalls rather than the 0.3s window that flaked on loaded CI.
+    session._remaining = _LEASE_MARGIN
 
     election = leader_election_module.LeaderElection(leader_id="node-a")
     session.election = election

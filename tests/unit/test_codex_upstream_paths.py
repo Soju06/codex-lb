@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import errno
+import socket
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 
 import app.core.clients.proxy as proxy_module
-from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
+from app.core.clients.codex import CodexClient, CodexTransportError, CodexWebSocketResult
 from app.core.clients.files import create_file, finalize_file
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -17,7 +21,7 @@ from app.core.clients.proxy import (
     thread_goal_request,
     transcribe_audio,
 )
-from app.core.clients.proxy_websocket import connect_responses_websocket
+from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError, connect_responses_websocket
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
@@ -104,6 +108,14 @@ class _StreamErrorResponse:
     content = _FakeStreamErrorContent()
 
 
+class _BufferedBodyNetworkFailureResponse:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+
+    async def read(self) -> bytes:
+        raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+
 class _TransportErrorCodexClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -111,6 +123,28 @@ class _TransportErrorCodexClient:
     async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
         self.calls.append({"method": method, "url": url, "route": route, **kwargs})
         raise CodexTransportError("Codex upstream request failed via proxy endpoint ep_1: OSError")
+
+
+class _NetworkFailureSession:
+    def __init__(self, error: OSError) -> None:
+        self.error = error
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> object:
+        del method, url, kwargs
+        raise self.error
+
+    async def ws_connect(self, url: str, **kwargs: Any) -> object:
+        del url, kwargs
+        raise self.error
+
+
+class _ResponseSession:
+    def __init__(self, response: object) -> None:
+        self.response = response
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> object:
+        del method, url, kwargs
+        return self.response
 
 
 class _FakeCodexWebSocket:
@@ -592,6 +626,140 @@ async def test_stream_responses_routed_transport_errors_are_unavailable(route: R
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "network_error",
+    [
+        socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
+        OSError(errno.ENETUNREACH, "Network is unreachable"),
+    ],
+    ids=["dns", "route"],
+)
+async def test_stream_responses_keeps_ambiguous_routed_process_network_failures_unreplayed(
+    route: ResolvedUpstreamRoute,
+    network_error: OSError,
+) -> None:
+    client = CodexClient(_NetworkFailureSession(network_error))
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+    session = object()
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, session),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=client,
+        )
+    ]
+
+    event = proxy_module.parse_sse_data_json(events[0])
+    assert event is not None
+    response = event.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+    assert error["code"] == "proxy_network_unavailable"
+    assert "ep_1" in str(error["message"])
+    assert str(network_error) not in str(error["message"])
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_marks_typed_routed_connector_failure_replay_safe(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    key = ConnectionKey("proxy.test", 8080, False, False, None, None, None)
+    network_error = aiohttp.ClientConnectorError(
+        key,
+        socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
+    )
+    client = CodexClient(_NetworkFailureSession(network_error))
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=client,
+        ):
+            pass
+
+    assert exc_info.value.payload["error"]["code"] == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.failed_session is None
+
+
+@pytest.mark.asyncio
+async def test_codex_client_buffered_body_network_failure_is_neutral_but_unsafe(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = CodexClient(_ResponseSession(_BufferedBodyNetworkFailureResponse()))
+
+    with pytest.raises(CodexTransportError) as exc_info:
+        await client.request("POST", "https://chatgpt.test/oauth/token", route=route, json={})
+
+    assert exc_info.value.error_code == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failure_phase == "body_read"
+
+
+@pytest.mark.asyncio
+async def test_compact_preserves_ambiguous_routed_process_network_code_without_replay(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = CodexClient(_NetworkFailureSession(OSError(errno.ENETUNREACH, "Network is unreachable")))
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Reply.", input=[])
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await compact_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            route=route,
+            codex_client=client,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failure_phase == "request"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keeps_missing_proxy_hostname_endpoint_scoped(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    network_error = socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+    client = CodexClient(_NetworkFailureSession(network_error))
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=client,
+        )
+    ]
+
+    assert '"code":"upstream_unavailable"' in "".join(events)
+
+
+@pytest.mark.asyncio
 async def test_responses_websocket_uses_codex_client_when_route_is_resolved(route: ResolvedUpstreamRoute) -> None:
     client = _WsCodexClient()
 
@@ -618,6 +786,59 @@ async def test_responses_websocket_uses_codex_client_when_route_is_resolved(rout
     assert client.websocket.sent == ['{"type":"response.create"}']
     assert client.context.exited is True
     assert client.closed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "network_error",
+    [
+        socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
+        OSError(errno.ENETUNREACH, "Network is unreachable"),
+    ],
+    ids=["dns", "route"],
+)
+async def test_responses_websocket_preserves_routed_process_network_failures(
+    route: ResolvedUpstreamRoute,
+    network_error: OSError,
+) -> None:
+    client = CodexClient(_NetworkFailureSession(network_error))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            base_url="https://chatgpt.test/backend-api",
+            route=route,
+            codex_client=client,
+        )
+
+    error = exc_info.value.payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "proxy_network_unavailable"
+    assert "ep_1" in str(error["message"])
+    assert str(network_error) not in str(error["message"])
+
+
+@pytest.mark.asyncio
+async def test_responses_websocket_keeps_missing_proxy_hostname_endpoint_scoped(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = CodexClient(_NetworkFailureSession(socket.gaierror(socket.EAI_NONAME, "Name or service not known")))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            base_url="https://chatgpt.test/backend-api",
+            route=route,
+            codex_client=client,
+        )
+
+    error = exc_info.value.payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio
@@ -670,3 +891,46 @@ async def test_responses_websocket_send_errors_do_not_expose_proxy_credentials(
     assert "OSError" in message
     assert "user:pass" not in message
     assert "proxy.test:8080" not in message
+
+
+@pytest.mark.asyncio
+async def test_responses_websocket_post_connect_network_failures_preserve_safe_code(
+    route: ResolvedUpstreamRoute,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NetworkFailureWebSocket(_FakeCodexWebSocket):
+        def send_str(self, payload: str) -> None:
+            del payload
+            raise OSError(errno.ENETUNREACH, "proxy http://user:pass@proxy.test:8080 unreachable")
+
+        async def receive(self) -> aiohttp.WSMessage:
+            raise OSError(errno.ENETUNREACH, "proxy http://user:pass@proxy.test:8080 unreachable")
+
+    client = _WsCodexClient()
+    client.websocket = _NetworkFailureWebSocket()
+    client.context = _FakeWsContext(client.websocket)
+    rotate = AsyncMock(return_value="rotated")
+    monkeypatch.setattr("app.core.clients.proxy_websocket.rotate_shared_http_transport", rotate)
+    websocket = await connect_responses_websocket(
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        base_url="https://chatgpt.test/backend-api",
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    with pytest.raises(UpstreamWebSocketTransportError) as exc_info:
+        await websocket.send_text('{"type":"response.create"}')
+    assert exc_info.value.error_code == "proxy_network_unavailable"
+    assert "user:pass" not in str(exc_info.value)
+
+    message = await websocket.receive()
+    await websocket.close()
+
+    assert message.kind == "error"
+    assert message.error_code == "proxy_network_unavailable"
+    assert message.error is not None
+    assert "user:pass" not in message.error
+    assert rotate.await_count == 2
+    assert all(call.kwargs["transport"] == "websocket" for call in rotate.await_args_list)

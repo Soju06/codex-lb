@@ -247,6 +247,25 @@ async def test_bulkhead_dashboard_websocket_uses_detail_payload_when_lane_full()
     assert payload == {"detail": "codex-lb is temporarily overloaded in the dashboard lane"}
 
 
+def test_bulkhead_semaphore_derives_per_class_limits_from_single_proxy_limit():
+    # Replaces the removed per-class settings (issue #1340): the single proxy
+    # limit drives http and websocket lanes, and compact derives min(http, 16).
+    bulkhead = BulkheadSemaphore(proxy_http_limit=40, proxy_websocket_limit=40, proxy_compact_limit=None)
+    _, http_sem = bulkhead.get_semaphore("http", "/v1/responses")
+    _, ws_sem = bulkhead.get_semaphore("websocket", "/v1/responses")
+    _, compact_sem = bulkhead.get_semaphore("http", "/v1/responses/compact")
+    assert http_sem is not None and http_sem._value == 40
+    assert ws_sem is not None and ws_sem._value == 40
+    assert compact_sem is not None and compact_sem._value == 16
+
+
+def test_bulkhead_semaphore_zero_proxy_limit_disables_all_proxy_lanes():
+    bulkhead = BulkheadSemaphore(proxy_http_limit=0, proxy_websocket_limit=0, proxy_compact_limit=None)
+    assert bulkhead.get_semaphore("http", "/v1/responses")[1] is None
+    assert bulkhead.get_semaphore("websocket", "/v1/responses")[1] is None
+    assert bulkhead.get_semaphore("http", "/v1/responses/compact")[1] is None
+
+
 def test_get_bulkhead_derives_compact_limit_from_http_limit(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bulkhead_module, "_bulkhead", None)
     bulkhead = bulkhead_module.get_bulkhead(proxy_http_limit=0, proxy_websocket_limit=1, dashboard_limit=1)

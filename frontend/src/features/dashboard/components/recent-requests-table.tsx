@@ -398,6 +398,7 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
                 <RequestDetailField label="Elapsed" value={formatElapsed(selectedRequest?.latencyMs ?? null)} />
                 <RequestDetailField label="TTFT" value={formatElapsed(selectedRequest?.latencyFirstTokenMs ?? null)} />
+                <RequestDetailField label="Queue" value={formatElapsed(selectedRequest?.latencyQueueMs ?? null)} />
                 <RequestDetailField label="TPS" value={selectedRequest ? (formatGenerationSpeed(selectedRequest) ?? "—") : "—"} />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">

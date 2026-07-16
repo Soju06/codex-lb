@@ -36,7 +36,7 @@ This repo uses **OpenSpec as the primary workflow and SSOT** for change-driven d
 
 ## Documentation & Release Notes
 
-- **Do not add/update feature or behavior documentation under `docs/`**. Use OpenSpec context docs under `openspec/specs/<capability>/context.md` (or change-level context under `openspec/changes/<change>/context.md`) as the SSOT.
+- **OpenSpec is the SSOT for feature/behavior documentation.** User-facing rendering lives under `docs/` (the published docs pages), and each spec-governed page MUST link back to the owning `openspec/specs/<capability>/` entry. Do not create `docs/` content that has no OpenSpec counterpart, and do not add feature docs as new README sections. Keep normative requirements in `openspec/specs/<capability>/spec.md` and free-form rationale in the capability's `context.md` (or change-level context under `openspec/changes/<change>/context.md`).
 - **Do not edit `CHANGELOG.md` directly.** Leave changelog updates to the release process; record change notes in OpenSpec artifacts instead.
 
 ### Documentation Model (Spec + Context)
@@ -69,7 +69,9 @@ an AI assistant most often needs are:
 - [Merge gates](.github/CONTRIBUTING.md#merge-gates) — CI green +
   `@codex review` clean (or findings addressed) + `mergeable=CLEAN` +
   OpenSpec change folder for behavior changes + `Fixes #N` /
-  `Closes #N` for issue cover.
+  `Closes #N` for issue cover + the five simplicity rules
+  (PRINCIPLES.md P1-P5; see
+  [Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)).
 - [Collaborator rules](.github/CONTRIBUTING.md#collaborator-rules) —
   no self-merge by default; large PRs get split (≈1-concern per PR,
   ~800 net lines / scoped capability ceiling).
@@ -128,3 +130,12 @@ These rules encode recurring review blockers observed across codex-lb PRs.
   behavior, external error envelopes, env-var semantics, and response-schema
   contracts. Update OpenSpec/context and tests together so docs cannot promise
   behavior the code does not implement.
+- Simplicity gates are a merge gate (`PRINCIPLES.md` +
+  [CONTRIBUTING.md Simplicity gates](.github/CONTRIBUTING.md#simplicity-gates)).
+  New features must default off or work zero-config; new `CODEX_LB_*` settings
+  need a why-not-a-default justification in the PR body; README top-level
+  sections, `.env.example`, and dashboard core-nav items are budgeted per
+  `.github/simplicity-budgets.toml` and exceptions need the maintainer-applied
+  `simplicity-budget-approved` label; feature documentation goes to `docs/` +
+  openspec (never new README sections); dashboard-visible PRs include
+  before/after screenshots.

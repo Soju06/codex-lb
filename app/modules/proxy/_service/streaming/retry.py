@@ -1802,6 +1802,12 @@ class _StreamingRetryMixin:
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
                                 last_exhausted_transient_exc = tex
+                            else:
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    error_code,
+                                    error_payload,
+                                    exclude_account=True,
+                                )
                             await _release_tracked_stream_lease(current_account_lease)
                             current_account_lease = None
                             excluded_account_ids.add(account.id)

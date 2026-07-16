@@ -222,12 +222,10 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
     forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1" if context.openai_sdk_request else "0"
-    signature_version = (
-        _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored or context.openai_sdk_request else None
-    )
+    signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
-        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1" if context.original_request_unanchored else "0"
+        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
@@ -370,7 +368,7 @@ def parse_forwarded_request(
         )
         if sdk_flag_downgrade_valid:
             return None, _invalid_bridge_forward_signature_error()
-    if signature_version is not None or openai_sdk_value == "1":
+    if openai_sdk_value is not None:
         return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /

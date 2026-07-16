@@ -41,9 +41,12 @@ new unconditional behavior.
   (`not_applicable`, `skipped`, `success`, `timeout`, `error`) and
   `prewarm_latency_ms` are unchanged.
 - Historical `prewarm_canary_bucket` / `prewarm_eligible_reason` request-log
-  values are dropped by the new Alembic revision; the canary experiment data
-  they carried has served its purpose. Downgrade re-adds the columns as
-  nullable strings (values are not restored).
+  values stop being written; the columns stay declared on `RequestLog`
+  (deprecated, unwritten) for one release so old replicas keep inserting
+  safely during rolling upgrades — the Helm migration job is a pre-upgrade
+  hook while the workload rolls. The Alembic drop revision ships in the next
+  release; the canary experiment data the columns carried has served its
+  purpose.
 
 ## Rollout note
 

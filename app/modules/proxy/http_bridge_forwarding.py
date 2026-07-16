@@ -368,8 +368,6 @@ def parse_forwarded_request(
         )
         if sdk_flag_downgrade_valid:
             return None, _invalid_bridge_forward_signature_error()
-    if openai_sdk_value is not None:
-        return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /
     # legacy scheme) so owners predating the tamper-proofing header — and

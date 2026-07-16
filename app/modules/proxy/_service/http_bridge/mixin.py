@@ -2162,14 +2162,11 @@ class _HTTPBridgeMixin(
                 session.account_lease = None
             await self._load_balancer.release_account_lease(lease)
 
-        async def release_selected_account_lease_and_reraise_if_hard_close_bound() -> None:
+        async def abandon_selected_account_retry(selected_account: Any) -> None:
+            nonlocal preferred_candidate_id
             if hard_close_account_bound:
                 await release_selected_account_lease()
                 raise
-
-        async def abandon_selected_account_retry(selected_account: Any) -> None:
-            nonlocal preferred_candidate_id
-            await release_selected_account_lease_and_reraise_if_hard_close_bound()
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()

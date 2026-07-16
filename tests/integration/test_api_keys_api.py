@@ -471,6 +471,27 @@ async def test_api_key_create_rejects_unknown_assigned_account_ids(async_client)
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_rejects_duplicate_limit_rules(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "duplicate-limits-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 100},
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 200},
+            ],
+        },
+    )
+
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_does_not_persist_assignments_when_limits_are_invalid(async_client):
     assigned_account_id = await _import_account(async_client, "acc-atomic", "atomic@example.com")
 

@@ -313,6 +313,11 @@ class Settings(BaseSettings):
     sticky_session_cleanup_enabled: bool = True
     # Data retention (0 = disabled). Non-zero values have safety floors so
     # every in-product consumer window stays inside retained data.
+    # DEPRECATED: retention is managed from the dashboard runtime settings
+    # (`dashboard_settings.request_log_retention_days` /
+    # `usage_history_retention_days`); a non-NULL dashboard value wins. These
+    # env fields remain one release as aliases for unset dashboard values and
+    # will be removed in a later phase.
     request_log_retention_days: int = Field(default=0, ge=0, le=3650)
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True

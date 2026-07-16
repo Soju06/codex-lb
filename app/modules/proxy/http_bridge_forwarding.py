@@ -392,6 +392,11 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value is None:
+        # Old origins did not send or sign this flag. Preserve the historical
+        # OpenAI-SDK classification so a mixed-version owner cannot enable the
+        # Codex shared instruction cache for an SDK request.
+        context = replace(context, openai_sdk_request=True)
     return HTTPBridgeForwardedRequest(context=context), None
 
 

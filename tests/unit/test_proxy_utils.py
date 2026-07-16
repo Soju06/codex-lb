@@ -9826,6 +9826,67 @@ async def test_http_bridge_does_not_replay_id_bearing_account_model_failure(monk
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_does_not_replay_id_bearing_auth_failure(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_id_bearing_auth_failure")
+    retry_precreated_auth = AsyncMock(return_value="retried")
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_auth_request", retry_precreated_auth)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_id_bearing_auth_failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"do not replay"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-id-bearing-auth-failure", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    cast(Any, session.upstream).archive_received = MagicMock()
+    failure = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_bridge_id_bearing_auth_failure",
+            "status": "failed",
+            "error": {
+                "type": "authentication_error",
+                "code": "invalid_api_key",
+                "message": "Authentication token expired",
+            },
+        },
+    }
+
+    await service._process_http_bridge_upstream_text(session, json.dumps(failure, separators=(",", ":")))
+
+    retry_precreated_auth.assert_not_awaited()
+    assert session.upstream_control.reconnect_requested is False
+    assert request_state.replay_count == 0
+    assert list(session.pending_requests) == []
+    assert request_state.event_queue is not None
+    forwarded = await request_state.event_queue.get()
+    assert forwarded is not None
+    assert parse_sse_data_json(forwarded) == failure
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retires_replacement_session_after_replay_setup_failure(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     rejected_account = _make_account("acc_bridge_rejected_model_metadata")
@@ -13163,15 +13224,11 @@ async def test_http_bridge_token_invalidated_retries_then_fails_over(monkeypatch
     )
     token_invalidated_text = json.dumps(
         {
-            "type": "response.failed",
-            "response": {
-                "id": "resp_token_invalidated",
-                "status": "failed",
-                "error": {
-                    "code": "token_invalidated",
-                    "type": "invalid_request_error",
-                    "message": "Your authentication token has been invalidated. Please try signing in again.",
-                },
+            "type": "error",
+            "error": {
+                "code": "token_invalidated",
+                "type": "invalid_request_error",
+                "message": "Your authentication token has been invalidated. Please try signing in again.",
             },
         },
         separators=(",", ":"),
@@ -13250,15 +13307,11 @@ async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(mo
     )
     token_invalidated_text = json.dumps(
         {
-            "type": "response.failed",
-            "response": {
-                "id": "resp_token_invalidated_pinned",
-                "status": "failed",
-                "error": {
-                    "code": "token_invalidated",
-                    "type": "invalid_request_error",
-                    "message": "Your authentication token has been invalidated. Please try signing in again.",
-                },
+            "type": "error",
+            "error": {
+                "code": "token_invalidated",
+                "type": "invalid_request_error",
+                "message": "Your authentication token has been invalidated. Please try signing in again.",
             },
         },
         separators=(",", ":"),
@@ -20000,6 +20053,62 @@ async def test_process_upstream_websocket_text_does_not_replay_id_bearing_accoun
     assert list(pending_requests) == []
     finalize_request_state.assert_awaited_once()
     handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_does_not_replay_id_bearing_auth_failure(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    finalize_request_state = AsyncMock()
+    handle_precreated_auth_failure = AsyncMock(return_value=True)
+    account = _make_account("acc_ws_id_bearing_auth_failure")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_precreated_websocket_auth_failure", handle_precreated_auth_failure)
+
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_id_bearing_auth_failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"do not replay"}',
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    failure = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_id_bearing_auth_failure",
+            "status": "failed",
+            "error": {
+                "type": "authentication_error",
+                "code": "invalid_api_key",
+                "message": "Authentication token expired",
+            },
+        },
+    }
+    upstream_text = json.dumps(failure, separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == upstream_text
+    handle_precreated_auth_failure.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.replay_request_state is None
+    assert pending_request.replay_count == 0
+    assert list(pending_requests) == []
+    finalize_request_state.assert_awaited_once()
 
 
 @pytest.mark.asyncio

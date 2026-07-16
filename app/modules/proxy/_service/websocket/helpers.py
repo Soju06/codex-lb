@@ -753,6 +753,8 @@ def _websocket_precreated_auth_error_code(
         return None
     if event_type not in {"error", "response.failed"}:
         return None
+    if event_type == "response.failed" and _websocket_response_id(None, payload) is not None:
+        return None
 
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),

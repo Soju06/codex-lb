@@ -886,6 +886,27 @@ async def test_codex_alpha_search_get_forwards_query_without_body(async_client, 
 
 
 @pytest.mark.asyncio
+async def test_codex_alpha_search_options_returns_local_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization, session_id",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    assert response.headers["access-control-allow-methods"] == "GET, POST, HEAD, OPTIONS"
+    assert response.headers["access-control-allow-headers"] == "authorization, session_id"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_codex_alpha_search_preserves_normalized_control_error_contract(async_client, monkeypatch):
     async def fake_codex_control_request(*_args, **_kwargs):
         raise ProxyResponseError(

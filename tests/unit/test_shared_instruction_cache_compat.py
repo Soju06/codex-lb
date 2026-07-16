@@ -9,7 +9,9 @@ from app.modules.proxy import affinity
 from app.modules.proxy import http_bridge_forwarding as bridge
 
 
-def _cacheable_lite_request(*, previous_response_id: str | None = None) -> ResponsesRequest:
+def _cacheable_lite_request(
+    *, previous_response_id: str | None = None
+) -> ResponsesRequest:
     return ResponsesRequest(
         model="gpt-5.6",
         instructions="",
@@ -20,8 +22,14 @@ def _cacheable_lite_request(*, previous_response_id: str | None = None) -> Respo
                 "content": [{"type": "input_text", "text": "base instructions"}],
             },
             {"role": "user", "content": [{"type": "input_text", "text": "first turn"}]},
-            {"role": "assistant", "content": [{"type": "output_text", "text": "first reply"}]},
-            {"role": "user", "content": [{"type": "input_text", "text": "second turn"}]},
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "first reply"}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "second turn"}],
+            },
         ],
         prompt_cache_key="client-cache-key",
         previous_response_id=previous_response_id,
@@ -76,8 +84,14 @@ def test_shared_instruction_cache_detects_breakpoint_before_instruction_hoist() 
                         }
                     ],
                 },
-                {"role": "user", "content": [{"type": "input_text", "text": "stable context"}]},
-                {"role": "user", "content": [{"type": "input_text", "text": "current task"}]},
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "stable context"}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "current task"}],
+                },
             ],
             "prompt_cache_key": "client-cache-key",
         }
@@ -88,7 +102,9 @@ def test_shared_instruction_cache_detects_breakpoint_before_instruction_hoist() 
     assert request.to_payload()["prompt_cache_key"] == "client-cache-key"
 
 
-def test_legacy_owner_forward_without_sdk_header_stays_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_v2_owner_forward_without_sdk_header_stays_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(bridge, "_sign_bridge_payload", _deterministic_signature)
     payload = _cacheable_lite_request()
     context = bridge.HTTPBridgeForwardContext(
@@ -96,11 +112,20 @@ def test_legacy_owner_forward_without_sdk_header_stays_sdk(monkeypatch: pytest.M
         target_instance="owner",
         codex_session_affinity=False,
         downstream_turn_state=None,
-        openai_sdk_request=True,
+        original_request_unanchored=True,
     )
-    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers = bridge.build_owner_forward_headers(
+        headers={}, payload=payload, context=context
+    )
     headers.pop(bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER)
-    headers.pop(bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+    headers[bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER] = (
+        bridge._bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=context,
+            signature_version="2",
+            include_openai_sdk_request=False,
+        )
+    )
 
     forwarded, error = bridge.parse_forwarded_request(
         headers,
@@ -113,7 +138,9 @@ def test_legacy_owner_forward_without_sdk_header_stays_sdk(monkeypatch: pytest.M
     assert forwarded.context.openai_sdk_request is True
 
 
-def test_owner_forward_rejects_sdk_header_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_owner_forward_rejects_sdk_header_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(bridge, "_sign_bridge_payload", _deterministic_signature)
     payload = _cacheable_lite_request()
     context = bridge.HTTPBridgeForwardContext(
@@ -123,7 +150,9 @@ def test_owner_forward_rejects_sdk_header_downgrade(monkeypatch: pytest.MonkeyPa
         downstream_turn_state=None,
         openai_sdk_request=True,
     )
-    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers = bridge.build_owner_forward_headers(
+        headers={}, payload=payload, context=context
+    )
     headers[bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER] = "0"
 
     forwarded, error = bridge.parse_forwarded_request(
@@ -137,7 +166,9 @@ def test_owner_forward_rejects_sdk_header_downgrade(monkeypatch: pytest.MonkeyPa
     assert error.status_code == 400
 
 
-def test_owner_forward_rejects_sdk_header_without_v2_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_owner_forward_rejects_sdk_header_without_v2_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(bridge, "_sign_bridge_payload", _deterministic_signature)
     payload = _cacheable_lite_request()
     context = bridge.HTTPBridgeForwardContext(
@@ -147,7 +178,9 @@ def test_owner_forward_rejects_sdk_header_without_v2_signature(monkeypatch: pyte
         downstream_turn_state=None,
         openai_sdk_request=True,
     )
-    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers = bridge.build_owner_forward_headers(
+        headers={}, payload=payload, context=context
+    )
     headers[bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER] = "0"
     headers.pop(bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER)
 

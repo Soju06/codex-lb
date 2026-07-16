@@ -577,6 +577,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
+                if allow_transient_retry:
+                    raise _TransientStreamError(error_code, settlement.error)
                 yield format_sse_event(
                     response_failed_event(
                         error_code,

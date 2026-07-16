@@ -476,9 +476,17 @@ class _PrecreatedOverloadUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 
 
 class _AcceptedContinuationOverloadUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
-    def __init__(self, order: list[tuple[str, object]]) -> None:
+    def __init__(
+        self,
+        order: list[tuple[str, object]],
+        *,
+        error_code: str = "server_is_overloaded",
+        error_message: str = "Our servers are currently overloaded. Please try again later.",
+    ) -> None:
         super().__init__("resp_capacity_parent")
         self.order = order
+        self.error_code = error_code
+        self.error_message = error_message
 
     async def send_text(self, text: str) -> None:
         if not self.sent_text:
@@ -520,8 +528,8 @@ class _AcceptedContinuationOverloadUpstreamWebSocket(_FakeBridgeUpstreamWebSocke
                         "type": "error",
                         "error": {
                             "type": "service_unavailable_error",
-                            "code": "server_is_overloaded",
-                            "message": "Our servers are currently overloaded. Please try again later.",
+                            "code": self.error_code,
+                            "message": self.error_message,
                         },
                     },
                     separators=(",", ":"),
@@ -8063,9 +8071,18 @@ async def test_backend_responses_http_bridge_retries_precreated_server_overload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+    ],
+)
 async def test_backend_responses_http_bridge_waits_and_retries_accepted_output_free_server_overload(
     async_client,
     monkeypatch,
+    error_code,
+    error_message,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -8075,7 +8092,11 @@ async def test_backend_responses_http_bridge_waits_and_retries_accepted_output_f
     )
     account = await _get_account(account_id)
     order: list[tuple[str, object]] = []
-    first_upstream = _AcceptedContinuationOverloadUpstreamWebSocket(order)
+    first_upstream = _AcceptedContinuationOverloadUpstreamWebSocket(
+        order,
+        error_code=error_code,
+        error_message=error_message,
+    )
     retry_upstream = _FakeBridgeUpstreamWebSocket("resp_capacity_retry")
     upstreams = [first_upstream, retry_upstream]
     connect_account_ids: list[str | None] = []

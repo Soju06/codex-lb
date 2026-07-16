@@ -469,6 +469,10 @@ logger = logging.getLogger(__name__)
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
 
 
+class _WebSocketReplaySequenceRegression(Exception):
+    pass
+
+
 def _log_websocket_persist_conflict(context: str, exc: RefreshError, account_id: str) -> None:
     """Surface a post-exchange persist/status CAS conflict distinctly in logs.
 
@@ -3333,6 +3337,34 @@ class _WebSocketMixin:
                 break
         except asyncio.CancelledError:
             raise
+        except _WebSocketReplaySequenceRegression as exc:
+            _facade().logger.warning(
+                "Refusing websocket replay after non-advancing sequence account_id=%s detail=%s",
+                account_id_value,
+                exc,
+            )
+            await proxy._fail_pending_websocket_requests(
+                account=account,
+                account_id_value=account_id_value,
+                pending_requests=pending_requests,
+                pending_lock=pending_lock,
+                error_code="stream_incomplete",
+                error_message="Replayed upstream websocket sequence did not advance",
+                api_key=api_key,
+                response_create_gate=response_create_gate,
+                suppress_sequenced_downstream_errors=True,
+            )
+            await _close_downstream_after_sequenced_replay_refusal(
+                websocket,
+                downstream_activity,
+            )
+            try:
+                await upstream.close()
+            except Exception:
+                _facade().logger.debug(
+                    "Failed to close upstream websocket after replay sequence refusal",
+                    exc_info=True,
+                )
         except Exception:
             _facade().logger.warning(
                 "Upstream websocket reader crashed account_id=%s",
@@ -3449,6 +3481,24 @@ class _WebSocketMixin:
             else:
                 release_create_gate = False
             if request_state is not None:
+                replay_created_will_be_suppressed = (
+                    event_type == "response.created" and request_state.suppress_next_created_downstream
+                )
+                sequence_number = payload.get("sequence_number") if payload is not None else None
+                if (
+                    request_state.replay_downstream_response_id is not None
+                    and request_state.last_downstream_sequence_number is not None
+                    and isinstance(sequence_number, int)
+                    and not isinstance(sequence_number, bool)
+                    and sequence_number <= request_state.last_downstream_sequence_number
+                    and not replay_created_will_be_suppressed
+                ):
+                    raise _WebSocketReplaySequenceRegression(
+                        f"request_id={request_state.request_log_id or request_state.request_id} "
+                        f"watermark={request_state.last_downstream_sequence_number} replay={sequence_number}"
+                    )
+                if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    _record_response_event(request_state, event_type)
                 elapsed_ms = int((time.monotonic() - request_state.started_at) * 1000)
                 if request_state.latency_first_upstream_event_ms is None:
                     request_state.latency_first_upstream_event_ms = elapsed_ms

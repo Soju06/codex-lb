@@ -548,6 +548,7 @@ class _WebSocketRequestState:
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
     request_kind: str = "normal"
+    generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -814,7 +815,15 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         return False
     if request_state.replay_count >= 1:
         return False
-    if request_state.last_downstream_sequence_number is not None:
+    sequenced_created_only_prewarm = (
+        request_state.generate_false_prewarm
+        and request_state.last_downstream_sequence_number == 0
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.response_event_count == 1
+        and not request_state.downstream_visible
+    )
+    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:
         return False

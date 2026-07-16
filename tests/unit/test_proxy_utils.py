@@ -15323,6 +15323,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert prepared.request_state.service_tier == "priority"
     assert prepared.request_state.reasoning_effort == "high"
     assert prepared.request_state.request_kind == "prewarm"
+    assert prepared.request_state.generate_false_prewarm is False
     assert prepared.affinity_policy.key == "thread_123"
     assert prepared.affinity_policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
     normalized_payload = json.loads(prepared.text_data)
@@ -15531,6 +15532,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     assert first_payload["generate"] is False
     assert first_payload["client_metadata"][marker] == "true"
     assert first.request_state.request_kind == "prewarm"
+    assert first.request_state.generate_false_prewarm is True
     assert continuity_state.responses_lite_model is None
     first.request_state.response_create_gate_acquired = True
     response_create_gate = asyncio.Semaphore(0)
@@ -15554,6 +15556,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     )
     assert continuity_state.responses_lite_model == "gpt-5.6-sol"
     assert continuity_state.responses_lite_response_id == "resp_ws_lite_prewarm"
+    assert first.request_state.response_event_count == 1
     await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
 
     incremental = await service._prepare_websocket_response_create_request(
@@ -22746,6 +22749,82 @@ async def test_pop_replayable_created_request_refuses_exposed_sequence():
         awaiting_response_created=False,
         response_event_count=1,
         last_downstream_sequence_number=5,
+    )
+    pending_requests = deque([pending_request])
+    replay_refusal_reasons: list[str] = []
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+        replay_refusal_reasons=replay_refusal_reasons,
+    )
+
+    assert replayed_request is None
+    assert pending_requests == deque([pending_request])
+    assert replay_refusal_reasons == ["sequenced_downstream_frame"]
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_created_generate_false_prewarm_accepts_initial_sequence():
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_prewarm_sequence_replay",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=('{"type":"response.create","model":"gpt-5.6-sol","generate":false,"input":[]}'),
+        request_kind="prewarm",
+        generate_false_prewarm=True,
+        response_id="resp_created_prewarm_then_closed",
+        awaiting_response_created=False,
+        response_event_count=1,
+        last_downstream_sequence_number=0,
+    )
+    pending_requests = deque([pending_request])
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+    )
+
+    assert replayed_request is pending_request
+    assert pending_requests == deque()
+    assert pending_request.replay_count == 1
+    assert pending_request.response_event_count == 0
+    assert pending_request.last_downstream_sequence_number == 0
+    assert pending_request.replay_downstream_response_id == "resp_created_prewarm_then_closed"
+    assert pending_request.suppress_next_created_downstream is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("generate_false_prewarm", "response_event_count", "sequence_number"),
+    [
+        (False, 1, 0),
+        (True, 2, 0),
+        (True, 1, 1),
+    ],
+)
+async def test_pop_replayable_created_sequenced_prewarm_keeps_unsafe_boundaries(
+    generate_false_prewarm: bool,
+    response_event_count: int,
+    sequence_number: int,
+):
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_unsafe_prewarm_sequence",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text=('{"type":"response.create","model":"gpt-5.6-sol","generate":false,"input":[]}'),
+        request_kind="prewarm",
+        generate_false_prewarm=generate_false_prewarm,
+        response_id="resp_created_unsafe_prewarm",
+        awaiting_response_created=False,
+        response_event_count=response_event_count,
+        last_downstream_sequence_number=sequence_number,
     )
     pending_requests = deque([pending_request])
     replay_refusal_reasons: list[str] = []

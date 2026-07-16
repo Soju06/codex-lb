@@ -178,15 +178,12 @@ def test_backend_responses_websocket_session_ended_auth_failure_fails_over_befor
                     "text",
                     text=json.dumps(
                         {
-                            "type": "response.failed",
-                            "response": {
-                                "id": "resp_ws_session_expired",
-                                "status": "failed",
-                                "error": {
-                                    "type": "authentication_error",
-                                    "code": "invalid_api_key",
-                                    "message": "Your session has ended. Please log in again.",
-                                },
+                            "type": "error",
+                            "status": 401,
+                            "error": {
+                                "type": "authentication_error",
+                                "code": "invalid_api_key",
+                                "message": "Your session has ended. Please log in again.",
                             },
                         },
                         separators=(",", ":"),
@@ -306,6 +303,97 @@ def test_backend_responses_websocket_session_ended_auth_failure_fails_over_befor
     assert permanent_failures == [("acct_ws_expired", "account_session_expired")]
 
 
+def test_backend_responses_websocket_id_bearing_auth_failure_is_forwarded_without_replay(
+    app_instance,
+    monkeypatch,
+):
+    failure = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_id_bearing_auth_failure",
+            "status": "failed",
+            "error": {
+                "type": "authentication_error",
+                "code": "invalid_api_key",
+                "message": "Authentication token expired",
+            },
+        },
+    }
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[[_FakeUpstreamMessage("text", text=json.dumps(failure, separators=(",", ":")))]],
+    )
+    connect_accounts: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        connect_accounts.append("acct_ws_id_bearing_auth_failure")
+        return SimpleNamespace(id="acct_ws_id_bearing_auth_failure"), first_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "do not replay",
+                        "stream": True,
+                    }
+                )
+            )
+            forwarded = json.loads(websocket.receive_text())
+
+    assert forwarded == failure
+    assert connect_accounts == ["acct_ws_id_bearing_auth_failure"]
+
+
 def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fails_over(
     app_instance,
     monkeypatch,
@@ -315,15 +403,12 @@ def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fa
             "text",
             text=json.dumps(
                 {
-                    "type": "response.failed",
-                    "response": {
-                        "id": "resp_ws_auth_failed",
-                        "status": "failed",
-                        "error": {
-                            "type": "authentication_error",
-                            "code": "invalid_api_key",
-                            "message": "token invalidated",
-                        },
+                    "type": "error",
+                    "status": 401,
+                    "error": {
+                        "type": "authentication_error",
+                        "code": "invalid_api_key",
+                        "message": "token invalidated",
                     },
                 },
                 separators=(",", ":"),
@@ -457,15 +542,12 @@ def test_backend_responses_websocket_generic_auth_refresh_budget_is_per_account(
             "text",
             text=json.dumps(
                 {
-                    "type": "response.failed",
-                    "response": {
-                        "id": "resp_ws_auth_failed",
-                        "status": "failed",
-                        "error": {
-                            "type": "authentication_error",
-                            "code": "invalid_api_key",
-                            "message": "token invalidated",
-                        },
+                    "type": "error",
+                    "status": 401,
+                    "error": {
+                        "type": "authentication_error",
+                        "code": "invalid_api_key",
+                        "message": "token invalidated",
                     },
                 },
                 separators=(",", ":"),

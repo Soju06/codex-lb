@@ -311,7 +311,9 @@ def _sticky_key_for_responses_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
-    if codex_session_affinity and not openai_sdk_request and get_settings().shared_prompt_cache:
+    if payload.previous_response_id is not None:
+        payload.disable_shared_instruction_cache()
+    elif codex_session_affinity and not openai_sdk_request and get_settings().shared_prompt_cache:
         payload.enable_shared_instruction_cache()
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key and turn_state_key != synthesized_turn_state:

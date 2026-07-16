@@ -44,10 +44,10 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT COALESCE(prewarm_canary_bucket, 'unknown') AS bucket, COALESCE(prewarm_status, 'unknown') AS outcome, COALESCE(prewarm_eligible_reason, 'unknown') AS cohort, COUNT(*) AS requests, AVG(latency_first_token_ms) AS avg_ttft_ms, AVG(latency_ms) AS avg_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY bucket, outcome, cohort ORDER BY requests DESC"
+          "rawSql": "SELECT COALESCE(prewarm_status, 'unknown') AS status, COUNT(*) AS requests, AVG(latency_first_token_ms) AS avg_ttft_ms, AVG(latency_ms) AS avg_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY status ORDER BY requests DESC"
         }
       ],
-      "title": "24h Prewarm Canary Outcomes",
+      "title": "Prewarm status (24h TTFT)",
       "type": "table"
     },
     {

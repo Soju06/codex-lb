@@ -9587,3 +9587,230 @@ def test_backend_responses_websocket_logs_proxy_injected_stale_anchor_metadata(
     assert "previous_response_age_seconds=unknown" in caplog.text
     assert "same_session=unknown" in caplog.text
     assert "resp_ws_proxy_injected_anchor" not in caplog.text
+
+
+def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_diagnostics(
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """One anonymous previous_response_not_found matching multiple same-anchor
+    pending requests must record stale-anchor diagnostics for each request.
+    """
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_grouped_anchor", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_grouped_anchor", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_grouped_followup_a", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_grouped_followup_b", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "previous_response_not_found",
+                                "message": "Previous response with id 'resp_ws_grouped_anchor' not found.",
+                                "param": "previous_response_id",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_grouped_stale"), first_upstream
+
+    async def fake_resolve_previous_response_owner(
+        self, *, previous_response_id, api_key, session_id=None, surface, request_state=None
+    ):
+        del self, api_key, session_id, surface, request_state
+        assert previous_response_id == "resp_ws_grouped_anchor"
+        return "acct_ws_grouped_stale"
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": "Bearer external-token", "session_id": "sid-grouped-stale"},
+        ) as websocket:
+            websocket.send_text(json.dumps({"type": "response.create", "model": "gpt-5.4", "input": "anchor"}))
+            created_1 = json.loads(websocket.receive_text())
+            completed_1 = json.loads(websocket.receive_text())
+
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "continue-a",
+                        "previous_response_id": "resp_ws_grouped_anchor",
+                        "stream": True,
+                    }
+                )
+            )
+            created_2 = json.loads(websocket.receive_text())
+
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "continue-b",
+                        "previous_response_id": "resp_ws_grouped_anchor",
+                        "stream": True,
+                    }
+                )
+            )
+            created_3 = json.loads(websocket.receive_text())
+            failed_2 = json.loads(websocket.receive_text())
+            while failed_2["type"] == "codex.keepalive":
+                failed_2 = json.loads(websocket.receive_text())
+            failed_3 = json.loads(websocket.receive_text())
+            while failed_3["type"] == "codex.keepalive":
+                failed_3 = json.loads(websocket.receive_text())
+
+    assert created_1["response"]["id"] == "resp_ws_grouped_anchor"
+    assert completed_1["response"]["id"] == "resp_ws_grouped_anchor"
+    assert created_2["response"]["id"] == "resp_ws_grouped_followup_a"
+    assert created_3["response"]["id"] == "resp_ws_grouped_followup_b"
+    assert failed_2["type"] == "response.failed"
+    assert failed_3["type"] == "response.failed"
+    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
+    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
+    assert "previous_response_not_found" not in json.dumps(failed_2)
+    assert "previous_response_not_found" not in json.dumps(failed_3)
+
+    error_logs = [call for call in log_calls if call.get("status") == "error"]
+    assert len(error_logs) == 2
+    for error_log in error_logs:
+        failure_detail = error_log["failure_detail"]
+        assert isinstance(failure_detail, str)
+        assert failure_detail.startswith("previous_response_not_found ")
+        assert "previous_response_source=client_supplied" in failure_detail
+        assert "fresh_replay_available=" in failure_detail
+        assert "owner_lookup_source=" in failure_detail
+        assert "owner_lookup_outcome=" in failure_detail
+        assert "previous_response_age_seconds=" in failure_detail
+        assert "same_session=" in failure_detail
+        assert "resp_ws_grouped_anchor" not in failure_detail
+        assert error_log["upstream_error_code"] == "previous_response_not_found"
+        assert error_log["failure_phase"] == "upstream"
+
+    fail_closed = [
+        record.getMessage()
+        for record in caplog.records
+        if "continuity_fail_closed" in record.getMessage()
+        and "reason=previous_response_not_found" in record.getMessage()
+    ]
+    assert len(fail_closed) >= 2
+    for message in fail_closed:
+        assert "surface=websocket_stream" in message
+        assert "previous_response_source=client_supplied" in message or "diagnostics=" in message
+        assert "resp_ws_grouped_anchor" not in message

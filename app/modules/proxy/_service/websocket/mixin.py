@@ -386,6 +386,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _prepare_websocket_request_state_for_auth_replay,
     _record_websocket_continuity_completion,
     _record_websocket_responses_lite_acceptance,
+    _record_websocket_stale_anchor_failure,
     _release_websocket_response_create_gate,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
@@ -3655,6 +3656,12 @@ class _WebSocketMixin:
                 else "stream_incomplete"
             )
             for grouped_request_state in grouped_previous_response_request_states:
+                if grouped_error_reason == "previous_response_not_found":
+                    _record_websocket_stale_anchor_failure(
+                        grouped_request_state,
+                        surface="websocket_stream",
+                        upstream_error_code="previous_response_not_found",
+                    )
                 (
                     grouped_downstream_text,
                     _grouped_event_block,

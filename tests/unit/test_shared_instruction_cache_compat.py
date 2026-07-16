@@ -8,8 +8,12 @@ from app.core.openai.requests import ResponsesRequest
 from app.modules.proxy import affinity
 from app.modules.proxy import http_bridge_forwarding as bridge
 
+# Covers rolling-upgrade compatibility and tamper-downgrade regressions together.
 
-def _cacheable_lite_request(*, previous_response_id: str | None = None) -> ResponsesRequest:
+
+def _cacheable_lite_request(
+    *, previous_response_id: str | None = None
+) -> ResponsesRequest:
     return ResponsesRequest(
         model="gpt-5.6",
         instructions="",
@@ -112,13 +116,17 @@ def test_legacy_v2_owner_forward_without_sdk_header_stays_sdk(
         downstream_turn_state=None,
         original_request_unanchored=True,
     )
-    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers = bridge.build_owner_forward_headers(
+        headers={}, payload=payload, context=context
+    )
     headers.pop(bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER)
-    headers[bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER] = bridge._bridge_forward_tools_bound_signature(
-        payload=payload,
-        context=context,
-        signature_version="2",
-        include_openai_sdk_request=False,
+    headers[bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER] = (
+        bridge._bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=context,
+            signature_version="2",
+            include_openai_sdk_request=False,
+        )
     )
 
     forwarded, error = bridge.parse_forwarded_request(
@@ -144,7 +152,9 @@ def test_owner_forward_rejects_sdk_header_downgrade(
         downstream_turn_state=None,
         openai_sdk_request=True,
     )
-    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers = bridge.build_owner_forward_headers(
+        headers={}, payload=payload, context=context
+    )
     headers[bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER] = "0"
 
     forwarded, error = bridge.parse_forwarded_request(
@@ -170,7 +180,9 @@ def test_owner_forward_rejects_sdk_header_without_v2_signature(
         downstream_turn_state=None,
         openai_sdk_request=True,
     )
-    headers = bridge.build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers = bridge.build_owner_forward_headers(
+        headers={}, payload=payload, context=context
+    )
     headers[bridge.HTTP_BRIDGE_OPENAI_SDK_HEADER] = "0"
     headers.pop(bridge.HTTP_BRIDGE_SIGNATURE_V2_HEADER)
 

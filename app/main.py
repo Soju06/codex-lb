@@ -586,6 +586,7 @@ def create_app() -> FastAPI:
     add_app_version_middleware(app)
     add_exception_handlers(app)
 
+    app.include_router(proxy_api.codex_preflight_router)
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)

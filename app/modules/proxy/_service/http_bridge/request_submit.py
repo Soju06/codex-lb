@@ -1248,10 +1248,14 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.error_http_status_override,
         )
         async with session.pending_lock:
-            if session.pending_requests or request_state.replay_count >= 1:
+            if request_state.replay_count >= 1:
                 return False
-            session.pending_requests.appendleft(request_state)
-            session.queued_request_count += 1
+            if session.pending_requests:
+                if len(session.pending_requests) != 1 or session.pending_requests[0] is not request_state:
+                    return False
+            else:
+                session.pending_requests.appendleft(request_state)
+                session.queued_request_count += 1
 
         async def retry_still_owns_session() -> bool:
             if session.closed or session.upstream_control.retire_after_drain:

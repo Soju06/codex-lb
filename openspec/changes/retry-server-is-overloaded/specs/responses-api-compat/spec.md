@@ -45,3 +45,12 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **AND** the replay MUST preserve the original parent `previous_response_id`
 - **AND** the bridge MUST expose the successful replay's actual `response.completed` ID so the next continuation anchors on the successful response
 - **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any model output, while another request is pending, or after the replay budget is exhausted
+
+#### Scenario: Native Codex bridge retries accepted output-free abrupt closes
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted only lifecycle events such as `response.created` or `response.in_progress`
+- **WHEN** the upstream websocket closes before `response.completed` without a terminal error event
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id`
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any reasoning, text, item, or tool output, while another request is pending, or after the replay budget is exhausted

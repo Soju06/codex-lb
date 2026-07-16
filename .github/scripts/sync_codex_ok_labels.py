@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -170,6 +171,9 @@ class GhError(RuntimeError):
 
 
 _RATE_LIMIT_MARKER = "API rate limit exceeded"
+_TRANSIENT_GH_MARKERS = ("HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "Unicorn!")
+_GH_RETRY_ATTEMPTS = 5
+_GH_RETRY_BASE_DELAY_SECONDS = 2.0
 _fallback_token_active = False
 
 
@@ -189,6 +193,29 @@ def _activate_fallback_token() -> bool:
     os.environ["GH_TOKEN"] = fallback
     _fallback_token_active = True
     return True
+
+
+def _gh_args_safe_to_retry(args: list[str]) -> bool:
+    """Return whether a failed gh invocation is safe to re-run automatically."""
+
+    if not args or args[0] != "api":
+        return False
+    if "graphql" in args:
+        return True
+    method = "GET"
+    for index, arg in enumerate(args):
+        if arg == "--method" and index + 1 < len(args):
+            method = args[index + 1].upper()
+            break
+    return method == "GET"
+
+
+def _is_retryable_gh_failure(detail: str) -> bool:
+    return any(marker in detail for marker in _TRANSIENT_GH_MARKERS)
+
+
+def _gh_retry_delay(attempt_index: int) -> float:
+    return min(_GH_RETRY_BASE_DELAY_SECONDS * (2**attempt_index), 30.0)
 
 
 @dataclass(frozen=True)
@@ -215,20 +242,28 @@ class SyncDecision:
 def run_gh(args: list[str], *, input_json: Any | None = None, timeout_seconds: int = 30) -> Any:
     command = ["gh", *args]
     input_text = json.dumps(input_json) if input_json is not None else None
-    try:
-        proc = subprocess.run(
-            command,
-            check=False,
-            input=input_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise GhError(f"{' '.join(command)}: timed out after {timeout_seconds}s") from exc
+    safe_to_retry = _gh_args_safe_to_retry(args)
+    attempts = _GH_RETRY_ATTEMPTS if safe_to_retry else 1
+    for attempt_index in range(attempts):
+        try:
+            proc = subprocess.run(
+                command,
+                check=False,
+                input=input_text,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GhError(f"{' '.join(command)}: timed out after {timeout_seconds}s") from exc
 
-    if proc.returncode != 0:
+        if proc.returncode == 0:
+            text = proc.stdout.strip()
+            if not text:
+                return None
+            return json.loads(text)
+
         detail = proc.stderr.strip() or proc.stdout.strip()
         if _RATE_LIMIT_MARKER in detail and _activate_fallback_token():
             print(
@@ -236,12 +271,17 @@ def run_gh(args: list[str], *, input_json: Any | None = None, timeout_seconds: i
                 file=sys.stderr,
             )
             return run_gh(args, input_json=input_json, timeout_seconds=timeout_seconds)
+        if safe_to_retry and _is_retryable_gh_failure(detail) and attempt_index + 1 < attempts:
+            delay = _gh_retry_delay(attempt_index)
+            print(
+                f"warning: {' '.join(command)} failed transiently ({detail}); retrying in {delay:g}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            continue
         raise GhError(f"{' '.join(command)}: {detail}")
 
-    text = proc.stdout.strip()
-    if not text:
-        return None
-    return json.loads(text)
+    raise GhError(f"{' '.join(command)}: failed after retries")
 
 
 def gh_api(path: str, *, method: str = "GET", input_json: Any | None = None) -> Any:

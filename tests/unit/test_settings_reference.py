@@ -33,6 +33,7 @@ def _isolated_settings(**overrides: Any) -> Settings:
     with mock.patch.dict(os.environ, clean, clear=True):
         return Settings(_env_file=None, **overrides)
 
+
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

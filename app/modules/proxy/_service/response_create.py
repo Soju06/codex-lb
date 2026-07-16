@@ -44,6 +44,10 @@ _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
 )
 _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
+_RESPONSE_CREATE_DUMP_SUFFIX = ".response-create.json.gz"
+_RESPONSE_CREATE_META_SUFFIX = ".meta.json"
+_RESPONSE_CREATE_DUMP_SHA_SLUG_LEN = 16
+_RESPONSE_CREATE_DUMP_MAX_PAIRS = 20
 _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS = (
     "x-codex-turn-metadata",
     "x-openai-subagent",
@@ -88,6 +92,39 @@ def _oversized_response_create_dump_dir() -> Path:
     settings_factory = _service_global_or("get_settings", get_settings)
     data_dir = getattr(settings_factory(), "data_dir", DEFAULT_HOME_DIR)
     return data_dir / "debug" / "response-create-dumps"
+
+
+def _response_create_dump_max_pairs() -> int:
+    return int(_service_global_or("_RESPONSE_CREATE_DUMP_MAX_PAIRS", _RESPONSE_CREATE_DUMP_MAX_PAIRS))
+
+
+def _existing_response_create_dump(dump_dir: Path, sha_slug: str) -> Path | None:
+    """Return an existing dump for the same payload fingerprint, if any."""
+    try:
+        return next(iter(dump_dir.glob(f"*-{sha_slug}{_RESPONSE_CREATE_DUMP_SUFFIX}")), None)
+    except OSError:
+        return None
+
+
+def _prune_response_create_dumps(dump_dir: Path, *, max_pairs: int) -> None:
+    """Drop the oldest dump pairs so at most ``max_pairs`` remain.
+
+    Dump ids are timestamp-prefixed, so lexicographic order is chronological.
+    """
+    try:
+        dump_paths = sorted(dump_dir.glob(f"*{_RESPONSE_CREATE_DUMP_SUFFIX}"))
+    except OSError:
+        return
+    excess = len(dump_paths) - max_pairs
+    if excess <= 0:
+        return
+    for dump_path in dump_paths[:excess]:
+        dump_id = dump_path.name[: -len(_RESPONSE_CREATE_DUMP_SUFFIX)]
+        for stale_path in (dump_path, dump_dir / f"{dump_id}{_RESPONSE_CREATE_META_SUFFIX}"):
+            try:
+                stale_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to prune response.create dump path=%s", stale_path, exc_info=True)
 
 
 def _fingerprint_input_items(items: Sequence[JsonValue]) -> str:
@@ -615,6 +652,25 @@ def _write_response_create_dump(
 
     payload_bytes = request_text.encode("utf-8")
     request_sha = sha256(payload_bytes).hexdigest()
+    sha_slug = request_sha[:_RESPONSE_CREATE_DUMP_SHA_SLUG_LEN]
+    dump_dir = _oversized_response_create_dump_dir()
+
+    existing_dump_path = _existing_response_create_dump(dump_dir, sha_slug)
+    if existing_dump_path is not None:
+        logger.warning(
+            (
+                "Skipped duplicate %s response.create dump request_id=%s request_log_id=%s "
+                "request_text_sha256=%s existing_dump_path=%s bytes=%s"
+            ),
+            log_prefix,
+            request_state.request_id,
+            request_state.request_log_id,
+            request_sha,
+            existing_dump_path,
+            len(payload_bytes),
+        )
+        return False
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     dump_id = "-".join(
         (
@@ -625,11 +681,11 @@ def _write_response_create_dump(
                 request_state.request_log_id or request_state.response_id or request_state.request_id,
                 fallback="request",
             ),
+            sha_slug,
         )
     )
-    dump_dir = _oversized_response_create_dump_dir()
-    dump_path = dump_dir / f"{dump_id}.response-create.json.gz"
-    meta_path = dump_dir / f"{dump_id}.meta.json"
+    dump_path = dump_dir / f"{dump_id}{_RESPONSE_CREATE_DUMP_SUFFIX}"
+    meta_path = dump_dir / f"{dump_id}{_RESPONSE_CREATE_META_SUFFIX}"
 
     meta: dict[str, JsonValue] = {
         "dump_id": dump_id,
@@ -688,6 +744,8 @@ def _write_response_create_dump(
             request_state.request_log_id,
         )
         return False
+
+    _prune_response_create_dumps(dump_dir, max_pairs=_response_create_dump_max_pairs())
 
     logger.warning(
         "Saved %s response.create dump request_id=%s request_log_id=%s dump_path=%s meta_path=%s bytes=%s",

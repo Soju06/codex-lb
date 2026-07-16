@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import gc
+import hashlib
 import json
 import logging
 import socket
@@ -31377,6 +31378,69 @@ def test_response_create_dump_uses_configured_data_dir(monkeypatch, tmp_path):
     dump_dir = tmp_path / "debug" / "response-create-dumps"
     assert list(dump_dir.glob("*.response-create.json.gz"))
     assert list(dump_dir.glob("*.meta.json"))
+
+
+def _write_dump_for_payload(request_text: str, *, request_id: str) -> bool:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id=request_id,
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=request_text,
+    )
+    return proxy_service._write_response_create_dump(
+        request_state,
+        account_id_value="acc-retention",
+        error_code="payload_too_large",
+        error_message="too large",
+        log_prefix="unit",
+    )
+
+
+def test_response_create_dump_skips_duplicate_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    payload = '{"type":"response.create","input":"identical retry"}'
+
+    assert _write_dump_for_payload(payload, request_id="req_dedup_first")
+    assert not _write_dump_for_payload(payload, request_id="req_dedup_retry")
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    assert len(list(dump_dir.glob("*.response-create.json.gz"))) == 1
+    assert len(list(dump_dir.glob("*.meta.json"))) == 1
+
+
+def test_response_create_dump_keeps_distinct_payloads(monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+
+    assert _write_dump_for_payload('{"input":"first"}', request_id="req_distinct_first")
+    assert _write_dump_for_payload('{"input":"second"}', request_id="req_distinct_second")
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    assert len(list(dump_dir.glob("*.response-create.json.gz"))) == 2
+
+
+def test_response_create_dump_prunes_oldest_beyond_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(proxy_service, "_RESPONSE_CREATE_DUMP_MAX_PAIRS", 2)
+
+    for index in range(3):
+        assert _write_dump_for_payload(f'{{"input":"payload-{index}"}}', request_id=f"req_prune_{index}")
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    dump_names = [path.name for path in sorted(dump_dir.glob("*.response-create.json.gz"))]
+    assert len(dump_names) == 2
+    # Oldest pair pruned, and its meta file goes with it.
+    assert len(list(dump_dir.glob("*.meta.json"))) == 2
+
+    def sha_slug(payload: str) -> str:
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    assert sha_slug('{"input":"payload-0"}') not in " ".join(dump_names)
+    assert sha_slug('{"input":"payload-1"}') in dump_names[0]
+    assert sha_slug('{"input":"payload-2"}') in dump_names[1]
 
 
 @pytest.mark.asyncio

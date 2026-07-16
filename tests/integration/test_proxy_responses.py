@@ -122,10 +122,6 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1417,10 +1413,6 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1518,10 +1510,6 @@ async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1612,10 +1600,6 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1649,9 +1633,8 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
-        log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
-        log_upstream_request_summary = False
+        trace_channels = frozenset()
 
     async def fail_open_upstream_websocket(**kwargs):
         del kwargs
@@ -1720,10 +1703,6 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1756,9 +1735,8 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
-        log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
-        log_upstream_request_summary = False
+        trace_channels = frozenset()
 
     captured: dict[str, object] = {}
 

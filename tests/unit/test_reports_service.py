@@ -76,6 +76,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                     error_count=0,
                     median_ttft_ms=123.456,
                     median_tps=78.901,
+                    median_queue_ms=45.678,
                 )
             ]
         ),
@@ -136,6 +137,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
 
     assert result.daily[0].median_ttft_ms == 123.46
     assert result.daily[0].median_tps == 78.9
+    assert result.daily[0].median_queue_ms == 45.68
     assert result.by_model[0].model == "gpt-5.1"
     assert result.by_model[0].requests == 2
     assert result.by_useragent[0].useragent == "opencode"

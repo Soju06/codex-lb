@@ -20,8 +20,28 @@ def test_get_rss_bytes_returns_positive_number():
 def test_is_memory_pressure_returns_false_when_threshold_disabled():
     from app.core.resilience import memory_monitor
 
-    memory_monitor.configure(warning_threshold_mb=0, reject_threshold_mb=0)
+    memory_monitor.configure(reject_threshold_mb=0)
     assert memory_monitor.is_memory_pressure() is False
+    assert memory_monitor.is_memory_warning() is False
+
+
+def test_memory_warning_threshold_is_derived_at_80_percent_of_reject(monkeypatch):
+    from app.core.resilience import memory_monitor
+
+    memory_monitor.configure(reject_threshold_mb=100)
+    try:
+        reject_bytes = 100 * 1024 * 1024
+        warning_bytes = int(reject_bytes * 0.8)
+        monkeypatch.setattr(memory_monitor, "get_rss_bytes", lambda: warning_bytes - 1)
+        assert memory_monitor.is_memory_warning() is False
+        assert memory_monitor.is_memory_pressure() is False
+        monkeypatch.setattr(memory_monitor, "get_rss_bytes", lambda: warning_bytes)
+        assert memory_monitor.is_memory_warning() is True
+        assert memory_monitor.is_memory_pressure() is False
+        monkeypatch.setattr(memory_monitor, "get_rss_bytes", lambda: reject_bytes)
+        assert memory_monitor.is_memory_pressure() is True
+    finally:
+        memory_monitor.configure(reject_threshold_mb=0)
 
 
 def test_memory_monitor_imports_on_windows_without_resource(monkeypatch: pytest.MonkeyPatch):

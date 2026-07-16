@@ -20,6 +20,12 @@ from app.modules.usage.repository import UsageRepository
 logger = logging.getLogger(__name__)
 
 _RESOLUTION_TTL_SECONDS = 300.0
+
+# Write-coalescing tuning (fixed; issue #1340 / PRINCIPLES.md P2). The
+# ingestor keeps both as constructor fields so tests can exercise queue
+# overflow and coalescing with small values.
+_QUEUE_SIZE = 512
+_WRITE_MIN_INTERVAL_SECONDS = 5.0
 _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS = 5.0
 
 
@@ -260,8 +266,8 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
         register_live_usage_publisher(None)
         return None
     ingestor = LiveUsageIngestor(
-        queue_size=getattr(settings, "live_usage_queue_size", 512),
-        write_min_interval_seconds=getattr(settings, "live_usage_write_min_interval_seconds", 5.0),
+        queue_size=_QUEUE_SIZE,
+        write_min_interval_seconds=_WRITE_MIN_INTERVAL_SECONDS,
     )
     ingestor.start()
     register_live_usage_publisher(ingestor.publish)

@@ -20,6 +20,7 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+site/
 app/static/
 deploy/helm/*/charts/
 
@@ -57,3 +58,4 @@ certs/
 PROMPT.md
 SUMMARY.md
 .superpowers/
+.agents/worktrees/

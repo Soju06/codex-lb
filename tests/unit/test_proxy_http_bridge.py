@@ -160,6 +160,27 @@ def test_terminal_capacity_retry_accepts_native_output_free_continuation() -> No
     )
 
 
+def test_terminal_capacity_retry_rejects_generic_model_change_message() -> None:
+    payload = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Please try a different model.",
+        },
+    }
+
+    assert (
+        http_bridge_upstream_events_module._http_bridge_terminal_capacity_retry_error_code(
+            _accepted_capacity_retry_state(),
+            event_type="error",
+            payload=cast(Any, payload),
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
 def test_transport_close_capacity_retry_accepts_native_output_free_continuation() -> None:
     assert (
         http_bridge_upstream_events_module._http_bridge_transport_close_capacity_retry_error_code(

@@ -577,7 +577,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                if allow_transient_retry:
+                if allow_transient_retry and payload.previous_response_id is None:
                     raise _TransientStreamError(error_code, settlement.error)
                 yield format_sse_event(
                     response_failed_event(
@@ -737,14 +737,12 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.error = {"message": error_message or "Upstream error"}
                 settlement.record_success = False
                 settlement.account_health_error = False
-
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
                 if event.response and event.response.id:
                     response_id = event.response.id
                 if event.type == "response.incomplete":
                     status = "error"
-
             if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                 saw_text_delta = True
             if not _facade()._should_suppress_text_done_event(

@@ -1049,6 +1049,71 @@ async def test_proxy_stream_retries_initial_upstream_eof_before_visible_output(a
 
 
 @pytest.mark.asyncio
+async def test_proxy_stream_does_not_retry_anchored_initial_upstream_eof(async_client, monkeypatch):
+    expected_account_id = await _import_account(
+        async_client,
+        "acc_stream_anchored_initial_eof",
+        "stream-anchored-initial-eof@example.com",
+    )
+    calls = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal calls
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        calls += 1
+        if False:
+            yield ""
+        return
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr("app.modules.proxy._service.streaming.retry.backoff_seconds", lambda _attempt: 0.0)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp_parent",
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": "req_stream_anchored_initial_eof"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [
+        event
+        for line in lines
+        if line.startswith("data: ") and not line.startswith("data: [DONE]")
+        if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+    ]
+    assert len(events) == 1
+    assert events[0]["type"] == "response.failed"
+    assert events[0]["response"]["id"] == "req_stream_anchored_initial_eof"
+    assert events[0]["response"]["error"] == {
+        "code": "stream_incomplete",
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+    }
+    assert calls == 1
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog)
+            .where(RequestLog.account_id == expected_account_id)
+            .order_by(RequestLog.requested_at.desc())
+        )
+        log = result.scalars().first()
+        assert log is not None
+        assert log.status == "error"
+        assert log.error_code == "stream_incomplete"
+        assert log.error_message == "Upstream websocket closed before response.completed"
+
+
+@pytest.mark.asyncio
 async def test_proxy_stream_classifies_core_generated_eof_failure(async_client, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_stream_core_eof", "stream-core-eof@example.com")
 

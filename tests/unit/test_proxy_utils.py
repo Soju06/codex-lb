@@ -14912,7 +14912,19 @@ async def test_connect_proxy_websocket_preserves_account_model_rejection_without
 
 
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_surfaces_selected_replacement_failure_after_account_model_rejection(monkeypatch):
+@pytest.mark.parametrize(
+    ("failure_status", "failure_code", "failure_message"),
+    [
+        (500, "replacement_failed", "Replacement connection failed"),
+        (502, "upstream_unavailable", "Replacement transport connection failed"),
+    ],
+)
+async def test_connect_proxy_websocket_surfaces_selected_replacement_failure_after_account_model_rejection(
+    monkeypatch,
+    failure_status,
+    failure_code,
+    failure_message,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     rejected_account = _make_account("acc_ws_rejected_model")
@@ -14920,8 +14932,8 @@ async def test_connect_proxy_websocket_surfaces_selected_replacement_failure_aft
     third_account = _make_account("acc_ws_third_model")
     select_account = AsyncMock(side_effect=[replacement_account, third_account])
     replacement_failure = proxy_module.ProxyResponseError(
-        500,
-        proxy_module.openai_error("replacement_failed", "Replacement connection failed", error_type="server_error"),
+        failure_status,
+        proxy_module.openai_error(failure_code, failure_message, error_type="server_error"),
     )
     monkeypatch.setattr(service, "_select_websocket_connect_account", select_account)
     monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", AsyncMock(side_effect=replacement_failure))
@@ -14967,16 +14979,16 @@ async def test_connect_proxy_websocket_surfaces_selected_replacement_failure_aft
     websocket_send_call = websocket_send.await_args
     assert websocket_send_call is not None
     sent = json.loads(websocket_send_call.args[0])
-    assert sent["status"] == 500
+    assert sent["status"] == failure_status
     assert sent["error"] == {
-        "message": "Replacement connection failed",
+        "message": failure_message,
         "type": "server_error",
-        "code": "replacement_failed",
+        "code": failure_code,
     }
     assert request_state.precreated_replay_reason is None
     assert request_state.error_code_override is None
     assert request_logs.calls[0]["account_id"] == replacement_account.id
-    assert request_logs.calls[0]["error_code"] == "replacement_failed"
+    assert request_logs.calls[0]["error_code"] == failure_code
     assert select_account.await_count == 1
     decide_failover.assert_not_awaited()
 

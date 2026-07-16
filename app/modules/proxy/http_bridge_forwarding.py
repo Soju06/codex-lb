@@ -495,7 +495,7 @@ def _bridge_forward_signature(
     context: HTTPBridgeForwardContext,
     include_client_ip: bool = True,
     signature_version: str | None = None,
-    include_openai_sdk_request: bool = True,
+    include_openai_sdk_request: bool = False,
 ) -> str:
     """Primary forward signature (#1169), computed over a plain ``model_dump``.
 

@@ -12,9 +12,10 @@ import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -182,6 +183,55 @@ async def test_proxy_stream_sticky_threads_reallocate_by_prompt_cache_key(async_
     assert response.status_code == 200
 
     assert seen == ["acc_a", "acc_a"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_bare_session_spills_under_cap_without_rebinding(async_client, monkeypatch):
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    owner_id = await _import_account(async_client, "acc_session_cap_owner", "session-cap-owner@example.com")
+    await _import_account(async_client, "acc_session_cap_alternate", "session-cap-alternate@example.com")
+    raw_session = "session-cap-spill"
+    selection_key = _codex_session_selection_key(raw_session)
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            selection_key,
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    saturated_leases = [await service._load_balancer.acquire_account_lease(owner_id, kind="stream") for _ in range(8)]
+    assert all(lease is not None for lease in saturated_leases)
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_spill"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    try:
+        response = await async_client.post(
+            "/backend-api/codex/responses",
+            headers={"x-codex-session-id": raw_session},
+            json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+        )
+    finally:
+        for lease in saturated_leases:
+            await service._load_balancer.release_account_lease(lease)
+
+    assert response.status_code == 200
+    assert seen == ["acc_session_cap_alternate"]
+    async with SessionLocal() as session:
+        mapped_account_id = await StickySessionsRepository(session).get_account_id(
+            selection_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+    assert mapped_account_id == owner_id
 
 
 @pytest.mark.asyncio
@@ -437,7 +487,7 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
 
 
 @pytest.mark.asyncio
-async def test_proxy_unregistered_turn_state_does_not_pin_compact_via_unscoped_sticky_state(
+async def test_proxy_unregistered_turn_state_fails_closed_for_stream_and_compact(
     async_client,
     monkeypatch,
 ):
@@ -488,8 +538,9 @@ async def test_proxy_unregistered_turn_state_does_not_pin_compact_via_unscoped_s
         "stream": True,
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
-    assert response.status_code == 200
-    assert stream_seen == ["acc_turn_state_a"]
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert stream_seen == []
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -1026,7 +1077,7 @@ async def test_backend_codex_session_affinity_also_forwards_prompt_cache_key_whe
         row = (
             await session.execute(
                 text("SELECT kind FROM sticky_sessions WHERE key = :key"),
-                {"key": "backend-thread-123"},
+                {"key": _codex_session_selection_key("backend-thread-123")},
             )
         ).fetchone()
         assert row is not None

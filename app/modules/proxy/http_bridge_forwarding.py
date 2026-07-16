@@ -55,6 +55,7 @@ HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
+HTTP_BRIDGE_FILE_OWNER_HEADER = "x-codex-bridge-file-owner"
 HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
 HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
@@ -83,6 +84,7 @@ class HTTPBridgeForwardContext:
     original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
+    file_owner_account_id: str | None = None
     client_ip: str | None = None
     reservation: ApiKeyUsageReservationData | None = None
     signature_version: str | None = None
@@ -224,6 +226,10 @@ def build_owner_forward_headers(
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
+    if context.file_owner_account_id:
+        # This proof is accepted only with the full-context signature below;
+        # the legacy primary signature intentionally remains byte-compatible.
+        forwarded[HTTP_BRIDGE_FILE_OWNER_HEADER] = context.file_owner_account_id
     if context.client_ip:
         forwarded[HTTP_BRIDGE_CLIENT_IP_HEADER] = context.client_ip
         forwarded[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
@@ -307,6 +313,7 @@ def parse_forwarded_request(
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
+        file_owner_account_id=_optional_header(headers.get(HTTP_BRIDGE_FILE_OWNER_HEADER)),
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
         signature_version=signature_version,
@@ -332,6 +339,10 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
+    if context.file_owner_account_id is not None:
+        # The rolling-upgrade primary signature does not bind this additive
+        # field. Never allow a stripped/forged proof to downgrade to it.
+        return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /
     # legacy scheme) so owners predating the tamper-proofing header — and
@@ -550,6 +561,7 @@ def _structured_bridge_signing_payload(
             "client_ip_present": context.client_ip is not None,
             "codex_session_affinity": context.codex_session_affinity,
             "downstream_turn_state": context.downstream_turn_state,
+            "file_owner_account_id": context.file_owner_account_id,
             "include_client_ip": include_client_ip,
             "origin_instance": context.origin_instance,
             "original_affinity_key": context.original_affinity_key,

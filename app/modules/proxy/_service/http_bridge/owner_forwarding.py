@@ -218,6 +218,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             previous_key = self._http_bridge_previous_response_index.get(previous_alias_key)
             if previous_key is not None and previous_key not in candidate_keys:
                 candidate_keys.append(previous_key)
+            resolved_owners: list[tuple[_HTTPBridgeSessionKey, str]] = []
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
                 if session is None or session.closed or not _http_bridge_session_account_active(session):
@@ -231,6 +232,19 @@ class _HTTPBridgeOwnerForwardingMixin:
                     previous_response_id=previous_response_id,
                 ):
                     continue
+                resolved_owners.append((candidate_key, session.account.id))
+            if len(resolved_owners) > 1:
+                # Distinct live sessions are distinct continuity owners even
+                # when they happen to use seats from the same account.
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "continuity_owner_conflict",
+                        "Live continuity aliases resolve to conflicting upstream owners.",
+                        error_type="server_error",
+                    ),
+                )
+            if resolved_owners:
                 _record_continuity_owner_resolution(
                     surface="http_bridge",
                     source="local_bridge_session",
@@ -238,7 +252,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     previous_response_id=previous_response_id,
                     session_id=incoming_turn_state,
                 )
-                return session.account.id
+                return resolved_owners[0][1]
         _record_continuity_owner_resolution(
             surface="http_bridge",
             source="local_bridge_session",
@@ -279,11 +293,15 @@ class _HTTPBridgeOwnerForwardingMixin:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        file_owner_account_id: str | None = None,
         client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(_service_get_settings())
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         forwarded_turn_state = incoming_turn_state or downstream_turn_state
+        # file_owner_account_id is an origin-side ownership proof, not a route
+        # hint. The forwarding signer binds it before another replica may skip
+        # its own process-local file-pin lookup.
         forward_context = HTTPBridgeForwardContext(
             origin_instance=current_instance,
             target_instance=owner_forward.owner_instance,
@@ -297,6 +315,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             ),
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
+            file_owner_account_id=file_owner_account_id,
             client_ip=client_ip,
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)

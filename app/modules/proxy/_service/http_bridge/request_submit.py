@@ -656,6 +656,9 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             _copy_websocket_route_metadata_from_session(request_state, session)
             request_state.bridge_queue_wait_started_at = _service_time().monotonic()
+            # Bridge ownership is established before this late admission. A
+            # cap race stays a bounded error/wait on that owner; it must not
+            # publish a replacement bridge as a spillover side effect.
             await self._acquire_request_state_response_create_admission(
                 request_state,
                 response_create_gate=session.response_create_gate,

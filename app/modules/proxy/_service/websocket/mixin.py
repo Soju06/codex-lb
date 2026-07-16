@@ -423,6 +423,7 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
@@ -430,6 +431,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -1067,17 +1069,39 @@ class _WebSocketMixin:
                     await release_current_account_lease()
                     account = None
 
-                if (
-                    request_state is not None
-                    and request_state.previous_response_id is not None
-                    and request_state.preferred_account_id is None
+                if request_state is not None and (
+                    request_state.previous_response_id is not None
+                    or request_state.affinity_policy.codex_session_source == "turn_state"
                 ):
                     try:
-                        request_state.preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
+                        # Preparation can discover file/bridge ownership, but
+                        # response and turn-state indexes are independent hard
+                        # evidence. Resolve every source before socket reuse or
+                        # connection so source ordering cannot hide conflicts.
+                        turn_state = (
+                            request_state.affinity_policy.key
+                            if request_state.affinity_policy.codex_session_source == "turn_state"
+                            else None
+                        )
+                        turn_state_owner_account_id = (
+                            await proxy._resolve_compact_turn_state_owner(
+                                turn_state=turn_state,
+                                api_key=request_state.api_key or api_key,
+                                fail_on_missing=not _is_synthesized_turn_state(turn_state),
+                            )
+                            if turn_state is not None
+                            else None
+                        )
+                        previous_response_owner_account_id = await proxy._resolve_websocket_previous_response_owner(
                             previous_response_id=request_state.previous_response_id,
                             api_key=request_state.api_key or api_key,
                             session_id=request_state.session_id,
                             surface="websocket",
+                        )
+                        request_state.preferred_account_id = resolve_required_account_id(
+                            ("existing bridge or file", request_state.preferred_account_id),
+                            ("turn state", turn_state_owner_account_id),
+                            ("previous response", previous_response_owner_account_id),
                         )
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
@@ -1136,6 +1160,43 @@ class _WebSocketMixin:
                     text_data = None
                     payload = None
                     continue
+
+                if (
+                    request_state is not None
+                    and upstream is not None
+                    and account is not None
+                    and request_state.affinity_policy.require_unambiguous_account
+                ):
+                    # Socket reuse bypasses connect-time selection. Re-run the
+                    # ownership-only check for every conversation frame; the
+                    # existing socket account is a route, not owner proof.
+                    ownership_selection = await proxy._select_account_with_budget_compatible(
+                        request_state.started_at + runtime_settings.proxy_request_budget_seconds,
+                        request_id=request_state.request_log_id or request_state.request_id,
+                        kind="websocket",
+                        request_stage=request_state.request_stage,
+                        api_key=request_state.api_key or api_key,
+                        affinity_policy=request_state.affinity_policy,
+                        model=request_state.model,
+                        preferred_account_id=account.id,
+                        fallback_on_preferred_account_unavailable=False,
+                    )
+                    if ownership_selection.account is None:
+                        await proxy._release_websocket_request_state_reservation(request_state)
+                        await proxy._emit_websocket_terminal_error(
+                            websocket,
+                            client_send_lock=client_send_lock,
+                            request_state=request_state,
+                            error_code=ownership_selection.error_code or "conversation_owner_unavailable",
+                            error_message=ownership_selection.error_message
+                            or "Conversation owner account is unavailable",
+                            error_type="server_error",
+                            downstream_activity=downstream_activity,
+                        )
+                        request_state = None
+                        text_data = None
+                        payload = None
+                        continue
 
                 if request_state is not None and not request_state_registered:
                     try:
@@ -1271,10 +1332,22 @@ class _WebSocketMixin:
                         filtered_headers = {
                             key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
                         }
+                    elif (
+                        upstream_turn_state is not None
+                        and upstream_account_id is not None
+                        and request_state.preferred_account_id is None
+                    ):
+                        # The token came from a closed account-owned socket. A
+                        # movable bare-session reconnect may spill, but only
+                        # after dropping that stale transport-owned token.
+                        upstream_turn_state = None
+                        filtered_headers = {
+                            key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
+                        }
                     connect_headers = _facade()._headers_with_turn_state(filtered_headers, upstream_turn_state)
                     account, upstream = await proxy._connect_proxy_websocket(
                         connect_headers,
-                        sticky_key=request_affinity.key,
+                        sticky_key=request_affinity.selection_key,
                         sticky_kind=request_affinity.kind,
                         reallocate_sticky=request_affinity.reallocate_sticky,
                         sticky_max_age_seconds=request_affinity.max_age_seconds,
@@ -1335,6 +1408,10 @@ class _WebSocketMixin:
                         and _is_websocket_response_create(payload)
                         and request_state.account_response_create_lease is None
                     ):
+                        # Account-cap spillover belongs to connect selection.
+                        # Once this shared socket exists, a late create-cap race
+                        # rejects only this frame; switching/retiring the socket
+                        # could interrupt unrelated in-flight responses.
                         current_settings = await _facade().get_settings_cache().get()
                         request_state.account_response_create_lease = (
                             await proxy._acquire_account_response_create_lease_or_overload(
@@ -1816,19 +1893,15 @@ class _WebSocketMixin:
         # First-turn ``input_file.file_id`` references must land on the
         # account that registered the upload (chatgpt-account-id-scoped).
         # Codex CLI's typical flow is upload-then-converse, so a fresh
-        # turn often references a file_id with no other affinity signal
-        # set. The helper short-circuits to ``None`` when stronger
-        # affinity signals (prompt_cache_key / session header /
-        # turn_state header / previous_response_id) are present, so this
-        # never overrides existing routing.
-        if request_state.preferred_account_id is None:
-            request_state.preferred_account_id = rewritten_file_account_id
-            request_state.file_required_preferred_account = request_state.preferred_account_id is not None
-        if request_state.preferred_account_id is None:
-            request_state.preferred_account_id = await proxy._resolve_file_account_for_responses(
-                responses_payload, headers
-            )
-            request_state.file_required_preferred_account = request_state.preferred_account_id is not None
+        # turn often references a file_id alongside process-session locality.
+        # The file pin is a hard owner and overrides session/cache hints; only
+        # resolved turn-state or previous-response ownership may take
+        # precedence, with conflicting hard signals failing closed.
+        request_state.preferred_account_id = resolve_required_account_id(
+            ("previous response or bridge", request_state.preferred_account_id),
+            ("input file", rewritten_file_account_id),
+        )
+        request_state.file_required_preferred_account = rewritten_file_account_id is not None
 
         # Direct WebSocket retry-safety classification.
         #
@@ -2148,6 +2221,10 @@ class _WebSocketMixin:
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
                     reallocate_sticky=reallocate_sticky,
+                    sticky_source=request_state.affinity_policy.codex_session_source,
+                    legacy_sticky_key=request_state.affinity_policy.legacy_selection_key,
+                    spill_bare_session_on_account_cap=request_state.affinity_policy.spill_on_account_cap,
+                    require_unambiguous_account=request_state.affinity_policy.require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,

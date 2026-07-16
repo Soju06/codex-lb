@@ -15,6 +15,7 @@ class _StreamingServiceProtocol(Protocol):
     _raise_for_unsupported_input_image_references: Any
     _release_unsettled_stream_api_key_usage: Any
     _resolve_file_account_for_responses: Any
+    _resolve_compact_turn_state_owner: Any
     _resolve_upstream_route_for_account: Any
     _resolve_websocket_previous_response_owner: Any
     _run_api_key_reservation_heartbeat: Any

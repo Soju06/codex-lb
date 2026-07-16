@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.utils.time import utcnow
 from app.db.models import Base, HttpBridgeSessionAlias
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
@@ -107,6 +108,66 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
     )
     assert by_session is not None
     assert by_session.canonical_key == "sid-123"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_aliases(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-turn-owner",
+        api_key_id="key-conflict",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-turn-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    response_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-response-owner",
+        api_key_id="key-conflict",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-response-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=turn_owner.session_id,
+        api_key_id="key-conflict",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        turn_state="http_turn_conflicting_owner",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=response_owner.session_id,
+        api_key_id="key-conflict",
+        instance_id="instance-b",
+        owner_epoch=response_owner.owner_epoch,
+        response_id="resp_conflicting_owner",
+        lease_ttl_seconds=120.0,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-conflicting-owner",
+            api_key_id="key-conflict",
+            turn_state="http_turn_conflicting_owner",
+            session_header=None,
+            previous_response_id="resp_conflicting_owner",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio

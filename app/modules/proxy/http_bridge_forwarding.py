@@ -351,7 +351,7 @@ def parse_forwarded_request(
         )
         if sdk_flag_downgrade_valid:
             return None, _invalid_bridge_forward_signature_error()
-    if openai_sdk_value == "1":
+    if openai_sdk_value is not None:
         return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /
@@ -392,11 +392,10 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
-    if openai_sdk_value is None:
-        # Old origins did not send or sign this flag. Preserve the historical
-        # OpenAI-SDK classification so a mixed-version owner cannot enable the
-        # Codex shared instruction cache for an SDK request.
-        context = replace(context, openai_sdk_request=True)
+    # Old origins did not send or sign this flag. Preserve the historical
+    # OpenAI-SDK classification so a mixed-version owner cannot enable the
+    # Codex shared instruction cache for an SDK request.
+    context = replace(context, openai_sdk_request=True)
     return HTTPBridgeForwardedRequest(context=context), None
 
 

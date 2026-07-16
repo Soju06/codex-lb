@@ -1102,7 +1102,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # or tool side effects. Clean websocket closes remain eligible
                 # for the bounded pre-created retry path below.
                 if message.error_code != "proxy_network_unavailable":
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                    capacity_retry_code = _http_bridge_transport_close_capacity_retry_error_code(
+                        archive_request_state,
+                        has_other_pending_requests=has_other_pending_requests,
+                        error_code=message.error_code,
+                        error_message=message.error,
+                    )
+                    if capacity_retry_code is not None and archive_request_state is not None:
+                        retried = await self._retry_http_bridge_terminal_capacity_request(
+                            session,
+                            archive_request_state,
+                            error_code=capacity_retry_code,
+                        )
+                    if not retried:
+                        retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 close_classification = (

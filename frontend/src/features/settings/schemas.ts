@@ -129,6 +129,8 @@ export const DashboardSettingsSchema = z
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
+    requestLogRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
+    usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -197,6 +199,8 @@ export const SettingsUpdateRequestSchema = z
     weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional(),
     guestAccessEnabled: z.boolean().optional(),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
+    requestLogRetentionDays: z.number().int().min(0).max(3650).optional(),
+    usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional(),
   })
   .superRefine((settings, ctx) => {
     if (
@@ -209,6 +213,28 @@ export const SettingsUpdateRequestSchema = z
         code: "custom",
         path: ["proxyAccountStreamRecoveryReserve"],
         message: "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
+      });
+    }
+    if (
+      settings.requestLogRetentionDays !== undefined &&
+      settings.requestLogRetentionDays !== 0 &&
+      settings.requestLogRetentionDays < 30
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["requestLogRetentionDays"],
+        message: "request_log_retention_days must be 0 (disabled) or >= 30",
+      });
+    }
+    if (
+      settings.usageHistoryRetentionDays !== undefined &&
+      settings.usageHistoryRetentionDays !== 0 &&
+      settings.usageHistoryRetentionDays < 45
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["usageHistoryRetentionDays"],
+        message: "usage_history_retention_days must be 0 (disabled) or >= 45",
       });
     }
   });

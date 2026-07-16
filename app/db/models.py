@@ -829,6 +829,16 @@ class DashboardSettings(Base):
         server_default=text("'{}'"),
         nullable=False,
     )
+    # Data retention windows in days; NULL = never set from the dashboard
+    # (the deprecated env alias then applies), 0 = explicitly disabled.
+    request_log_retention_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    usage_history_retention_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,

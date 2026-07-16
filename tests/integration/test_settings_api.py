@@ -1026,3 +1026,97 @@ async def test_account_proxy_binding_does_not_reactivate_session_deactivated_acc
         assert account is not None
         assert account.status == AccountStatus.DEACTIVATED
         assert account.deactivation_reason == "ChatGPT session ended - re-login required"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_retention_update_persists_and_round_trips(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    # Fresh row has NULL overrides and the test env sets no alias: effective 0.
+    assert response.json()["requestLogRetentionDays"] == 0
+    assert response.json()["usageHistoryRetentionDays"] == 0
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"requestLogRetentionDays": 30, "usageHistoryRetentionDays": 45},
+    )
+    assert response.status_code == 200
+    assert response.json()["requestLogRetentionDays"] == 30
+    assert response.json()["usageHistoryRetentionDays"] == 45
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.request_log_retention_days == 30
+        assert settings.usage_history_retention_days == 45
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["requestLogRetentionDays"] == 30
+    assert response.json()["usageHistoryRetentionDays"] == 45
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"requestLogRetentionDays": 7},  # below the 30-day floor
+        {"requestLogRetentionDays": 3651},  # above the 3650 cap
+        {"requestLogRetentionDays": -1},
+        {"usageHistoryRetentionDays": 10},  # below the 45-day floor
+        {"usageHistoryRetentionDays": 3651},
+    ],
+)
+async def test_settings_api_rejects_unsafe_retention_values(async_client, payload):
+    response = await async_client.put("/api/settings", json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+    # The stored settings are unchanged (NULL = inherit the env alias).
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        if settings is not None:
+            assert settings.request_log_retention_days is None
+            assert settings.usage_history_retention_days is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_retention_get_falls_back_to_env_alias(async_client, monkeypatch):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+
+    from app.modules.settings import service as settings_service
+
+    inherited = settings_service.get_settings().model_copy(
+        update={
+            "request_log_retention_days": 90,
+            "usage_history_retention_days": 45,
+        }
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["requestLogRetentionDays"] == 90
+    assert response.json()["usageHistoryRetentionDays"] == 45
+
+    # A dashboard write wins over the alias, including 0 (explicit disable).
+    response = await async_client.put("/api/settings", json={"usageHistoryRetentionDays": 0})
+    assert response.status_code == 200
+    assert response.json()["requestLogRetentionDays"] == 90
+    assert response.json()["usageHistoryRetentionDays"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unrelated_settings_update_preserves_inherited_retention_nulls(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+
+    response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.request_log_retention_days is None
+        assert settings.usage_history_retention_days is None

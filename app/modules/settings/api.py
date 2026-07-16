@@ -165,6 +165,8 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
+        request_log_retention_days=settings.request_log_retention_days,
+        usage_history_retention_days=settings.usage_history_retention_days,
         version=settings.version,
     )
 
@@ -764,6 +766,16 @@ async def update_settings(
                     if payload.limit_warmup_staggered_idle_enabled is not None
                     else current.limit_warmup_staggered_idle_enabled
                 ),
+                request_log_retention_days=(
+                    payload.request_log_retention_days
+                    if "request_log_retention_days" in payload.model_fields_set
+                    else None
+                ),
+                usage_history_retention_days=(
+                    payload.usage_history_retention_days
+                    if "usage_history_retention_days" in payload.model_fields_set
+                    else None
+                ),
             ),
             # CAS anchor: omitted fields above were merged from `current`
             # (version checked against expectedVersion when supplied), so the
@@ -819,6 +831,8 @@ async def update_settings(
             "weekly_pace_smoothing_minutes",
             "guest_access_enabled",
             "limit_warmup_staggered_idle_enabled",
+            "request_log_retention_days",
+            "usage_history_retention_days",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

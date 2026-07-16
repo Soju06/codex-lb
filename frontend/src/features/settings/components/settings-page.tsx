@@ -12,6 +12,7 @@ import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-p
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
@@ -171,6 +172,12 @@ export function SettingsPage() {
               <FirewallSection disabled={controlsDisabled} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               <StickySessionsSection disabled={controlsDisabled} />
+              <DataRetentionSettings
+                key={[settings.requestLogRetentionDays, settings.usageHistoryRetentionDays].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
             </AdvancedSettingsGroup>
           </div>
 

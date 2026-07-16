@@ -341,6 +341,24 @@
         "longWarning": "Lifetimes over 30 days keep admin sessions valid for a long time. That may be acceptable on a personal laptop, but it increases the impact of a leaked browser profile or stolen cookie."
       }
     },
+    "retention": {
+      "title": "Data retention",
+      "description": "Automatically prune old request logs and usage history on a background schedule.",
+      "daysSuffix": "days",
+      "save": "Save retention",
+      "requestLogs": {
+        "label": "Request log retention",
+        "description": "Delete request logs older than this many days. 0 keeps them forever; non-zero values need at least 30 days.",
+        "ariaLabel": "Request log retention days",
+        "invalid": "Request log retention must be 0 (disabled) or a whole number between 30 and 3650 days."
+      },
+      "usageHistory": {
+        "label": "Usage history retention",
+        "description": "Delete usage history older than this many days. 0 keeps it forever; non-zero values need at least 45 days.",
+        "ariaLabel": "Usage history retention days",
+        "invalid": "Usage history retention must be 0 (disabled) or a whole number between 45 and 3650 days."
+      }
+    },
     "password": {
       "title": "Password",
       "status": {

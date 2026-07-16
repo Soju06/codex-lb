@@ -419,7 +419,7 @@ describe("UpstreamProxyAdminSchema", () => {
 });
 
 describe("retention fields", () => {
-  it("parses effective retention values and defaults them to 0 for older backends", () => {
+  it("parses effective values plus overrides, defaulting for older backends", () => {
     const withValues = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
       preferEarlierResetAccounts: true,
@@ -429,9 +429,13 @@ describe("retention fields", () => {
       apiKeyAuthEnabled: false,
       requestLogRetentionDays: 90,
       usageHistoryRetentionDays: 45,
+      requestLogRetentionOverrideDays: null,
+      usageHistoryRetentionOverrideDays: 45,
     });
     expect(withValues.requestLogRetentionDays).toBe(90);
     expect(withValues.usageHistoryRetentionDays).toBe(45);
+    expect(withValues.requestLogRetentionOverrideDays).toBeNull();
+    expect(withValues.usageHistoryRetentionOverrideDays).toBe(45);
 
     const withoutValues = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
@@ -443,28 +447,37 @@ describe("retention fields", () => {
     });
     expect(withoutValues.requestLogRetentionDays).toBe(0);
     expect(withoutValues.usageHistoryRetentionDays).toBe(0);
+    expect(withoutValues.requestLogRetentionOverrideDays).toBeNull();
+    expect(withoutValues.usageHistoryRetentionOverrideDays).toBeNull();
   });
 
-  it("accepts 0 and floor-or-above retention updates", () => {
+  it("accepts 0, floor-or-above, and null (clear) override updates", () => {
     const parsed = SettingsUpdateRequestSchema.parse({
-      requestLogRetentionDays: 30,
-      usageHistoryRetentionDays: 0,
+      requestLogRetentionOverrideDays: 30,
+      usageHistoryRetentionOverrideDays: 0,
     });
-    expect(parsed.requestLogRetentionDays).toBe(30);
-    expect(parsed.usageHistoryRetentionDays).toBe(0);
+    expect(parsed.requestLogRetentionOverrideDays).toBe(30);
+    expect(parsed.usageHistoryRetentionOverrideDays).toBe(0);
+
+    const cleared = SettingsUpdateRequestSchema.parse({
+      requestLogRetentionOverrideDays: null,
+      usageHistoryRetentionOverrideDays: null,
+    });
+    expect(cleared.requestLogRetentionOverrideDays).toBeNull();
+    expect(cleared.usageHistoryRetentionOverrideDays).toBeNull();
   });
 
-  it("rejects retention updates between 1 and the safety floor", () => {
-    expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionDays: 7 })).toThrow(
-      /request_log_retention_days must be 0 \(disabled\) or >= 30/,
+  it("rejects override updates between 1 and the safety floor", () => {
+    expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionOverrideDays: 7 })).toThrow(
+      /request_log_retention_override_days must be 0 \(disabled\) or >= 30/,
     );
-    expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionDays: 44 })).toThrow(
-      /usage_history_retention_days must be 0 \(disabled\) or >= 45/,
+    expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionOverrideDays: 44 })).toThrow(
+      /usage_history_retention_override_days must be 0 \(disabled\) or >= 45/,
     );
   });
 
-  it("rejects retention updates above 3650 days", () => {
-    expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionDays: 3651 })).toThrow();
-    expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionDays: 3651 })).toThrow();
+  it("rejects override updates above 3650 days", () => {
+    expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionOverrideDays: 3651 })).toThrow();
+    expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionOverrideDays: 3651 })).toThrow();
   });
 });

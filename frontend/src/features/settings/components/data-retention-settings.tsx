@@ -18,48 +18,66 @@ const REQUEST_LOG_FLOOR_DAYS = 30;
 const USAGE_HISTORY_FLOOR_DAYS = 45;
 const INTEGER_DAYS_PATTERN = /^\d+$/;
 
-function parseRetentionDays(raw: string, floor: number): number | null {
+type ParsedOverride =
+  | { valid: true; value: number | null } // null = inherit (cleared input)
+  | { valid: false };
+
+function parseOverride(raw: string, floor: number): ParsedOverride {
   const trimmed = raw.trim();
+  if (trimmed === "") {
+    // Empty input = no dashboard override (inherit the env alias / default).
+    return { valid: true, value: null };
+  }
   if (!INTEGER_DAYS_PATTERN.test(trimmed)) {
-    return null;
+    return { valid: false };
   }
   const parsed = Number.parseInt(trimmed, 10);
   if (!Number.isFinite(parsed) || parsed > MAX_RETENTION_DAYS) {
-    return null;
+    return { valid: false };
   }
   // 0 = disabled; non-zero values have a safety floor so in-product consumer
   // windows stay inside retained data (mirrors the backend validators).
   if (parsed !== 0 && parsed < floor) {
-    return null;
+    return { valid: false };
   }
-  return parsed;
+  return { valid: true, value: parsed };
+}
+
+function overrideToInput(override: number | null): string {
+  return override === null ? "" : String(override);
 }
 
 export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionSettingsProps) {
   const { t } = useTranslation();
-  const [requestLogDays, setRequestLogDays] = useState(String(settings.requestLogRetentionDays));
-  const [usageHistoryDays, setUsageHistoryDays] = useState(String(settings.usageHistoryRetentionDays));
+  const [requestLogDays, setRequestLogDays] = useState(overrideToInput(settings.requestLogRetentionOverrideDays));
+  const [usageHistoryDays, setUsageHistoryDays] = useState(
+    overrideToInput(settings.usageHistoryRetentionOverrideDays),
+  );
 
-  const parsedRequestLogDays = parseRetentionDays(requestLogDays, REQUEST_LOG_FLOOR_DAYS);
-  const parsedUsageHistoryDays = parseRetentionDays(usageHistoryDays, USAGE_HISTORY_FLOOR_DAYS);
-  const requestLogValid = parsedRequestLogDays !== null;
-  const usageHistoryValid = parsedUsageHistoryDays !== null;
-  const requestLogChanged = requestLogValid && parsedRequestLogDays !== settings.requestLogRetentionDays;
-  const usageHistoryChanged = usageHistoryValid && parsedUsageHistoryDays !== settings.usageHistoryRetentionDays;
-  const canSave = requestLogValid && usageHistoryValid && (requestLogChanged || usageHistoryChanged);
+  const parsedRequestLog = parseOverride(requestLogDays, REQUEST_LOG_FLOOR_DAYS);
+  const parsedUsageHistory = parseOverride(usageHistoryDays, USAGE_HISTORY_FLOOR_DAYS);
+  const requestLogChanged =
+    parsedRequestLog.valid && parsedRequestLog.value !== settings.requestLogRetentionOverrideDays;
+  const usageHistoryChanged =
+    parsedUsageHistory.valid && parsedUsageHistory.value !== settings.usageHistoryRetentionOverrideDays;
+  const canSave = parsedRequestLog.valid && parsedUsageHistory.valid && (requestLogChanged || usageHistoryChanged);
 
   const save = () => {
-    // Only submit edited fields so an untouched value keeps inheriting the
-    // (deprecated) env alias instead of being pinned as a dashboard override.
+    // Only submit this card's edited fields: a value stores an override, null
+    // clears it (back to inheriting the deprecated env alias), and untouched
+    // fields stay out of the payload entirely.
     const patch: Partial<SettingsUpdateRequest> = {};
-    if (requestLogChanged && parsedRequestLogDays !== null) {
-      patch.requestLogRetentionDays = parsedRequestLogDays;
+    if (requestLogChanged && parsedRequestLog.valid) {
+      patch.requestLogRetentionOverrideDays = parsedRequestLog.value;
     }
-    if (usageHistoryChanged && parsedUsageHistoryDays !== null) {
-      patch.usageHistoryRetentionDays = parsedUsageHistoryDays;
+    if (usageHistoryChanged && parsedUsageHistory.valid) {
+      patch.usageHistoryRetentionOverrideDays = parsedUsageHistory.value;
     }
     void onSave(buildSettingsUpdateRequest(settings, patch));
   };
+
+  const showRequestLogInheritedHint = requestLogDays.trim() === "";
+  const showUsageHistoryInheritedHint = usageHistoryDays.trim() === "";
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -81,6 +99,11 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
             <div>
               <p className="text-sm font-medium">{t("settings.retention.requestLogs.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.retention.requestLogs.description")}</p>
+              {showRequestLogInheritedHint ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.retention.inheritedHint", { value: settings.requestLogRetentionDays })}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Input
@@ -91,6 +114,7 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
                 inputMode="numeric"
                 value={requestLogDays}
                 disabled={busy}
+                placeholder={t("settings.retention.inheritPlaceholder")}
                 onChange={(event) => setRequestLogDays(event.target.value)}
                 className="h-8 w-24 text-xs"
                 aria-label={t("settings.retention.requestLogs.ariaLabel")}
@@ -102,6 +126,11 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
             <div>
               <p className="text-sm font-medium">{t("settings.retention.usageHistory.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.retention.usageHistory.description")}</p>
+              {showUsageHistoryInheritedHint ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.retention.inheritedHint", { value: settings.usageHistoryRetentionDays })}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Input
@@ -112,6 +141,7 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
                 inputMode="numeric"
                 value={usageHistoryDays}
                 disabled={busy}
+                placeholder={t("settings.retention.inheritPlaceholder")}
                 onChange={(event) => setUsageHistoryDays(event.target.value)}
                 className="h-8 w-24 text-xs"
                 aria-label={t("settings.retention.usageHistory.ariaLabel")}
@@ -121,12 +151,12 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
           </div>
         </div>
 
-        {!requestLogValid && requestLogDays.trim() !== "" ? (
+        {!parsedRequestLog.valid ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
             {t("settings.retention.requestLogs.invalid")}
           </div>
         ) : null}
-        {!usageHistoryValid && usageHistoryDays.trim() !== "" ? (
+        {!parsedUsageHistory.valid ? (
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
             {t("settings.retention.usageHistory.invalid")}
           </div>

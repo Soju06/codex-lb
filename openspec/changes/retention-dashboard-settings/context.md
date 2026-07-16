@@ -24,12 +24,18 @@ logs / 0 or >= 45 usage history, max 3650) with the same error wording, so
 in-product consumer windows stay inside retained data regardless of which
 layer configured retention.
 
-The GET settings API returns the *effective* value per field (dashboard
-value, falling back to the env alias), the same convention as the
-`proxy_account_*` concurrency caps. A dashboard save writes the submitted
-value into the row; the frontend only submits the retention fields when the
-operator actually edits them, so unrelated saves cannot silently convert an
-env-inherited value into a dashboard override.
+The GET settings API returns both the *effective* value per window
+(`requestLogRetentionDays`, dashboard override falling back to the env
+alias — same convention as the `proxy_account_*` concurrency caps) and the
+raw nullable *override* (`requestLogRetentionOverrideDays`, `null` =
+inherit). Updates use only the override fields, tri-state: absent =
+unchanged, present `null` = clear back to inherit, present value = store —
+including a value equal to the env alias, which deliberately pins it as a
+dashboard override (a codex review P2 showed a value-based echo guard made
+that capture impossible). Full-save clients echo the override fields
+verbatim, so `null` round-trips as `null` and no echo heuristic is needed;
+the dashboard card additionally submits only the fields the operator edited
+and clears an override by emptying the input.
 
 ## Scheduler behavior
 

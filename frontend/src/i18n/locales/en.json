@@ -345,18 +345,20 @@
       "title": "Data retention",
       "description": "Automatically prune old request logs and usage history on a background schedule.",
       "daysSuffix": "days",
+      "inheritPlaceholder": "inherit",
+      "inheritedHint": "Inherited: {{value}} days (environment default; 0 = disabled)",
       "save": "Save retention",
       "requestLogs": {
         "label": "Request log retention",
-        "description": "Delete request logs older than this many days. 0 keeps them forever; non-zero values need at least 30 days.",
+        "description": "Delete request logs older than this many days. 0 disables deletion; non-zero values need at least 30 days. Leave empty to inherit the environment value.",
         "ariaLabel": "Request log retention days",
-        "invalid": "Request log retention must be 0 (disabled) or a whole number between 30 and 3650 days."
+        "invalid": "Request log retention must be 0 (disabled) or a whole number between 30 and 3650 days. Leave the field empty to inherit the environment value."
       },
       "usageHistory": {
         "label": "Usage history retention",
-        "description": "Delete usage history older than this many days. 0 keeps it forever; non-zero values need at least 45 days.",
+        "description": "Delete usage history older than this many days. 0 disables deletion; non-zero values need at least 45 days. Leave empty to inherit the environment value.",
         "ariaLabel": "Usage history retention days",
-        "invalid": "Usage history retention must be 0 (disabled) or a whole number between 45 and 3650 days."
+        "invalid": "Usage history retention must be 0 (disabled) or a whole number between 45 and 3650 days. Leave the field empty to inherit the environment value."
       }
     },
     "password": {

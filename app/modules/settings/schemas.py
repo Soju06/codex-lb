@@ -75,6 +75,8 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_staggered_idle_enabled: bool
     request_log_retention_days: int = Field(ge=0, le=3650)
     usage_history_retention_days: int = Field(ge=0, le=3650)
+    request_log_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
+    usage_history_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
     additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
@@ -133,21 +135,24 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     weekly_pace_smoothing_minutes: int | None = None
     guest_access_enabled: bool | None = None
     limit_warmup_staggered_idle_enabled: bool | None = None
-    request_log_retention_days: int | None = Field(default=None, ge=0, le=3650)
-    usage_history_retention_days: int | None = Field(default=None, ge=0, le=3650)
+    # Tri-state retention overrides: absent = unchanged, present null = clear
+    # the override (back to inheriting the deprecated env alias), present
+    # value = store the override.
+    request_log_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
+    usage_history_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
 
-    @field_validator("request_log_retention_days")
+    @field_validator("request_log_retention_override_days")
     @classmethod
-    def _validate_request_log_retention(cls, value: int | None) -> int | None:
+    def _validate_request_log_retention_override(cls, value: int | None) -> int | None:
         if value is not None and value != 0 and value < 30:
-            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
+            raise ValueError("request_log_retention_override_days must be 0 (disabled) or >= 30")
         return value
 
-    @field_validator("usage_history_retention_days")
+    @field_validator("usage_history_retention_override_days")
     @classmethod
-    def _validate_usage_history_retention(cls, value: int | None) -> int | None:
+    def _validate_usage_history_retention_override(cls, value: int | None) -> int | None:
         if value is not None and value != 0 and value < 45:
-            raise ValueError("usage_history_retention_days must be 0 (disabled) or >= 45")
+            raise ValueError("usage_history_retention_override_days must be 0 (disabled) or >= 45")
         return value
 
     @field_validator("warmup_model")

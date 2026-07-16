@@ -13,6 +13,19 @@ dashboard value is NULL the corresponding deprecated env alias
 `CODEX_LB_USAGE_HISTORY_RETENTION_DAYS`) MUST apply; when neither is set
 retention MUST be disabled. At every layer the value `0` means disabled.
 
+The dashboard settings API MUST expose, per retention window, the read-only
+*effective* value (`requestLogRetentionDays` / `usageHistoryRetentionDays`)
+alongside the nullable stored *override*
+(`requestLogRetentionOverrideDays` / `usageHistoryRetentionOverrideDays`,
+`null` = inherit). Updates MUST use only the override fields with tri-state
+semantics: a field absent from the payload leaves the stored value unchanged;
+a field present with `null` MUST clear the override back to inherit; a field
+present with a value MUST store it as the override — including a value equal
+to the current effective (env-inherited) value, which deliberately captures
+it as a dashboard override. Because overrides round-trip verbatim (null in,
+null out), a full GET-then-PUT save echoing the override fields unchanged
+MUST NOT alter the stored values.
+
 Both the env validators and the dashboard settings API MUST accept `0`
 (disabled) or values at or above their safety floors (30 days for request
 logs, 45 days for usage history) up to 3650; configurations between 1 and the
@@ -32,9 +45,27 @@ for dashboard API updates.
 
 #### Scenario: Unsafe dashboard retention values are rejected
 
-- **WHEN** a dashboard settings update carries `requestLogRetentionDays=7` or `usageHistoryRetentionDays=10`
-- **THEN** the API MUST reject the update with a validation error (the internal validator message names the violated floor with the same wording as the env validator)
+- **WHEN** a dashboard settings update carries `requestLogRetentionOverrideDays=7` or `usageHistoryRetentionOverrideDays=10`
+- **THEN** the API MUST reject the update with a validation error (the internal validator message names the violated floor, mirroring the env validator's wording)
 - **AND** the stored settings MUST remain unchanged
+
+#### Scenario: Full-save echoes round-trip inherit unchanged
+
+- **GIVEN** no dashboard override exists and an env alias supplies the effective retention
+- **WHEN** a client performs a full GET-then-PUT save echoing `requestLogRetentionOverrideDays: null` back
+- **THEN** the stored value remains `NULL = inherit`, so later changes to the deprecated env alias still take effect
+
+#### Scenario: An explicit override equal to the env alias is stored
+
+- **GIVEN** `CODEX_LB_REQUEST_LOG_RETENTION_DAYS=90` and no dashboard override
+- **WHEN** a client PUTs `requestLogRetentionOverrideDays: 90`
+- **THEN** the override MUST be stored (the effective value stays 90 but no longer tracks the env alias)
+
+#### Scenario: Present-null clears an override back to inherit
+
+- **GIVEN** a stored dashboard override and `CODEX_LB_REQUEST_LOG_RETENTION_DAYS=90`
+- **WHEN** a client PUTs `requestLogRetentionOverrideDays: null`
+- **THEN** the stored value MUST return to `NULL = inherit` and the effective value MUST fall back to 90
 
 #### Scenario: Dashboard value overrides the env alias
 
@@ -75,15 +106,6 @@ retention MUST NOT run a pass.
 - **GIVEN** a running instance with retention disabled
 - **WHEN** an operator sets a dashboard retention window
 - **THEN** a subsequent scheduler tick runs a retention pass without a restart
-
-#### Scenario: Echoed effective values do not create overrides
-
-- **GIVEN** no dashboard override exists and an env alias supplies the
-  effective retention
-- **WHEN** a client performs a full GET-then-PUT save that echoes the
-  effective values back unchanged
-- **THEN** the stored dashboard values remain `NULL = inherit`, so later
-  changes to the deprecated env alias still take effect
 
 #### Scenario: Disabled effective retention skips the pass
 

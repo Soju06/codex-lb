@@ -10,10 +10,16 @@ const baseSettings = createDashboardSettings();
 const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("DataRetentionSettings", () => {
-  it("shows the effective retention values", () => {
+  it("shows stored overrides in the inputs", () => {
     render(
       <DataRetentionSettings
-        settings={{ ...baseSettings, requestLogRetentionDays: 90, usageHistoryRetentionDays: 45 }}
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 90,
+          usageHistoryRetentionDays: 45,
+          requestLogRetentionOverrideDays: 90,
+          usageHistoryRetentionOverrideDays: 45,
+        }}
         busy={false}
         onSave={vi.fn().mockResolvedValue(undefined)}
       />,
@@ -23,7 +29,32 @@ describe("DataRetentionSettings", () => {
     expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
   });
 
-  it("submits only the edited retention field", async () => {
+  it("shows empty inputs with the inherited effective value as a hint while no override is set", () => {
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 90,
+          usageHistoryRetentionDays: 0,
+          requestLogRetentionOverrideDays: null,
+          usageHistoryRetentionOverrideDays: null,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(screen.getByLabelText("Request log retention days")).toHaveDisplayValue("");
+    expect(screen.getByLabelText("Usage history retention days")).toHaveDisplayValue("");
+    expect(
+      screen.getByText("Inherited: 90 days (environment default; 0 = disabled)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Inherited: 0 days (environment default; 0 = disabled)"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save retention" })).toBeDisabled();
+  });
+
+  it("submits only the edited override field", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
 
@@ -36,39 +67,72 @@ describe("DataRetentionSettings", () => {
 
     expect(onSave).toHaveBeenCalledWith({
       ...baseUpdatePayload,
-      requestLogRetentionDays: 30,
+      requestLogRetentionOverrideDays: 30,
     });
-    expect(onSave.mock.calls[0][0]).not.toHaveProperty("usageHistoryRetentionDays");
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty("usageHistoryRetentionOverrideDays");
   });
 
-  it("submits both fields when both are edited", async () => {
-    const user = userEvent.setup();
-    const onSave = vi.fn().mockResolvedValue(undefined);
-
-    render(<DataRetentionSettings settings={baseSettings} busy={false} onSave={onSave} />);
-
-    const requestLogInput = screen.getByLabelText("Request log retention days");
-    await user.clear(requestLogInput);
-    await user.type(requestLogInput, "3650");
-    const usageHistoryInput = screen.getByLabelText("Usage history retention days");
-    await user.clear(usageHistoryInput);
-    await user.type(usageHistoryInput, "45");
-    await user.click(screen.getByRole("button", { name: "Save retention" }));
-
-    expect(onSave).toHaveBeenCalledWith({
-      ...baseUpdatePayload,
-      requestLogRetentionDays: 3650,
-      usageHistoryRetentionDays: 45,
-    });
-  });
-
-  it("allows saving 0 to disable retention", async () => {
+  it("captures the inherited value as an override when typed deliberately", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
 
     render(
       <DataRetentionSettings
-        settings={{ ...baseSettings, usageHistoryRetentionDays: 45 }}
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 90, // effective via env alias
+          requestLogRetentionOverrideDays: null,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    const input = screen.getByLabelText("Request log retention days");
+    await user.type(input, "90");
+    await user.click(screen.getByRole("button", { name: "Save retention" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ requestLogRetentionOverrideDays: 90 }),
+    );
+  });
+
+  it("clears an existing override by emptying the input (submits null)", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 120,
+          requestLogRetentionOverrideDays: 120,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    const input = screen.getByLabelText("Request log retention days");
+    await user.clear(input);
+    await user.click(screen.getByRole("button", { name: "Save retention" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ requestLogRetentionOverrideDays: null }),
+    );
+  });
+
+  it("allows saving 0 to disable retention explicitly", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          usageHistoryRetentionDays: 45,
+          usageHistoryRetentionOverrideDays: 45,
+        }}
         busy={false}
         onSave={onSave}
       />,
@@ -79,10 +143,9 @@ describe("DataRetentionSettings", () => {
     await user.type(input, "0");
     await user.click(screen.getByRole("button", { name: "Save retention" }));
 
-    expect(onSave).toHaveBeenCalledWith({
-      ...baseUpdatePayload,
-      usageHistoryRetentionDays: 0,
-    });
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ usageHistoryRetentionOverrideDays: 0 }),
+    );
   });
 
   it("rejects request-log values below the 30-day floor", async () => {

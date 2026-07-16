@@ -127,6 +127,8 @@ class SettingsRepository:
         limit_warmup_staggered_idle_enabled: bool | None = None,
         request_log_retention_days: int | None = None,
         usage_history_retention_days: int | None = None,
+        clear_request_log_retention: bool = False,
+        clear_usage_history_retention: bool = False,
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -221,9 +223,16 @@ class SettingsRepository:
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
-        if request_log_retention_days is not None:
+        # Retention overrides are tri-state: a clear flag resets the column to
+        # NULL (inherit the deprecated env alias); a non-None value stores an
+        # override; neither leaves the stored value untouched.
+        if clear_request_log_retention:
+            settings.request_log_retention_days = None
+        elif request_log_retention_days is not None:
             settings.request_log_retention_days = request_log_retention_days
-        if usage_history_retention_days is not None:
+        if clear_usage_history_retention:
+            settings.usage_history_retention_days = None
+        elif usage_history_retention_days is not None:
             settings.usage_history_retention_days = usage_history_retention_days
         # Force the optimistic-version CAS to run even when the payload makes no
         # net change. `version_id_col` only raises `StaleDataError` when the

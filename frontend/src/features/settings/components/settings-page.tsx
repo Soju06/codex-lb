@@ -173,7 +173,12 @@ export function SettingsPage() {
               <QuotaPlannerSection disabled={controlsDisabled} />
               <StickySessionsSection disabled={controlsDisabled} />
               <DataRetentionSettings
-                key={[settings.requestLogRetentionDays, settings.usageHistoryRetentionDays].join(":")}
+                key={[
+                  settings.requestLogRetentionOverrideDays,
+                  settings.usageHistoryRetentionOverrideDays,
+                  settings.requestLogRetentionDays,
+                  settings.usageHistoryRetentionDays,
+                ].join(":")}
                 settings={settings}
                 busy={controlsDisabled}
                 onSave={handleSave}

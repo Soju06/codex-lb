@@ -167,6 +167,8 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
         request_log_retention_days=settings.request_log_retention_days,
         usage_history_retention_days=settings.usage_history_retention_days,
+        request_log_retention_override_days=settings.request_log_retention_override_days,
+        usage_history_retention_override_days=settings.usage_history_retention_override_days,
         version=settings.version,
     )
 
@@ -531,22 +533,6 @@ def _elapsed_ms(started: float) -> int:
     return max(0, round((time.monotonic() - started) * 1000))
 
 
-def _retention_edit(*, submitted: bool, value: int | None, stored: int | None, effective: int) -> int | None:
-    """Persist a retention field only when it was intentionally edited.
-
-    GET returns the *effective* value, so a full GET-then-PUT save echoes
-    inherited env-alias values back with the field present. Storing that echo
-    would silently turn ``NULL = inherit`` into a dashboard override; skip the
-    write when no override exists and the submitted value equals the current
-    effective value.
-    """
-    if not submitted or value is None:
-        return None
-    if stored is None and value == effective:
-        return None
-    return value
-
-
 @router.put("", response_model=DashboardSettingsResponse)
 async def update_settings(
     request: Request,
@@ -555,7 +541,6 @@ async def update_settings(
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
-    stored_request_log_retention, stored_usage_history_retention = await context.service.get_stored_retention()
     if payload.expected_version is not None and payload.expected_version != current.version:
         raise DashboardSettingsConflictError(
             "Settings were modified since this form was loaded; reload and retry",
@@ -783,17 +768,23 @@ async def update_settings(
                     if payload.limit_warmup_staggered_idle_enabled is not None
                     else current.limit_warmup_staggered_idle_enabled
                 ),
-                request_log_retention_days=_retention_edit(
-                    submitted="request_log_retention_days" in payload.model_fields_set,
-                    value=payload.request_log_retention_days,
-                    stored=stored_request_log_retention,
-                    effective=current.request_log_retention_days,
+                request_log_retention_override_days=(
+                    payload.request_log_retention_override_days
+                    if "request_log_retention_override_days" in payload.model_fields_set
+                    else None
                 ),
-                usage_history_retention_days=_retention_edit(
-                    submitted="usage_history_retention_days" in payload.model_fields_set,
-                    value=payload.usage_history_retention_days,
-                    stored=stored_usage_history_retention,
-                    effective=current.usage_history_retention_days,
+                usage_history_retention_override_days=(
+                    payload.usage_history_retention_override_days
+                    if "usage_history_retention_override_days" in payload.model_fields_set
+                    else None
+                ),
+                clear_request_log_retention_override=(
+                    "request_log_retention_override_days" in payload.model_fields_set
+                    and payload.request_log_retention_override_days is None
+                ),
+                clear_usage_history_retention_override=(
+                    "usage_history_retention_override_days" in payload.model_fields_set
+                    and payload.usage_history_retention_override_days is None
                 ),
             ),
             # CAS anchor: omitted fields above were merged from `current`
@@ -850,8 +841,8 @@ async def update_settings(
             "weekly_pace_smoothing_minutes",
             "guest_access_enabled",
             "limit_warmup_staggered_idle_enabled",
-            "request_log_retention_days",
-            "usage_history_retention_days",
+            "request_log_retention_override_days",
+            "usage_history_retention_override_days",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

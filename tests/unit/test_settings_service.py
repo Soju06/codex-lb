@@ -78,10 +78,13 @@ async def test_null_retention_inherits_environment_and_dashboard_value_wins(
     )
     service = SettingsService(cast(SettingsRepository, _Repository()))
 
-    # NULL dashboard values inherit the deprecated env alias.
+    # NULL dashboard values inherit the deprecated env alias; the raw
+    # overrides stay exposed as None (= inherit).
     settings = await service.get_settings()
     assert settings.request_log_retention_days == 90
     assert settings.usage_history_retention_days == 45
+    assert settings.request_log_retention_override_days is None
+    assert settings.usage_history_retention_override_days is None
 
     # Non-NULL dashboard values win, including 0 (explicitly disabled).
     row.request_log_retention_days = 30
@@ -89,6 +92,8 @@ async def test_null_retention_inherits_environment_and_dashboard_value_wins(
     settings = await service.get_settings()
     assert settings.request_log_retention_days == 30
     assert settings.usage_history_retention_days == 0
+    assert settings.request_log_retention_override_days == 30
+    assert settings.usage_history_retention_override_days == 0
 
 
 def test_parse_additional_quota_routing_policies_normalizes_aliases_and_policy_case() -> None:

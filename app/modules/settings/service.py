@@ -57,6 +57,8 @@ class DashboardSettingsData:
     limit_warmup_staggered_idle_enabled: bool
     request_log_retention_days: int
     usage_history_retention_days: int
+    request_log_retention_override_days: int | None
+    usage_history_retention_override_days: int | None
     version: int
 
 
@@ -102,18 +104,17 @@ class DashboardSettingsUpdateData:
     weekly_pace_smoothing_minutes: int
     guest_access_enabled: bool
     limit_warmup_staggered_idle_enabled: bool
-    request_log_retention_days: int | None
-    usage_history_retention_days: int | None
+    # Tri-state retention overrides: value set = store, clear flag = reset to
+    # NULL (inherit the deprecated env alias), neither = leave untouched.
+    request_log_retention_override_days: int | None
+    usage_history_retention_override_days: int | None
+    clear_request_log_retention_override: bool
+    clear_usage_history_retention_override: bool
 
 
 class SettingsService:
     def __init__(self, repository: SettingsRepository) -> None:
         self._repository = repository
-
-    async def get_stored_retention(self) -> tuple[int | None, int | None]:
-        """Raw dashboard-stored retention overrides (``None`` = inherit env alias)."""
-        row = await self._repository.get_or_create()
-        return row.request_log_retention_days, row.usage_history_retention_days
 
     async def get_settings(self) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
@@ -170,6 +171,8 @@ class SettingsService:
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
             request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
             usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_override_days=row.request_log_retention_days,
+            usage_history_retention_override_days=row.usage_history_retention_days,
             version=row.version,
         )
 
@@ -228,8 +231,10 @@ class SettingsService:
             weekly_pace_smoothing_minutes=payload.weekly_pace_smoothing_minutes,
             guest_access_enabled=payload.guest_access_enabled,
             limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
-            request_log_retention_days=payload.request_log_retention_days,
-            usage_history_retention_days=payload.usage_history_retention_days,
+            request_log_retention_days=payload.request_log_retention_override_days,
+            usage_history_retention_days=payload.usage_history_retention_override_days,
+            clear_request_log_retention=payload.clear_request_log_retention_override,
+            clear_usage_history_retention=payload.clear_usage_history_retention_override,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -284,6 +289,8 @@ class SettingsService:
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
             request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
             usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_override_days=row.request_log_retention_days,
+            usage_history_retention_override_days=row.usage_history_retention_days,
             version=row.version,
         )
 

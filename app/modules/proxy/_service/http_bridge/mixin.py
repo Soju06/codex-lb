@@ -46,10 +46,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.utils.request_id import ensure_request_scope_id
-from app.db.models import (
-    AccountStatus,
-    StickySessionKind,
-)
+from app.db.models import AccountStatus, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,

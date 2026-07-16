@@ -952,6 +952,49 @@ def test_websocket_precreated_retry_error_code_classifies_exact_account_model_re
     )
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [("account_model", "account_model_unsupported"), ("auth", "invalid_api_key")],
+)
+def test_websocket_precreated_error_classifiers_do_not_replay_top_level_response_id(
+    kind: str,
+    expected: str,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id=f"req_{kind}_top_level_response_id",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    error = (
+        {
+            "type": "invalid_request_error",
+            "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        }
+        if kind == "account_model"
+        else {
+            "type": "authentication_error",
+            "code": "invalid_api_key",
+            "message": "Authentication token expired",
+        }
+    )
+    payload: dict[str, JsonValue] = {"type": "error", "status": 401, "error": error}
+    classifier = (
+        proxy_service._websocket_precreated_retry_error_code
+        if kind == "account_model"
+        else proxy_service._websocket_precreated_auth_error_code
+    )
+
+    assert classifier(request_state, event_type="error", payload=payload, has_other_pending_requests=False) == expected
+
+    payload["response_id"] = "resp_already_accepted"
+    assert classifier(request_state, event_type="error", payload=payload, has_other_pending_requests=False) is None
+
+
 def _assert_proxy_response_error(exc: BaseException) -> proxy_module.ProxyResponseError:
     assert isinstance(exc, proxy_module.ProxyResponseError)
     return exc
@@ -10630,7 +10673,11 @@ async def test_stream_with_retry_preserves_account_model_rejection_without_repla
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replacement_failure_kind", "expected_status", "expected_code"),
-    [("server", 500, "replacement_failed"), ("transport", 502, "upstream_unavailable")],
+    [
+        ("server", 500, "replacement_failed"),
+        ("transport", 502, "upstream_unavailable"),
+        ("refresh", 503, "upstream_unavailable"),
+    ],
 )
 async def test_stream_with_retry_surfaces_selected_replacement_failure_after_account_model_rejection(
     monkeypatch,
@@ -10683,14 +10730,45 @@ async def test_stream_with_retry_surfaces_selected_replacement_failure_after_acc
         )
         yield  # pragma: no cover
 
+    async def ensure_fresh(account: Account, **_kwargs: object) -> Account:
+        if account.id == replacement.id and replacement_failure_kind == "refresh":
+            raise proxy_service.RefreshError(
+                "refresh_claim_timeout",
+                "Replacement refresh is temporarily unavailable",
+                False,
+                transport_error=True,
+            )
+        return account
+
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
-    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_kwargs: account))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
 
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
     )
+
+    if replacement_failure_kind == "refresh":
+        chunks = [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-account-model-replacement-failure"},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+        event = json.loads(chunks[-1].split("data: ", 1)[1])
+        assert event["response"]["error"]["code"] == expected_code
+        assert selected_account_ids == [rejected.id, replacement.id]
+        return
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         async for _chunk in service._stream_with_retry(
@@ -14913,14 +14991,21 @@ async def test_connect_proxy_websocket_preserves_account_model_rejection_without
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure_status", "failure_code", "failure_message"),
+    ("failure_kind", "failure_status", "failure_code", "failure_message"),
     [
-        (500, "replacement_failed", "Replacement connection failed"),
-        (502, "upstream_unavailable", "Replacement transport connection failed"),
+        ("server", 500, "replacement_failed", "Replacement connection failed"),
+        ("transport", 502, "upstream_unavailable", "Replacement transport connection failed"),
+        (
+            "refresh",
+            503,
+            "upstream_unavailable",
+            "Account refresh is temporarily unavailable; no healthy account could be reached.",
+        ),
     ],
 )
 async def test_connect_proxy_websocket_surfaces_selected_replacement_failure_after_account_model_rejection(
     monkeypatch,
+    failure_kind,
     failure_status,
     failure_code,
     failure_message,
@@ -14931,9 +15016,13 @@ async def test_connect_proxy_websocket_surfaces_selected_replacement_failure_aft
     replacement_account = _make_account("acc_ws_replacement_model")
     third_account = _make_account("acc_ws_third_model")
     select_account = AsyncMock(side_effect=[replacement_account, third_account])
-    replacement_failure = proxy_module.ProxyResponseError(
-        failure_status,
-        proxy_module.openai_error(failure_code, failure_message, error_type="server_error"),
+    replacement_failure: BaseException = (
+        proxy_support._WebSocketTransientRefreshFailover(replacement_account.id)
+        if failure_kind == "refresh"
+        else proxy_module.ProxyResponseError(
+            failure_status,
+            proxy_module.openai_error(failure_code, failure_message, error_type="server_error"),
+        )
     )
     monkeypatch.setattr(service, "_select_websocket_connect_account", select_account)
     monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", AsyncMock(side_effect=replacement_failure))
@@ -28962,6 +29051,77 @@ async def test_reconnect_http_bridge_discards_model_fallback_before_selected_rep
     assert request_state.error_code_override is None
     assert request_state.error_message_override is None
     assert request_state.error_http_status_override is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_does_not_fail_over_after_selected_model_replacement_401(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected_account = _make_account("acc_bridge_rejected_model_401")
+    replacement_account = _make_account("acc_bridge_replacement_model_401")
+    third_account = _make_account("acc_bridge_third_model_401")
+    first_401 = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+    second_401 = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "still expired"))
+    selected_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+
+    async def select_account(**_kwargs: object) -> AccountSelection:
+        selected = replacement_account if not selected_account_ids else third_account
+        selected_account_ids.append(selected.id)
+        return AccountSelection(account=selected, error_message=None)
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=[replacement_account, replacement_account, third_account]),
+    )
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(side_effect=[first_401, second_401, SimpleNamespace(response_header=lambda _name: None)]),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_selected_model_replacement_401",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+        excluded_account_ids={rejected_account.id},
+        precreated_replay_reason="account_model_unsupported",
+        precreated_replay_account_id=rejected_account.id,
+        error_code_override="invalid_request_error",
+        error_message_override="The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        error_type_override="invalid_request_error",
+        error_http_status_override=400,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-model-replacement-401", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=rejected_account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert exc_info.value is second_401
+    assert selected_account_ids == [replacement_account.id]
+    assert request_state.precreated_replay_reason is None
+    assert request_state.error_code_override is None
 
 
 @pytest.mark.asyncio

@@ -2008,7 +2008,6 @@ class _WebSocketMixin:
                 # exclude it, and reselect a healthy account.
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
-                excluded_account_ids.add(failover.account_id)
                 # Record a capacity-style failure so that if every account
                 # attempt hits a transient refresh-claim failover, the loop
                 # still surfaces a proper terminal error after exhaustion
@@ -2016,7 +2015,7 @@ class _WebSocketMixin:
                 # credentials are fine (its refresh claim is just held by
                 # another replica), so this must be a 503/capacity-style
                 # upstream error, NOT a bogus 401 invalid_api_key.
-                last_failover_exc = ProxyResponseError(
+                refresh_failure = ProxyResponseError(
                     503,
                     openai_error(
                         "upstream_unavailable",
@@ -2024,6 +2023,23 @@ class _WebSocketMixin:
                         error_type="server_error",
                     ),
                 )
+                if selected_account_model_replacement:
+                    await proxy._emit_websocket_connect_failure(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        account_id=account.id,
+                        api_key=api_key,
+                        request_state=request_state,
+                        status_code=refresh_failure.status_code,
+                        payload=refresh_failure.payload,
+                        error_code="upstream_unavailable",
+                        error_message=(
+                            "Account refresh is temporarily unavailable; no healthy account could be reached."
+                        ),
+                    )
+                    return None, None
+                excluded_account_ids.add(failover.account_id)
+                last_failover_exc = refresh_failure
                 last_failover_account = account
                 continue
             except ProxyResponseError as exc:

@@ -163,6 +163,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_precreated_replay_fallback,
@@ -2151,6 +2152,7 @@ class _HTTPBridgeMixin(
         else:
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
+        selected_account_model_replacement = False
 
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
@@ -2164,7 +2166,7 @@ class _HTTPBridgeMixin(
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
             nonlocal preferred_candidate_id
-            if hard_close_account_bound:
+            if hard_close_account_bound or selected_account_model_replacement:
                 await release_selected_account_lease()
                 raise
             excluded_account_ids.add(selected_account.id)
@@ -2273,7 +2275,11 @@ class _HTTPBridgeMixin(
                 if reuse_current_account_lease and account.id == session.account.id
                 else selection.lease
             )
-            if account.id != request_state.precreated_replay_account_id:
+            selected_account_model_replacement = (
+                request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                and account.id != request_state.precreated_replay_account_id
+            )
+            if selected_account_model_replacement:
                 _clear_websocket_precreated_replay_fallback(request_state)
             selected_is_preferred = account.id == session.account.id
             force_refresh = forced_refresh_account_id == account.id

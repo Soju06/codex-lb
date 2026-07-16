@@ -1217,6 +1217,7 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        selected_account_model_replacement = account.id == account_model_replacement_account_id
                         if isinstance(exc, RefreshError):
                             if exc.is_permanent:
                                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
@@ -1229,7 +1230,8 @@ class _StreamingRetryMixin:
                                 # duration of the replacement stream.
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                continue
+                                if not selected_account_model_replacement:
+                                    continue
                             if is_transient_refresh_contention(exc):
                                 # Transient CROSS-REPLICA refresh contention: benign
                                 # claim contention (the account's refresh claim is
@@ -1248,7 +1250,11 @@ class _StreamingRetryMixin:
                                         exc.code,
                                         account.id,
                                     )
-                                if not require_preferred_account and preferred_account_id is None:
+                                if (
+                                    not selected_account_model_replacement
+                                    and not require_preferred_account
+                                    and preferred_account_id is None
+                                ):
                                     # Movable request: release the stream lease and
                                     # fail over to a different account instead of
                                     # reselecting the same one until attempts are
@@ -1311,7 +1317,7 @@ class _StreamingRetryMixin:
                                 )
                                 yield format_sse_event(event)
                                 return
-                            if not exc.transport_error:
+                            if not exc.transport_error and not selected_account_model_replacement:
                                 # Non-transport, non-permanent RefreshError: release
                                 # the stream lease and reselect (its prior behavior).
                                 await _release_tracked_stream_lease(current_account_lease)
@@ -1334,7 +1340,8 @@ class _StreamingRetryMixin:
                         )
                         message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
                         if (
-                            _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
+                            not selected_account_model_replacement
+                            and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                             and attempt + 1 < max_attempts
                             and _move_verified_fresh_replay_from_owner(
                                 account_id=account.id,
@@ -1355,7 +1362,8 @@ class _StreamingRetryMixin:
                             )
                             continue
                         if (
-                            not require_preferred_account
+                            not selected_account_model_replacement
+                            and not require_preferred_account
                             and preferred_account_id is None
                             and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                             and attempt + 1 < max_attempts

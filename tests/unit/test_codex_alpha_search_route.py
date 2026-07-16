@@ -16,4 +16,4 @@ def test_codex_alpha_search_route_allows_browser_search_methods() -> None:
     ]
 
     methods = set().union(*(route.methods for route in protected_routes + preflight_routes))
-    assert methods == {"GET", "POST", "HEAD", "OPTIONS"}
+    assert methods == {"GET", "POST", "OPTIONS"}

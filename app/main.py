@@ -709,6 +709,7 @@ def create_app() -> FastAPI:
     add_trusted_proxy_headers_middleware(app)
 
     app.include_router(proxy_api.realtime_call_router)
+    app.include_router(proxy_api.codex_preflight_router)
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)

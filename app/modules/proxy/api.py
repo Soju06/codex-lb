@@ -343,6 +343,11 @@ class _RealtimeLiveCallIdConvertor(Convertor[str]):
 
 register_url_convertor("realtime_live_call_id", _RealtimeLiveCallIdConvertor())
 
+codex_preflight_router = APIRouter(
+    prefix="/backend-api/codex",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
+)
 router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
@@ -975,7 +980,7 @@ async def codex_safety_arc(
 _CODEX_ALPHA_SEARCH_ALLOWED_METHODS = "GET, POST, HEAD, OPTIONS"
 
 
-@router.options("/alpha/search")
+@codex_preflight_router.options("/alpha/search")
 async def codex_alpha_search_options(request: Request) -> Response:
     requested_headers = request.headers.get("access-control-request-headers")
     allow_headers = requested_headers or "authorization, content-type, session_id"

@@ -576,7 +576,25 @@ async def codex_safety_arc(
     return await _codex_control_proxy(request, "safety/arc", context, api_key)
 
 
-@router.api_route("/alpha/search", methods=["GET", "POST"])
+_CODEX_ALPHA_SEARCH_ALLOWED_METHODS = "GET, POST, HEAD, OPTIONS"
+
+
+@router.options("/alpha/search")
+async def codex_alpha_search_options(request: Request) -> Response:
+    requested_headers = request.headers.get("access-control-request-headers")
+    allow_headers = requested_headers or "authorization, content-type, session_id"
+    return Response(
+        status_code=204,
+        headers={
+            "allow": _CODEX_ALPHA_SEARCH_ALLOWED_METHODS,
+            "access-control-allow-methods": _CODEX_ALPHA_SEARCH_ALLOWED_METHODS,
+            "access-control-allow-headers": allow_headers,
+            "access-control-max-age": "600",
+        },
+    )
+
+
+@router.api_route("/alpha/search", methods=["GET", "POST", "HEAD"])
 async def codex_alpha_search(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),

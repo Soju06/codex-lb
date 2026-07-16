@@ -5,6 +5,7 @@ import base64
 import json
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.responses import StreamingResponse
@@ -719,6 +720,27 @@ async def test_codex_alpha_search_get_forwards_query_without_body(async_client, 
     ]
     assert isinstance(calls[0]["timeout_seconds"], float)
     assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_options_returns_local_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization, session_id",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    assert response.headers["access-control-allow-methods"] == "GET, POST, HEAD, OPTIONS"
+    assert response.headers["access-control-allow-headers"] == "authorization, session_id"
+    codex_control_request.assert_not_called()
 
 
 @pytest.mark.asyncio

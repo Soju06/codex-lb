@@ -4198,6 +4198,7 @@ async def test_http_downstream_sticky_smart_auto_mode_keeps_websocket_handshake_
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
         log_upstream_request_summary = False
+        trace_channels = frozenset()
 
     async def fake_open_upstream_websocket(**kwargs: object) -> None:
         del kwargs
@@ -6112,6 +6113,7 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
         log_upstream_request_summary = False
+        trace_channels = frozenset()
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)

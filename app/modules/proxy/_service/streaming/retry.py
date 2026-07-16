@@ -335,6 +335,7 @@ class _StreamingRetryMixin:
         last_transient_exc: ProxyResponseError | None = None
         last_account_model_rejection: ProxyResponseError | None = None
         last_account_model_rejection_account_id: str | None = None
+        account_model_replacement_account_id: str | None = None
         account_model_replay_attempted = False
         current_account_lease: AccountLease | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
@@ -1106,6 +1107,7 @@ class _StreamingRetryMixin:
                     # that must reach the client. Keep the separate replay
                     # budget so another account/model rejection cannot trigger
                     # a second transparent replay.
+                    account_model_replacement_account_id = account.id
                     last_account_model_rejection = None
                     last_account_model_rejection_account_id = None
                 if (
@@ -1482,6 +1484,23 @@ class _StreamingRetryMixin:
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
+                            if account.id == account_model_replacement_account_id:
+                                # Account/model routing gets exactly one selected
+                                # replacement.  Its own pre-visible 5xx/transport
+                                # failure is terminal; allowing the normal
+                                # transient path here would silently select a third
+                                # account.  Re-raise into the outer terminal
+                                # renderer to retain the replacement details.
+                                if isinstance(tex, ProxyResponseError):
+                                    raise
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        tex.code,
+                                        str(tex.error.get("message") or "Upstream error"),
+                                        error_type="server_error",
+                                    ),
+                                ) from tex
                             if settlement.downstream_visible:
                                 failed_response_id = settlement.response_id or request_id
                                 if isinstance(tex, ProxyResponseError):

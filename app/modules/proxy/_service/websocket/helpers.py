@@ -696,6 +696,12 @@ def _websocket_precreated_retry_error_code(
         message=error_message,
         model=request_state.model,
     ):
+        # A response.failed that already names a response id is an accepted
+        # upstream response even when response.created was not observed on this
+        # socket.  It is therefore not safe to account-switch it as though the
+        # pre-created request were still unaccepted.
+        if event_type == "response.failed" and _websocket_response_id(None, payload) is not None:
+            return None
         return _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
     if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None

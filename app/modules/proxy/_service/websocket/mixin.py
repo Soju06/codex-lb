@@ -1967,10 +1967,11 @@ class _WebSocketMixin:
                 if request_state.preferred_account_id == forced_refresh_account_id:
                     request_state.preferred_account_id = None
 
-            if (
+            selected_account_model_replacement = (
                 request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
                 and account.id != request_state.precreated_replay_account_id
-            ):
+            )
+            if selected_account_model_replacement:
                 # Preserve the rejected account's 400 only when selection
                 # cannot find a replacement. Once this replacement attempt
                 # starts, a connection/open failure belongs to the replacement.
@@ -2026,14 +2027,20 @@ class _WebSocketMixin:
                 last_failover_account = account
                 continue
             except ProxyResponseError as exc:
-                action = await proxy._decide_websocket_failover_action(
-                    account=account,
-                    exc=exc,
-                    request_state=request_state,
-                    attempt=attempt + 1,
-                    max_attempts=max_attempts,
-                    deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
-                )
+                if selected_account_model_replacement:
+                    # The account/model retry budget selected this replacement;
+                    # its connection failure must be surfaced rather than
+                    # consuming another account through generic failover.
+                    action = "surface"
+                else:
+                    action = await proxy._decide_websocket_failover_action(
+                        account=account,
+                        exc=exc,
+                        request_state=request_state,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
+                    )
                 if action == "failover_next":
                     await proxy._load_balancer.release_account_lease(selected_stream_lease)
                     last_failover_exc = exc

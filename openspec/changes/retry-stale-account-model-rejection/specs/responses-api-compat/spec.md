@@ -12,7 +12,8 @@ without violating continuation or uploaded-file ownership. The proxy MUST
 exclude the rejecting account only for that request and MUST NOT record an
 account-health penalty for this rejection.
 
-The proxy MUST NOT replay after a response id, a nonterminal `response.*`
+The proxy MUST NOT replay after a response id, including a `response.failed`
+payload that carries one even when `response.created` was not observed, a nonterminal `response.*`
 event, downstream sequence/output, another pending request on the shared
 socket, or an earlier replay. If no compatible replacement is available, or
 the request is account-bound, the proxy MUST preserve the original upstream
@@ -43,6 +44,18 @@ another proxy-generated failure.
 - **WHEN** that replacement attempt fails before acceptance
 - **THEN** the client receives the replacement attempt's failure
 - **AND** the skipped account's original HTTP 400 is not used as a fallback
+- **AND** the proxy does not select a third account after a retryable replacement
+  transport or server failure
+
+#### Scenario: failed bridge replacement retires without restoring rejected metadata
+
+- **GIVEN** an HTTP responses bridge reconnect has selected and installed a
+  replacement account after an account/model rejection
+- **WHEN** replacement response-create lease acquisition or request send fails
+- **THEN** the proxy forwards the replacement failure and retires that bridge
+  session after draining the rejected request
+- **AND** it does not restore the rejected account's turn state or headers onto
+  the replacement socket
 
 #### Scenario: accepted or visible request is never replayed
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.openai.requests import ResponsesRequest
 from app.modules.proxy import http_bridge_forwarding as bridge
 
@@ -30,16 +32,10 @@ def test_shared_instruction_cache_skips_anchored_responses() -> None:
 
     payload = request.to_payload()
     assert payload["prompt_cache_key"] == "client-cache-key"
-    assert all(
-        "prompt_cache_breakpoint" not in part
-        for item in payload["input"]
-        if isinstance(item, dict)
-        for part in item.get("content", [])
-        if isinstance(part, dict)
-    )
+    assert payload["input"] == request.input
 
 
-def test_legacy_owner_forward_without_sdk_header_stays_sdk(monkeypatch) -> None:
+def test_legacy_owner_forward_without_sdk_header_stays_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bridge, "_sign_bridge_payload", lambda _payload: "signature")
     payload = _cacheable_lite_request()
     context = bridge.HTTPBridgeForwardContext(

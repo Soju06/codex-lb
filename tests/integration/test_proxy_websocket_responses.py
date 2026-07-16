@@ -1066,8 +1066,8 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
     async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
-    async def fake_resolve_owner(self, *, previous_response_id, api_key, session_id=None, surface):
-        del self, previous_response_id, api_key, session_id, surface
+    async def fake_resolve_owner(self, *, previous_response_id, api_key, session_id=None, surface, request_state=None):
+        del self, previous_response_id, api_key, session_id, surface, request_state
         return owner_id
 
     async def fake_select_websocket_connect_account(
@@ -6768,8 +6768,9 @@ def test_backend_responses_websocket_same_owner_followup_skips_selector_revalida
         api_key,
         session_id=None,
         surface,
+        request_state=None,
     ):
-        del self, api_key, session_id, surface
+        del self, api_key, session_id, surface, request_state
         assert previous_response_id == "resp_ws_prev_anchor"
         return "acct_ws_same_owner"
 

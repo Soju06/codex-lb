@@ -17,36 +17,61 @@ function getIntlLocale(): string {
   return "en-US";
 }
 
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+const compactFormatters = new Map<string, Intl.NumberFormat>();
+const currencyFormatters = new Map<string, Intl.NumberFormat>();
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+const chartDateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function getCachedFormatter<TFormatter>(
+  cache: Map<string, TFormatter>,
+  key: string,
+  create: () => TFormatter,
+): TFormatter {
+  const cached = cache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const formatter = create();
+  cache.set(key, formatter);
+  return formatter;
+}
+
 function getNumberFormatter(): Intl.NumberFormat {
-  return new Intl.NumberFormat(getIntlLocale());
+  const locale = getIntlLocale();
+  return getCachedFormatter(numberFormatters, locale, () => new Intl.NumberFormat(locale));
 }
 
 function getCompactFormatter(): Intl.NumberFormat {
-  return new Intl.NumberFormat(getIntlLocale(), {
+  const locale = getIntlLocale();
+  return getCachedFormatter(compactFormatters, locale, () => new Intl.NumberFormat(locale, {
     notation: "compact",
     maximumFractionDigits: 2,
-  });
+  }));
 }
 
 function getCurrencyFormatter(): Intl.NumberFormat {
-  return new Intl.NumberFormat(getIntlLocale(), {
+  const locale = getIntlLocale();
+  return getCachedFormatter(currencyFormatters, locale, () => new Intl.NumberFormat(locale, {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  });
+  }));
 }
 
 function getDateFormatter(): Intl.DateTimeFormat {
-  return new Intl.DateTimeFormat(getIntlLocale(), {
+  const locale = getIntlLocale();
+  return getCachedFormatter(dateFormatters, locale, () => new Intl.DateTimeFormat(locale, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  });
+  }));
 }
 
-function createTimeFormatter(preference: TimeFormatPreference): Intl.DateTimeFormat {
-  return new Intl.DateTimeFormat(getIntlLocale(), {
+function createTimeFormatter(locale: string, preference: TimeFormatPreference): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -54,8 +79,8 @@ function createTimeFormatter(preference: TimeFormatPreference): Intl.DateTimeFor
   });
 }
 
-function createChartDateTimeFormatter(preference: TimeFormatPreference): Intl.DateTimeFormat {
-  return new Intl.DateTimeFormat(getIntlLocale(), {
+function createChartDateTimeFormatter(locale: string, preference: TimeFormatPreference): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -70,11 +95,19 @@ export type FormattedDateTime = {
 };
 
 function getTimeFormatter(): Intl.DateTimeFormat {
-  return createTimeFormatter(getTimeFormatPreference());
+  const locale = getIntlLocale();
+  const preference = getTimeFormatPreference();
+  return getCachedFormatter(timeFormatters, `${locale}:${preference}`, () => createTimeFormatter(locale, preference));
 }
 
 function getChartDateTimeFormatter(): Intl.DateTimeFormat {
-  return createChartDateTimeFormatter(getTimeFormatPreference());
+  const locale = getIntlLocale();
+  const preference = getTimeFormatPreference();
+  return getCachedFormatter(
+    chartDateTimeFormatters,
+    `${locale}:${preference}`,
+    () => createChartDateTimeFormatter(locale, preference),
+  );
 }
 
 type TokenState = {

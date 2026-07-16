@@ -1,0 +1,52 @@
+name: Agent repair
+
+on:
+  push:
+    branches:
+      - agent/share-instruction-cache-prefixes
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/share-instruction-cache-prefixes
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Repair and validate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/modules/proxy/http_bridge_forwarding.py')
+          text = path.read_text()
+          replacements = {
+              '                yieled_event = False': '                yielded_event = False',
+              '    # verifying during a rolling upgrade. Known residual until the shim is\n    # removed: this fallback is exactly as strong as the pre-#1203 scheme, so%': '    # verifying during a rolling upgrade. Known residual until the shim is\n    # removed: this fallback is exactly as strong as the pre-#1203 scheme, so',
+              '            "bridgge_forward_invalid",': '            "bridge_forward_invalid",',
+              '        payload.model_dump(mode="json", exclude_none=True)\n   )': '        payload.model_dump(mode="json", exclude_none=True)\n    )',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'missing expected text: {old!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          uvx ruff check --fix app/modules/proxy/http_bridge_forwarding.py tests/unit/test_shared_instruction_cache_compat.py
+          uvx ruff format app/modules/proxy/http_bridge_forwarding.py tests/unit/test_shared_instruction_cache_compat.py
+          uvx ruff check app/modules/proxy/http_bridge_forwarding.py tests/unit/test_shared_instruction_cache_compat.py
+          uvx ruff format --check app/modules/proxy/http_bridge_forwarding.py tests/unit/test_shared_instruction_cache_compat.py
+          python -m py_compile app/modules/proxy/http_bridge_forwarding.py tests/unit/test_shared_instruction_cache_compat.py
+          rm .github/workflows/agent-repair.yml
+      - name: Commit repair
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/modules/proxy/http_bridge_forwarding.py tests/unit/test_shared_instruction_cache_compat.py .github/workflows/agent-repair.yml
+          git commit -m 'fix: repair bridge compatibility patch'
+          git push origin HEAD:agent/share-instruction-cache-prefixes

@@ -11,13 +11,27 @@ Guards three contracts:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 
 from app.core.config.settings import Settings
 from scripts.generate_settings_reference import OUTPUT_PATH, render_settings_reference
+
+
+def _isolated_settings(**overrides: Any) -> Settings:
+    """Build Settings from code defaults only.
+
+    Strips ``CODEX_LB_*`` from the process environment and disables env-file
+    loading, so a developer's local ``.env.local`` or exported variables can
+    never mask (or fake) a drift between ``.env.example`` and the code.
+    """
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_LB_")}
+    with mock.patch.dict(os.environ, clean, clear=True):
+        return Settings(_env_file=None, **overrides)
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +84,7 @@ def test_env_example_uncommented_values_match_code_defaults() -> None:
     Commented lines are exempt; today the file is fully commented out and
     copying it verbatim must change nothing (user-documentation spec).
     """
-    defaults = Settings()
+    defaults = _isolated_settings()
     for key, value in _uncommented_assignments(ENV_EXAMPLE_PATH.read_text(encoding="utf-8")):
         if key == "PORT":
             assert value == "2455", f".env.example sets PORT={value}, but the code default is 2455"
@@ -80,7 +94,7 @@ def test_env_example_uncommented_values_match_code_defaults() -> None:
         assert field_name in Settings.model_fields, f".env.example sets unknown setting {key}"
         # The raw env-file string is validated through the field's own
         # validators/coercion, exactly as pydantic-settings would apply it.
-        candidate = Settings(**cast("dict[str, Any]", {field_name: value}))
+        candidate = _isolated_settings(**cast("dict[str, Any]", {field_name: value}))
         assert getattr(candidate, field_name) == getattr(defaults, field_name), (
             f".env.example sets {key}={value}, which differs from the code default "
             f"{getattr(defaults, field_name)!r}; keep the line commented or fix the value"

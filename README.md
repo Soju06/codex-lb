@@ -255,6 +255,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/jamesx0416"><img src="https://avatars.githubusercontent.com/u/105842516?v=4?s=100" width="100px;" alt="James"/><br /><sub><b>James</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=jamesx0416" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=jamesx0416" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/mereyabdenbekuly-ctrl"><img src="https://avatars.githubusercontent.com/u/234955825?v=4?s=100" width="100px;" alt="SSY"/><br /><sub><b>SSY</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Documentation">📖</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/fozbek"><img src="https://avatars.githubusercontent.com/u/17993880?v=4?s=100" width="100px;" alt="Fatih Özbek"/><br /><sub><b>Fatih Özbek</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Tests">⚠️</a></td>
+    </tr>
   </tbody>
 </table>
 

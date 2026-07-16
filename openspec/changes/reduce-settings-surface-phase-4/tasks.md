@@ -20,6 +20,9 @@
       columns stay declared (deprecated, unwritten) for one release so old
       replicas keep inserting safely during rolling upgrades; the Alembic
       drop revision ships in the next release
+- [x] 1.3b Ship every `dashboards/*.json` in the Helm Grafana ConfigMap
+      (previously only `codex-lb.json`), so the updated TTFT dashboard
+      actually reaches chart operators
 - [x] 1.4 Add the three phase-4 env names to `_REMOVED_SETTINGS`
       (grouped and commented per phase, at the end of the tuple)
 - [x] 2.1 Convert the canary sampling/cohort unit tests into tests of the

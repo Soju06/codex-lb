@@ -424,16 +424,17 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
         if not expired_requests:
             return ()
-        await self._fail_pending_websocket_requests(
-            account=session.account,
-            account_id_value=session.account.id,
-            pending_requests=deque(expired_requests),
-            pending_lock=asyncio.Lock(),
-            error_code=error_code,
-            error_message=error_message,
-            api_key=None,
-            response_create_gate=session.response_create_gate,
-        )
+        for request_state in expired_requests:
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=deque([request_state]),
+                pending_lock=asyncio.Lock(),
+                error_code=error_code,
+                error_message=error_message,
+                api_key=request_state.api_key,
+                response_create_gate=session.response_create_gate,
+            )
         return expired_requests
 
     async def _process_http_bridge_upstream_text(

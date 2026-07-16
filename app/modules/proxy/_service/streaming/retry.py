@@ -701,6 +701,7 @@ class _StreamingRetryMixin:
                         )
                         return
             file_required_preferred_account = False
+            request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
             if preferred_account_id is None:
                 # ``input_file.file_id`` references must land on the account
                 # that registered the upload; otherwise upstream rejects the
@@ -1655,6 +1656,7 @@ class _StreamingRetryMixin:
                                         account.security_work_authorized
                                         or account.id == file_preferred_account_id
                                         or require_preferred_account
+                                        or request_contains_input_file_ids
                                         or attempt >= max_attempts - 1
                                     ):
                                         raise
@@ -1862,6 +1864,7 @@ class _StreamingRetryMixin:
                             account.security_work_authorized
                             or account.id == file_preferred_account_id
                             or require_preferred_account
+                            or request_contains_input_file_ids
                             or attempt >= max_attempts - 1
                         ):
                             event = response_failed_event(
@@ -2324,6 +2327,7 @@ class _StreamingRetryMixin:
                             not account.security_work_authorized
                             and account.id != file_preferred_account_id
                             and not require_preferred_account
+                            and not request_contains_input_file_ids
                             and attempt < max_attempts - 1
                         ):
                             await proxy._mark_security_lineage_requirement(

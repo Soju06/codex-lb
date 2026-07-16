@@ -24,7 +24,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
-from app.core.openai.requests import ResponsesCompactRequest
+from app.core.openai.requests import ResponsesCompactRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
@@ -655,6 +655,7 @@ class _CompactMixin:
         preferred_account_id = (
             turn_state_owner_account_id or previous_response_preferred_account_id or rewritten_file_account_id
         )
+        request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
         if preferred_account_id is None:
             preferred_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         try:
@@ -1377,6 +1378,7 @@ class _CompactMixin:
                             if (
                                 not account.security_work_authorized
                                 and account.id != preferred_account_id
+                                and not request_contains_input_file_ids
                                 and _account_attempt < _compact_max_account_attempts() - 1
                             ):
                                 await proxy._mark_security_lineage_requirement(

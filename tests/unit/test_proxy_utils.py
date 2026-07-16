@@ -13053,7 +13053,7 @@ async def test_stream_responses_missing_security_work_pool_surfaces_terminal_den
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_does_not_move_file_pinned_security_work_request(monkeypatch):
+async def test_stream_responses_does_not_migrate_file_scoped_security_lineage(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13077,7 +13077,7 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
-    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=regular_account.id))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     mark_security_lineage = AsyncMock()
     monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
 
@@ -13131,7 +13131,7 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
     assert event["response"]["error"]["code"] == "security_work_authorization_required"
     assert select_account.await_count == 1
     only_call = select_account.await_args_list[0]
-    assert only_call.kwargs["account_ids"] == {regular_account.id}
+    assert only_call.kwargs["account_ids"] is None
     assert only_call.kwargs["require_security_work_authorized"] is False
     mark_security_lineage.assert_not_awaited()
 
@@ -14357,6 +14357,115 @@ async def test_compact_responses_does_not_fallback_to_ordinary_pool_after_securi
         response=None,
         request_service_tier=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_does_not_migrate_file_scoped_security_lineage(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    regular_account = _make_account("acc_compact_security_file")
+    authorized_account = _make_account("acc_compact_security_file_authorized")
+    authorized_account.security_work_authorized = True
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(account=authorized_account, error_message=None),
+        ]
+    )
+    cyber_message = "This chat was flagged for possible cybersecurity risk."
+    mark_security_lineage = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        assert account_id == regular_account.chatgpt_account_id
+        raise proxy_module.ProxyResponseError(
+            400,
+            openai_error("invalid_request_error", cyber_message, error_type="invalid_request_error"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "check file ownership",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_compact_scoped"}],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact-file"})
+
+    assert exc_info.value.payload["error"]["code"] == "invalid_request_error"
+    assert select_account.await_count == 1
+    assert select_account.await_args_list[0].kwargs["require_security_work_authorized"] is False
+    mark_security_lineage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_startup_timeout_preserves_request_api_key_attribution(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = _make_api_key_data("bridge-startup-timeout-key")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_startup_timeout_api_key",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        upstream_sent_at=0.0,
+        awaiting_response_created=True,
+        transport="http",
+        api_key=api_key,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-startup-timeout-api-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_startup_timeout_api_key"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    expired = await service._fail_response_created_timeout_requests(
+        session,
+        request_ids=frozenset({request_state.request_id}),
+        timeout_seconds=0.0,
+        error_code="response_created_timeout",
+        error_message="Upstream did not create a response within the startup window",
+    )
+
+    assert expired == (request_state,)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["request_id"] == request_state.request_id
+    assert request_logs.calls[0]["api_key_id"] == api_key.id
+    assert request_logs.calls[0]["error_code"] == "response_created_timeout"
 
 
 @pytest.mark.asyncio

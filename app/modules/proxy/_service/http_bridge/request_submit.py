@@ -55,6 +55,7 @@ from app.core.utils.request_id import (
     reset_request_id,
     set_request_id,
 )
+from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -245,6 +246,23 @@ async def _send_http_bridge_request_text_with_archive_id(
             raise
     finally:
         reset_request_id(token)
+
+
+def _prepare_http_bridge_terminal_capacity_replay(request_state: _WebSocketRequestState) -> str | None:
+    request_text = request_state.request_text
+    if not isinstance(request_text, str) or not request_text:
+        return None
+    if request_state.response_id is None or request_state.replay_count >= 1:
+        return None
+    if request_state.upstream_model_output_seen:
+        return None
+    request_state.replay_count += 1
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    request_state.upstream_model_output_seen = False
+    _clear_websocket_request_error_overrides(request_state)
+    return request_text
 
 
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:

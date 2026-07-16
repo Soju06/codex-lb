@@ -44,7 +44,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT COALESCE(prewarm_status, 'unknown') AS status, COUNT(*) AS requests, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_first_token_ms) AS p50_ttft_ms, percentile_cont(0.9) WITHIN GROUP (ORDER BY latency_first_token_ms) AS p90_ttft_ms, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_first_token_ms) AS p95_ttft_ms, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50_total_ms, percentile_cont(0.9) WITHIN GROUP (ORDER BY latency_ms) AS p90_total_ms, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY status ORDER BY requests DESC"
+          "rawSql": "SELECT COALESCE(prewarm_status, 'unknown') AS prewarm, COUNT(*) AS requests, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_first_token_ms) AS p50_ttft_ms, percentile_cont(0.9) WITHIN GROUP (ORDER BY latency_first_token_ms) AS p90_ttft_ms, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_first_token_ms) AS p95_ttft_ms, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS p50_total_ms, percentile_cont(0.9) WITHIN GROUP (ORDER BY latency_ms) AS p90_total_ms, percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY 1 ORDER BY requests DESC"
         }
       ],
       "title": "Prewarm status (24h TTFT)",

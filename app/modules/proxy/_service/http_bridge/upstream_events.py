@@ -178,6 +178,44 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES = frozenset({"overloaded_error", "server_is_overloaded"})
+
+
+def _http_bridge_terminal_capacity_retry_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    has_other_pending_requests: bool,
+) -> str | None:
+    """Classify one output-free accepted overload that native Codex can replay."""
+    if request_state is None or request_state.enforce_openai_sdk_contract:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.last_downstream_sequence_number is not None:
+        return None
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return None
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return None
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return None
+    if request_state.response_event_count < 1:
+        return None
+    if request_state.event_queue is None:
+        return None
+    if not request_state.request_text or request_state.replay_count >= 1:
+        return None
+    if event_type not in {"error", "response.failed"}:
+        return None
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
+    if error_code not in _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES:
+        return None
+    return error_code
 
 
 def _archive_http_bridge_upstream_text(
@@ -670,6 +708,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
         )
+        terminal_capacity_retry_error_code = _http_bridge_terminal_capacity_retry_error_code(
+            status_request_state,
+            event_type=event_type,
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
         auth_error_code = _websocket_precreated_auth_error_code(
             status_request_state,
             event_type=event_type,
@@ -681,6 +725,14 @@ class _HTTPBridgeUpstreamEventsMixin:
             event_type=event_type,
             payload=payload,
         )
+        if terminal_capacity_retry_error_code is not None and status_request_state is not None:
+            retried = await self._retry_http_bridge_terminal_capacity_request(
+                session,
+                status_request_state,
+                error_code=terminal_capacity_retry_error_code,
+            )
+            if retried:
+                return
         if (
             auth_error_code is not None
             and not is_previous_response_not_found_event

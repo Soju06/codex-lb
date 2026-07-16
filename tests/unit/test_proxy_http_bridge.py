@@ -35,7 +35,9 @@ from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
+from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 
@@ -105,6 +107,234 @@ def test_forwarded_fork_keeps_authenticated_original_unanchored_state() -> None:
         True,
         True,
     )
+
+
+def _accepted_capacity_retry_state(**overrides: object) -> proxy_service._WebSocketRequestState:
+    values: dict[str, object] = {
+        "request_id": "req-accepted-capacity",
+        "model": "gpt-5.6-sol",
+        "service_tier": None,
+        "reasoning_effort": None,
+        "api_key_reservation": None,
+        "started_at": 1.0,
+        "transport": "http",
+        "enforce_openai_sdk_contract": False,
+        "request_text": json.dumps(
+            {
+                "type": "response.create",
+                "previous_response_id": "resp-parent",
+                "input": "continue",
+            }
+        ),
+        "previous_response_id": "resp-parent",
+        "response_id": "resp-capacity-failed",
+        "response_event_count": 2,
+        "event_queue": asyncio.Queue(),
+    }
+    values.update(overrides)
+    return proxy_service._WebSocketRequestState(**cast(Any, values))
+
+
+def _server_overloaded_event_payload() -> dict[str, object]:
+    return {
+        "type": "error",
+        "error": {
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+            "message": "Our servers are currently overloaded. Please try again later.",
+        },
+    }
+
+
+def test_terminal_capacity_retry_accepts_native_output_free_continuation() -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_terminal_capacity_retry_error_code(
+            _accepted_capacity_retry_state(),
+            event_type="error",
+            payload=cast(Any, _server_overloaded_event_payload()),
+            has_other_pending_requests=False,
+        )
+        == "server_is_overloaded"
+    )
+
+
+def test_terminal_capacity_retry_rejects_another_pending_request() -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_terminal_capacity_retry_error_code(
+            _accepted_capacity_retry_state(),
+            event_type="error",
+            payload=cast(Any, _server_overloaded_event_payload()),
+            has_other_pending_requests=True,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("unsafe_field", "unsafe_value"),
+    [
+        ("enforce_openai_sdk_contract", True),
+        ("upstream_model_output_seen", True),
+        ("downstream_visible", True),
+        ("replay_count", 1),
+        ("response_id", None),
+        ("awaiting_response_created", True),
+    ],
+)
+def test_terminal_capacity_retry_rejects_unsafe_lifecycle(
+    unsafe_field: str,
+    unsafe_value: object,
+) -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_terminal_capacity_retry_error_code(
+            _accepted_capacity_retry_state(**{unsafe_field: unsafe_value}),
+            event_type="error",
+            payload=cast(Any, _server_overloaded_event_payload()),
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+def test_response_event_tracking_distinguishes_lifecycle_from_model_output() -> None:
+    request_state = _accepted_capacity_retry_state(response_event_count=0)
+
+    proxy_service._record_response_event(request_state, "response.created")
+    proxy_service._record_response_event(request_state, "response.in_progress")
+
+    assert request_state.upstream_model_output_seen is False
+
+    proxy_service._record_response_event(request_state, "response.output_item.added")
+
+    assert request_state.upstream_model_output_seen is True
+
+
+@pytest.mark.asyncio
+async def test_detach_http_bridge_request_waits_for_lifecycle_reconnect_owner() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_capacity_retry_state()
+    session = _make_bridge_session(
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async with session.lifecycle_lock:
+        detach_task = asyncio.create_task(service._detach_http_bridge_request(session, request_state=request_state))
+        await asyncio.sleep(0)
+
+        assert request_state.event_queue is None
+        assert request_state.draining_until_terminal is False
+        assert detach_task.done() is False
+
+    assert await detach_task is True
+    assert request_state.draining_until_terminal is True
+    assert session.closed is True
+    session.upstream.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_capacity_retry_stops_after_downstream_detach_without_double_counting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    request_state = _accepted_capacity_retry_state()
+    other_request = _accepted_capacity_retry_state(
+        request_id="req-other",
+        response_id="resp-other",
+        request_text='{"type":"response.create","input":"other"}',
+        previous_response_id=None,
+    )
+
+    async def fake_acquire(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **kwargs: object,
+    ) -> None:
+        del kwargs
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    class _DetachDuringSleepAsyncio:
+        def __getattr__(self, name: str) -> object:
+            return getattr(asyncio, name)
+
+        async def sleep(self, delay: float) -> None:
+            assert delay == 0.25
+            request_state.draining_until_terminal = True
+            session.queued_request_count = max(0, session.queued_request_count - 1)
+            await proxy_service._release_websocket_response_create_gate(
+                request_state,
+                session.response_create_gate,
+            )
+            async with session.pending_lock:
+                session.pending_requests.append(other_request)
+                session.queued_request_count += 1
+
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", fake_acquire)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(http_bridge_request_submit_module, "backoff_seconds", lambda attempt: 0.25)
+    monkeypatch.setattr(http_bridge_request_submit_module, "asyncio", _DetachDuringSleepAsyncio())
+
+    retried = await service._retry_http_bridge_terminal_capacity_request(
+        session,
+        request_state,
+        error_code="server_is_overloaded",
+    )
+
+    assert retried is False
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [other_request]
+    assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_capacity_retry_does_not_reconnect_over_competing_pending_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    request_state = _accepted_capacity_retry_state()
+    competing_request = _accepted_capacity_retry_state(
+        request_id="req-competing",
+        response_id="resp-competing",
+        request_text='{"type":"response.create","input":"competing"}',
+        previous_response_id=None,
+    )
+
+    async def fake_acquire(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **kwargs: object,
+    ) -> None:
+        del kwargs
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+        async with session.pending_lock:
+            session.pending_requests.append(competing_request)
+            session.queued_request_count += 1
+
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", fake_acquire)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    retried = await service._retry_http_bridge_terminal_capacity_request(
+        session,
+        request_state,
+        error_code="server_is_overloaded",
+    )
+
+    assert retried is False
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [competing_request]
+    assert session.queued_request_count == 1
 
 
 @pytest.mark.asyncio

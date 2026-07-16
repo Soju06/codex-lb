@@ -498,119 +498,45 @@ async def test_durable_alias_fence_rejection_preserves_new_local_generation(
     assert service._http_bridge_previous_response_index[response_alias_key] == current_session.key
 
 
-def test_codex_prewarm_enabled_without_percent_preserves_full_treatment() -> None:
-    settings = _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True)
+def test_codex_prewarm_eligibility_is_enabled_flag_alone() -> None:
+    assert proxy_service._http_bridge_prewarm_enabled(
+        _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True)
+    )
+    assert not proxy_service._http_bridge_prewarm_enabled(_make_app_settings())
+
+
+@pytest.mark.asyncio
+async def test_maybe_prewarm_http_bridge_session_not_applicable_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
     state = proxy_service._WebSocketRequestState(
-        request_id="req-prewarm-sample",
+        request_id="req-prewarm-disabled",
         model="gpt-5.2",
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=1.0,
         request_text=json.dumps({"input": "x" * 50000}),
+        transport="http",
     )
     session = _make_bridge_session()
     session.codex_session = True
     session.last_used_at = -180.0
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(),
+    )
 
-    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
-        settings,
-        session=session,
+    await service._maybe_prewarm_http_bridge_session(
+        session,
         request_state=state,
         text_data=state.request_text or "{}",
     )
 
-    assert bucket == "treatment"
-    assert reason == "first_turn_50k_gap_2m"
-
-
-def test_codex_prewarm_legacy_mode_honors_api_key_denylist() -> None:
-    settings = _make_app_settings(
-        http_responses_session_bridge_codex_prewarm_enabled=True,
-        http_responses_session_bridge_codex_prewarm_deny_api_key_ids=["key-denied"],
-    )
-    state = proxy_service._WebSocketRequestState(
-        request_id="req-prewarm-denied",
-        model="gpt-5.2",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        api_key=_make_api_key(key_id="key-denied", assigned_account_ids=[]),
-        started_at=1.0,
-        request_text=json.dumps({"input": "x" * 50000}),
-    )
-    session = _make_bridge_session()
-    session.codex_session = True
-    session.last_used_at = -180.0
-
-    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
-        settings,
-        session=session,
-        request_state=state,
-        text_data=state.request_text or "{}",
-    )
-
-    assert bucket == "control"
-    assert reason == "first_turn_50k_gap_2m"
-
-
-def test_codex_prewarm_legacy_mode_honors_api_key_allowlist() -> None:
-    settings = _make_app_settings(
-        http_responses_session_bridge_codex_prewarm_enabled=True,
-        http_responses_session_bridge_codex_prewarm_allow_api_key_ids=["key-allowed"],
-    )
-    state = proxy_service._WebSocketRequestState(
-        request_id="req-prewarm-not-allowed",
-        model="gpt-5.2",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        api_key=_make_api_key(key_id="key-other", assigned_account_ids=[]),
-        started_at=1.0,
-        request_text=json.dumps({"input": "x" * 50000}),
-    )
-    session = _make_bridge_session()
-    session.codex_session = True
-    session.last_used_at = -180.0
-
-    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
-        settings,
-        session=session,
-        request_state=state,
-        text_data=state.request_text or "{}",
-    )
-
-    assert bucket == "control"
-    assert reason == "first_turn_50k_gap_2m"
-
-
-def test_codex_prewarm_percent_zero_records_canary_miss_for_eligible_request() -> None:
-    settings = _make_app_settings(
-        http_responses_session_bridge_codex_prewarm_enabled=True,
-        http_responses_session_bridge_codex_prewarm_canary_percent=0.0,
-    )
-    state = proxy_service._WebSocketRequestState(
-        request_id="req-prewarm-control",
-        model="gpt-5.2",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=1.0,
-        request_text=json.dumps({"input": "x" * 50000}),
-    )
-    session = _make_bridge_session()
-    session.codex_session = True
-    session.last_used_at = -180.0
-
-    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
-        settings,
-        session=session,
-        request_state=state,
-        text_data=state.request_text or "{}",
-    )
-
-    assert bucket == "control"
-    assert reason == "first_turn_50k_gap_2m"
+    assert state.prewarm_status == "not_applicable"
+    assert session.prewarmed is False
 
 
 @pytest.mark.asyncio

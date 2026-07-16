@@ -534,8 +534,6 @@ class _WebSocketRequestState:
     bridge_request_deadline: float | None = None
     prewarm_status: str | None = None
     prewarm_latency_ms: int | None = None
-    prewarm_canary_bucket: str | None = None
-    prewarm_eligible_reason: str | None = None
     session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
     archive_request_id: str | None = None

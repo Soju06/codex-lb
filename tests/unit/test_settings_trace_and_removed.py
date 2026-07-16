@@ -89,7 +89,7 @@ def test_warn_removed_settings_scans_env_files(tmp_path, monkeypatch, caplog):
 
 
 def test_removed_settings_tuple_covers_all_five_groups():
-    assert len(_REMOVED_SETTINGS) == 49
+    assert len(_REMOVED_SETTINGS) == 52
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
     assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
 
@@ -164,4 +164,33 @@ def test_phase_3_removed_settings_are_listed_and_ignored(monkeypatch):
     assert found == [
         "CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS",
         "CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT",
+    ]
+
+
+def test_phase_4_removed_settings_are_listed_and_ignored(monkeypatch):
+    phase_4_names = (
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS",
+    )
+    for name in phase_4_names:
+        assert name in _REMOVED_SETTINGS
+
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT", "25.0")
+    monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS", "key-a,key-b")
+    settings = Settings()
+    assert not hasattr(settings, "http_responses_session_bridge_codex_prewarm_canary_percent")
+    assert not hasattr(settings, "http_responses_session_bridge_codex_prewarm_allow_api_key_ids")
+    assert not hasattr(settings, "http_responses_session_bridge_codex_prewarm_deny_api_key_ids")
+    # The prewarm feature flag itself survives phase 4.
+    assert settings.http_responses_session_bridge_codex_prewarm_enabled is False
+    found = warn_removed_settings(
+        {
+            "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT": "25.0",
+            "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS": "key-a,key-b",
+        }
+    )
+    assert found == [
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
     ]

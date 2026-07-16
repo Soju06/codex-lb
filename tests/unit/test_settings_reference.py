@@ -25,13 +25,16 @@ from scripts.generate_settings_reference import OUTPUT_PATH, render_settings_ref
 def _isolated_settings(**overrides: Any) -> Settings:
     """Build Settings from code defaults only.
 
-    Strips ``CODEX_LB_*`` from the process environment and disables env-file
-    loading, so a developer's local ``.env.local`` or exported variables can
-    never mask (or fake) a drift between ``.env.example`` and the code.
+    Strips ``CODEX_LB_*`` and the bare ``PORT`` variable from the process
+    environment and disables env-file loading, so a developer's local
+    ``.env.local`` or exported variables can never mask (or fake) a drift
+    between ``.env.example`` and the code.
     """
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_LB_")}
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_LB_") and k != "PORT"}
     with mock.patch.dict(os.environ, clean, clear=True):
-        return Settings(_env_file=None, **overrides)
+        # ``_env_file`` is a documented pydantic-settings init kwarg that its
+        # type stubs do not expose; ty flags it as unknown.
+        return Settings(_env_file=None, **overrides)  # ty: ignore[unknown-argument]
 
 
 pytestmark = pytest.mark.unit

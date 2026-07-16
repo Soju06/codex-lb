@@ -306,4 +306,4 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)*
+*Specs: [user-documentation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)*

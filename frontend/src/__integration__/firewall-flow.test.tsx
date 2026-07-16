@@ -47,6 +47,9 @@ describe("firewall flow integration", () => {
     window.history.pushState({}, "", "/settings");
     renderWithProviders(<App />);
 
+    // Firewall lives in the collapsed-by-default Advanced group.
+    await user.click(await screen.findByRole("button", { name: "Show advanced settings" }));
+
     const firewallHeading = await screen.findByRole("heading", { name: "Firewall" });
     expect(firewallHeading).toBeInTheDocument();
 
@@ -67,5 +70,14 @@ describe("firewall flow integration", () => {
     await waitFor(() => {
       expect(screen.queryByText("127.0.0.1")).not.toBeInTheDocument();
     });
+  });
+
+  it("redirects the legacy /firewall route to settings", async () => {
+    window.history.pushState({}, "", "/firewall");
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/settings");
+    expect(await screen.findByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
   });
 });

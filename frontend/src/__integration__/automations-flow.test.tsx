@@ -22,12 +22,22 @@ describe("automations page integration", () => {
 		window.history.pushState({}, "", "/automations");
 	});
 
-	it("navigates to automations from the header navigation", async () => {
+	it("navigates to automations through the Advanced header menu", async () => {
 		const user = userEvent.setup({ delay: null });
 		window.history.pushState({}, "", "/dashboard");
 		renderWithProviders(<App />);
 
-		await user.click(await screen.findByRole("link", { name: "Automations" }));
+		const advancedTrigger = await screen.findByRole("button", { name: "Advanced" });
+		expect(screen.queryByRole("link", { name: "Automations" })).not.toBeInTheDocument();
+		await user.click(advancedTrigger);
+		await user.click(await screen.findByRole("menuitem", { name: "Automations" }));
+
+		expect(await screen.findByRole("heading", { name: "Automations" })).toBeInTheDocument();
+		expect(window.location.pathname).toBe("/automations");
+	});
+
+	it("renders automations from a direct /automations deep link", async () => {
+		renderWithProviders(<App />);
 
 		expect(await screen.findByRole("heading", { name: "Automations" })).toBeInTheDocument();
 		expect(window.location.pathname).toBe("/automations");

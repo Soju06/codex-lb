@@ -45,7 +45,7 @@ selectors instead of being persisted on account state.
 ## Scheduler
 
 The scheduler gates every tick on the enabled-by-default scheduler leader lease (see the `scheduler-coordination`
-capability), ticking every `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS` seconds and defaulting to five minutes. It can be
+capability), ticking every five minutes (a fixed application constant since issue #1340 phase 2). It can be
 disabled with `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED=false`.
 
 Each tick:

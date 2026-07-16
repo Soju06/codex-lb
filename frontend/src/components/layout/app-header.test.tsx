@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -8,7 +9,7 @@ import { AppHeader } from "@/components/layout/app-header";
 import { server } from "@/test/mocks/server";
 import { createAccountSummary } from "@/test/mocks/factories";
 
-function renderHeader() {
+function renderHeader(initialEntry = "/dashboard") {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
@@ -19,7 +20,7 @@ function renderHeader() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/dashboard"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <AppHeader onLogout={vi.fn()} />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -79,5 +80,36 @@ describe("AppHeader", () => {
 
     await screen.findByRole("link", { name: /Accounts/i });
     expect(screen.queryByText("99+")).not.toBeInTheDocument();
+  });
+
+  it("renders core destinations as top-level links and keeps Automations out of the pill bar", async () => {
+    renderHeader();
+
+    expect(await screen.findByRole("link", { name: /Dashboard/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Reports/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Accounts/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /APIs/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Settings/i })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Automations" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Advanced" })).toBeInTheDocument();
+  });
+
+  it("reveals Automations after opening the Advanced menu", async () => {
+    const user = userEvent.setup();
+    renderHeader();
+
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+
+    expect(await screen.findByRole("menuitem", { name: "Automations" })).toBeInTheDocument();
+  });
+
+  it("marks the Advanced trigger active only while an advanced route is current", () => {
+    renderHeader("/automations");
+    expect(screen.getByRole("button", { name: "Advanced" })).toHaveAttribute("data-active", "true");
+  });
+
+  it("keeps the Advanced trigger inactive on core routes", () => {
+    renderHeader("/dashboard");
+    expect(screen.getByRole("button", { name: "Advanced" })).toHaveAttribute("data-active", "false");
   });
 });

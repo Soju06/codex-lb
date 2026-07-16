@@ -14,6 +14,7 @@
     "automations": "Automations",
     "apis": "APIs",
     "settings": "Settings",
+    "advanced": "Advanced",
     "openMenu": "Open menu",
     "adminSignIn": "Admin Sign In",
     "showEmails": "Show Emails",
@@ -75,11 +76,17 @@
   "settings": {
     "page": {
       "title": "Settings",
-      "subtitle": "Configure routing, auth, API key management, and firewall.",
+      "subtitle": "Configure appearance, auth, and API keys. Power-user tuning lives in the Advanced settings group below.",
       "readOnlyNotice": "You are viewing the dashboard with read-only guest access. Admin controls are disabled.",
       "trustedHeaderNotice": "Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay available only as optional fallback login.",
       "disabledNotice": "Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions or external access control.",
       "savingLabel": "Saving settings..."
+    },
+    "advanced": {
+      "title": "Advanced settings",
+      "description": "Routing tuning, upstream proxies, model sources, firewall, quota planner, and sticky sessions.",
+      "show": "Show advanced settings",
+      "hide": "Hide advanced settings"
     },
     "guestAccess": {
       "title": "Guest access",
@@ -332,6 +339,26 @@
         "save": "Save lifetime",
         "invalid": "Enter a whole number of hours (1 or more). Decimals such as <0>1.5</0> are not accepted.",
         "longWarning": "Lifetimes over 30 days keep admin sessions valid for a long time. That may be acceptable on a personal laptop, but it increases the impact of a leaked browser profile or stolen cookie."
+      }
+    },
+    "retention": {
+      "title": "Data retention",
+      "description": "Automatically prune old request logs and usage history on a background schedule.",
+      "daysSuffix": "days",
+      "inheritPlaceholder": "inherit",
+      "inheritedHint": "Inherited: {{value}} days (environment default; 0 = disabled)",
+      "save": "Save retention",
+      "requestLogs": {
+        "label": "Request log retention",
+        "description": "Delete request logs older than this many days. 0 disables deletion; non-zero values need at least 30 days. Leave empty to inherit the environment value.",
+        "ariaLabel": "Request log retention days",
+        "invalid": "Request log retention must be 0 (disabled) or a whole number between 30 and 3650 days. Leave the field empty to inherit the environment value."
+      },
+      "usageHistory": {
+        "label": "Usage history retention",
+        "description": "Delete usage history older than this many days. 0 disables deletion; non-zero values need at least 45 days. Leave empty to inherit the environment value.",
+        "ariaLabel": "Usage history retention days",
+        "invalid": "Usage history retention must be 0 (disabled) or a whole number between 45 and 3650 days. Leave the field empty to inherit the environment value."
       }
     },
     "password": {

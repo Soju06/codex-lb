@@ -960,8 +960,18 @@ async def test_sticky_thread_below_threshold_does_not_reallocate():
 
 @pytest.mark.asyncio
 async def test_fresh_sticky_mapping_uses_normal_budget_gate():
+    # "a" is secondary-pressured (99% > secondary threshold 98%) but must stay
+    # eligible for a FRESH mapping: the secondary budget gate applies only to
+    # sticky reallocation, not to normal selection. Mark "b" as recently
+    # selected so round_robin's least-recently-selected primary key
+    # deterministically prefers "a" whenever "a" is eligible — the selection
+    # must not fall through to the final tie-break, which is decorrelated per
+    # replica (keyed on the host identity) and therefore host-dependent.
+    # If the secondary gate were wrongly applied here, "a" would be excluded
+    # and "b" selected, failing the assertion below.
     acc_a = _active("a", used_percent=10.0, secondary_used_percent=99.0)
     acc_b = _active("b", used_percent=20.0, secondary_used_percent=10.0)
+    acc_b.last_selected_at = time.time()
     repo = _make_sticky_repo(existing_account_id=None)
 
     result = await _invoke_stickiness(

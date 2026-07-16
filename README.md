@@ -19,19 +19,27 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 
 ## Features
 
-- **Account pooling** — load balance across multiple ChatGPT accounts
-- **Usage tracking** — per-account tokens, cost, 28-day trends
-- **API keys** — per-key rate limits by token, cost, window, model
-- **Dashboard auth** — password + optional TOTP
-- **OpenAI-compatible** — Codex CLI, OpenCode, any OpenAI client
-- **Auto model sync** — available models fetched from upstream
+<table>
+<tr>
+<td><b>Account Pooling</b><br>Load balance across multiple ChatGPT accounts</td>
+<td><b>Usage Tracking</b><br>Per-account tokens, cost, 28-day trends</td>
+<td><b>API Keys</b><br>Per-key rate limits by token, cost, window, model</td>
+</tr>
+<tr>
+<td><b>Dashboard Auth</b><br>Password + optional TOTP</td>
+<td><b>OpenAI-compatible</b><br>Codex CLI, OpenCode, any OpenAI client</td>
+<td><b>Auto Model Sync</b><br>Available models fetched from upstream</td>
+</tr>
+</table>
 
 ## Quick Start
 
 ```bash
 # Docker (recommended)
 docker volume create codex-lb-data
+docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
+  --network codex-lb-net \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
@@ -50,7 +58,7 @@ see [Getting started](https://soju06.github.io/codex-lb/getting-started/).
 Point any OpenAI-compatible client at codex-lb. For Codex CLI, `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.3-codex"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
@@ -62,12 +70,13 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
-| Client | Endpoint | Guide |
-|--------|----------|-------|
-| Codex CLI / IDE | `http://127.0.0.1:2455/backend-api/codex` | [Client setup → Codex CLI](https://soju06.github.io/codex-lb/client-setup/#codex-cli-ide-extension) |
-| OpenCode | `http://127.0.0.1:2455/v1` | [Client setup → OpenCode](https://soju06.github.io/codex-lb/client-setup/#opencode) |
-| OpenClaw | `http://127.0.0.1:2455/v1` | [Client setup → OpenClaw](https://soju06.github.io/codex-lb/client-setup/#openclaw) |
-| OpenAI Python SDK | `http://127.0.0.1:2455/v1` | [Client setup → Python SDK](https://soju06.github.io/codex-lb/client-setup/#openai-python-sdk) |
+| Logo | Client | Endpoint | Guide |
+|---|--------|----------|-------|
+| <img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="32" alt="OpenAI"> | **Codex CLI / IDE** | `http://127.0.0.1:2455/backend-api/codex` | [Client setup → Codex CLI](https://soju06.github.io/codex-lb/client-setup/#codex-cli-ide-extension) |
+| <img src="https://avatars.githubusercontent.com/u/66570915?s=200" width="32" alt="OpenCode (Anomaly)"> | **OpenCode** | `http://127.0.0.1:2455/v1` | [Client setup → OpenCode](https://soju06.github.io/codex-lb/client-setup/#opencode) |
+| <img src="https://avatars.githubusercontent.com/u/252820863?s=200" width="32" alt="OpenClaw"> | **OpenClaw** | `http://127.0.0.1:2455/v1` | [Client setup → OpenClaw](https://soju06.github.io/codex-lb/client-setup/#openclaw) |
+| <img src="https://avatars.githubusercontent.com/u/134168893?s=200" width="32" alt="Hermes Agent (Nous Research)"> | **Hermes Agent** | `http://127.0.0.1:2455/v1` | [Client setup → Hermes Agent](https://soju06.github.io/codex-lb/client-setup/#hermes-agent) |
+| <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="32" alt="Python"> | **OpenAI Python SDK** | `http://127.0.0.1:2455/v1` | [Client setup → Python SDK](https://soju06.github.io/codex-lb/client-setup/#openai-python-sdk) |
 
 Remote clients need an [API key](https://soju06.github.io/codex-lb/api-keys/) created from the dashboard.
 
@@ -244,6 +253,12 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/dmdfami"><img src="https://avatars.githubusercontent.com/u/222630288?v=4?s=100" width="100px;" alt="DOMANHDUC"/><br /><sub><b>DOMANHDUC</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=dmdfami" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/HeroOfOdyssey"><img src="https://avatars.githubusercontent.com/u/144704328?v=4?s=100" width="100px;" alt="Kwan Perry"/><br /><sub><b>Kwan Perry</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=HeroOfOdyssey" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/jamesx0416"><img src="https://avatars.githubusercontent.com/u/105842516?v=4?s=100" width="100px;" alt="James"/><br /><sub><b>James</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=jamesx0416" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=jamesx0416" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mereyabdenbekuly-ctrl"><img src="https://avatars.githubusercontent.com/u/234955825?v=4?s=100" width="100px;" alt="SSY"/><br /><sub><b>SSY</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Documentation">📖</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/fozbek"><img src="https://avatars.githubusercontent.com/u/17993880?v=4?s=100" width="100px;" alt="Fatih Özbek"/><br /><sub><b>Fatih Özbek</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ShiroKSH"><img src="https://avatars.githubusercontent.com/u/218489957?v=4?s=100" width="100px;" alt="Kushida"/><br /><sub><b>Kushida</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ShiroKSH" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ShiroKSH" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aididhaiqal"><img src="https://avatars.githubusercontent.com/u/10329190?v=4?s=100" width="100px;" alt="Aidid Haiqal"/><br /><sub><b>Aidid Haiqal</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aididhaiqal" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aididhaiqal" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

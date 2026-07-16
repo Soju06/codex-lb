@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 import app.core.retention.scheduler as retention_scheduler
+from app.core.retention.job import EffectiveRetention
 from app.core.retention.scheduler import DataRetentionScheduler
 
 pytestmark = pytest.mark.unit
@@ -34,31 +34,59 @@ class _GateLeader:
         raise AssertionError("retention scheduler must gate via run_if_leader, not try_acquire")
 
 
-def test_build_data_retention_scheduler_disabled_by_default(monkeypatch) -> None:
-    settings = SimpleNamespace(request_log_retention_days=0, usage_history_retention_days=0)
-    monkeypatch.setattr(retention_scheduler, "get_settings", lambda: settings)
+def _set_effective_retention(monkeypatch, *, request_log: int = 0, usage_history: int = 0) -> None:
+    async def _resolve() -> EffectiveRetention:
+        return EffectiveRetention(request_log_days=request_log, usage_history_days=usage_history)
 
+    monkeypatch.setattr(retention_scheduler, "get_effective_retention", _resolve)
+
+
+def test_build_data_retention_scheduler_uses_hourly_interval() -> None:
     scheduler = retention_scheduler.build_data_retention_scheduler()
-
-    assert scheduler.enabled is False
     assert scheduler.interval_seconds == retention_scheduler.RETENTION_INTERVAL_SECONDS
 
 
-def test_build_data_retention_scheduler_enabled_when_any_retention_set(monkeypatch) -> None:
-    settings = SimpleNamespace(request_log_retention_days=0, usage_history_retention_days=45)
-    monkeypatch.setattr(retention_scheduler, "get_settings", lambda: settings)
+@pytest.mark.asyncio
+async def test_prune_once_skips_leader_election_when_retention_disabled(monkeypatch) -> None:
+    """A disabled tick returns before leader election: retention is a runtime
+    setting, so the always-on tick must stay cheap while it is off."""
+    leader = _GateLeader(leader=True)
+    monkeypatch.setattr(retention_scheduler, "_get_leader_election", lambda: leader)
+    _set_effective_retention(monkeypatch, request_log=0, usage_history=0)
+    prune = AsyncMock()
+    monkeypatch.setattr(retention_scheduler, "run_retention_pass", prune)
 
-    assert retention_scheduler.build_data_retention_scheduler().enabled is True
+    await DataRetentionScheduler(interval_seconds=1)._prune_once()
+
+    prune.assert_not_called()
+    assert leader.run_if_leader_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_prune_once_runs_when_any_effective_retention_set(monkeypatch) -> None:
+    """Each tick re-resolves the effective retention, so a dashboard change
+    enables pruning without a restart."""
+    leader = _GateLeader(leader=True)
+    monkeypatch.setattr(retention_scheduler, "_get_leader_election", lambda: leader)
+    _set_effective_retention(monkeypatch, usage_history=45)
+    prune = AsyncMock()
+    monkeypatch.setattr(retention_scheduler, "run_retention_pass", prune)
+
+    await DataRetentionScheduler(interval_seconds=1)._prune_once()
+
+    prune.assert_awaited_once()
+    assert leader.run_if_leader_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_prune_once_skips_when_not_leader(monkeypatch) -> None:
     leader = _GateLeader(leader=False)
     monkeypatch.setattr(retention_scheduler, "_get_leader_election", lambda: leader)
+    _set_effective_retention(monkeypatch, request_log=30)
     prune = AsyncMock()
     monkeypatch.setattr(retention_scheduler, "run_retention_pass", prune)
 
-    await DataRetentionScheduler(interval_seconds=1, enabled=True)._prune_once()
+    await DataRetentionScheduler(interval_seconds=1)._prune_once()
 
     prune.assert_not_called()
     assert leader.run_if_leader_calls == 1
@@ -74,17 +102,36 @@ async def test_prune_once_gates_via_run_if_leader_heartbeat(monkeypatch) -> None
     """
     leader = _GateLeader(leader=True)
     monkeypatch.setattr(retention_scheduler, "_get_leader_election", lambda: leader)
+    _set_effective_retention(monkeypatch, request_log=30)
     prune = AsyncMock(side_effect=RuntimeError("db down"))
     monkeypatch.setattr(retention_scheduler, "run_retention_pass", prune)
 
-    await DataRetentionScheduler(interval_seconds=1, enabled=True)._prune_once()
+    await DataRetentionScheduler(interval_seconds=1)._prune_once()
 
     prune.assert_awaited_once()
     assert leader.run_if_leader_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_start_returns_immediately_when_disabled() -> None:
-    scheduler = DataRetentionScheduler(interval_seconds=1, enabled=False)
-    await scheduler.start()
-    assert scheduler._task is None
+async def test_prune_once_survives_settings_resolution_failure(monkeypatch) -> None:
+    """A settings read failure (e.g. DB blip) must not kill the tick loop."""
+    leader = _GateLeader(leader=True)
+    monkeypatch.setattr(retention_scheduler, "_get_leader_election", lambda: leader)
+
+    async def _boom() -> EffectiveRetention:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(retention_scheduler, "get_effective_retention", _boom)
+    prune = AsyncMock()
+    monkeypatch.setattr(retention_scheduler, "run_retention_pass", prune)
+
+    await DataRetentionScheduler(interval_seconds=1)._prune_once()
+
+    prune.assert_not_called()
+    assert leader.run_if_leader_calls == 0
+
+
+def test_effective_retention_enabled_property() -> None:
+    assert EffectiveRetention(request_log_days=0, usage_history_days=0).enabled is False
+    assert EffectiveRetention(request_log_days=30, usage_history_days=0).enabled is True
+    assert EffectiveRetention(request_log_days=0, usage_history_days=45).enabled is True

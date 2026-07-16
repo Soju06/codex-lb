@@ -20,7 +20,6 @@ import pytest
 from sqlalchemy import select
 
 from app.core.auth.refresh import RefreshError, TokenRefreshResult
-from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountRefreshClaim, AccountStatus, StickySession, StickySessionKind
@@ -218,9 +217,8 @@ async def test_unexpired_foreign_claim_times_out_transient_and_is_not_cached(db_
     """Bounded wait: with a live foreign claim the loser must fail with a
     transient (non-permanent) error, never call upstream, never touch account
     status, and the singleflight must not cache the failure as permanent."""
-    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS", "0.05")
-    get_settings.cache_clear()
+    monkeypatch.setattr(auth_manager_module, "_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(auth_manager_module, "_TOKEN_REFRESH_CLAIM_POLL_SECONDS", 0.05)
 
     account_id = "acc_claim_blocked"
     await _create_account(account_id)
@@ -419,11 +417,10 @@ async def test_claim_poll_sleep_capped_to_remaining_caller_budget(db_setup, monk
         push_token_refresh_timeout_override,
     )
 
-    # Configured cap and poll interval both far exceed the caller budget so the
+    # Claim-wait cap and poll interval both far exceed the caller budget so the
     # only thing that can bound the wait is the per-iteration budget cap.
-    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", "5.0")
-    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS", "3.0")
-    get_settings.cache_clear()
+    monkeypatch.setattr(auth_manager_module, "_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", 5.0)
+    monkeypatch.setattr(auth_manager_module, "_TOKEN_REFRESH_CLAIM_POLL_SECONDS", 3.0)
 
     account_id = "acc_claim_poll_budget_cap"
     await _create_account(account_id)
@@ -1070,9 +1067,8 @@ async def test_proxy_401_with_foreign_claim_fails_over_without_reauth_write(asyn
     import app.modules.proxy.service as proxy_module
     from app.modules.accounts.refresh_claims import set_refresh_claim_coordinator
 
-    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS", "0.05")
-    get_settings.cache_clear()
+    monkeypatch.setattr(auth_manager_module, "_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(auth_manager_module, "_TOKEN_REFRESH_CLAIM_POLL_SECONDS", 0.05)
     set_refresh_claim_coordinator(RefreshClaimCoordinator(claimant_id="this-replica"))
 
     for raw_account_id, email in (

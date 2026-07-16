@@ -18,12 +18,9 @@ def test_settings_multi_replica_defaults():
     assert settings.leader_election_ttl_seconds == 60
     assert settings.auth_guardian_enabled is False
     assert settings.circuit_breaker_enabled is False
-    assert settings.circuit_breaker_failure_threshold == 5
-    assert settings.circuit_breaker_recovery_timeout_seconds == 60
     assert settings.backpressure_max_concurrent_requests == 0
-    assert settings.bulkhead_proxy_http_limit == settings.bulkhead_proxy_limit
-    assert settings.bulkhead_proxy_websocket_limit == settings.bulkhead_proxy_limit
-    assert settings.bulkhead_proxy_compact_limit == 16
+    assert settings.bulkhead_proxy_limit == 512
+    assert settings.bulkhead_dashboard_limit == 50
     assert settings.proxy_token_refresh_limit == 64
     assert settings.proxy_upstream_websocket_connect_limit == 128
     assert settings.proxy_response_create_limit == 256
@@ -114,16 +111,15 @@ def test_settings_circuit_breaker_enabled_from_env(monkeypatch):
     assert settings.circuit_breaker_enabled is True
 
 
-def test_settings_circuit_breaker_failure_threshold_from_env(monkeypatch):
+def test_settings_circuit_breaker_tuning_env_overrides_are_removed(monkeypatch):
+    # Failure threshold and recovery timeout became fixed constants in
+    # app/core/resilience/circuit_breaker.py (issue #1340 phase 2); the env
+    # vars are ignored and the fields no longer exist.
     monkeypatch.setenv("CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "10")
-    settings = Settings()
-    assert settings.circuit_breaker_failure_threshold == 10
-
-
-def test_settings_circuit_breaker_recovery_timeout_from_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS", "120")
     settings = Settings()
-    assert settings.circuit_breaker_recovery_timeout_seconds == 120
+    assert not hasattr(settings, "circuit_breaker_failure_threshold")
+    assert not hasattr(settings, "circuit_breaker_recovery_timeout_seconds")
 
 
 def test_settings_backpressure_max_concurrent_requests_from_env(monkeypatch):
@@ -132,24 +128,18 @@ def test_settings_backpressure_max_concurrent_requests_from_env(monkeypatch):
     assert settings.backpressure_max_concurrent_requests == 50
 
 
-def test_settings_split_bulkhead_limits_from_env(monkeypatch):
+def test_settings_split_bulkhead_env_overrides_are_removed(monkeypatch):
+    # Per-class bulkhead overrides were removed (issue #1340); the env vars
+    # are ignored and the per-class limits always derive from
+    # bulkhead_proxy_limit inside BulkheadSemaphore.
     monkeypatch.setenv("CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT", "40")
     monkeypatch.setenv("CODEX_LB_BULKHEAD_PROXY_WEBSOCKET_LIMIT", "25")
     monkeypatch.setenv("CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT", "8")
     settings = Settings()
-    assert settings.bulkhead_proxy_http_limit == 40
-    assert settings.bulkhead_proxy_websocket_limit == 25
-    assert settings.bulkhead_proxy_compact_limit == 8
-
-
-def test_settings_split_bulkhead_limits_allow_explicit_zero(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_BULKHEAD_PROXY_HTTP_LIMIT", "0")
-    monkeypatch.setenv("CODEX_LB_BULKHEAD_PROXY_WEBSOCKET_LIMIT", "0")
-    monkeypatch.setenv("CODEX_LB_BULKHEAD_PROXY_COMPACT_LIMIT", "0")
-    settings = Settings()
-    assert settings.bulkhead_proxy_http_limit == 0
-    assert settings.bulkhead_proxy_websocket_limit == 0
-    assert settings.bulkhead_proxy_compact_limit == 0
+    assert not hasattr(settings, "bulkhead_proxy_http_limit")
+    assert not hasattr(settings, "bulkhead_proxy_websocket_limit")
+    assert not hasattr(settings, "bulkhead_proxy_compact_limit")
+    assert settings.bulkhead_proxy_limit == 512
 
 
 def test_settings_work_admission_limits_from_env(monkeypatch):

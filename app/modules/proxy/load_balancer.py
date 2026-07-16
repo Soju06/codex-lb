@@ -2232,12 +2232,8 @@ def _state_from_account(
             now=time.time(),
             drain_entered_at=runtime.drain_entered_at,
             probe_success_streak=runtime.probe_success_streak,
-            drain_primary_threshold_pct=getattr(settings, "drain_primary_threshold_pct", 85.0),
-            drain_secondary_threshold_pct=getattr(settings, "drain_secondary_threshold_pct", 90.0),
-            drain_error_window_seconds=getattr(settings, "drain_error_window_seconds", 60.0),
-            drain_error_count_threshold=getattr(settings, "drain_error_count_threshold", 2),
-            probe_quiet_seconds=getattr(settings, "probe_quiet_seconds", 60.0),
-            probe_success_streak_required=getattr(settings, "probe_success_streak_required", 3),
+            # Drain/probe thresholds are the fixed constants in
+            # ``app/core/balancer/logic.py`` (evaluate_health_tier defaults).
         )
         if new_tier == HEALTH_TIER_DRAINING and runtime.health_tier != HEALTH_TIER_DRAINING:
             runtime.drain_entered_at = time.time()

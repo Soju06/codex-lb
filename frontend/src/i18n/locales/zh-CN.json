@@ -14,6 +14,7 @@
     "automations": "自动化",
     "apis": "API",
     "settings": "设置",
+    "advanced": "高级",
     "openMenu": "打开菜单",
     "adminSignIn": "管理员登录",
     "showEmails": "显示邮箱",
@@ -75,11 +76,17 @@
   "settings": {
     "page": {
       "title": "设置",
-      "subtitle": "配置路由、鉴权、API Key 管理与防火墙。",
+      "subtitle": "配置外观、鉴权与 API Key。高级调优功能位于下方的高级设置分组中。",
       "readOnlyNotice": "你当前以只读访客身份查看仪表盘。管理员控制项已禁用。",
       "trustedHeaderNotice": "仪表盘访问由可信反向代理头部鉴权。密码与 TOTP 仅作为可选的回退登录方式保留。",
       "disabledNotice": "仪表盘鉴权已被配置完全跳过。请仅在网络受限或外部已有访问控制的场景下使用此模式。",
       "savingLabel": "保存设置中..."
+    },
+    "advanced": {
+      "title": "高级设置",
+      "description": "路由调优、上游代理、模型源、防火墙、配额规划器和粘性会话。",
+      "show": "显示高级设置",
+      "hide": "隐藏高级设置"
     },
     "guestAccess": {
       "title": "访客访问",
@@ -332,6 +339,26 @@
         "save": "保存有效期",
         "invalid": "请输入整数小时数（1 或更大）。不接受 <0>1.5</0> 这类小数。",
         "longWarning": "超过 30 天的会话有效期会让管理员会话长期可用。这在个人电脑上可能可以接受，但会放大浏览器配置文件泄露或 cookie 被盗的影响。"
+      }
+    },
+    "retention": {
+      "title": "数据保留",
+      "description": "按后台计划自动清理过期的请求日志和用量历史。",
+      "daysSuffix": "天",
+      "inheritPlaceholder": "继承",
+      "inheritedHint": "继承值：{{value}} 天（来自环境默认；0 表示禁用）",
+      "save": "保存保留策略",
+      "requestLogs": {
+        "label": "请求日志保留",
+        "description": "删除超过该天数的请求日志。0 表示禁用删除；非零值至少为 30 天。留空则继承环境变量的值。",
+        "ariaLabel": "请求日志保留天数",
+        "invalid": "请求日志保留必须为 0（禁用）或 30 到 3650 之间的整数天数。留空可继承环境变量的值。"
+      },
+      "usageHistory": {
+        "label": "用量历史保留",
+        "description": "删除超过该天数的用量历史。0 表示禁用删除；非零值至少为 45 天。留空则继承环境变量的值。",
+        "ariaLabel": "用量历史保留天数",
+        "invalid": "用量历史保留必须为 0（禁用）或 45 到 3650 之间的整数天数。留空可继承环境变量的值。"
       }
     },
     "password": {

@@ -66,8 +66,8 @@ def _maybe_log_proxy_request_shape(
     sticky_key_source: str | None = None,
     prompt_cache_key_set: bool | None = None,
 ) -> None:
-    settings = _service_get_settings()
-    if not settings.log_proxy_request_shape:
+    trace_channels = _service_get_settings().trace_channels
+    if "shape" not in trace_channels:
         return
 
     request_id = get_request_id()
@@ -75,7 +75,7 @@ def _maybe_log_proxy_request_shape(
     prompt_cache_key_hash = _hash_identifier(prompt_cache_key) if isinstance(prompt_cache_key, str) else None
     prompt_cache_key_raw = (
         _truncate_identifier(prompt_cache_key)
-        if settings.log_proxy_request_shape_raw_cache_key and isinstance(prompt_cache_key, str)
+        if "shape_raw_cache_key" in trace_channels and isinstance(prompt_cache_key, str)
         else None
     )
 
@@ -116,8 +116,7 @@ def _maybe_log_proxy_request_payload(
     payload: ResponsesRequest | ResponsesCompactRequest,
     headers: Mapping[str, str],
 ) -> None:
-    settings = _service_get_settings()
-    if not settings.log_proxy_request_payload:
+    if "payload" not in _service_get_settings().trace_channels:
         return
 
     request_id = get_request_id()
@@ -143,8 +142,7 @@ def _maybe_log_proxy_service_tier_trace(
     requested_service_tier: str | None,
     actual_service_tier: str | None,
 ) -> None:
-    settings = _service_get_settings()
-    if not settings.log_proxy_service_tier_trace:
+    if "service_tier" not in _service_get_settings().trace_channels:
         return
 
     logger.warning(

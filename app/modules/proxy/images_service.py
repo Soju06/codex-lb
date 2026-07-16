@@ -306,7 +306,6 @@ def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> V1Image
     """Apply the cross-field validation matrix and return the payload with
     ``model`` populated to the configured default when the client omitted it.
     """
-    settings = get_settings()
     resolved_model = resolve_public_image_model(payload.model)
     # Forward ``payload.input_fidelity`` so the validator rejects it on the
     # generations path (it is an edit-only parameter). Without this the
@@ -324,7 +323,6 @@ def validate_generations_payload(payload: V1ImagesGenerationsRequest) -> V1Image
         n=payload.n,
         partial_images=payload.partial_images,
         output_compression=payload.output_compression,
-        images_max_partial_images=settings.images_max_partial_images,
     )
     if payload.model != resolved_model:
         # Pydantic models are immutable by default; build a copy with the
@@ -338,7 +336,6 @@ def validate_edits_payload(payload: V1ImagesEditsForm) -> V1ImagesEditsForm:
     """Apply the cross-field validation matrix and return the payload with
     ``model`` populated to the configured default when the client omitted it.
     """
-    settings = get_settings()
     resolved_model = resolve_public_image_model(payload.model)
     validate_image_request_parameters(
         model=resolved_model,
@@ -352,7 +349,6 @@ def validate_edits_payload(payload: V1ImagesEditsForm) -> V1ImagesEditsForm:
         n=payload.n,
         partial_images=payload.partial_images,
         output_compression=payload.output_compression,
-        images_max_partial_images=settings.images_max_partial_images,
     )
     if payload.model != resolved_model:
         return payload.model_copy(update={"model": resolved_model})

@@ -25,7 +25,13 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.http import lease_http_session
-from app.core.config.settings import get_settings
+from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE, get_settings
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+    is_pre_dispatch_connection_failure,
+    is_proxy_endpoint_failure,
+    process_network_error_code,
+)
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
@@ -62,6 +68,9 @@ class RefreshError(Exception):
         is_permanent: bool,
         *,
         transport_error: bool = False,
+        transport_error_code: str | None = None,
+        retryable_same_contract: bool = False,
+        failed_session: aiohttp.ClientSession | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -69,6 +78,9 @@ class RefreshError(Exception):
         self.message = message
         self.is_permanent = is_permanent
         self.transport_error = transport_error
+        self.transport_error_code = transport_error_code
+        self.retryable_same_contract = retryable_same_contract
+        self.failed_session = failed_session
         self.upstream_proxy_fail_closed_reason = upstream_proxy_fail_closed_reason
 
 
@@ -199,12 +211,12 @@ async def refresh_access_token(
     allow_direct_egress: bool = False,
 ) -> TokenRefreshResult:
     settings = get_settings()
-    url = f"{settings.auth_base_url.rstrip('/')}/oauth/token"
+    url = f"{AUTH_BASE_URL}/oauth/token"
     payload = {
         "grant_type": "refresh_token",
-        "client_id": settings.oauth_client_id,
+        "client_id": OAUTH_CLIENT_ID,
         "refresh_token": refresh_token,
-        "scope": settings.oauth_scope,
+        "scope": OAUTH_SCOPE,
     }
     timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
 
@@ -217,6 +229,7 @@ async def refresh_access_token(
         allow_direct_egress=allow_direct_egress,
         operation="token refresh",
     )
+    failed_session: aiohttp.ClientSession | None = None
     try:
         if route is not None:
             owns_codex_client = codex_client is None
@@ -241,6 +254,7 @@ async def refresh_access_token(
                     await active_codex_client.close()
         else:
             async with lease_http_session(session) as client_session:
+                failed_session = client_session
                 async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
                     data = await _safe_json(resp)
                     payload_data = _validate_token_payload(data)
@@ -255,11 +269,33 @@ async def refresh_access_token(
         raise
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError, CodexTransportError) as exc:
         message = str(exc) or exc.__class__.__name__
+        transport_error_code = (
+            exc.error_code
+            if isinstance(exc, CodexTransportError) and exc.error_code is not None
+            else process_network_error_code(
+                exc,
+                fallback="transport_error",
+                include_permanent_dns=route is None and not is_proxy_endpoint_failure(exc),
+            )
+        )
+        retryable_same_contract = (
+            exc.retryable_same_contract
+            if isinstance(exc, CodexTransportError)
+            else is_pre_dispatch_connection_failure(exc)
+        )
         raise RefreshError(
             "transport_error",
             f"Transport error during token refresh: {message}",
             False,
             transport_error=True,
+            transport_error_code=(
+                transport_error_code if transport_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+            ),
+            # A rotating refresh token may already be consumed once response
+            # headers/body reads begin. Only connector-proven pre-dispatch
+            # failures can retry the same refresh contract.
+            retryable_same_contract=retryable_same_contract,
+            failed_session=failed_session if route is None else None,
         ) from exc
 
     if not payload_data.access_token or not payload_data.refresh_token or not payload_data.id_token:

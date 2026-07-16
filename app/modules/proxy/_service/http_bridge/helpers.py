@@ -1991,6 +1991,22 @@ def _http_bridge_request_budget_seconds(settings: object) -> float:
     )
 
 
+def _http_bridge_admission_timeout_seconds(
+    request_state: _WebSocketRequestState,
+    admission_timeout_seconds: float,
+    settings: object,
+) -> float:
+    # Bridged requests may retry response-create gate acquisition within one
+    # bridge request budget, so every wait must be clamped to the remaining
+    # time. Re-prepared retry states reset started_at but deliberately retain
+    # the original deadline; using started_at alone would extend the budget.
+    deadline = request_state.bridge_request_deadline
+    if deadline is None:
+        deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
+    remaining_budget_seconds = deadline - time.monotonic()
+    return max(0.0, min(admission_timeout_seconds, remaining_budget_seconds))
+
+
 def _http_bridge_owner_check_required(
     key: _HTTPBridgeSessionKey,
     *,

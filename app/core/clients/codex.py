@@ -8,22 +8,38 @@ import aiohttp
 from aiohttp_socks import ProxyConnector
 from python_socks import ProxyType
 
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+    is_pre_dispatch_connection_failure,
+    is_process_network_failure,
+)
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 _RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
 
 
 class CodexTransportError(RuntimeError):
-    """Sanitized upstream transport failure.
+    """Credential-safe routed transport failure.
 
-    Transport libraries can include proxy URLs in exception strings. Proxy URLs
-    may embed credentials, so callers should surface this sanitized exception
-    instead of the original transport message.
+    ``retryable_same_contract`` is provenance, not a synonym for transient:
+    callers may replay only when the failing layer proved dispatch never
+    happened.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        retryable_same_contract: bool = False,
+        failure_phase: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
+        self.retryable_same_contract = retryable_same_contract
+        self.failure_phase = failure_phase
 
 
 def require_route_or_direct_egress_opt_in(
@@ -169,13 +185,43 @@ class CodexClient:
                         **kwargs,
                     )
                 else:
-                    response = await self._session.request(method, url, proxy=endpoint.proxy_url, **kwargs)
-                if buffer_response and not endpoint.scheme.startswith("socks"):
-                    response = await _buffer_response(response)
+                    try:
+                        response = await self._session.request(method, url, proxy=endpoint.proxy_url, **kwargs)
+                    except Exception as exc:
+                        raise _transport_error(
+                            "request",
+                            endpoint.id,
+                            exc,
+                            failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
+                            retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+                        ) from None
+                    if buffer_response:
+                        try:
+                            response = await _buffer_response(response)
+                        except Exception as exc:
+                            # Headers prove the POST reached the response phase;
+                            # a failed buffered read is neutral when classified
+                            # as host-network loss, but it is never replay-safe.
+                            raise _transport_error(
+                                "response body",
+                                endpoint.id,
+                                exc,
+                                failure_phase="body_read",
+                                retryable_same_contract=False,
+                            ) from None
                 return CodexRequestResult(response, candidate, index > 0)
+            except CodexTransportError:
+                if index == len(endpoints) - 1 or not allow_fallback:
+                    raise
             except Exception as exc:
                 if index == len(endpoints) - 1 or not allow_fallback:
-                    raise _transport_error("request", endpoint.id, exc) from None
+                    raise _transport_error(
+                        "request",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
+                        retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+                    ) from None
         raise RuntimeError("unreachable Codex client fallback state")
 
     async def ws_connect(self, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> Any:
@@ -219,7 +265,18 @@ class CodexClient:
                 if context is not None and hasattr(context, "__aexit__"):
                     await context.__aexit__(None, None, None)
                 if index == len(endpoints) - 1:
-                    raise _transport_error("websocket", endpoint.id, exc) from None
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        # No response.create frame can be delivered before the
+                        # websocket open returns to its caller.
+                        retryable_same_contract=is_process_network_failure(
+                            exc,
+                            include_permanent_dns=False,
+                        ),
+                    ) from None
         raise RuntimeError("unreachable Codex client websocket fallback state")
 
     async def close(self) -> None:
@@ -255,9 +312,27 @@ async def _request_via_socks_proxy(
         trust_env=False,
     )
     try:
-        response = await session.request(method, url, **kwargs)
+        try:
+            response = await session.request(method, url, **kwargs)
+        except Exception as exc:
+            raise _transport_error(
+                "request",
+                endpoint.id,
+                exc,
+                failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
+                retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+            ) from None
         if buffer_response:
-            return await _buffer_response(response)
+            try:
+                return await _buffer_response(response)
+            except Exception as exc:
+                raise _transport_error(
+                    "response body",
+                    endpoint.id,
+                    exc,
+                    failure_phase="body_read",
+                    retryable_same_contract=False,
+                ) from None
         return _SessionOwnedResponse(response, session)
     except Exception:
         await session.close()
@@ -380,10 +455,25 @@ def _is_idempotent_method(method: str) -> bool:
     return method.upper() in {"GET", "HEAD", "OPTIONS", "TRACE"}
 
 
-def _transport_error(operation: str, endpoint_id: str, exc: Exception) -> CodexTransportError:
+def _transport_error(
+    operation: str,
+    endpoint_id: str,
+    exc: Exception,
+    *,
+    failure_phase: str,
+    retryable_same_contract: bool,
+) -> CodexTransportError:
+    process_network_failure = is_process_network_failure(exc, include_permanent_dns=False)
     return CodexTransportError(
         codex_transport_error_message(operation, endpoint_id, exc),
         status_code=_transport_error_status_code(exc),
+        # A missing proxy hostname is endpoint configuration, not evidence
+        # that the host lost DNS. Transient DNS and local route loss remain
+        # process-wide failures and are safe to classify without exposing the
+        # credential-bearing original exception.
+        error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if process_network_failure else None,
+        retryable_same_contract=retryable_same_contract,
+        failure_phase=failure_phase,
     )
 
 

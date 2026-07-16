@@ -21,7 +21,9 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
-from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds,
+)
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -221,9 +223,7 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
     forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1" if context.openai_sdk_request else "0"
     signature_version = (
-        _HTTP_BRIDGE_SIGNATURE_VERSION_V2
-        if context.original_request_unanchored or context.openai_sdk_request
-        else None
+        _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored or context.openai_sdk_request else None
     )
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
@@ -430,7 +430,9 @@ def _invalid_bridge_forward_signature_error() -> ProxyResponseError:
     )
 
 
-def _legacy_signature_context_has_ambiguous_delimiter(context: HTTPBridgeForwardContext) -> bool:
+def _legacy_signature_context_has_ambiguous_delimiter(
+    context: HTTPBridgeForwardContext,
+) -> bool:
     """Reject legacy fields whose boundaries cannot be authenticated safely."""
 
     values = [
@@ -460,7 +462,9 @@ def _owner_forward_timeout(*, connect_timeout_seconds: float, idle_timeout_secon
     )
 
 
-def _reservation_from_headers(headers: Mapping[str, str]) -> ApiKeyUsageReservationData | None:
+def _reservation_from_headers(
+    headers: Mapping[str, str],
+) -> ApiKeyUsageReservationData | None:
     reservation_id = _optional_header(headers.get(HTTP_BRIDGE_RESERVATION_ID_HEADER))
     key_id = _optional_header(headers.get(HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER))
     model = _optional_header(headers.get(HTTP_BRIDGE_RESERVATION_MODEL_HEADER))

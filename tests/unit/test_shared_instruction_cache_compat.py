@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
+
 from app.core.openai.requests import ResponsesRequest
 from app.modules.proxy import affinity
 from app.modules.proxy import http_bridge_forwarding as bridge

@@ -1085,6 +1085,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
                     terminal_request_state.require_security_work_authorized = True
                     session.requires_security_work_authorized = True
+                    # This terminal denial has classified the session's
+                    # lineage as security-only. Retire the ordinary upstream
+                    # after its visible requests drain; the relay owns the
+                    # actual close so concurrent requests are not cut off.
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
                     if session.durable_session_id is not None:
                         durable_lookup = await self._durable_bridge.require_security_work_authorized(
                             session_id=session.durable_session_id

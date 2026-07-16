@@ -1118,25 +1118,31 @@ async def test_http_bridge_security_denial_without_fresh_replay_body_marks_root_
     )
     session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
     session.account = account
+    close = AsyncMock()
+    terminal_text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp-http-security-no-fresh-body",
+                "status": "failed",
+                "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+            },
+        },
+        separators=(",", ":"),
+    )
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            close=close,
+        ),
+    )
     mark_security_lineage = AsyncMock()
     retry_security_work = AsyncMock(return_value=True)
     monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
     monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
 
-    await service._process_http_bridge_upstream_text(
-        session,
-        json.dumps(
-            {
-                "type": "response.failed",
-                "response": {
-                    "id": "resp-http-security-no-fresh-body",
-                    "status": "failed",
-                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
-                },
-            },
-            separators=(",", ":"),
-        ),
-    )
+    await service._process_http_bridge_upstream_text(session, terminal_text)
 
     mark_security_lineage.assert_awaited_once_with(
         "root-http-security-no-fresh-body",
@@ -1145,6 +1151,10 @@ async def test_http_bridge_security_denial_without_fresh_replay_body_marks_root_
     retry_security_work.assert_not_awaited()
     assert request_state.require_security_work_authorized is True
     assert session.requires_security_work_authorized is True
+    assert session.upstream_control.retire_after_drain is True
+    assert await service._retire_http_bridge_after_drain_if_ready(session) is True
+    assert session.closed is True
+    close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

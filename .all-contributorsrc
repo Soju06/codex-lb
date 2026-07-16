@@ -1024,6 +1024,26 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "ShiroKSH",
+      "name": "Kushida",
+      "avatar_url": "https://avatars.githubusercontent.com/u/218489957?v=4",
+      "profile": "https://github.com/ShiroKSH",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "aididhaiqal",
+      "name": "Aidid Haiqal",
+      "avatar_url": "https://avatars.githubusercontent.com/u/10329190?v=4",
+      "profile": "https://github.com/aididhaiqal",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

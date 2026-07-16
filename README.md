@@ -257,6 +257,8 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/fozbek"><img src="https://avatars.githubusercontent.com/u/17993880?v=4?s=100" width="100px;" alt="Fatih Özbek"/><br /><sub><b>Fatih Özbek</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ShiroKSH"><img src="https://avatars.githubusercontent.com/u/218489957?v=4?s=100" width="100px;" alt="Kushida"/><br /><sub><b>Kushida</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ShiroKSH" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ShiroKSH" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aididhaiqal"><img src="https://avatars.githubusercontent.com/u/10329190?v=4?s=100" width="100px;" alt="Aidid Haiqal"/><br /><sub><b>Aidid Haiqal</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aididhaiqal" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aididhaiqal" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

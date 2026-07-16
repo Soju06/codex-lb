@@ -16,9 +16,10 @@
 - [x] 1.3 Drop the cohort/bucket observability dimensions: the
       `codex_lb_http_bridge_prewarm_total` counter is labelled by `outcome`
       only; remove `prewarm_canary_bucket` / `prewarm_eligible_reason` from
-      the request state, request-log plumbing, repository, and `RequestLog`
-      model; add an Alembic revision dropping the two columns (with
-      downgrade re-adding them as nullable strings)
+      the request state and request-log write plumbing. The `RequestLog`
+      columns stay declared (deprecated, unwritten) for one release so old
+      replicas keep inserting safely during rolling upgrades; the Alembic
+      drop revision ships in the next release
 - [x] 1.4 Add the three phase-4 env names to `_REMOVED_SETTINGS`
       (grouped and commented per phase, at the end of the tuple)
 - [x] 2.1 Convert the canary sampling/cohort unit tests into tests of the

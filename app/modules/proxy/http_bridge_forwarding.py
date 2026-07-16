@@ -44,9 +44,7 @@ _BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
-_OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset(
-    {aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING}
-)
+_OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 _LEGACY_SIGNATURE_DELIMITER = "|"
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
@@ -138,32 +136,26 @@ class HTTPBridgeOwnerClient:
             async with session.post(
                 f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
                 json=payload.model_dump_for_forwarding(),
-                headers=build_owner_forward_headers(
-                    headers=headers, payload=payload, context=context
-                ),
+                headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             ) as response:
                 if response.status != 200:
                     payload_text = await response.text()
                     raise ProxyResponseError(
                         response.status,
-                        _owner_forward_error_payload(
-                            status_code=response.status, payload_text=payload_text
-                        ),
+                        _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
                         failure_phase="owner_forward_status",
                         failure_detail="owner_forward_non_200",
                         upstream_status_code=response.status,
                     )
                 if on_response_ready is not None:
                     on_response_ready()
-                yieled_event = False
+                yielded_event = False
                 try:
                     async for event_block in _iter_sse_event_blocks(
                         response,
                         request_started_at=request_started_at,
-                        proxy_request_budget_seconds=_http_bridge_request_budget_seconds(
-                            settings
-                        ),
+                        proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
                         yielded_event = True
@@ -201,9 +193,7 @@ def build_owner_forward_headers(
         (value for key, value in headers.items() if key.lower() == "connection"),
         "",
     )
-    connection_named = {
-        token.strip().lower() for token in connection_value.split(",") if token.strip()
-    }
+    connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
     drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
     # Drop any client-supplied ``x-codex-bridge-*`` header: those names are
     # reserved for the internal forward contract and are set below from the
@@ -230,12 +220,8 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
-    forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = (
-        "1" if context.codex_session_affinity else "0"
-    )
-    forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = (
-        "1" if context.openai_sdk_request else "0"
-    )
+    forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
+    forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1" if context.openai_sdk_request else "0"
     signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
@@ -254,9 +240,7 @@ def build_owner_forward_headers(
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
     if context.reservation is not None:
-        forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = (
-            context.reservation.reservation_id
-        )
+        forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
         forwarded[HTTP_BRIDGE_RESERVATION_MODEL_HEADER] = context.reservation.model
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
@@ -310,12 +294,8 @@ def parse_forwarded_request(
             ),
         )
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
-    signature_version = _optional_header(
-        headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER)
-    )
-    original_unanchored_value = _optional_header(
-        headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER)
-    )
+    signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
+    original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
     openai_sdk_value = _optional_header(headers.get(HTTP_BRIDGE_OPENAI_SDK_HEADER))
     if openai_sdk_value not in {None, "0", "1"}:
         return None, _invalid_bridge_forward_signature_error()
@@ -328,21 +308,14 @@ def parse_forwarded_request(
     else:
         return None, _invalid_bridge_forward_signature_error()
     context = HTTPBridgeForwardContext(
-        origin_instance=headers.get(HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, "").strip()
-        or "unknown",
+        origin_instance=headers.get(HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, "").strip() or "unknown",
         target_instance=target_instance,
-        codex_session_affinity=_bool_header(
-            headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)
-        ),
+        codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
         openai_sdk_request=openai_sdk_value == "1",
         original_request_unanchored=original_request_unanchored,
-        original_affinity_kind=_optional_header(
-            headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)
-        ),
-        original_affinity_key=_optional_header(
-            headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)
-        ),
+        original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
+        original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
         signature_version=signature_version,
@@ -357,9 +330,7 @@ def parse_forwarded_request(
     # trustworthy signal, because an external client could plant a garbage
     # value on an honestly primary-signed forward, so a present-but-invalid
     # header simply falls through to the primary verification.
-    tools_bound_signature = _optional_header(
-        headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
-    )
+    tools_bound_signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
     tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
         tools_bound_signature,
         _bridge_forward_tools_bound_signature(
@@ -384,9 +355,7 @@ def parse_forwarded_request(
         )
     )
     if legacy_tools_bound_valid:
-        return HTTPBridgeForwardedRequest(
-            context=replace(context, openai_sdk_request=True)
-        ), None
+        return HTTPBridgeForwardedRequest(context=replace(context, openai_sdk_request=True)), None
     if tools_bound_signature is not None and openai_sdk_value != "1":
         sdk_context = replace(context, openai_sdk_request=True)
         sdk_flag_downgrade_valid = hmac.compare_digest(
@@ -406,19 +375,15 @@ def parse_forwarded_request(
     # legacy scheme) so owners predating the tamper-proofing header — and
     # genuinely old origins that only send the primary signature — keep
     # verifying during a rolling upgrade. Known residual until the shim is
-    # removed: this fallback is exactly as strong as the pre-#1203 scheme, so%
+    # removed: this fallback is exactly as strong as the pre-#1203 scheme, so
     # a body-only rewrite that injects ``"tools": []`` downgrades to the
     # plain-dump digest (which is insensitive to synthesized-vs-injected empty
     # tools) and verifies. Dropping the shim restores strict tamper-proof
     # rejection.
-    if signature_version is None and _legacy_signature_context_has_ambiguous_delimiter(
-        context
-    ):
+    if signature_version is None and _legacy_signature_context_has_ambiguous_delimiter(context):
         return None, _invalid_bridge_forward_signature_error()
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
-    client_ip_signature = _optional_header(
-        headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER)
-    )
+    client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
     include_openai_sdk_request = openai_sdk_value is not None
     expected_signature = _bridge_forward_signature(
         payload=payload,
@@ -433,9 +398,7 @@ def parse_forwarded_request(
         signature_version=signature_version,
         include_openai_sdk_request=include_openai_sdk_request,
     )
-    primary_signature_valid = signature is not None and hmac.compare_digest(
-        signature, expected_signature
-    )
+    primary_signature_valid = signature is not None and hmac.compare_digest(signature, expected_signature)
     signature_without_client_ip_valid = signature is not None and hmac.compare_digest(
         signature,
         signature_without_client_ip,
@@ -445,8 +408,7 @@ def parse_forwarded_request(
         expected_signature,
     )
     signature_valid = primary_signature_valid or (
-        signature_without_client_ip_valid
-        and (client_ip is None or client_ip_signature_valid)
+        signature_without_client_ip_valid and (client_ip is None or client_ip_signature_valid)
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
@@ -458,12 +420,11 @@ def parse_forwarded_request(
     return HTTPBridgeForwardedRequest(context=context), None
 
 
-
 def _invalid_bridge_forward_signature_error() -> ProxyResponseError:
     return ProxyResponseError(
         400,
         openai_error(
-            "bridgge_forward_invalid",
+            "bridge_forward_invalid",
             "Internal bridge forward signature is invalid",
             error_type="invalid_request_error",
         ),
@@ -491,14 +452,10 @@ def _legacy_signature_context_has_ambiguous_delimiter(
                 context.reservation.model,
             )
         )
-    return any(
-        _LEGACY_SIGNATURE_DELIMITER in value for value in values if value is not None
-    )
+    return any(_LEGACY_SIGNATURE_DELIMITER in value for value in values if value is not None)
 
 
-def _owner_forward_timeout(
-    *, connect_timeout_seconds: float, idle_timeout_seconds: float
-) -> aiohttp.ClientTimeout:
+def _owner_forward_timeout(*, connect_timeout_seconds: float, idle_timeout_seconds: float) -> aiohttp.ClientTimeout:
     return aiohttp.ClientTimeout(
         total=None,
         sock_connect=connect_timeout_seconds,
@@ -553,9 +510,7 @@ def _bridge_forward_signature(
     delimiter-joined format; the versioned path uses a canonical structured
     encoding whose object boundaries make field re-packing impossible.
     """
-    body_digest = _bridge_forward_body_digest(
-        payload.model_dump(mode="json", exclude_none=True)
-   )
+    body_digest = _bridge_forward_body_digest(payload.model_dump(mode="json", exclude_none=True))
     if signature_version is None:
         # Preserve the deployed legacy wire format for anchored requests during
         # rolling upgrades. Its delimiter-based encoding is intentionally not
@@ -576,9 +531,7 @@ def _bridge_forward_signature(
             fields.append("1" if context.openai_sdk_request else "0")
         fields.extend(
             (
-                context.reservation.reservation_id
-                if context.reservation is not None
-                else "",
+                context.reservation.reservation_id if context.reservation is not None else "",
                 context.reservation.key_id if context.reservation is not None else "",
                 context.reservation.model if context.reservation is not None else "",
                 body_digest,
@@ -631,9 +584,7 @@ def _bridge_forward_tools_bound_signature(
 
 
 def _bridge_forward_body_digest(payload_dump: JsonObject) -> str:
-    payload_json = json.dumps(
-        payload_dump, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    )
+    payload_json = json.dumps(payload_dump, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
@@ -657,11 +608,7 @@ def _structured_bridge_signing_payload(
             "codex_session_affinity": context.codex_session_affinity,
             "downstream_turn_state": context.downstream_turn_state,
             "include_client_ip": include_client_ip,
-            **(
-                {"openai_sdk_request": context.openai_sdk_request}
-                if include_openai_sdk_request
-                else {}
-            ),
+            **({"openai_sdk_request": context.openai_sdk_request} if include_openai_sdk_request else {}),
             "origin_instance": context.origin_instance,
             "original_affinity_key": context.original_affinity_key,
             "original_affinity_kind": context.original_affinity_kind,
@@ -706,9 +653,7 @@ async def _iter_sse_event_blocks(
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         )
         try:
-            chunk = await asyncio.wait_for(
-                chunks.__anext__(), timeout=receive_timeout.timeout_seconds
-            )
+            chunk = await asyncio.wait_for(chunks.__anext__(), timeout=receive_timeout.timeout_seconds)
         except StopAsyncIteration:
             break
         except asyncio.TimeoutError as exc:
@@ -735,12 +680,8 @@ def _owner_forward_receive_timeout(
     stream_idle_timeout_seconds: float,
 ) -> _OwnerForwardReceiveTimeout:
     idle_timeout_seconds = max(0.001, stream_idle_timeout_seconds)
-    remaining_budget = _remaining_budget_seconds(
-        request_started_at + proxy_request_budget_seconds
-    )
-    idle_timeout_matches_request_budget = idle_timeout_seconds == max(
-        0.001, proxy_request_budget_seconds
-    )
+    remaining_budget = _remaining_budget_seconds(request_started_at + proxy_request_budget_seconds)
+    idle_timeout_matches_request_budget = idle_timeout_seconds == max(0.001, proxy_request_budget_seconds)
     if remaining_budget <= 0 and idle_timeout_matches_request_budget:
         return _OwnerForwardReceiveTimeout(
             timeout_seconds=0.0,
@@ -776,9 +717,7 @@ def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
-def _owner_forward_error_payload(
-    *, status_code: int, payload_text: str
-) -> OpenAIErrorEnvelope:
+def _owner_forward_error_payload(*, status_code: int, payload_text: str) -> OpenAIErrorEnvelope:
     try:
         payload = json.loads(payload_text)
     except json.JSONDecodeError:

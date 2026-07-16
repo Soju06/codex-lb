@@ -295,6 +295,12 @@ class RequestLog(Base):
     latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
     prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Deprecated: no longer written since the prewarm canary retirement
+    # (reduce-settings-surface-phase-4). Kept one release so old replicas can
+    # keep inserting during rolling upgrades; the column drop ships in the
+    # next release.
+    prewarm_canary_bucket: Mapped[str | None] = mapped_column(String, nullable=True)
+    prewarm_eligible_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)

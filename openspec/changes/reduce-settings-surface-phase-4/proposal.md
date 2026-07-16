@@ -33,8 +33,9 @@ stays, default off, mid-rollout):
   `codex_lb_http_bridge_prewarm_total` counter), but the canary bucket and
   eligibility-cohort dimensions are removed along with the sampling. The
   counter is labelled by `outcome` only, the request-log columns
-  `prewarm_canary_bucket` and `prewarm_eligible_reason` are dropped by a new
-  Alembic revision, and `prewarm_status=canary_miss` no longer occurs
+  `prewarm_canary_bucket` and `prewarm_eligible_reason` stop being written
+  (columns stay one release for rolling-upgrade safety; the drop ships in
+  the next release), and `prewarm_status=canary_miss` no longer occurs
   (canary sampling was its only source).
 - **One-release removal warning**: the phase-4 env names join
   `_REMOVED_SETTINGS`, so startup logs the existing single WARN when any of
@@ -55,7 +56,8 @@ stays, default off, mid-rollout):
   `app/modules/proxy/_service/websocket/mixin.py`,
   `app/modules/proxy/service.py`, `app/core/metrics/prometheus.py`,
   `app/modules/request_logs/repository.py`, `app/db/models.py`, and a new
-  Alembic revision dropping the two request-log columns.
+  The request-log columns are retained (unwritten) this release; a follow-up
+  release drops them once no old replicas can be writing.
 - Operator impact: none for default installs (prewarm remains off by
   default). Deployments that still set a removed env var keep working —
   values are ignored with one startup WARN. Anyone who had a canary percent

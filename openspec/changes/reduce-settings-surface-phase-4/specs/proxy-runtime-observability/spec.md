@@ -25,7 +25,8 @@ bucket or eligibility cohort dimension is recorded and the
 - **THEN** no request is excluded by deterministic canary sampling
 - **AND** `prewarm_status=canary_miss` is never recorded
 - **AND** the prewarm counter and request log carry no canary bucket or
-  eligibility cohort dimension
+  eligibility cohort dimension (the legacy request-log columns remain
+  unwritten for one release for rolling-upgrade safety, then are dropped)
 
 ### Requirement: 24-hour TTFT breakdown queries are available
 

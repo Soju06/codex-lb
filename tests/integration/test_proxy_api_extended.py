@@ -2704,6 +2704,7 @@ async def test_proxy_stream_surfaces_first_core_generated_eof_before_no_accounts
     ][-1]
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "stream_incomplete"
+    assert event["response"]["error"]["message"] == "Upstream closed stream without completion"
 
     async with SessionLocal() as session:
         result = await session.execute(

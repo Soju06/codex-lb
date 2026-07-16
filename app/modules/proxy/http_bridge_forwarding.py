@@ -53,6 +53,7 @@ HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER = "x-codex-bridge-origin-instance"
 HTTP_BRIDGE_TARGET_INSTANCE_HEADER = "x-codex-bridge-target-instance"
 HTTP_BRIDGE_CODEX_AFFINITY_HEADER = "x-codex-bridge-codex-session-affinity"
 HTTP_BRIDGE_OPENAI_SDK_HEADER = "x-codex-bridge-openai-sdk-request"
+HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER = "x-codex-bridge-openai-sdk-signature"
 HTTP_BRIDGE_RESERVATION_ID_HEADER = "x-codex-bridge-reservation-id"
 HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
@@ -260,11 +261,13 @@ def build_owner_forward_headers(
     # body; covers the full authenticated context (including the unanchored /
     # signature-version domain) so it cannot be replayed against a different
     # forward.
-    forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_tools_bound_signature(
+    tools_bound_signature = _bridge_forward_tools_bound_signature(
         payload=payload,
         context=context,
         signature_version=signature_version,
     )
+    forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = tools_bound_signature
+    forwarded[HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER] = tools_bound_signature
     return forwarded
 
 
@@ -331,15 +334,21 @@ def parse_forwarded_request(
     # value on an honestly primary-signed forward, so a present-but-invalid
     # header simply falls through to the primary verification.
     tools_bound_signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
+    sdk_signature = _optional_header(headers.get(HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER))
+    expected_tools_bound_signature = _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+        signature_version=signature_version,
+    )
     tools_bound_valid = tools_bound_signature is not None and hmac.compare_digest(
         tools_bound_signature,
-        _bridge_forward_tools_bound_signature(
-            payload=payload,
-            context=context,
-            signature_version=signature_version,
-        ),
+        expected_tools_bound_signature,
     )
-    if tools_bound_valid:
+    sdk_signature_valid = sdk_signature is not None and hmac.compare_digest(
+        sdk_signature,
+        expected_tools_bound_signature,
+    )
+    if tools_bound_valid or sdk_signature_valid:
         return HTTPBridgeForwardedRequest(context=context), None
     legacy_tools_bound_valid = (
         tools_bound_signature is not None
@@ -356,18 +365,17 @@ def parse_forwarded_request(
     )
     if legacy_tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=replace(context, openai_sdk_request=True)), None
-    if tools_bound_signature is not None and openai_sdk_value != "1":
-        sdk_context = replace(context, openai_sdk_request=True)
-        sdk_flag_downgrade_valid = hmac.compare_digest(
-            tools_bound_signature,
-            _bridge_forward_tools_bound_signature(
-                payload=payload,
-                context=sdk_context,
-                signature_version=signature_version,
-            ),
-        )
-        if sdk_flag_downgrade_valid:
+    sdk_context = replace(context, openai_sdk_request=True)
+    expected_sdk_signature = _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=sdk_context,
+        signature_version=signature_version,
+    )
+    for candidate in (tools_bound_signature, sdk_signature):
+        if candidate is not None and hmac.compare_digest(candidate, expected_sdk_signature):
             return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value is not None:
+        return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /
     # legacy scheme) so owners predating the tamper-proofing header — and
@@ -382,19 +390,16 @@ def parse_forwarded_request(
         return None, _invalid_bridge_forward_signature_error()
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
-    include_openai_sdk_request = openai_sdk_value is not None
     expected_signature = _bridge_forward_signature(
         payload=payload,
         context=context,
         signature_version=signature_version,
-        include_openai_sdk_request=include_openai_sdk_request,
     )
     signature_without_client_ip = _bridge_forward_signature(
         payload=payload,
         context=context,
         include_client_ip=False,
         signature_version=signature_version,
-        include_openai_sdk_request=include_openai_sdk_request,
     )
     primary_signature_valid = signature is not None and hmac.compare_digest(signature, expected_signature)
     signature_without_client_ip_valid = signature is not None and hmac.compare_digest(
@@ -410,11 +415,7 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
-    if openai_sdk_value is None:
-        # Old origins did not send or sign this flag. Preserve the historical
-        # OpenAI-SDK classification so a mixed-version owner cannot enable the
-        # Codex shared instruction cache for an SDK request.
-        context = replace(context, openai_sdk_request=True)
+    context = replace(context, openai_sdk_request=True)
     return HTTPBridgeForwardedRequest(context=context), None
 
 

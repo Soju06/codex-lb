@@ -1652,18 +1652,22 @@ class _StreamingRetryMixin:
                                     # already excluded by the helper.
                                     break
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
-                                    if (
-                                        account.security_work_authorized
-                                        or account.id == file_preferred_account_id
+                                    security_lineage_can_be_classified = not (
+                                        account.id == file_preferred_account_id
                                         or require_preferred_account
                                         or request_contains_input_file_ids
+                                    )
+                                    if security_lineage_can_be_classified:
+                                        await proxy._mark_security_lineage_requirement(
+                                            security_lineage_id,
+                                            account_id=account.id,
+                                        )
+                                    if (
+                                        account.security_work_authorized
+                                        or not security_lineage_can_be_classified
                                         or attempt >= max_attempts - 1
                                     ):
                                         raise
-                                    await proxy._mark_security_lineage_requirement(
-                                        security_lineage_id,
-                                        account_id=account.id,
-                                    )
                                     _facade().logger.info(
                                         "Retrying on security-work-authorized account request_id=%s account_id=%s",
                                         request_id,

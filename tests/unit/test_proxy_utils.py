@@ -12825,6 +12825,55 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_authorized_security_denial_still_marks_lineage(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    authorized_account = _make_account("acc-stream-authorized-terminal-security")
+    authorized_account.security_work_authorized = True
+    mark_security_lineage = AsyncMock()
+    select_account = AsyncMock(return_value=AccountSelection(account=authorized_account, error_message=None))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        assert account_id == authorized_account.chatgpt_account_id
+        if False:
+            yield ""
+        raise proxy_module.ProxyResponseError(
+            400,
+            openai_error("cyber_policy", "denied by Trusted Access"),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {"session_id": "root-stream-terminal-security"},
+        )
+    ]
+
+    mark_security_lineage.assert_awaited_once_with(
+        "root-stream-terminal-security",
+        account_id=authorized_account.id,
+    )
+    assert len(chunks) == 1
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert select_account.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_fallback_to_ordinary_pool_after_security_classification(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

@@ -1036,3 +1036,166 @@ async def test_process_websocket_security_retry_detects_file_id_in_fresh_retry_t
     assert request_state.previous_response_id == "resp_ws_file_body"
     assert request_state.fresh_upstream_request_is_retry_safe is True
     mark_security_lineage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_websocket_security_denial_without_fresh_replay_body_marks_root_and_retires_owner() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc-ws-security-no-fresh-body")
+    mark_security_lineage = AsyncMock()
+    service._mark_security_lineage_requirement = mark_security_lineage
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws-security-no-fresh-body",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        transport="websocket",
+        previous_response_id="resp-ws-security-anchor",
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.6-sol",'
+            '"previous_response_id":"resp-ws-security-anchor","input":"tail"}'
+        ),
+        security_lineage_id="root-ws-security-no-fresh-body",
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-ws-security-no-fresh-body",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    mark_security_lineage.assert_awaited_once_with(
+        "root-ws-security-no-fresh-body",
+        account_id=account.id,
+    )
+    assert upstream_control.replay_request_state is None
+    assert upstream_control.reconnect_requested is True
+    assert request_state.require_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_security_denial_without_fresh_replay_body_marks_root_without_migration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc-http-security-no-fresh-body")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-security-no-fresh-body",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-http-security-anchor",
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.6-sol",'
+            '"previous_response_id":"resp-http-security-anchor","input":"tail"}'
+        ),
+        security_lineage_id="root-http-security-no-fresh-body",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    session.account = account
+    mark_security_lineage = AsyncMock()
+    retry_security_work = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-http-security-no-fresh-body",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    mark_security_lineage.assert_awaited_once_with(
+        "root-http-security-no-fresh-body",
+        account_id=account.id,
+    )
+    retry_security_work.assert_not_awaited()
+    assert request_state.require_security_work_authorized is True
+    assert session.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_security_retry_does_not_trust_missing_durable_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc-http-security-missing-durable")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-security-missing-durable",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-http-security-durable-anchor",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text='{"type":"response.create","input":"full resend"}',
+        fresh_upstream_request_is_retry_safe=True,
+        request_text='{"type":"response.create","previous_response_id":"resp-http-security-durable-anchor","input":"tail"}',
+        security_lineage_id="root-http-security-missing-durable",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    session.account = account
+    session.durable_session_id = "durable-http-security-missing"
+    persist_durable = AsyncMock(return_value=None)
+    retry_security_work = AsyncMock(return_value=True)
+    monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", persist_durable)
+    monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-http-security-missing-durable",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    persist_durable.assert_awaited_once_with(session_id="durable-http-security-missing")
+    retry_security_work.assert_awaited_once()
+    retry_call = retry_security_work.await_args
+    assert retry_call is not None
+    assert retry_call.kwargs["durable_security_requirement_persisted"] is False

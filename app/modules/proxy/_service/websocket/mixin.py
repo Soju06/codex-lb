@@ -3963,7 +3963,15 @@ class _WebSocketMixin:
                     if request_state.previous_response_id is not None
                     else request_state.request_text
                 )
-                security_retry_has_file_ids = _websocket_retry_text_contains_input_file_ids(security_retry_text)
+                # Missing replay text is unsafe for account migration, but it
+                # does not prove that the rooted lineage contains a file.
+                # Keep those decisions separate so a non-replayable ordinary
+                # continuation is still classified and its connection retired.
+                security_retry_has_file_ids = (
+                    security_retry_text is not None
+                    and _websocket_retry_text_contains_input_file_ids(security_retry_text)
+                )
+                security_retry_is_unsafe = security_retry_text is None or security_retry_has_file_ids
                 if not request_state.file_required_preferred_account and not security_retry_has_file_ids:
                     await proxy._mark_security_lineage_requirement(
                         request_state.security_lineage_id,
@@ -3977,7 +3985,7 @@ class _WebSocketMixin:
                     and bool(request_state.request_text)
                     and _websocket_request_can_replay_before_visible_output(request_state)
                     and not request_state.file_required_preferred_account
-                    and not security_retry_has_file_ids
+                    and not security_retry_is_unsafe
                     and (
                         request_state.previous_response_id is None
                         or (

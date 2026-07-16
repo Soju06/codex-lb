@@ -1064,11 +1064,21 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if terminal_request_state.previous_response_id is not None
                     else terminal_request_state.request_text
                 )
+                # A missing fresh replay body must prevent a cross-account
+                # replay, but it is not evidence that this lineage contains an
+                # account-scoped file. Persist the security requirement first
+                # so later turns cannot remain on the denied ordinary owner.
+                security_retry_has_file_ids = (
+                    security_retry_text is not None
+                    and _http_bridge_request_contains_input_file_ids(security_retry_text)
+                )
                 file_replay_unsafe = (
                     terminal_request_state.file_required_preferred_account
-                    or _http_bridge_request_contains_input_file_ids(security_retry_text)
+                    or security_retry_text is None
+                    or security_retry_has_file_ids
                 )
-                if not file_replay_unsafe:
+                durable_security_requirement_persisted = False
+                if not terminal_request_state.file_required_preferred_account and not security_retry_has_file_ids:
                     await self._mark_security_lineage_requirement(
                         terminal_request_state.security_lineage_id,
                         account_id=session.account.id,
@@ -1076,9 +1086,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                     terminal_request_state.require_security_work_authorized = True
                     session.requires_security_work_authorized = True
                     if session.durable_session_id is not None:
-                        await self._durable_bridge.require_security_work_authorized(
+                        durable_lookup = await self._durable_bridge.require_security_work_authorized(
                             session_id=session.durable_session_id
                         )
+                        durable_security_requirement_persisted = durable_lookup is not None
                 owner_is_security_work_authorized = bool(getattr(session.account, "security_work_authorized", False))
                 can_retry_security_work = (
                     not owner_is_security_work_authorized
@@ -1115,7 +1126,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_security_work_request(
                         session,
                         terminal_request_state,
-                        durable_security_requirement_persisted=session.durable_session_id is not None,
+                        durable_security_requirement_persisted=durable_security_requirement_persisted,
                     )
                     if retried:
                         return

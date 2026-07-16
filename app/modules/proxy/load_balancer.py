@@ -32,6 +32,7 @@ from app.core.balancer import (
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
+    plausible_rate_limit_reset_at,
     select_account,
 )
 from app.core.balancer.types import UpstreamError
@@ -2015,7 +2016,8 @@ def _state_from_account(
     # while waiting for the next usage refresh. Expired samples map to 0.0
     # rather than None because usage-derived status recovery only evaluates
     # non-None percentages.
-    now_epoch = int(time.time())
+    now = time.time()
+    now_epoch = int(now)
     if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
         primary_used = 0.0
         primary_reset = None
@@ -2055,15 +2057,15 @@ def _state_from_account(
     # stale window data, not for an upstream 429 whose cooldown is running.
     rate_limited_cooldown_deadline: float | None = None
     if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
-        persisted_deadline = (
-            float(account.reset_at) if account.reset_at else effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        persisted_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
+            effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
         )
-        if time.time() < persisted_deadline:
+        if now < persisted_deadline:
             rate_limited_cooldown_deadline = persisted_deadline
         if (
             rate_limited_cooldown_deadline is not None
             and runtime.cooldown_until is not None
-            and runtime.cooldown_until <= time.time()
+            and runtime.cooldown_until <= now
             and runtime.blocked_at is not None
             and runtime.blocked_at >= effective_blocked_at
         ):
@@ -2106,11 +2108,25 @@ def _state_from_account(
 
     # Use account.reset_at from DB as the authoritative source for runtime reset
     # and to survive process restarts.
-    db_reset_at = (
-        None if ignore_zero_capacity_primary_runtime_reset else (float(account.reset_at) if account.reset_at else None)
+    persisted_reset_at = float(account.reset_at) if account.reset_at is not None else None
+    runtime_reset_at = runtime.reset_at
+    # Validate only future RATE_LIMITED hints. Elapsed deadlines must still
+    # reach apply_usage_quota's ordinary expiry transition, and QUOTA_EXCEEDED
+    # deadlines have separate recovery semantics.
+    if account.status == AccountStatus.RATE_LIMITED:
+        if persisted_reset_at is not None and persisted_reset_at > now:
+            persisted_reset_at = plausible_rate_limit_reset_at(persisted_reset_at, now=now)
+        if runtime_reset_at is not None and runtime_reset_at > now:
+            runtime_reset_at = plausible_rate_limit_reset_at(runtime_reset_at, now=now)
+    rejected_persisted_rate_limit_reset = (
+        account.status == AccountStatus.RATE_LIMITED
+        and account.reset_at is not None
+        and persisted_reset_at is None
+        and account.reset_at > now
     )
+    db_reset_at = None if ignore_zero_capacity_primary_runtime_reset else persisted_reset_at
     if status_seed in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) or runtime.blocked_at is not None:
-        effective_runtime_reset = db_reset_at or runtime.reset_at
+        effective_runtime_reset = db_reset_at or runtime_reset_at
     else:
         effective_runtime_reset = None
 
@@ -2126,7 +2142,7 @@ def _state_from_account(
         and effective_blocked_at is not None
     ):
         floor_deadline = effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
-        if time.time() < floor_deadline:
+        if now < floor_deadline:
             effective_runtime_reset = floor_deadline
 
     if (
@@ -2184,13 +2200,38 @@ def _state_from_account(
             if recorded_epoch > effective_blocked_at:
                 effective_runtime_reset = None
 
+    rejected_reset_recovery_evidence = False
+    if rejected_persisted_rate_limit_reset:
+        rejected_reset_freshness_entry = _rate_limited_freshness_entry(
+            account=account,
+            primary_entry=primary_entry,
+            long_window_entry=effective_secondary_entry,
+        )
+        # One healthy window must not conceal exhaustion in another applicable
+        # window; at least one window must also have supplied actual evidence.
+        all_quota_windows_available = (
+            (primary_used is None or float(primary_used) < 100.0)
+            and (secondary_used is None or float(secondary_used) < 100.0)
+            and (primary_used is not None or secondary_used is not None)
+        )
+        rejected_reset_recovery_evidence = all_quota_windows_available and _usage_entry_is_recent_available(
+            rejected_reset_freshness_entry
+        )
+        if effective_blocked_at is not None:
+            # A sample predating the 429 cannot disprove the persisted block.
+            rejected_reset_recovery_evidence = (
+                rejected_reset_recovery_evidence
+                and now >= effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+                and _usage_entry_recorded_after_block(rejected_reset_freshness_entry, effective_blocked_at)
+            )
+
     # A resetless rate limit whose runtime cooldown was lost (e.g. a restart
     # after a 429 without reset metadata) has no deadline to expire and no
     # post-block evidence trail; a long-window sample alone must not clear
     # it. Evidence-gated clearing above always starts from a persisted or
     # runtime reset, so this only matches the truly resetless case.
     resetless_rate_limit_without_evidence = (
-        status_seed == AccountStatus.RATE_LIMITED and db_reset_at is None and runtime.reset_at is None
+        status_seed == AccountStatus.RATE_LIMITED and account.reset_at is None and runtime.reset_at is None
     )
 
     status, used_percent, reset_at = apply_usage_quota(
@@ -2208,6 +2249,9 @@ def _state_from_account(
     )
     if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
         status = AccountStatus.RATE_LIMITED
+    if rejected_persisted_rate_limit_reset and not rejected_reset_recovery_evidence:
+        status = AccountStatus.RATE_LIMITED
+        reset_at = float(account.reset_at)
 
     if status == AccountStatus.QUOTA_EXCEEDED:
         next_blocked_at = effective_blocked_at
@@ -2304,14 +2348,16 @@ def background_recovery_state_from_account(
 
     runtime = RuntimeState()
     blocked_at = float(account.blocked_at) if account.blocked_at is not None else None
+    now = time.time()
     reset_at = float(account.reset_at) if account.reset_at is not None else None
+    valid_reset_at = plausible_rate_limit_reset_at(reset_at, now=now)
 
     if blocked_at is not None:
         runtime.blocked_at = blocked_at
 
     if account.status == AccountStatus.RATE_LIMITED and blocked_at is not None:
-        if reset_at is not None:
-            runtime.cooldown_until = reset_at
+        if valid_reset_at is not None:
+            runtime.cooldown_until = valid_reset_at
     state = _state_from_account(
         account=account,
         primary_entry=primary_entry,
@@ -2324,16 +2370,21 @@ def background_recovery_state_from_account(
             primary_entry=primary_entry,
             long_window_entry=secondary_entry,
         )
-        if blocked_at is not None and reset_at is not None and reset_at <= time.time():
-            if not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
+        # Keep elapsed resets intact until _state_from_account evaluates the
+        # selector's normal expiry path; only freshness gates the final repair.
+        if blocked_at is not None and reset_at is not None and reset_at <= now:
+            minimum_floor_deadline = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+            # An early explicit reset does not let scheduler reconciliation
+            # bypass the persisted post-429 minimum floor.
+            if now < minimum_floor_deadline or not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
                     reset_at=reset_at,
                     blocked_at=blocked_at,
-                    cooldown_until=reset_at,
+                    cooldown_until=max(reset_at, minimum_floor_deadline),
                 )
-        elif blocked_at is None and reset_at is not None and reset_at <= time.time():
+        elif blocked_at is None and reset_at is not None and reset_at <= now:
             if not _usage_entry_is_recent_available(freshness_entry):
                 return replace(
                     state,

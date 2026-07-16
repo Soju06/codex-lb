@@ -51,6 +51,8 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
 SECONDS_PER_DAY = 60 * 60 * 24
 SECONDS_PER_HOUR = 60 * 60
 SECONDS_PER_WEEK = 7 * SECONDS_PER_DAY
+RATE_LIMIT_RESET_MAX_HORIZON_SECONDS = 366 * SECONDS_PER_DAY
+RATE_LIMIT_RESET_ROUNDING_TOLERANCE_SECONDS = 1.0
 UNKNOWN_RESET_BUCKET_DAYS = 10_000
 UNKNOWN_RESET_FALLBACK_SECONDS = 7 * SECONDS_PER_DAY
 RELATIVE_AVAILABILITY_MIN_DIVISOR_SECONDS = 5 * 60
@@ -1077,7 +1079,7 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
     state.last_error_at = now
     state.blocked_at = now
 
-    reset_at = _extract_reset_at(error)
+    reset_at = _extract_reset_at(error, now=now)
 
     message = error.get("message")
     delay = parse_retry_after(message) if message else None
@@ -1123,16 +1125,17 @@ def _format_retry_hint(wait_seconds: float) -> str:
 
 
 def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:
+    now = time.time()
     state.status = AccountStatus.QUOTA_EXCEEDED
     state.used_percent = 100.0
-    state.blocked_at = time.time()
-    state.cooldown_until = time.time() + QUOTA_EXCEEDED_COOLDOWN_SECONDS
+    state.blocked_at = now
+    state.cooldown_until = now + QUOTA_EXCEEDED_COOLDOWN_SECONDS
 
-    reset_at = _extract_reset_at(error)
+    reset_at = _extract_reset_at(error, now=now)
     if reset_at is not None:
         state.reset_at = reset_at
     else:
-        state.reset_at = int(time.time() + 3600)
+        state.reset_at = int(now + 3600)
 
 
 def handle_permanent_failure(state: AccountState, error_code: str) -> None:
@@ -1168,13 +1171,53 @@ def failover_decision(
     return "surface"
 
 
-def _extract_reset_at(error: UpstreamError) -> int | None:
-    reset_at = error.get("resets_at")
+def plausible_rate_limit_reset_at(
+    reset_at: int | float | None,
+    *,
+    now: float | None = None,
+    allow_rounding_slack: bool = True,
+) -> float | None:
+    """Return a finite near-future reset deadline, or ``None`` when invalid."""
+
+    if reset_at is None or isinstance(reset_at, bool):
+        return None
+    current = time.time() if now is None else now
+    if isinstance(reset_at, float) and not math.isfinite(reset_at):
+        return None
+    horizon = RATE_LIMIT_RESET_MAX_HORIZON_SECONDS
+    if allow_rounding_slack:
+        # Persisted deadlines are whole seconds; ceil may move an otherwise
+        # valid raw deadline just beyond the metadata horizon.
+        horizon += RATE_LIMIT_RESET_ROUNDING_TOLERANCE_SECONDS
+    # Keep this comparison ahead of float conversion: Python integers can be
+    # arbitrarily large, while converting malformed metadata can overflow.
+    if reset_at <= current or reset_at > current + horizon:
+        return None
+    return float(reset_at)
+
+
+def _extract_reset_at(error: UpstreamError, *, now: float) -> int | None:
+    reset_at = plausible_rate_limit_reset_at(
+        error.get("resets_at"),
+        now=now,
+        allow_rounding_slack=False,
+    )
     if reset_at is not None:
-        return int(reset_at)
+        rounded_reset_at = int(math.ceil(reset_at))
+        if plausible_rate_limit_reset_at(rounded_reset_at, now=now) is not None:
+            return rounded_reset_at
+        return None
+
     reset_in = error.get("resets_in_seconds")
-    if reset_in is not None:
-        return int(time.time() + float(reset_in))
+    if reset_in is None or isinstance(reset_in, bool):
+        return None
+    if isinstance(reset_in, float) and not math.isfinite(reset_in):
+        return None
+    if reset_in <= 0 or reset_in > RATE_LIMIT_RESET_MAX_HORIZON_SECONDS:
+        return None
+    rounded_reset_at = int(math.ceil(now + float(reset_in)))
+    if plausible_rate_limit_reset_at(rounded_reset_at, now=now) is not None:
+        return rounded_reset_at
     return None
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Mapping
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from app.core import usage as usage_core
 from app.core.usage.types import UsageWindowRow
@@ -30,9 +30,13 @@ from app.modules.usage.additional_quota_keys import get_additional_display_label
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.updater import UsageUpdater
 
+if TYPE_CHECKING:
+    from app.modules.proxy.load_balancer import LoadBalancer
+
 
 class _RateLimitServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
+    _load_balancer: LoadBalancer
 
 
 def _has_available_usage_account(
@@ -71,6 +75,19 @@ def _has_available_usage_account(
 
 
 class _RateLimitMixin:
+    async def record_account_probe_result(
+        self,
+        *,
+        account_id: str,
+        http_status: int,
+    ) -> None:
+        """Feed a dashboard Force Probe into this process's health state."""
+        proxy = cast(_RateLimitServiceProtocol, self)
+        await proxy._load_balancer.record_probe_result(
+            account_id=account_id,
+            http_status=http_status,
+        )
+
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
 

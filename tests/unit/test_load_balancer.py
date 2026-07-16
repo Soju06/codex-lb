@@ -12,7 +12,9 @@ from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
+    HEALTH_TIER_PROBING,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
+    ROUTING_POLICY_PRESERVE,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -336,6 +338,98 @@ def test_budget_safe_selection_applies_burn_first_after_health_tier_filtering():
 
     assert result.account is not None
     assert result.account.account_id == "normal"
+
+
+def test_due_probe_precedes_healthy_burn_first_policy():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-burn-first",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "due-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "due-probe"
+
+
+def test_due_preserve_probe_precedes_healthy_normal_policy():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-normal",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "due-preserve-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            routing_policy=ROUTING_POLICY_PRESERVE,
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "due-preserve-probe"
+
+
+def test_unavailable_due_probe_does_not_bypass_availability_gates():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "blocked-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+            cooldown_until=now + 60.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
 
 
 def test_budget_safe_selection_falls_back_when_burn_first_unavailable():

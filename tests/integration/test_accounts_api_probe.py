@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.usage.models import UsagePayload
+from app.modules.accounts import api as accounts_api
 from app.modules.accounts.service import AccountsService
 
 pytestmark = pytest.mark.integration
@@ -90,6 +92,7 @@ async def test_probe_refresh_failure_returns_structured_409(async_client, monkey
 @pytest.mark.asyncio
 async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
     captured: dict = {}
+    record_probe_result = AsyncMock()
 
     async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
         captured["model"] = model
@@ -99,6 +102,9 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
         return 200
 
     monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+
+    proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
+    monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
 
     account_id = await _import_test_account(
         async_client,
@@ -121,6 +127,10 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
     assert captured["model"] == "gpt-5.5-test"
     assert captured["chatgpt_account_id"] == "acc_probe_active"
     assert captured["had_token"] is True
+    record_probe_result.assert_awaited_once_with(
+        account_id=account_id,
+        http_status=200,
+    )
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from app.core.exceptions import (
     DashboardUpstreamError,
 )
 from app.core.upstream_proxy import UpstreamProxyRouteError
-from app.dependencies import AccountsContext, get_accounts_context
+from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
@@ -292,6 +292,10 @@ async def probe_account(
         ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    await get_proxy_service_for_app(request.app).record_account_probe_result(
+        account_id=result.account_id,
+        http_status=result.probe_status_code,
+    )
     AuditService.log_async(
         "account_probed",
         actor_ip=request.client.host if request.client else None,

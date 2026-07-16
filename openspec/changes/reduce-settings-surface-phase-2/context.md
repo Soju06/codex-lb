@@ -112,3 +112,11 @@ removed setting(s) ignored: CODEX_LB_QUOTA_PLANNER_TICK_SECONDS — values are n
 ```
 
 and the planner ticks on the fixed five-minute cadence.
+
+## Cross-change coordination
+
+The active (unarchived) `cache-request-log-count` change originally specified
+the count-cache TTL as a configurable setting with `0` disabling the cache.
+Its delta spec and tasks were updated in this change to the fixed-constant
+reality so a later archive cannot reintroduce a requirement the code no
+longer satisfies.

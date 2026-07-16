@@ -339,9 +339,9 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
-    if tools_bound_signature is not None and openai_sdk_value is None:
+    if tools_bound_signature is not None and openai_sdk_value != "1":
         sdk_context = replace(context, openai_sdk_request=True)
-        stripped_sdk_flag_valid = hmac.compare_digest(
+        sdk_flag_downgrade_valid = hmac.compare_digest(
             tools_bound_signature,
             _bridge_forward_tools_bound_signature(
                 payload=payload,
@@ -349,7 +349,7 @@ def parse_forwarded_request(
                 signature_version=signature_version,
             ),
         )
-        if stripped_sdk_flag_valid:
+        if sdk_flag_downgrade_valid:
             return None, _invalid_bridge_forward_signature_error()
     if openai_sdk_value == "1":
         return None, _invalid_bridge_forward_signature_error()

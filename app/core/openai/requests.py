@@ -5,9 +5,17 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import cast
+from typing import Any, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonObject, JsonValue
@@ -680,6 +688,19 @@ class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _shared_instruction_cache_key: str | None = PrivateAttr(default=None)
     _shared_instruction_cache_disabled: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _remember_client_prompt_cache_breakpoint(
+        cls,
+        data: Any,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        has_explicit_breakpoint = is_json_mapping(data) and _has_explicit_prompt_cache_breakpoint(data.get("input"))
+        request = handler(data)
+        if has_explicit_breakpoint:
+            request._shared_instruction_cache_disabled = True
+        return request
 
     @model_validator(mode="before")
     @classmethod

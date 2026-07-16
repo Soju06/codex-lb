@@ -657,6 +657,71 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
 
 
 @pytest.mark.asyncio
+async def test_codex_alpha_search_get_forwards_query_without_body(async_client, monkeypatch):
+    await _import_account(async_client, "acc_codex_search_get", "codex-search-get@example.com")
+    calls = []
+    upstream_body = b'{"results":[{"title":"OpenAI","url":"https://openai.com/"}]}'
+
+    async def fake_codex_control_request(
+        path,
+        *,
+        method,
+        payload: bytes | None,
+        query_params,
+        headers,
+        access_token,
+        account_id,
+        timeout_seconds=None,
+        **_kwargs,
+    ):
+        calls.append(
+            {
+                "path": path,
+                "method": method,
+                "payload": payload,
+                "query_params": list(query_params),
+                "session_id": headers.get("session_id"),
+                "access_token": access_token,
+                "account_id": account_id,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return core_proxy.CodexControlResponse(
+            status_code=200,
+            body=upstream_body,
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "search-get-request",
+            },
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    response = await async_client.get(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={"session_id": "search-get-session"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == upstream_body
+    assert response.headers["x-request-id"] == "search-get-request"
+    assert calls == [
+        {
+            "path": "alpha/search",
+            "method": "GET",
+            "payload": None,
+            "query_params": [("query", "OpenAI"), ("result_count", "10")],
+            "session_id": "search-get-session",
+            "access_token": "access-token",
+            "account_id": "acc_codex_search_get",
+            "timeout_seconds": calls[0]["timeout_seconds"],
+        }
+    ]
+    assert isinstance(calls[0]["timeout_seconds"], float)
+    assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
 async def test_codex_alpha_search_preserves_normalized_control_error_contract(async_client, monkeypatch):
     async def fake_codex_control_request(*_args, **_kwargs):
         raise ProxyResponseError(

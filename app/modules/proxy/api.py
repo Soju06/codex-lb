@@ -103,6 +103,7 @@ from app.core.openai.requests import (
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import (
+    FORWARDED_CHAIN_HEADER_NAMES,
     parse_trusted_proxy_networks,
     resolve_connection_client_ip,
     resolve_request_client_host,
@@ -5693,6 +5694,7 @@ async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONRespo
         websocket.client.host if websocket.client else None,
         trust_proxy_headers=settings.firewall_trust_proxy_headers,
         trusted_proxy_networks=parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
+        allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,
     )
     async with get_background_session() as session:
         repository = cast(FirewallRepositoryPort, FirewallRepository(session))

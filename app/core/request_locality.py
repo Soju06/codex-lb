@@ -17,13 +17,10 @@ _LOCAL_HOSTS = {
 }
 
 _TEST_SERVER_HOSTS = {"testserver", "testclient"}
-_FORWARDED_CLIENT_IP_HEADERS = {
-    "x-forwarded-for",
-    "forwarded",
-    "x-real-ip",
-    "true-client-ip",
-    "cf-connecting-ip",
-}
+FORWARDED_CHAIN_HEADER_NAMES = frozenset({"x-forwarded-for", "forwarded"})
+_SINGLETON_CLIENT_IP_HEADER_NAMES = ("x-real-ip", "true-client-ip", "cf-connecting-ip")
+_FORWARDED_CLIENT_IP_HEADERS = FORWARDED_CHAIN_HEADER_NAMES | frozenset(_SINGLETON_CLIENT_IP_HEADER_NAMES)
+_HTTP_TOKEN_CHARACTERS = frozenset("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 
 def is_local_host(host: str | None) -> bool:
@@ -45,9 +42,20 @@ def resolve_connection_client_ip(
     *,
     trust_proxy_headers: bool,
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
+    allowed_proxy_header_names: frozenset[str] | None = None,
 ) -> str | None:
     if trust_proxy_headers and socket_ip and is_trusted_proxy_source(socket_ip, trusted_proxy_networks):
-        forwarded_for = _combined_chain_header(headers, "x-forwarded-for")
+        allowed_header_names = (
+            _FORWARDED_CLIENT_IP_HEADERS if allowed_proxy_header_names is None else allowed_proxy_header_names
+        )
+        if isinstance(headers, Headers):
+            for header_name in _SINGLETON_CLIENT_IP_HEADER_NAMES:
+                if header_name in allowed_header_names and len(headers.getlist(header_name)) > 1:
+                    return None
+
+        forwarded_for = (
+            _combined_chain_header(headers, "x-forwarded-for") if "x-forwarded-for" in allowed_header_names else None
+        )
         if forwarded_for:
             try:
                 resolved_from_chain = _resolve_client_ip_from_xff_chain(
@@ -60,13 +68,15 @@ def resolve_connection_client_ip(
             if resolved_from_chain is not None:
                 return resolved_from_chain
 
-        for header_name in ("x-real-ip", "true-client-ip", "cf-connecting-ip"):
+        for header_name in _SINGLETON_CLIENT_IP_HEADER_NAMES:
+            if header_name not in allowed_header_names:
+                continue
             forwarded_ip = headers.get(header_name)
             if forwarded_ip:
                 candidate = forwarded_ip.strip()
                 return candidate if _is_valid_ip(candidate) else None
 
-        forwarded = _combined_chain_header(headers, "forwarded")
+        forwarded = _combined_chain_header(headers, "forwarded") if "forwarded" in allowed_header_names else None
         if forwarded:
             try:
                 return _resolve_client_ip_from_forwarded_chain(
@@ -163,12 +173,25 @@ def _split_forwarded_value(value: str, delimiter: str) -> list[str]:
     return parts
 
 
+def _is_http_token(value: str) -> bool:
+    return bool(value) and all(character in _HTTP_TOKEN_CHARACTERS for character in value)
+
+
+def _is_forwarded_quoted_character(character: str, *, escaped: bool) -> bool:
+    code_point = ord(character)
+    if escaped:
+        return code_point == 0x09 or code_point == 0x20 or 0x21 <= code_point <= 0x7E or 0x80 <= code_point <= 0xFF
+    return (
+        code_point == 0x09
+        or code_point in (0x20, 0x21)
+        or 0x23 <= code_point <= 0x5B
+        or 0x5D <= code_point <= 0x7E
+        or 0x80 <= code_point <= 0xFF
+    )
+
+
 def _unquote_forwarded_value(raw_value: str) -> str:
     value = raw_value.strip()
-    if not value:
-        raise ValueError("Empty Forwarded header value")
-    if '"' not in value:
-        return value
     if len(value) < 2 or not (value.startswith('"') and value.endswith('"')):
         raise ValueError("Malformed quoted Forwarded header value")
 
@@ -176,11 +199,13 @@ def _unquote_forwarded_value(raw_value: str) -> str:
     escaped = False
     for character in value[1:-1]:
         if escaped:
+            if not _is_forwarded_quoted_character(character, escaped=True):
+                raise ValueError("Malformed quoted Forwarded header value")
             unescaped.append(character)
             escaped = False
         elif character == "\\":
             escaped = True
-        elif character == '"':
+        elif character == '"' or not _is_forwarded_quoted_character(character, escaped=False):
             raise ValueError("Malformed quoted Forwarded header value")
         else:
             unescaped.append(character)
@@ -190,21 +215,27 @@ def _unquote_forwarded_value(raw_value: str) -> str:
 
 
 def _validate_forwarded_port(port: str) -> None:
-    if not port.isascii() or not port.isdigit() or not 0 <= int(port) <= 65535:
+    if not 1 <= len(port) <= 5 or not port.isascii() or not port.isdigit():
+        raise ValueError("Invalid Forwarded node port")
+    if not 0 <= int(port) <= 65535:
         raise ValueError("Invalid Forwarded node port")
 
 
-def _parse_forwarded_node(raw_value: str) -> str:
-    value = _unquote_forwarded_value(raw_value)
+def _parse_forwarded_node(value: str, *, is_quoted: bool) -> str:
     if value.lower() == "unknown" or value.startswith("_"):
         raise ValueError("Unsupported Forwarded node identifier")
 
     candidate = value
-    if value.startswith("["):
+    expects_ipv6 = value.startswith("[")
+    if expects_ipv6:
+        if not is_quoted:
+            raise ValueError("Bracketed Forwarded nodes must be quoted")
         closing_bracket = value.find("]")
         if closing_bracket == -1:
             raise ValueError("Invalid bracketed Forwarded node")
         candidate = value[1:closing_bracket]
+        if "%" in candidate:
+            raise ValueError("Scoped IPv6 Forwarded nodes are unsupported")
         suffix = value[closing_bracket + 1 :]
         if suffix:
             if not suffix.startswith(":"):
@@ -212,32 +243,53 @@ def _parse_forwarded_node(raw_value: str) -> str:
             _validate_forwarded_port(suffix[1:])
     else:
         try:
-            return str(ip_address(value))
+            parsed_ip = ip_address(value)
         except ValueError:
+            if not is_quoted:
+                raise ValueError("Forwarded nodes with ports must be quoted") from None
             candidate, separator, port = value.rpartition(":")
             if not separator or ":" in candidate:
                 raise ValueError("Invalid Forwarded node") from None
             _validate_forwarded_port(port)
+        else:
+            if parsed_ip.version != 4:
+                raise ValueError("IPv6 Forwarded nodes must be bracketed")
+            return str(parsed_ip)
 
     try:
-        return str(ip_address(candidate))
+        parsed_ip = ip_address(candidate)
     except ValueError:
         raise ValueError("Invalid Forwarded node") from None
+    if (parsed_ip.version == 6) != expects_ipv6:
+        raise ValueError("Invalid Forwarded node address family")
+    return str(parsed_ip)
+
+
+def _parse_forwarded_pair(parameter: str) -> tuple[str, str, bool]:
+    name, separator, raw_value = parameter.partition("=")
+    normalized_name = name.strip().lower()
+    value = raw_value.strip()
+    if not separator or not _is_http_token(normalized_name) or not value:
+        raise ValueError("Malformed Forwarded parameter")
+    if value.startswith('"'):
+        return normalized_name, _unquote_forwarded_value(value), True
+    if not _is_http_token(value):
+        raise ValueError("Malformed Forwarded parameter value")
+    return normalized_name, value, False
 
 
 def _parse_forwarded_for_chain(forwarded: str) -> list[str]:
     hops: list[str] = []
     for element in _split_forwarded_value(forwarded, ","):
         forwarded_for: str | None = None
+        seen_parameter_names: set[str] = set()
         for parameter in _split_forwarded_value(element, ";"):
-            name, separator, raw_value = parameter.partition("=")
-            if not separator or not name.strip() or not raw_value.strip():
-                raise ValueError("Malformed Forwarded parameter")
-            if name.strip().lower() != "for":
-                continue
-            if forwarded_for is not None:
-                raise ValueError("Duplicate Forwarded for parameter")
-            forwarded_for = _parse_forwarded_node(raw_value)
+            name, value, is_quoted = _parse_forwarded_pair(parameter)
+            if name in seen_parameter_names:
+                raise ValueError("Duplicate Forwarded parameter")
+            seen_parameter_names.add(name)
+            if name == "for":
+                forwarded_for = _parse_forwarded_node(value, is_quoted=is_quoted)
         if forwarded_for is None:
             raise ValueError("Missing Forwarded for parameter")
         hops.append(forwarded_for)

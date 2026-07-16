@@ -7,6 +7,7 @@ Trusted-proxy client resolution validates `X-Forwarded-For` from right to left, 
 - Parse every RFC 7239 `Forwarded` hop and resolve the effective client from right to left using the configured trusted-proxy CIDRs.
 - Join every repeated `Forwarded` or `X-Forwarded-For` field value in arrival order before parsing the effective chain.
 - Fail closed when any hop is missing, obfuscated, malformed, or otherwise cannot establish a complete IP chain.
+- Reject repeated singleton client-IP fields instead of trusting whichever value the HTTP runtime exposes first.
 - Preserve support for valid IPv4 and bracketed IPv6 `for=` values, including optional ports.
 - Add regression coverage for attacker-preseeded chains, trusted multi-proxy chains, malformed chains, and IPv6 values.
 

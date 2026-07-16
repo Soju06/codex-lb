@@ -189,7 +189,9 @@ Mutations to security-bearing dashboard settings (dashboard password hash, guest
 
 ### Requirement: Trusted proxy client identity resists appended Forwarded chain spoofing
 
-When proxy-header trust is enabled and the socket peer belongs to a configured trusted proxy CIDR, the system MUST resolve an RFC 7239 `Forwarded` client chain from right to left. It MUST advance toward an earlier `for=` hop only while the immediately downstream peer is trusted. Every forwarded element MUST contain exactly one valid IP `for=` node, optionally with a valid port; otherwise the entire `Forwarded` value MUST fail closed and MUST NOT classify the request as local.
+When proxy-header trust is enabled and the socket peer belongs to a configured trusted proxy CIDR, the system MUST resolve an RFC 7239 `Forwarded` client chain from right to left. It MUST advance toward an earlier `for=` hop only while the immediately downstream peer is trusted. Every forwarded element MUST contain exactly one valid IP `for=` node, optionally with a valid port. Every parameter name and value MUST follow RFC 7239 token or quoted-string syntax, and no parameter name may repeat within an element. IPv6 nodes MUST be bracketed and quoted, and every node carrying a port MUST be quoted; numeric ports MUST contain one to five ASCII digits and fall within `0..65535`. Otherwise the entire `Forwarded` value MUST fail closed and MUST NOT classify the request as local.
+
+`X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP` MUST each occur at most once. Repetition of any such singleton client-IP header MUST return no resolved client IP and MUST NOT classify the request as local.
 
 #### Scenario: Client-preseeded loopback value cannot bypass remote bootstrap protection
 
@@ -217,7 +219,19 @@ When proxy-header trust is enabled and the socket peer belongs to a configured t
 - **THEN** trusted proxy client resolution returns no client IP from that header
 - **AND** the request is not classified as local
 
+#### Scenario: Unquoted IPv6 or port-bearing node fails closed
+
+- **WHEN** a `Forwarded` element contains an unquoted bracketed IPv6 node or an unquoted node with a port
+- **THEN** trusted proxy client resolution returns no client IP from that header
+- **AND** the request is not classified as local
+
 #### Scenario: Bracketed IPv6 node with port is resolved
 
 - **WHEN** a trusted socket proxy supplies a valid quoted bracketed IPv6 `for=` node with a numeric port
 - **THEN** the system resolves the IPv6 address without the brackets or port
+
+#### Scenario: Repeated singleton client-IP header fails closed
+
+- **WHEN** a trusted socket request contains more than one field for `X-Real-IP`, `True-Client-IP`, or `CF-Connecting-IP`
+- **THEN** trusted proxy client resolution returns no client IP
+- **AND** the request is not classified as local

@@ -125,6 +125,19 @@ def test_forwarded_chain_traverses_only_complete_trusted_proxy_path() -> None:
         "for=127.0.0.1,, for=203.0.113.24",
         'for="127.0.0.1;proto=https"',
         'for="[2001:db8::1]:65536"',
+        "for=198.51.100.7:4711",
+        "for=[2001:db8::1]",
+        "for=[2001:db8::1]:4711",
+        "for=2001:db8::1",
+        'for="2001:db8::1"',
+        'for="[198.51.100.7]"',
+        'for="198.51.100.7:000080"',
+        "for=203.0.113.24;proto=https;PROTO=http",
+        "for=203.0.113.24;bad name=value",
+        "for=203.0.113.24;proto=bad value",
+        'for=203.0.113.24;proto=abc"def"',
+        'for=203.0.113.24;proto="bad\x01value"',
+        'for="[fe80::1%eth0]"',
         "for=203.0.113.24; proto",
     ],
 )
@@ -171,3 +184,54 @@ def test_xff_chain_combines_duplicate_header_fields() -> None:
     )
 
     assert resolved == "203.0.113.24"
+
+
+@pytest.mark.parametrize("header_name", ["x-real-ip", "true-client-ip", "cf-connecting-ip"])
+def test_connection_resolver_preserves_default_singleton_proxy_headers(header_name: str) -> None:
+    resolved = request_locality.resolve_connection_client_ip(
+        {header_name: "203.0.113.24"},
+        "127.0.0.1",
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(["127.0.0.1/32"]),
+    )
+
+    assert resolved == "203.0.113.24"
+
+
+@pytest.mark.parametrize("header_name", ["x-real-ip", "true-client-ip", "cf-connecting-ip"])
+def test_connection_resolver_rejects_repeated_singleton_proxy_headers(header_name: str) -> None:
+    encoded_name = header_name.encode()
+    headers = Headers(
+        raw=[
+            (encoded_name, b"127.0.0.1"),
+            (encoded_name, b"203.0.113.24"),
+        ]
+    )
+
+    resolved = request_locality.resolve_connection_client_ip(
+        headers,
+        "127.0.0.1",
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(["127.0.0.1/32"]),
+    )
+
+    assert resolved is None
+
+
+def test_connection_resolver_rejects_repeated_singleton_before_valid_xff() -> None:
+    headers = Headers(
+        raw=[
+            (b"x-forwarded-for", b"127.0.0.1"),
+            (b"x-real-ip", b"127.0.0.1"),
+            (b"x-real-ip", b"203.0.113.24"),
+        ]
+    )
+
+    resolved = request_locality.resolve_connection_client_ip(
+        headers,
+        "127.0.0.1",
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(["127.0.0.1/32"]),
+    )
+
+    assert resolved is None

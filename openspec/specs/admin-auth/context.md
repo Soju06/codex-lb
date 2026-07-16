@@ -39,6 +39,8 @@ Set `CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN=<value>` as an environment variable befo
 
 Requests from localhost (127.0.0.1, ::1) bypass bootstrap entirely — no token or password needed for initial setup. This is handled by `is_local_request()` in `app/core/request_locality.py` and checked in both the session endpoint and the auth guard.
 
+Behind a trusted proxy, locality comes from the resolved client identity rather than from header presence alone. Chain headers preserve repeated fields because they form one ordered route; singleton identity headers (`X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP`) must appear once. Repetition is ambiguous and fails closed so a client-preseeded loopback field cannot win a first-value lookup.
+
 ### Threat Model
 
 - **Token in logs**: Acceptable risk (same pattern as Grafana/GitLab/Portainer). `docker logs` requires container access. Token is one-time — useless after password is set.

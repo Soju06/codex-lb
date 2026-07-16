@@ -44,6 +44,14 @@ When the runtime header object exposes `getlist()`, join all values in arrival o
 
 Alternative: use `headers.get()` and assume intermediaries combine repeated fields. Rejected because RFC 7239 explicitly permits multiple `Forwarded` fields and Starlette returns only the first duplicate from `get()`.
 
+### Reject repeated singleton identity fields
+
+Unlike `Forwarded` and `X-Forwarded-For`, `X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP` each assert one client identity rather than an ordered chain. When the runtime exposes repeated fields, the shared resolver rejects more than one value instead of accepting Starlette's first-value `get()` result.
+
+Singleton repetition is validated before header precedence is applied. A valid higher-priority `X-Forwarded-For` chain therefore cannot hide an ambiguous repeated singleton field from general trusted-proxy resolution; firewall callers remain unaffected because their explicit header policy excludes singleton fields.
+
+Alternative: accept the first or last singleton field. Rejected because a client and proxy can each supply one field, and field order alone does not prove which party owns either value.
+
 ### Share only the chain trust algorithm
 
 Keep format-specific parsing separate, then pass both IP lists to a small common right-to-left resolver. This removes the semantic drift without introducing a general header abstraction.
@@ -54,13 +62,15 @@ Alternative: translate `Forwarded` into an `X-Forwarded-For` string. Rejected be
 
 Delete the firewall-local client-chain, CIDR, and trusted-source implementations. HTTP firewall middleware and the WebSocket firewall path import the shared resolver and CIDR parser; trusted-header sanitization imports the shared trusted-source predicate.
 
+The shared resolver accepts an explicit allowed-header policy. Firewall callers pass only `X-Forwarded-For` and `Forwarded`; general request-locality callers retain their existing singleton `X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP` fallbacks. This keeps consolidation from silently broadening the firewall trust contract.
+
 Alternative: patch both implementations in parallel. Rejected because duplicated security logic already drifted in header formats, malformed-chain behavior, and repeated-field handling.
 
 ## Risks / Trade-offs
 
 - [Previously accepted malformed or partial `Forwarded` values stop resolving] → This is intentional fail-closed behavior at an authentication boundary; valid single-hop values remain supported.
 - [Some proxies emit nonstandard hostnames or obfuscated identifiers] → Continue rejecting them because configured trust is IP/CIDR-based and cannot authenticate those identifiers.
-- [Parser edge cases around quoting] → Cover escaped quoted strings, unmatched quotes, duplicate/missing `for=`, IPv4 ports, and bracketed IPv6 ports with focused tests.
+- [Parser edge cases around quoting] → Cover escaped quoted strings, unmatched quotes, duplicate parameters, token and quoted-string character syntax, mandatory quoting for IPv6 and port-bearing nodes, numeric port bounds, and bracketed address-family validation with focused tests.
 - [Shared resolver behavior affects several callers] → Preserve socket trust gating and header precedence, then exercise dashboard bootstrap and firewall-facing ASGI headers plus the existing firewall resolver suite.
 
 ## Migration Plan

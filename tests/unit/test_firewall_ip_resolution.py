@@ -112,3 +112,21 @@ def test_resolve_client_ip_combines_duplicate_chain_header_fields(header_name: b
         )
         == "203.0.113.24"
     )
+
+
+@pytest.mark.parametrize("header_name", [b"x-real-ip", b"true-client-ip", b"cf-connecting-ip"])
+def test_resolve_client_ip_rejects_non_firewall_proxy_headers(header_name: bytes):
+    trusted = parse_trusted_proxy_networks(["127.0.0.1/32"])
+    request = _make_request(
+        headers=[(header_name, b"127.0.0.1")],
+        client=("127.0.0.1", 12345),
+    )
+
+    assert (
+        _resolve_client_ip(
+            request,
+            trust_proxy_headers=True,
+            trusted_proxy_networks=trusted,
+        )
+        is None
+    )

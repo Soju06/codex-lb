@@ -201,6 +201,13 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **THEN** the returned `failure_class` is `retryable_transient`
 - **AND** the streaming retry layer is eligible to retry the request before surfacing the terminal overload event
 
+#### Scenario: Non-streaming Responses retries status-level overload JSON
+
+- **GIVEN** a non-streaming `/v1/responses` request has not emitted any downstream output
+- **WHEN** upstream returns an HTTP status error envelope with `code="server_is_overloaded"`
+- **THEN** the retry layer MUST treat the envelope as a transient overload even when the HTTP status is not 500
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning the overload error to the client
+
 #### Scenario: HTTP bridge retries a pre-created overload event
 
 - **GIVEN** the HTTP responses session bridge is enabled

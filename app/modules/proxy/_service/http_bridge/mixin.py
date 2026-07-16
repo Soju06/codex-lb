@@ -67,6 +67,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _apply_http_bridge_reuse_metadata,
+    _bridge_selection_account,
     _close_http_bridge_session_bounded,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
@@ -1878,7 +1879,7 @@ class _HTTPBridgeMixin(
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
             selected_account_lease = selection.lease
-            account = selection.account
+            account = _bridge_selection_account(request_state, selection, require_security_work_authorized)
             if account is None:
                 await self._load_balancer.release_account_lease(selected_account_lease)
                 selected_account_lease = None
@@ -2080,7 +2081,7 @@ class _HTTPBridgeMixin(
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
             account_lease=selected_account_lease,
-            requires_security_work_authorized=require_security_work_authorized,
+            requires_security_work_authorized=request_state.require_security_work_authorized,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
@@ -2200,7 +2201,7 @@ class _HTTPBridgeMixin(
                 service_tier=session.request_service_tier,
                 exclude_account_ids=excluded_account_ids,
                 preferred_account_id=preferred_candidate_id,
-                require_security_work_authorized=require_security_work_authorized,
+                require_security_work_authorized=session.requires_security_work_authorized,
                 security_lineage_id=request_state.security_lineage_id,
                 lease_kind=None if reuse_current_account_lease else "stream",
                 estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
@@ -2212,7 +2213,7 @@ class _HTTPBridgeMixin(
                     and required_preferred_account_id is None
                 ),
             )
-            account = selection.account
+            account = _bridge_selection_account(request_state, selection, require_security_work_authorized, session)
             if account is None:
                 await release_selected_account_lease()
                 if (

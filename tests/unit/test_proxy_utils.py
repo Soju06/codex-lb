@@ -15125,6 +15125,95 @@ async def test_create_http_bridge_session_fails_over_after_repeated_401_refresh_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "case",
+        "session_id",
+        "caller_requires_security_work_authorized",
+        "lineage_requires_security_work_authorized",
+        "expected_requires_security_work_authorized",
+    ),
+    [
+        ("lineage_derived", "root-security-lineage", False, True, True),
+        ("caller_true", "root-caller-security", True, False, True),
+        ("ordinary", None, False, False, False),
+    ],
+)
+async def test_create_http_bridge_session_carries_effective_security_requirement_to_durable_claim(
+    monkeypatch,
+    case,
+    session_id,
+    caller_requires_security_work_authorized,
+    lineage_requires_security_work_authorized,
+    expected_requires_security_work_authorized,
+):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account(f"acc_bridge_create_security_{case}")
+    account.security_work_authorized = expected_requires_security_work_authorized
+    upstream = SimpleNamespace(response_header=lambda _name: None)
+    mark_security_lineage = AsyncMock()
+    claim_live_session = AsyncMock(
+        return_value=SimpleNamespace(
+            owner_instance_id=settings.http_responses_session_bridge_instance_id,
+            session_id=f"durable-bridge-create-security-{case}",
+            owner_epoch=1,
+            requires_security_work_authorized=expected_requires_security_work_authorized,
+        )
+    )
+
+    async def relay_noop(_session: proxy_service._HTTPBridgeSession) -> None:
+        return None
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        service,
+        "_security_lineage_requires_security_work_authorized",
+        AsyncMock(return_value=lineage_requires_security_work_authorized),
+    )
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+    monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", relay_noop)
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", claim_live_session)
+
+    headers = {} if session_id is None else {"x-codex-session-id": session_id}
+    session = await service._create_http_bridge_session(
+        proxy_service._HTTPBridgeSessionKey("prompt_cache", f"bridge-create-security-{case}", None),
+        headers=headers,
+        affinity=proxy_service._AffinityPolicy(key=f"bridge-create-security-{case}"),
+        api_key=None,
+        request_model="gpt-5.5",
+        idle_ttl_seconds=30.0,
+        require_security_work_authorized=caller_requires_security_work_authorized,
+    )
+
+    upstream_reader = session.upstream_reader
+    assert upstream_reader is not None
+    await upstream_reader
+    assert session.account is account
+    assert session.account.security_work_authorized is expected_requires_security_work_authorized
+    assert session.requires_security_work_authorized is expected_requires_security_work_authorized
+    select_call = service._load_balancer.select_account.await_args
+    assert select_call is not None
+    assert select_call.kwargs["require_security_work_authorized"] is expected_requires_security_work_authorized
+
+    await service._claim_durable_http_bridge_session(session, allow_takeover=False)
+
+    claim_call = claim_live_session.await_args
+    assert claim_call is not None
+    assert claim_call.kwargs["requires_security_work_authorized"] is expected_requires_security_work_authorized
+    assert session.requires_security_work_authorized is expected_requires_security_work_authorized
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -29957,6 +30046,84 @@ async def test_reconnect_http_bridge_session_sets_security_requirement_before_du
     assert session.requires_security_work_authorized is True
     assert session.account == account_b
     assert session.upstream is new_upstream
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_promotes_lineage_requirement_before_durable_claim(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    ordinary_account = _make_account("acc_bridge_reconnect_lineage_ordinary")
+    authorized_account = _make_account("acc_bridge_reconnect_lineage_authorized")
+    authorized_account.security_work_authorized = True
+    old_upstream = AsyncMock()
+    replacement_upstream = SimpleNamespace(response_header=lambda _name: None)
+    mark_security_lineage = AsyncMock()
+    claim_saw_security_requirement = False
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        service,
+        "_security_lineage_requires_security_work_authorized",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=authorized_account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=authorized_account))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(return_value=replacement_upstream),
+    )
+
+    async def claim_durable(session_arg, **kwargs):
+        nonlocal claim_saw_security_requirement
+        assert kwargs["claim_account_id"] == authorized_account.id
+        claim_saw_security_requirement = session_arg.requires_security_work_authorized
+
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock(side_effect=claim_durable))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_reconnect_lineage_security_claim",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+        security_lineage_id="root-security-lineage-reconnect",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-lineage-reconnect", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-lineage-reconnect"),
+        request_model="gpt-5.5",
+        account=ordinary_account,
+        upstream=old_upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        durable_session_id="durable-reconnect-lineage-security",
+        durable_owner_epoch=1,
+    )
+
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    select_call = service._load_balancer.select_account.await_args
+    assert select_call is not None
+    assert select_call.kwargs["require_security_work_authorized"] is True
+    assert session.account is authorized_account
+    assert session.requires_security_work_authorized is True
+    assert request_state.require_security_work_authorized is True
+    assert claim_saw_security_requirement is True
 
 
 @pytest.mark.asyncio

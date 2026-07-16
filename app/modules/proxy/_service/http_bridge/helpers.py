@@ -955,6 +955,23 @@ def _http_bridge_connect_request_state(
     )
 
 
+def _bridge_selection_account(
+    request_state: _WebSocketRequestState,
+    selection: Any,
+    require_security_work_authorized: bool,
+    session: _HTTPBridgeSession | None = None,
+) -> Any:
+    effective_requirement = (
+        require_security_work_authorized
+        or request_state.require_security_work_authorized
+        or bool(selection.requires_security_work_authorized)
+    )
+    request_state.require_security_work_authorized = effective_requirement
+    if session is not None:
+        session.requires_security_work_authorized = session.requires_security_work_authorized or effective_requirement
+    return selection.account
+
+
 def _http_bridge_session_reusable_for_request(
     *,
     session: "_HTTPBridgeSession",

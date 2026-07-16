@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from starlette.datastructures import Headers
 from starlette.requests import Request
 
 import app.core.request_locality as request_locality
@@ -30,6 +31,20 @@ def _request(*, client_host: str, host: str) -> Request:
         "query_string": b"",
     }
     return Request(scope)
+
+
+def _resolve_forwarded(
+    forwarded: str,
+    *,
+    socket_ip: str = "127.0.0.1",
+    trusted_cidrs: list[str] | None = None,
+) -> str | None:
+    return request_locality.resolve_connection_client_ip(
+        {"forwarded": forwarded},
+        socket_ip,
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(trusted_cidrs or ["127.0.0.1/32"]),
+    )
 
 
 def test_loopback_with_local_host_is_local() -> None:
@@ -80,3 +95,79 @@ def test_trusted_proxy_mode_accepts_loopback_with_forwarded_hint(monkeypatch: py
     }
     request = Request(scope)
     assert is_local_request(request) is True
+
+
+def test_forwarded_chain_stops_at_proxy_appended_remote_client() -> None:
+    resolved = _resolve_forwarded("for=127.0.0.1, for=203.0.113.24")
+
+    assert resolved == "203.0.113.24"
+
+
+def test_forwarded_chain_traverses_only_complete_trusted_proxy_path() -> None:
+    resolved = _resolve_forwarded(
+        'for=198.51.100.7;proto=https, for=10.0.0.1;host="proxy,internal", for=10.0.0.2',
+        socket_ip="10.0.0.3",
+        trusted_cidrs=["10.0.0.0/8"],
+    )
+
+    assert resolved == "198.51.100.7"
+
+
+@pytest.mark.parametrize(
+    "forwarded",
+    [
+        "for=127.0.0.1, by=203.0.113.24",
+        "for=127.0.0.1; for=203.0.113.24",
+        "for=_hidden",
+        "for=unknown",
+        "for=not-an-ip",
+        'for="127.0.0.1',
+        "for=127.0.0.1,, for=203.0.113.24",
+        'for="127.0.0.1;proto=https"',
+        'for="[2001:db8::1]:65536"',
+        "for=203.0.113.24; proto",
+    ],
+)
+def test_forwarded_chain_fails_closed_on_malformed_element(forwarded: str) -> None:
+    assert _resolve_forwarded(forwarded) is None
+
+
+@pytest.mark.parametrize(
+    ("forwarded", "expected"),
+    [
+        ('for="198.51.100.7:4711"', "198.51.100.7"),
+        ('for="[2001:db8::1]:4711"', "2001:db8::1"),
+        ('for="[2001:0db8::1]"', "2001:db8::1"),
+    ],
+)
+def test_forwarded_chain_accepts_ip_nodes_with_optional_port(forwarded: str, expected: str) -> None:
+    assert _resolve_forwarded(forwarded) == expected
+
+
+def test_xff_chain_keeps_right_to_left_trusted_proxy_resolution() -> None:
+    resolved = request_locality.resolve_connection_client_ip(
+        {"x-forwarded-for": "198.51.100.7, 10.0.0.1, 10.0.0.2"},
+        "10.0.0.3",
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(["10.0.0.0/8"]),
+    )
+
+    assert resolved == "198.51.100.7"
+
+
+def test_xff_chain_combines_duplicate_header_fields() -> None:
+    headers = Headers(
+        raw=[
+            (b"x-forwarded-for", b"127.0.0.1"),
+            (b"x-forwarded-for", b"203.0.113.24"),
+        ]
+    )
+
+    resolved = request_locality.resolve_connection_client_ip(
+        headers,
+        "127.0.0.1",
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(["127.0.0.1/32"]),
+    )
+
+    assert resolved == "203.0.113.24"

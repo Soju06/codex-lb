@@ -4,7 +4,7 @@ Every request-log page load and pagination click runs an exact `COUNT(*)` over t
 
 ## What Changes
 
-- Cache the listing total per filter signature (all filter params except limit/offset) with a configurable TTL: `CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS`, default 30 s, `0` disables (the test suite disables it so totals stay exact within a test). Bounded LRU-ish eviction at 256 entries; per-instance.
+- Cache the listing total per filter signature (all filter params except limit/offset) with a fixed 30 s TTL (application constant; made non-tunable by the `reduce-settings-surface-phase-2` change — the test suite patches the constant to 0 so totals stay exact within a test). Bounded LRU-ish eviction at 256 entries; per-instance.
 - API contract unchanged: `total` and `has_more` keep their exact semantics up to ≤TTL staleness of a monotonically-growing display figure; new rows always appear on page 1 (newest-first ordering) regardless.
 
 ## Capabilities
@@ -19,4 +19,4 @@ Every request-log page load and pagination click runs an exact `COUNT(*)` over t
 
 ## Impact
 
-`app/modules/request_logs/repository.py`, `app/core/config/settings.py`, `tests/conftest.py` (suite disables the TTL). No schema/API change.
+`app/modules/request_logs/repository.py`, `tests/conftest.py` (suite patches the TTL constant to 0). No schema/API change.

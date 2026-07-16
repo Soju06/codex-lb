@@ -195,6 +195,7 @@ from app.modules.proxy.schemas import (
     AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
+    CodexTruncationPolicy,
     ConsumeRateLimitResetCreditRequest,
     ConsumeRateLimitResetCreditResponse,
     FileCreateRequest,
@@ -357,6 +358,14 @@ class _CapacityStartupReadyEvent(asyncio.Event):
 
 
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
+
+# Internal Responses host model used to invoke the built-in
+# ``image_generation`` tool on the /v1/images/* routes. It is never echoed
+# to clients (only the requested ``gpt-image-*`` value appears in public
+# responses) and is fixed (issue #1340 / PRINCIPLES.md P2): it tracks the
+# registry bootstrap catalog's stable ``gpt-5.5`` slug and changes only in
+# lockstep with catalog maintenance.
+_IMAGES_HOST_MODEL = "gpt-5.5"
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -564,6 +573,15 @@ async def codex_safety_arc(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "safety/arc", context, api_key)
+
+
+@router.post("/alpha/search")
+async def codex_alpha_search(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "alpha/search", context, api_key)
 
 
 @router.get("/agent-identities/jwks")
@@ -2168,7 +2186,7 @@ async def _proxy_images_generation_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = settings.images_host_model
+    host_model = _IMAGES_HOST_MODEL
 
     try:
         validate_model_access(api_key, effective_model)
@@ -2470,7 +2488,7 @@ async def _proxy_images_edit_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = settings.images_host_model
+    host_model = _IMAGES_HOST_MODEL
 
     try:
         validate_model_access(api_key, effective_model)
@@ -2957,6 +2975,23 @@ def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
     return model.raw.get("shell_type") == "shell_command"
 
 
+def _codex_model_truncation_policy(model: UpstreamModel) -> CodexTruncationPolicy:
+    if "truncation_policy" in model.raw:
+        try:
+            return CodexTruncationPolicy.model_validate(model.raw["truncation_policy"])
+        except ValidationError:
+            pass
+    mode = "bytes" if model.slug == "gpt-5.2" else "tokens"
+    return CodexTruncationPolicy(mode=mode, limit=10_000)
+
+
+def _codex_model_experimental_supported_tools(model: UpstreamModel) -> list[str]:
+    tools = model.raw.get("experimental_supported_tools")
+    if not is_json_list(tools):
+        return []
+    return [tool for tool in tools if isinstance(tool, str)]
+
+
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
     raw = model.raw
 
@@ -2980,6 +3015,8 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         "available_in_plans",
         "prefer_websockets",
         "visibility",
+        "truncation_policy",
+        "experimental_supported_tools",
     }
     for key, value in raw.items():
         if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
@@ -3012,6 +3049,11 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         available_in_plans=sorted(model.available_in_plans),
         prefer_websockets=model.prefer_websockets,
         visibility=visibility or _model_visibility(model),
+        # Codex deserializes the complete catalog atomically. Repair legacy
+        # bootstrap/retained metadata at this final wire boundary so one hidden
+        # entry cannot invalidate otherwise-current live model metadata.
+        truncation_policy=_codex_model_truncation_policy(model),
+        experimental_supported_tools=_codex_model_experimental_supported_tools(model),
         **extra,
     )
 

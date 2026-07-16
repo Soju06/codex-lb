@@ -1003,6 +1003,27 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "mereyabdenbekuly-ctrl",
+      "name": "SSY",
+      "avatar_url": "https://avatars.githubusercontent.com/u/234955825?v=4",
+      "profile": "https://github.com/mereyabdenbekuly-ctrl",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "fozbek",
+      "name": "Fatih Özbek",
+      "avatar_url": "https://avatars.githubusercontent.com/u/17993880?v=4",
+      "profile": "https://github.com/fozbek",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

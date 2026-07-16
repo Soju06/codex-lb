@@ -43,9 +43,25 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
 
+      - name: Mint label sync App token
+        id: app-token
+        if: ${{ vars.CODEX_LABEL_SYNC_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.CODEX_LABEL_SYNC_APP_ID }}
+          private-key: ${{ secrets.CODEX_LABEL_SYNC_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+          permission-statuses: read
+
       - name: Sync labels
         env:
-          GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          GH_FALLBACK_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
@@ -74,9 +90,25 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
 
+      - name: Mint label sync App token
+        id: app-token
+        if: ${{ vars.CODEX_LABEL_SYNC_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.CODEX_LABEL_SYNC_APP_ID }}
+          private-key: ${{ secrets.CODEX_LABEL_SYNC_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+          permission-statuses: read
+
       - name: Sync labels
         env:
-          GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          GH_FALLBACK_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           if [ ! -f .github/scripts/sync_codex_ok_labels.py ]; then

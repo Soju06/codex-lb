@@ -365,6 +365,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -456,6 +457,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -629,6 +631,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -701,6 +704,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
+        prime=AsyncMock(),
         start=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -831,7 +835,7 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
         heartbeat=AsyncMock(),
         list_active=AsyncMock(return_value=[]),
     )
-    cache_poller = SimpleNamespace(on_invalidation=Mock(), start=AsyncMock(), stop=AsyncMock())
+    cache_poller = SimpleNamespace(on_invalidation=Mock(), prime=AsyncMock(), start=AsyncMock(), stop=AsyncMock())
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)

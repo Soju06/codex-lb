@@ -4,8 +4,9 @@ import asyncio
 import importlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
@@ -18,9 +19,17 @@ from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
+# Planner tick cadence (fixed; issue #1340 / PRINCIPLES.md P2). The scheduler
+# keeps ``interval_seconds`` as a constructor field so tests can exercise the
+# loop with a short interval.
+_TICK_SECONDS = 300
+
+
+_T = TypeVar("_T")
+
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -64,8 +73,9 @@ class QuotaPlannerScheduler:
                 pass
 
     async def run_once(self) -> None:
-        if not await _get_leader_election().try_acquire():
-            return
+        await _get_leader_election().run_if_leader(self._run_once_as_leader)
+
+    async def _run_once_as_leader(self) -> None:
         async with get_background_session() as session:
             planner_repo = QuotaPlannerRepository(session)
             settings = await planner_repo.get_settings()
@@ -161,6 +171,6 @@ class QuotaPlannerScheduler:
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:
     settings = get_settings()
     return QuotaPlannerScheduler(
-        interval_seconds=max(60, getattr(settings, "quota_planner_tick_seconds", 300)),
+        interval_seconds=_TICK_SECONDS,
         enabled=getattr(settings, "quota_planner_scheduler_enabled", True),
     )

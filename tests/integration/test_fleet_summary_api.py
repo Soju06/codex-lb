@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -262,8 +262,9 @@ async def test_fleet_summary_rejects_invalid_api_key(async_client, db_setup):
 @pytest.mark.asyncio
 async def test_fleet_summary_returns_minimal_projection_with_valid_key(async_client, db_setup):
     plain_key = await _create_api_key("fleet-summary-key")
-    primary_reset = 1735862400
-    secondary_reset = 1736467200
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    primary_reset = now_epoch + 300
+    secondary_reset = now_epoch + 5 * 24 * 3600
     await _seed_account_with_windows(
         "acc_fleet_a",
         "fleet-a@example.com",

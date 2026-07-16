@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -13,9 +14,17 @@ from app.db.models import DashboardSettings
 pytestmark = pytest.mark.unit
 
 
+class _FakeLeader:
+    """Leader stub that always runs the guarded body, bypassing the DB lease."""
+
+    async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+        return await fn()
+
+
 def test_build_sticky_session_cleanup_scheduler_respects_enabled_setting(monkeypatch) -> None:
-    settings = SimpleNamespace(sticky_session_cleanup_interval_seconds=42, sticky_session_cleanup_enabled=False)
+    settings = SimpleNamespace(sticky_session_cleanup_enabled=False)
     monkeypatch.setattr(cleanup_scheduler, "get_settings", lambda: settings)
+    monkeypatch.setattr(cleanup_scheduler, "_CLEANUP_INTERVAL_SECONDS", 42)
 
     scheduler = cleanup_scheduler.build_sticky_session_cleanup_scheduler()
 
@@ -70,6 +79,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
         patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
     ):
         await scheduler._cleanup_once()
@@ -125,6 +135,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
         patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
         patch.object(
             cleanup_scheduler,
@@ -184,6 +195,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
         patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
         patch.object(cleanup_scheduler, "missing_durable_bridge_tables", AsyncMock(return_value=())),
     ):
@@ -268,6 +280,7 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
         patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
+        patch.object(cleanup_scheduler, "_get_leader_election", lambda: _FakeLeader()),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
     ):
         await scheduler._cleanup_once()

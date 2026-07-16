@@ -80,9 +80,6 @@ retry once on conflict because their mutations are idempotent absolute writes.
 
 ## Known limitations (triaged follow-ups)
 
-- **Dashboard OAuth flows require replica affinity** — the PKCE verifier, state token, and
-  device-poll handle live in process memory, so `/api/oauth` start/status/complete must land on
-  the same replica. Follow-up: `persist-oauth-flow-state`.
 - **Websocket turns are not drained on shutdown, and detached request-log writes may be lost at
   teardown** — drain rejects new HTTP work but neither rejects new websocket scopes nor waits
   for in-flight websocket turns, and pending request-log tasks are not flushed before the DB

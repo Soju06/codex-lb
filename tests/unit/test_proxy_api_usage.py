@@ -70,7 +70,8 @@ async def test_build_account_pool_usage_limits_latest_queries_to_assigned_accoun
         ("secondary", assigned_account_ids),
     ]
     assert result is not None
-    assert result.primary == pytest.approx(100.0)
+    # No live primary sample -> the pooled primary percent reads absent.
+    assert result.primary is None
     assert result.secondary == pytest.approx(100.0)
 
 

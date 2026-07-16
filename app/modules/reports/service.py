@@ -77,6 +77,7 @@ class ReportsService:
                 error_count=row.error_count,
                 median_ttft_ms=round(row.median_ttft_ms, 2),
                 median_tps=round(row.median_tps, 2),
+                median_queue_ms=round(row.median_queue_ms, 2),
             )
             for row in daily_rows
         ]

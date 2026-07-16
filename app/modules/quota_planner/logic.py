@@ -58,16 +58,26 @@ class PlannerAction:
 
 
 class DemandBinLike(Protocol):
-    slot_epoch: int
-    api_key_id: str | None
-    model: str
-    reasoning_effort: str | None
-    request_kind: str
-    input_tokens: int
-    cached_input_tokens: int
-    output_tokens: int
-    cost_usd: float
-    request_count: int
+    @property
+    def slot_epoch(self) -> int: ...
+
+    @property
+    def request_kind(self) -> str: ...
+
+    @property
+    def input_tokens(self) -> int: ...
+
+    @property
+    def cached_input_tokens(self) -> int: ...
+
+    @property
+    def output_tokens(self) -> int: ...
+
+    @property
+    def cost_usd(self) -> float: ...
+
+    @property
+    def request_count(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)

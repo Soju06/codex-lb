@@ -840,3 +840,66 @@ def test_unresolved_inline_codex_finding_counts_as_review_news(
 
     assert len(nodes) == 1
     assert nodes[0]["url"] == url
+
+
+def _rate_limited_proc() -> Any:
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "gh: API rate limit exceeded for user ID 34199905 (HTTP 403)"
+
+    return _Proc()
+
+
+def _ok_proc(payload: str = "{}") -> Any:
+    class _Proc:
+        returncode = 0
+        stdout = payload
+        stderr = ""
+
+    return _Proc()
+
+
+def test_run_gh_switches_to_fallback_token_on_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    monkeypatch.setenv("GH_TOKEN", "primary-token")
+    monkeypatch.setenv("GH_FALLBACK_TOKEN", "fallback-token")
+
+    calls: list[str] = []
+
+    def fake_run(command: Any, **kwargs: Any) -> Any:
+        import os
+
+        calls.append(os.environ["GH_TOKEN"])
+        if len(calls) == 1:
+            return _rate_limited_proc()
+        return _ok_proc()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = module.run_gh(["api", "/rate-limited-path"])
+
+    assert result == {}
+    assert calls == ["primary-token", "fallback-token"]
+
+
+def test_run_gh_fails_without_distinct_fallback_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    monkeypatch.setenv("GH_TOKEN", "primary-token")
+    monkeypatch.setenv("GH_FALLBACK_TOKEN", "primary-token")
+
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: _rate_limited_proc())
+
+    with pytest.raises(module.GhError):
+        module.run_gh(["api", "/rate-limited-path"])
+
+
+def test_run_gh_fails_when_fallback_token_is_also_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    monkeypatch.setenv("GH_TOKEN", "primary-token")
+    monkeypatch.setenv("GH_FALLBACK_TOKEN", "fallback-token")
+
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: _rate_limited_proc())
+
+    with pytest.raises(module.GhError):
+        module.run_gh(["api", "/rate-limited-path"])

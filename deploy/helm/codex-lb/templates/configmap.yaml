@@ -28,10 +28,9 @@ data:
   # Leader election
   CODEX_LB_LEADER_ELECTION_ENABLED: {{ .Values.config.leaderElectionEnabled | toString | quote }}
   CODEX_LB_LEADER_ELECTION_TTL_SECONDS: {{ .Values.config.leaderElectionTtlSeconds | toString | quote }}
-  # Circuit breaker
+  # Circuit breaker (failure threshold and recovery timeout are fixed
+  # application constants)
   CODEX_LB_CIRCUIT_BREAKER_ENABLED: {{ .Values.config.circuitBreakerEnabled | toString | quote }}
-  CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD: {{ .Values.config.circuitBreakerFailureThreshold | toString | quote }}
-  CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS: {{ .Values.config.circuitBreakerRecoveryTimeoutSeconds | toString | quote }}
   # Backpressure
   CODEX_LB_BACKPRESSURE_MAX_CONCURRENT_REQUESTS: {{ .Values.config.backpressureMaxConcurrentRequests | toString | quote }}
   # Shutdown
@@ -50,9 +49,8 @@ data:
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_MAX_SESSIONS: {{ .Values.config.sessionBridgeMaxSessions | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT: {{ .Values.config.sessionBridgeQueueLimit | toString | quote }}
   CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING: {{ .Values.config.sessionBridgeInstanceRing | quote }}
-  # Sticky session cleanup
+  # Sticky session cleanup (the interval is a fixed application constant)
   CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED: {{ .Values.config.stickySessionCleanupEnabled | toString | quote }}
-  CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS: {{ .Values.config.stickySessionCleanupIntervalSeconds | toString | quote }}
   {{- if .Values.tracing.enabled }}
   CODEX_LB_OTEL_ENABLED: "true"
   CODEX_LB_OTEL_EXPORTER_ENDPOINT: {{ .Values.tracing.endpoint | quote }}

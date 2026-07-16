@@ -5,9 +5,10 @@ import contextlib
 import importlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, AsyncIterator, Protocol, cast
+from typing import Any, AsyncIterator, Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
 from app.core.usage import capacity_for_plan
@@ -31,8 +32,11 @@ logger = logging.getLogger(__name__)
 _RECOVERABLE_ACCOUNT_STATUSES = frozenset({AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED})
 
 
+_T = TypeVar("_T")
+
+
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _RecoverableAccountsRepository(Protocol):
@@ -157,8 +161,12 @@ class UsageRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> float:
-        if not await _get_leader_election().try_acquire():
+        delay = await _get_leader_election().run_if_leader(self._refresh_as_leader)
+        if delay is None:
             return float(self.interval_seconds)
+        return delay
+
+    async def _refresh_as_leader(self) -> float:
         async with self._lock:
             account_count = 0
             try:

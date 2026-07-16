@@ -17,6 +17,7 @@ from typing import cast
 import pytest
 
 import app.modules.proxy.service as proxy_module
+from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 
 pytestmark = pytest.mark.integration
@@ -190,6 +191,53 @@ async def test_backend_files_create_repeated_401_after_refresh_fails_over(async_
     assert response.json()["file_id"] == "file_recovered"
     assert captured_account_ids[:2] == [invalidated_account_id, invalidated_account_id]
     assert captured_account_ids[2] != invalidated_account_id
+
+
+@pytest.mark.asyncio
+async def test_backend_files_create_post_401_forced_refresh_claim_timeout_reports_upstream_unavailable(
+    async_client, monkeypatch
+):
+    """Regression (P2 forced-refresh surfaces): when the file-upload post-401
+    forced refresh on the failover account hits a transient cross-replica
+    refresh-CLAIM-CONTENTION timeout, the surface routes through
+    ``_ensure_fresh_with_budget_or_auth_error``, which MUST surface a retryable
+    ``upstream_unavailable`` (502) rather than a bogus 401 ``invalid_api_key``."""
+    await _import_account(async_client, "acc_files_claim_a", "files-claim-a@example.com")
+    await _import_account(async_client, "acc_files_claim_b", "files-claim-b@example.com")
+
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
+        del payload, headers, access_token, base_url, session, account_id, kwargs
+        # Always 401 so the surface fails over and forces a refresh on the peer.
+        raise FileProxyError(
+            401,
+            {"error": {"message": "token invalidated", "type": "authentication_error", "code": "invalid_api_key"}},
+        )
+
+    first_fresh_account: dict[str, str | None] = {"id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_fresh_account["id"] is None:
+            first_fresh_account["id"] = account.id
+        if account.id != first_fresh_account["id"]:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_create_file", fake_create_file)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/backend-api/files",
+        json={"file_name": "x.png", "file_size": 1},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio

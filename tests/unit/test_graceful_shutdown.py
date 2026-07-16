@@ -5,11 +5,78 @@ from importlib import import_module
 
 import pytest
 
-from app.main import InFlightMiddleware
+from app.main import InFlightMiddleware, _release_leader_lease_within
 
+app_main = import_module("app.main")
 shutdown_state = import_module("app.core.shutdown")
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_release_leader_lease_within_returns_when_release_wedged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: release() uses a background DB session whose rollback/close
+    # shield and await their own teardown, so a wedged DB call cannot be
+    # unwound by cancellation. The shutdown release step must still return
+    # within its deadline (abandoning the release) instead of hanging.
+    class _WedgedElection:
+        def __init__(self) -> None:
+            self.gate = asyncio.Event()
+            self.started = asyncio.Event()
+
+        async def release(self) -> None:
+            self.started.set()
+            await self.gate.wait()
+
+    election = _WedgedElection()
+    monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await _release_leader_lease_within(0.2)
+    elapsed = loop.time() - start
+
+    assert 0.2 <= elapsed < 1.0
+    assert election.started.is_set()
+
+    # Let the abandoned release finish so no task dangles past the test.
+    election.gate.set()
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_release_leader_lease_within_awaits_quick_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FastElection:
+        def __init__(self) -> None:
+            self.released = False
+
+        async def release(self) -> None:
+            self.released = True
+
+    election = _FastElection()
+    monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
+
+    await _release_leader_lease_within(5)
+
+    assert election.released is True
+
+
+@pytest.mark.asyncio
+async def test_release_leader_lease_within_swallows_release_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BrokenElection:
+        async def release(self) -> None:
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(app_main, "get_leader_election", lambda: _BrokenElection())
+
+    # Must not raise: a failed release must never fail shutdown.
+    await _release_leader_lease_within(5)
 
 
 @pytest.fixture(autouse=True)

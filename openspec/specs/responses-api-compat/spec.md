@@ -84,14 +84,14 @@ The default compact request budget MUST be at least 180 seconds, and the default
 - **AND** `stream_idle_timeout_seconds` is at least 600 seconds
 
 ### Requirement: Upstream websocket drops penalize affected accounts
-
-When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before signaling failure for those pending requests. The proxy MUST surface `stream_incomplete` to affected pending requests except when a direct Responses WebSocket request has already successfully emitted a finite integer `sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST record the request outcome as `stream_incomplete` without emitting a synthetic terminal frame under the active response id, then MUST close the downstream WebSocket with code 1011.
+When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before signaling failure for those pending requests, except when the close carries a classified process-wide network failure. A classified process-wide network failure MUST remain account neutral and use its network error code. For other closes, the proxy MUST surface `stream_incomplete` to affected pending requests except when a direct Responses WebSocket request has already successfully emitted a finite integer `sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST record the request outcome as `stream_incomplete` without emitting a synthetic terminal frame under the active response id, then MUST close the downstream WebSocket with code 1011.
 
 #### Scenario: websocket closes before pending responses complete
 
 - **GIVEN** a streamed response request is pending on an upstream websocket
 - **AND** the direct downstream response has not emitted a numeric sequence, or the request uses another transport
 - **WHEN** the websocket closes before a terminal response event is observed
+- **AND** the close does not carry a classified process-wide network failure
 - **THEN** the pending request fails with `stream_incomplete`
 - **AND** the account receives a transient upstream failure signal for routing
 
@@ -181,7 +181,7 @@ When serving streaming `POST /v1/responses`, the first OpenAI-contract event the
 
 ### Requirement: Upstream overload envelopes are classified as retryable transient failures
 
-When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
+When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error` or `server_is_overloaded`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
 
 #### Scenario: `overloaded_error` without a 5xx status is retryable transient
 
@@ -194,6 +194,19 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **WHEN** `classify_upstream_failure` is called with `error_code="overloaded_error"` and `http_status` is 500, 502, 503, or 504
 - **THEN** the returned `failure_class` is `retryable_transient`
 - **AND** the result is the same as the no-status path, so the 5xx fallback heuristic is not the only signal driving the decision
+
+#### Scenario: `server_is_overloaded` without a 5xx status is retryable transient
+
+- **WHEN** `classify_upstream_failure` is called with `error_code="server_is_overloaded"` and `http_status` not in the 5xx range (including `None`)
+- **THEN** the returned `failure_class` is `retryable_transient`
+- **AND** the streaming retry layer is eligible to retry the request before surfacing the terminal overload event
+
+#### Scenario: HTTP bridge retries a pre-created overload event
+
+- **GIVEN** the HTTP responses session bridge is enabled
+- **WHEN** the first upstream `response.failed` or `error` event has `code="overloaded_error"` or `code="server_is_overloaded"`
+- **THEN** the bridge MUST retry the pre-created request before forwarding that terminal event
+- **AND** the bridge MUST preserve its existing no-replay behavior after downstream-visible output or for other fail-fast error codes
 
 ### Requirement: Strict function tool parameter schemas are pre-validated
 
@@ -270,7 +283,7 @@ Read-only function calls and matching operations under different response ids MU
 - **AND** does not forward the duplicate nested operation to the client
 
 ### Requirement: Continuity-dependent Responses follow-ups fail closed with retryable errors
-When a Responses follow-up depends on previously established continuity state, the service MUST return a retryable continuity error if that continuity cannot be reconstructed safely. The service MUST NOT expose raw `previous_response_not_found` for bridge-local metadata loss or similar internal continuity gaps.
+When a Responses follow-up depends on previously established continuity state, the service MUST return a retryable continuity error if that continuity cannot be reconstructed safely. The service MUST NOT expose raw `previous_response_not_found` for bridge-local metadata loss or similar internal continuity gaps. When forwarding a turn-state-anchored follow-up to its bridge owner fails with `bridge_owner_unreachable` and a fresh durable lookup shows the owner no longer holds an active lease (released, expired, or the row is missing or CLOSED), the service MUST recover the follow-up locally through durable takeover instead of returning the retryable error. The fresh durable lookup MUST use the same resolution semantics as request routing, including the latest-turn-state fallback, so a row originally resolved without a registered alias remains takeover-eligible. When the durable lease is still actively held by another instance — including DRAINING rows whose lease has not been released or expired — the service MUST keep failing closed with the retryable error.
 
 #### Scenario: HTTP bridge loses local continuity metadata for a follow-up request
 - **WHEN** an HTTP `/v1/responses` or `/backend-api/codex/responses` follow-up request depends on `previous_response_id` or a hard continuity turn-state
@@ -305,6 +318,14 @@ When a Responses follow-up depends on previously established continuity state, t
 - **THEN** the service still maps that continuity loss to the pending follow-up
 - **AND** it rewrites the downstream terminal event to a retryable continuity error
 - **AND** it does not surface raw `previous_response_not_found` to the client
+
+#### Scenario: turn-state follow-up recovers locally after the owner released its lease
+- **WHEN** a turn-state-anchored follow-up without `previous_response_id` is forwarded to its bridge owner during the post-shutdown ring grace window
+- **AND** the forward fails with `bridge_owner_unreachable`
+- **AND** a fresh durable lookup using the request-routing resolution semantics (registered alias or latest-turn-state fallback) shows the lease is released or expired
+- **THEN** the service retries the follow-up locally through durable takeover instead of returning the retryable 503
+- **AND** the takeover retry carries the fresh durable lookup as its continuity anchor even when the turn-state alias registration was lost
+- **AND** a fresh durable lookup showing a live lease held by another instance — even for a DRAINING row — still fails closed with the retryable `bridge_owner_unreachable` error
 
 ### Requirement: Hard continuity owner lookup fails closed
 
@@ -1162,6 +1183,65 @@ When an HTTP bridge request is still pending before upstream `response.completed
 - **AND** a visible HTTP bridge request is still counted in the session queue
 - **THEN** prewarm cleanup releases its response-create gate and admission state
 - **AND** the visible request queue count is preserved
+
+### Requirement: Pre-dispatch Responses requests recover from local network transitions
+
+When a Responses request encounters a classified local DNS or host-route failure and the transport proves that request dispatch did not occur, the proxy MUST retry on the same account with bounded backoff until the attempt succeeds or the existing request budget expires. A classified token-refresh network failure MUST receive the same bounded same-account recovery only when typed transport provenance proves the refresh POST was not dispatched. Recovery MUST NOT move account-owned continuation or file state to another account. Recovery client rotation, client construction, cleanup, and sleep MUST remain inside the original monotonic deadline, and existing keepalive behavior MUST remain active while an HTTP/SSE client waits. Post-connect send or receive failures, response/body-read failures, and serialized terminal response events with uncertain upstream delivery MUST retain the account-neutral network classification but MUST NOT be transparently replayed.
+
+#### Scenario: HTTP stream survives a temporary DNS outage
+
+- **WHEN** a streaming Responses request fails DNS resolution before request dispatch
+- **AND** DNS resolution recovers before the request budget expires
+- **THEN** the proxy retries the request on the same account
+- **AND** the downstream stream receives the recovered upstream response instead of a terminal network error
+
+#### Scenario: Native WebSocket connect survives a temporary DNS outage
+
+- **WHEN** a native Responses WebSocket request cannot open its upstream WebSocket because of a classified local network failure
+- **AND** connectivity recovers before the request budget expires
+- **THEN** the proxy opens the upstream WebSocket on the same account
+- **AND** does not exhaust or exclude unrelated accounts
+
+#### Scenario: Recovery remains bounded
+
+- **WHEN** the local network does not recover before the configured request budget expires
+- **THEN** the proxy terminates the request with `error.code = "upstream_request_timeout"` and message `"Proxy request budget exhausted"`
+- **AND** does not extend the deadline or replay downstream-visible output
+
+#### Scenario: Token refresh survives a temporary DNS outage
+
+- **WHEN** token refresh for the selected account reports a classified process-network failure
+- **AND** typed transport provenance proves the refresh POST was not dispatched
+- **AND** connectivity recovers within the original request deadline
+- **THEN** the proxy retries refresh on the same account
+- **AND** does not record the network failure against the account
+
+#### Scenario: Token refresh response failure is not replayed
+
+- **WHEN** token refresh reports a classified process-network failure while reading the response or body
+- **AND** the proxy cannot prove the refresh POST was not dispatched
+- **THEN** the failure retains the account-neutral process-network code
+- **AND** the proxy does not retry the possibly consumed rotating refresh token
+
+#### Scenario: Ambiguous compact POST failure is not replayed
+
+- **WHEN** a compact POST reports a classified process-network failure without typed pre-dispatch provenance
+- **THEN** the compact failure retains the account-neutral process-network code
+- **AND** the proxy does not replay, penalize, or exclude the selected account
+
+#### Scenario: Serialized terminal network failure is not replayed
+
+- **WHEN** an upstream stream emits a terminal response event carrying the process-network code
+- **AND** the proxy cannot prove that request dispatch did not occur
+- **THEN** the terminal event is surfaced without transparent replay
+- **AND** the selected account's health remains unchanged
+
+#### Scenario: Post-connect WebSocket network failure is not replayed speculatively
+
+- **WHEN** an upstream WebSocket send or receive reports a classified process-network failure after the connection opened
+- **AND** the proxy cannot prove that `response.create` was not delivered
+- **THEN** the pending request fails with the account-neutral process-network code
+- **AND** the proxy does not transparently replay the request
 
 ### Requirement: File-pinned compact refresh/connect failures fail closed
 
@@ -3024,7 +3104,6 @@ and object key order.
 - **WHEN** two requests differ only in tool array order or tool object key
   order
 - **THEN** their tools affinity/observability hash is identical
-
 ### Requirement: Streaming events are parsed once and re-serialized only when modified
 
 Within each streaming layer (core client consumer, streaming mixin, bridge upstream reader, /v1 normalizers), an SSE event's JSON payload MUST be parsed at most once and reused by that layer's consumers, and an event that no consumer modified MUST NOT be re-serialized by the /v1 normalizers. Event framing, payload contents, dedupe/rewrite semantics, and error normalization MUST be unchanged.
@@ -3045,4 +3124,3 @@ Within each streaming layer (core client consumer, streaming mixin, bridge upstr
 
 - **WHEN** the rewrite step removes duplicate tool calls
 - **THEN** the returned line, payload, and validated event all reflect the rewritten content
-

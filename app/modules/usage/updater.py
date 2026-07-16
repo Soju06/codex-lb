@@ -128,6 +128,7 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
 
@@ -415,6 +416,22 @@ class UsageUpdater:
             usage_account_id=usage_account_id,
         )
 
+    async def _additional_usage_is_stale(self, account_id: str, *, now: datetime, interval_seconds: int) -> bool:
+        # The upstream fetch is the only path that syncs additional
+        # (per-model) rate limits; live main-window rows must not keep an
+        # account "fresh" while its additional rows age past the interval,
+        # or gated-model routing starves on additional_quota_data_unavailable.
+        if self._additional_usage_repo is None:
+            return False
+        latest_at = await self._additional_usage_repo.latest_recorded_at_for_account(account_id)
+        if latest_at is None:
+            # No additional rows ever fetched: live rows alone must not
+            # suppress the fetch, or a first gated-model use would never be
+            # discovered. Non-gated accounts simply keep the pre-live poll
+            # cadence.
+            return True
+        return (now - latest_at).total_seconds() >= interval_seconds
+
     async def _freshness_usage_entry(self, account: Account, latest: UsageHistory | None) -> UsageHistory | None:
         if latest is not None:
             return latest
@@ -431,7 +448,7 @@ class UsageUpdater:
         interval_seconds: int,
     ) -> bool:
         if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval_seconds):
-            return True
+            return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
         # A stale (or elapsed-reset) newest row of one window must not
         # permanently defeat freshness once upstream stops reporting that
         # window: a strictly newer sibling-window row proves a later fetch
@@ -458,7 +475,9 @@ class UsageUpdater:
             and (newest.recorded_at - latest.recorded_at).total_seconds() <= _SIBLING_FETCH_MARGIN_SECONDS
         ):
             return False
-        return _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds)
+        if not _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds):
+            return False
+        return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
 
     async def _refresh_account_if_stale_with_owned_session(
         self,
@@ -761,12 +780,13 @@ class UsageUpdater:
         if not self._auth_manager:
             return True
 
-        await self._auth_manager._repo.update_tokens(
+        # Identity/plan/workspace sync only. This runs against a stale in-memory
+        # ``account`` snapshot taken well before the write, so it MUST route
+        # through the metadata-only writer, which structurally cannot touch
+        # token ciphertext. Persisting token material from this snapshot would
+        # clobber a peer replica's concurrent refresh-token rotation.
+        await self._auth_manager._repo.update_account_metadata(
             account.id,
-            access_token_encrypted=account.access_token_encrypted,
-            refresh_token_encrypted=account.refresh_token_encrypted,
-            id_token_encrypted=account.id_token_encrypted,
-            last_refresh=account.last_refresh,
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,

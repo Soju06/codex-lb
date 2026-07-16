@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.utils.time import to_utc_naive, utcnow
@@ -22,9 +22,24 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
+# Guardian cadence and backoff tuning (fixed; issue #1340 / PRINCIPLES.md P2).
+# The guardian is an off-by-default background refresher; these values are
+# implementation details, not operator contract. ``AuthGuardianScheduler``
+# keeps them as constructor fields so tests can exercise the behavior.
+_INTERVAL_SECONDS = 21600
+_MAX_REFRESH_AGE_SECONDS = 43200
+_BATCH_SIZE = 100
+_CONCURRENCY = 3
+_JITTER_SECONDS = 300.0
+_FAILURE_BACKOFF_BASE_SECONDS = 300.0
+_FAILURE_BACKOFF_MAX_SECONDS = 3600.0
+
+
+_T = TypeVar("_T")
+
 
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _AccountsRepositoryLike(Protocol):
@@ -112,8 +127,6 @@ class AuthGuardianScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        if not await self.leader_election_factory().try_acquire():
-            return
         if not self.leader_election_enabled:
             live_replicas = await self.live_replica_count()
             if live_replicas > 1:
@@ -124,6 +137,9 @@ class AuthGuardianScheduler:
                     live_replicas,
                 )
                 return
+        await self.leader_election_factory().run_if_leader(self._refresh_as_leader)
+
+    async def _refresh_as_leader(self) -> None:
         async with self._lock:
             async with self.repo_factory() as repo:
                 accounts = await repo.list_accounts(refresh_existing=True)
@@ -241,21 +257,25 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
 
     settings = get_settings()
     multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
-    if settings.auth_guardian_enabled and multi_replica and not settings.leader_election_enabled:
+    # Deliberate exception to the "disabled election means every replica is
+    # leader" escape hatch: concurrent force token refreshes across replicas
+    # can invalidate rotated refresh tokens, so without election the guardian
+    # must not run in a multi-replica ring at all.
+    enabled = settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica)
+    if settings.auth_guardian_enabled and not enabled:
         logger.warning(
-            "Auth guardian disabled: the bridge instance ring has %d members but leader election is off. "
-            "Set CODEX_LB_LEADER_ELECTION_ENABLED=true so the elected replica runs proactive token refresh.",
-            len(settings.http_responses_session_bridge_instance_ring),
+            "Auth Guardian disabled: multi-replica deployment without leader election; "
+            "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
         )
     return AuthGuardianScheduler(
-        interval_seconds=settings.auth_guardian_interval_seconds,
-        enabled=settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica),
-        max_age_seconds=settings.auth_guardian_max_refresh_age_seconds,
-        batch_size=settings.auth_guardian_batch_size,
-        concurrency=settings.auth_guardian_concurrency,
-        jitter_seconds=settings.auth_guardian_jitter_seconds,
-        failure_backoff_base_seconds=settings.auth_guardian_failure_backoff_base_seconds,
-        failure_backoff_max_seconds=settings.auth_guardian_failure_backoff_max_seconds,
+        interval_seconds=_INTERVAL_SECONDS,
+        enabled=enabled,
+        max_age_seconds=_MAX_REFRESH_AGE_SECONDS,
+        batch_size=_BATCH_SIZE,
+        concurrency=_CONCURRENCY,
+        jitter_seconds=_JITTER_SECONDS,
+        failure_backoff_base_seconds=_FAILURE_BACKOFF_BASE_SECONDS,
+        failure_backoff_max_seconds=_FAILURE_BACKOFF_MAX_SECONDS,
         leader_election_enabled=settings.leader_election_enabled,
     )
 

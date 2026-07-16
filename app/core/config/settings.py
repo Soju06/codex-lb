@@ -79,6 +79,17 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_MEMORY_WARNING_THRESHOLD_MB",
     "CODEX_LB_IMAGES_HOST_MODEL",
     "CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES",
+    # Phase 3 (reduce-settings-surface-phase-3)
+    "CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE",
+    "CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW",
+    "CODEX_LB_DATABASE_POOL_TIMEOUT_SECONDS",
+    "CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS",
+    "CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT",
+    "CODEX_LB_DRAIN_SECONDARY_THRESHOLD_PCT",
+    "CODEX_LB_DRAIN_ERROR_WINDOW_SECONDS",
+    "CODEX_LB_DRAIN_ERROR_COUNT_THRESHOLD",
+    "CODEX_LB_PROBE_QUIET_SECONDS",
+    "CODEX_LB_PROBE_SUCCESS_STREAK_REQUIRED",
 )
 
 
@@ -225,12 +236,11 @@ class Settings(BaseSettings):
 
     data_dir: Path = Field(default_factory=_default_home_dir)
     database_url: str = DEFAULT_DATABASE_URL
+    # Pool timeout and recycle are fixed constants in ``app/db/session.py``;
+    # the background-task engine always derives its pool sizing from the two
+    # settings below.
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
-    database_background_pool_size: int | None = Field(default=None, gt=0)
-    database_background_max_overflow: int | None = Field(default=None, ge=0)
-    database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
-    database_pool_recycle_seconds: int = Field(default=1800, gt=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
@@ -379,15 +389,10 @@ class Settings(BaseSettings):
     # constants in ``app/core/resilience/circuit_breaker.py``)
     circuit_breaker_enabled: bool = False
 
-    # Soft drain & deterministic failover
+    # Soft drain & deterministic failover (drain/probe thresholds are fixed
+    # constants in ``app/core/balancer/logic.py``)
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
-    drain_primary_threshold_pct: float = 85.0
-    drain_secondary_threshold_pct: float = 90.0
-    drain_error_window_seconds: float = 60.0
-    drain_error_count_threshold: int = 2
-    probe_quiet_seconds: float = 60.0
-    probe_success_streak_required: int = 3
 
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited

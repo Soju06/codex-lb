@@ -260,6 +260,7 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER] = _bridge_forward_signature(
         payload=payload,
         context=context,
+        include_client_ip=False,
         signature_version=signature_version,
         include_openai_sdk_request=True,
     )
@@ -369,34 +370,35 @@ def parse_forwarded_request(
         _bridge_forward_signature(
             payload=payload,
             context=context,
+            include_client_ip=False,
             signature_version=signature_version,
             include_openai_sdk_request=True,
         ),
     )
     sdk_context = replace(context, openai_sdk_request=True)
-    sdk_flag_downgrade_valid = any(
-        candidate is not None and hmac.compare_digest(candidate, expected)
-        for candidate, expected in (
-            (
-                tools_bound_signature,
-                _bridge_forward_tools_bound_signature(
-                    payload=payload,
-                    context=sdk_context,
-                    signature_version=signature_version,
-                ),
-            ),
-            (
-                sdk_signature,
-                _bridge_forward_signature(
-                    payload=payload,
-                    context=sdk_context,
-                    signature_version=signature_version,
-                    include_openai_sdk_request=True,
-                ),
-            ),
-        )
+    tools_bound_sdk_downgrade_valid = tools_bound_signature is not None and hmac.compare_digest(
+        tools_bound_signature,
+        _bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=sdk_context,
+            signature_version=signature_version,
+        ),
     )
-    if openai_sdk_value != "1" and sdk_flag_downgrade_valid:
+    sdk_signature_sdk_valid = sdk_signature is not None and hmac.compare_digest(
+        sdk_signature,
+        _bridge_forward_signature(
+            payload=payload,
+            context=sdk_context,
+            include_client_ip=False,
+            signature_version=signature_version,
+            include_openai_sdk_request=True,
+        ),
+    )
+    if openai_sdk_value != "1" and tools_bound_sdk_downgrade_valid:
+        return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value is None and sdk_signature_sdk_valid:
+        return HTTPBridgeForwardedRequest(context=sdk_context), None
+    if openai_sdk_value == "0" and sdk_signature_sdk_valid:
         return None, _invalid_bridge_forward_signature_error()
     if openai_sdk_value is not None and not sdk_signature_valid:
         return None, _invalid_bridge_forward_signature_error()

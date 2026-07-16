@@ -1,4 +1,5 @@
 import { Loader2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
 
@@ -21,11 +22,14 @@ type SpinnerBlockProps = {
   className?: string;
 };
 
-export function SpinnerBlock({ label = "Loading...", className }: SpinnerBlockProps) {
+export function SpinnerBlock({ label, className }: SpinnerBlockProps) {
+  const { t } = useTranslation();
+  const labelText = label ?? t("common.loading");
+
   return (
     <output className={cn("flex flex-col items-center gap-3", className)}>
       <Spinner />
-      <p className="text-sm text-muted-foreground">{label}</p>
+      <p className="text-sm text-muted-foreground">{labelText}</p>
     </output>
   );
 }

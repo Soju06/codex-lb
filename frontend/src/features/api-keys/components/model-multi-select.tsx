@@ -23,9 +23,10 @@ export type ModelMultiSelectProps = {
 export function ModelMultiSelect({
   value,
   onChange,
-  placeholder = "All models",
+  placeholder,
 }: ModelMultiSelectProps) {
   const { t } = useTranslation();
+  const placeholderLabel = placeholder ?? t("apiKeys.modelSelect.all");
   const { data: models = [], isLoading } = useModels();
   const [search, setSearch] = useState("");
 
@@ -62,7 +63,7 @@ export function ModelMultiSelect({
   }, [onChange]);
 
   const label =
-    value.length === 0 ? placeholder : t("apiKeys.modelSelect.selected", { count: value.length });
+    value.length === 0 ? placeholderLabel : t("apiKeys.modelSelect.selected", { count: value.length });
 
   return (
     <div className="space-y-1.5">

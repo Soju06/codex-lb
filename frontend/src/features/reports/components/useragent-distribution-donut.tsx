@@ -18,6 +18,7 @@ const LEGEND_ROW_HEIGHT_REM = 2;
 
 type ChartDatum = UseragentCostEntry & {
   id: string;
+  displayUseragent: string;
   fill: string;
   metricLabel: string;
   metricValue: number;
@@ -43,6 +44,9 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
   const chartData: ChartDatum[] = data.map((entry, index) => ({
     ...entry,
     id: `${entry.useragent}-${index}`,
+    displayUseragent: entry.useragent === MISSING_USERAGENT_LABEL
+      ? t("reports.distribution.missingUserAgent")
+      : entry.useragent,
     fill: getUseragentColor(entry.useragent, index),
     metricLabel: formatDistributionMetricValue(
       isCostMetric ? entry.costUsd : entry.requests,
@@ -156,7 +160,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                   style={{ background: entry.fill }}
                 />
-                <span className="text-foreground">{entry.useragent}</span>
+                <span className="text-foreground">{entry.displayUseragent}</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="tabular-nums text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>

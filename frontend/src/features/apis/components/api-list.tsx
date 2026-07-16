@@ -14,7 +14,12 @@ import {
 import { ApiListItem } from "@/features/apis/components/api-list-item";
 import type { ApiKey } from "@/features/api-keys/schemas";
 
-const STATUS_FILTER_OPTIONS = ["all", "active", "disabled", "expired"];
+const STATUS_FILTER_OPTIONS = ["all", "active", "disabled", "expired"] as const;
+const STATUS_FILTER_LABEL_KEYS = {
+  active: "common.states.active",
+  disabled: "common.states.disabled",
+  expired: "common.states.expired",
+} as const;
 
 export type ApiListProps = {
   apiKeys: ApiKey[];
@@ -73,7 +78,7 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
           <SelectContent>
             {STATUS_FILTER_OPTIONS.map((option) => (
               <SelectItem key={option} value={option}>
-                {option === "all" ? t("accounts.list.allStatuses") : t(`apis.status.${option}`)}
+                {option === "all" ? t("accounts.list.allStatuses") : t(STATUS_FILTER_LABEL_KEYS[option])}
               </SelectItem>
             ))}
           </SelectContent>

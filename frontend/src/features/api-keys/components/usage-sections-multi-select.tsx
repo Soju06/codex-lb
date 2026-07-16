@@ -41,9 +41,10 @@ function formatSections(raw: string, allSectionsLabel: string, t: ReturnType<typ
 export function UsageSectionsMultiSelect({
   value,
   onChange,
-  placeholder = "All sections",
+  placeholder,
 }: UsageSectionsMultiSelectProps) {
   const { t } = useTranslation();
+  const placeholderLabel = placeholder ?? t("apiKeys.usageSections.allSections");
   const selected = useMemo(() => parseSections(value), [value]);
 
   const toggle = useCallback(
@@ -59,7 +60,7 @@ export function UsageSectionsMultiSelect({
     [onChange, selected],
   );
 
-  const label = value.trim() === "" ? t("common.options.none") : formatSections(value, placeholder, t);
+  const label = value.trim() === "" ? t("common.options.none") : formatSections(value, placeholderLabel, t);
 
   return (
     <DropdownMenu>

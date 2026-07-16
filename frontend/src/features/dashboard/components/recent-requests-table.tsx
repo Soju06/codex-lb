@@ -487,9 +487,12 @@ function RequestDetailField({
   value,
   mono = false,
   copyValue,
-  copyLabel = "Copy",
+  copyLabel,
   compactCopy = false,
 }: RequestDetailFieldProps) {
+  const { t } = useTranslation();
+  const copyLabelText = copyLabel ?? t("components.copyButton.copy");
+
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2">
@@ -497,7 +500,7 @@ function RequestDetailField({
           {label}
         </div>
         {copyValue ? (
-          <CopyButton value={copyValue} label={copyLabel} iconOnly={compactCopy} />
+          <CopyButton value={copyValue} label={copyLabelText} iconOnly={compactCopy} />
         ) : null}
       </div>
       <div className="flex flex-col items-start gap-2">

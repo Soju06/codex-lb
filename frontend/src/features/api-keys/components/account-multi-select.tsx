@@ -136,7 +136,7 @@ function AccountOption({ account }: { account: AccountSummary }) {
 export function AccountMultiSelect({
   value,
   onChange,
-  placeholder = "All accounts",
+  placeholder,
   triggerId,
   ariaInvalid = false,
   ariaDescribedBy,
@@ -144,6 +144,7 @@ export function AccountMultiSelect({
   allowPausedAccounts = false,
 }: AccountMultiSelectProps) {
   const { t } = useTranslation();
+  const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
   const { accountsQuery } = useAccounts();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const selectableAccounts = useMemo(
@@ -199,7 +200,7 @@ export function AccountMultiSelect({
   }, [onChange]);
 
   const label =
-    value.length === 0 ? placeholder : t("apiKeys.accountSelect.selected", { count: value.length });
+    value.length === 0 ? placeholderLabel : t("apiKeys.accountSelect.selected", { count: value.length });
 
   return (
     <div className="space-y-1.5">

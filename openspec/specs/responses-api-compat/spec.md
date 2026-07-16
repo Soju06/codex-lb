@@ -208,6 +208,14 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **THEN** the retry layer MUST treat the envelope as a transient overload even when the HTTP status is not 500
 - **AND** it MUST retry the same request within the bounded transient retry budget before returning the overload error to the client
 
+#### Scenario: Streaming Responses retries initial output-free EOF
+
+- **GIVEN** a streaming `/v1/responses` request is not anchored to a previous response
+- **WHEN** upstream closes before emitting the first SSE event
+- **THEN** the retry layer MUST treat the close as a transient output-free failure
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning `stream_incomplete`
+- **AND** it MUST NOT perform this retry for anchored continuations, after any downstream-visible output, or after the retry budget is exhausted
+
 #### Scenario: HTTP bridge retries a pre-created overload event
 
 - **GIVEN** the HTTP responses session bridge is enabled
@@ -224,6 +232,15 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **AND** the replay MUST preserve the original parent `previous_response_id`
 - **AND** the bridge MUST expose the successful replay's actual `response.completed` ID so the next continuation anchors on the successful response
 - **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any model output, while another request is pending, or after the replay budget is exhausted
+
+#### Scenario: Native Codex bridge retries accepted output-free abrupt closes
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted only lifecycle events such as `response.created` or `response.in_progress`
+- **WHEN** the upstream websocket closes before `response.completed` without a terminal error event
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id`
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any reasoning, text, item, or tool output, while another request is pending, or after the replay budget is exhausted
 
 ### Requirement: Strict function tool parameter schemas are pre-validated
 

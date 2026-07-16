@@ -9316,8 +9316,10 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         client_send_lock,
         websocket,
         force_refresh,
+        can_transient_failover=False,
     ):
         del self, account, headers, deadline, api_key, request_state, client_send_lock, websocket, force_refresh
+        del can_transient_failover
         payload = proxy_module.openai_error(
             "previous_response_not_found",
             "Previous response with id 'resp_ws_prev_anchor_client' not found.",

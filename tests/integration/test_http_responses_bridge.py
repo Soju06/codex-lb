@@ -4248,7 +4248,7 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_account_omitted_from_catalog(
+async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_then_rejects_current_plan_change(
     async_client,
     app_instance,
     monkeypatch,
@@ -4333,6 +4333,27 @@ async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_account_omit
         json={**payload, "previous_response_id": first_body["id"]},
     )
     assert second.status_code == 200
+    second_body = second.json()
+
+    await registry.update(
+        {"pro": [spark_model]},
+        per_account_results={account_id: ("plus", [])},
+        active_account_plans={account_id: "plus"},
+    )
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_plans[account_id] == "plus"
+
+    rejected = await async_client.post(
+        "/v1/responses",
+        json={**payload, "previous_response_id": second_body["id"]},
+    )
+    assert rejected.status_code == 502, rejected.text
+    assert rejected.json()["error"] == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
 
     assert connect_calls == [(account_id, account.chatgpt_account_id)]
     assert len(fake_upstream.sent_text) == 2

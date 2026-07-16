@@ -31013,7 +31013,8 @@ def test_http_bridge_session_only_honors_exact_catalog_omission_quota_admission(
     )
 
 
-def test_http_bridge_session_rechecks_current_plan_tier_for_catalog_omission_admission(monkeypatch):
+@pytest.mark.parametrize("current_plan", ["plus", None], ids=["ineligible", "unavailable"])
+def test_http_bridge_session_rechecks_registry_plan_tier_for_catalog_omission_admission(monkeypatch, current_plan):
     account = _make_account("acc_bridge_quota_plan_changed")
     account.plan_type = "pro"
     session = cast(
@@ -31030,7 +31031,8 @@ def test_http_bridge_session_rechecks_current_plan_tier_for_catalog_omission_adm
 
     class Registry:
         def get_snapshot(self) -> SimpleNamespace:
-            return SimpleNamespace(account_plans={account.id: "pro"})
+            account_plans = {} if current_plan is None else {account.id: current_plan}
+            return SimpleNamespace(account_plans=account_plans)
 
         def account_ids_for_model(self, slug: str) -> frozenset[str]:
             assert slug == "gpt-5.3-codex-spark"
@@ -31042,7 +31044,7 @@ def test_http_bridge_session_rechecks_current_plan_tier_for_catalog_omission_adm
 
         def plan_types_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
             assert (slug, service_tier) == ("gpt-5.3-codex-spark", "priority")
-            return frozenset({"business"})
+            return frozenset({"pro"})
 
     monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
 

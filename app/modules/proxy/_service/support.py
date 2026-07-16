@@ -735,10 +735,15 @@ def _http_bridge_session_supports_service_tier(
             return False
         return True
     account_indexes_cover_owner = True
+    current_account_plan: str | None = None
+    current_account_plan_is_authoritative = False
     get_snapshot = getattr(registry, "get_snapshot", None)
     if callable(get_snapshot):
         snapshot = get_snapshot()
-        account_indexes_cover_owner = snapshot is not None and session.account.id in snapshot.account_plans
+        current_account_plan_is_authoritative = snapshot is not None and session.account.id in snapshot.account_plans
+        account_indexes_cover_owner = current_account_plan_is_authoritative
+        if current_account_plan_is_authoritative:
+            current_account_plan = snapshot.account_plans[session.account.id]
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
     model_account_ids = (
         account_ids_for_model(request_model)
@@ -773,7 +778,14 @@ def _http_bridge_session_supports_service_tier(
         allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
     if allowed_plans is None:
         return True
-    return account_plan_matches_allowed(session.account.plan_type, allowed_plans)
+    if current_account_plan_is_authoritative:
+        account_plan = current_account_plan
+    elif session.catalog_omission_quota_admission is not None:
+        # Quota admission proves model support, not the owner's current plan eligibility.
+        return False
+    else:
+        account_plan = session.account.plan_type
+    return account_plan_matches_allowed(account_plan, allowed_plans)
 
 
 @dataclass(slots=True)

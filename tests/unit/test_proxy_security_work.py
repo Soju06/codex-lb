@@ -420,6 +420,7 @@ async def test_previous_response_recovery_applies_security_account_gate(
     monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
     monkeypatch.setattr(
         proxy_service,

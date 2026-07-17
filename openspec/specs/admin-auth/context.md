@@ -41,6 +41,8 @@ Requests from localhost (127.0.0.1, ::1) bypass bootstrap entirely — no token 
 
 Behind a trusted proxy, locality comes from the resolved client identity rather than from header presence alone. Chain headers preserve repeated fields because they form one ordered route; singleton identity headers (`X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP`) must appear once. Repetition is ambiguous and fails closed so a client-preseeded loopback field cannot win a first-value lookup.
 
+Direct loopback requests remain local when proxy-header trust is disabled only if every forwarded client-IP field value is empty. Repeated fields are all inspected: for example, an empty first `X-Forwarded-For` field followed by `203.0.113.24` is treated as proxied and remote. The same shared locality decision protects first-run dashboard setup and unauthenticated protected proxy access.
+
 ### Threat Model
 
 - **Token in logs**: Acceptable risk (same pattern as Grafana/GitLab/Portainer). `docker logs` requires container access. Token is one-time — useless after password is set.

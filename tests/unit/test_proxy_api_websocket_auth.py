@@ -9,18 +9,68 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import WebSocket
 from fastapi.responses import JSONResponse
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
+from starlette.types import Message, Receive, Scope, Send
 
 import app.core.auth.dependencies as auth_dependencies
 import app.modules.proxy.api as proxy_api_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
+from app.core.middleware.trusted_proxy_headers import TrustedProxyHeadersMiddleware
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 
 pytestmark = pytest.mark.unit
+
+
+async def _validate_projected_proxy_websocket_request(
+    *,
+    raw_host: str,
+    projected_host: str,
+    capture_raw_peer: bool = True,
+) -> tuple[ApiKeyData | None, JSONResponse | None]:
+    result: tuple[ApiKeyData | None, JSONResponse | None] | None = None
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal result
+        result = await proxy_api_module._validate_proxy_websocket_request(WebSocket(scope, receive, send))
+
+    async def fail_receive() -> Message:
+        raise AssertionError("proxy authorization must finish before the WebSocket upgrade")
+
+    async def fail_send(_message: Message) -> None:
+        raise AssertionError("proxy authorization must finish before the WebSocket upgrade")
+
+    middleware = TrustedProxyHeadersMiddleware(app)
+    scope = cast(
+        Scope,
+        {
+            "type": "websocket",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "scheme": "ws",
+            "server": ("lb.example", 80),
+            "client": (raw_host, 50001),
+            "root_path": "",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [(b"x-forwarded-for", projected_host.encode("ascii"))],
+            "subprotocols": [],
+            "state": {},
+            "extensions": {},
+        },
+    )
+
+    if capture_raw_peer:
+        await middleware(scope, fail_receive, fail_send)
+    else:
+        await app(scope, fail_receive, fail_send)
+
+    assert result is not None
+    return result
 
 
 @pytest.mark.asyncio
@@ -165,27 +215,31 @@ async def test_validate_proxy_websocket_request_reraises_unrelated_type_error(mo
 
 
 @pytest.mark.asyncio
-async def test_validate_proxy_websocket_request_allows_explicit_socket_peer_when_auth_disabled(monkeypatch):
+async def test_validate_proxy_websocket_request_allows_raw_peer_when_projected_client_differs(monkeypatch):
     async def fake_denial(_websocket):
         return None
 
     async def fake_dashboard_settings() -> SimpleNamespace:
         return SimpleNamespace(api_key_auth_enabled=False)
 
+    def fake_is_local_request(request: HTTPConnection) -> bool:
+        assert request.client is not None
+        assert request.client.host == "192.168.65.2"
+        return False
+
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
     monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: SimpleNamespace(get=fake_dashboard_settings))
     monkeypatch.setattr(
         auth_dependencies,
         "get_settings",
-        lambda: SimpleNamespace(proxy_unauthenticated_client_cidrs=["192.168.65.1/32"]),
+        lambda: SimpleNamespace(proxy_unauthenticated_client_cidrs=["127.0.0.1/32"]),
     )
-    monkeypatch.setattr(auth_dependencies, "is_local_request", lambda _request: False)
+    monkeypatch.setattr(auth_dependencies, "is_local_request", fake_is_local_request)
 
-    resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
-        cast(
-            WebSocket,
-            SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.65.1")),
-        )
+    resolved_api_key, response = await _validate_projected_proxy_websocket_request(
+        raw_host="127.0.0.1",
+        projected_host="192.168.65.2",
     )
 
     assert response is None
@@ -193,7 +247,45 @@ async def test_validate_proxy_websocket_request_allows_explicit_socket_peer_when
 
 
 @pytest.mark.asyncio
-async def test_validate_proxy_websocket_request_rejects_remote_socket_peer_outside_allowlist(monkeypatch):
+async def test_validate_proxy_websocket_request_rejects_projected_client_when_raw_peer_is_not_allowlisted(
+    monkeypatch,
+):
+    async def fake_denial(_websocket):
+        return None
+
+    async def fake_dashboard_settings() -> SimpleNamespace:
+        return SimpleNamespace(api_key_auth_enabled=False)
+
+    def fake_is_local_request(request: HTTPConnection) -> bool:
+        assert request.client is not None
+        assert request.client.host == "192.168.65.1"
+        return False
+
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: SimpleNamespace(get=fake_dashboard_settings))
+    monkeypatch.setattr(
+        auth_dependencies,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_unauthenticated_client_cidrs=["192.168.65.1/32"]),
+    )
+    monkeypatch.setattr(auth_dependencies, "is_local_request", fake_is_local_request)
+
+    resolved_api_key, response = await _validate_projected_proxy_websocket_request(
+        raw_host="127.0.0.1",
+        projected_host="192.168.65.1",
+    )
+
+    assert resolved_api_key is None
+    assert response is not None
+    assert response.status_code == 401
+    payload = json.loads(cast(bytes, response.body).decode("utf-8"))
+    assert payload["error"]["code"] == "invalid_api_key"
+    assert payload["error"]["message"] == "Proxy authentication must be configured before remote access is allowed"
+
+
+@pytest.mark.asyncio
+async def test_validate_proxy_websocket_request_fails_closed_without_raw_peer_capture(monkeypatch):
     async def fake_denial(_websocket):
         return None
 
@@ -209,11 +301,10 @@ async def test_validate_proxy_websocket_request_rejects_remote_socket_peer_outsi
     )
     monkeypatch.setattr(auth_dependencies, "is_local_request", lambda _request: False)
 
-    resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
-        cast(
-            WebSocket,
-            SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.65.2")),
-        )
+    resolved_api_key, response = await _validate_projected_proxy_websocket_request(
+        raw_host="192.168.65.1",
+        projected_host="192.168.65.1",
+        capture_raw_peer=False,
     )
 
     assert resolved_api_key is None

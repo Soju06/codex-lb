@@ -62,6 +62,21 @@ async def _set_migration_inconsistent_totp_only_mode() -> None:
     await get_settings_cache().invalidate()
 
 
+async def _set_api_key_auth_enabled(enabled: bool) -> None:
+    settings_cache = get_settings_cache()
+    await settings_cache.get()
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.api_key_auth_enabled = enabled
+        await session.commit()
+
+    await settings_cache.invalidate()
+    refreshed_settings = await settings_cache.get()
+    assert refreshed_settings.api_key_auth_enabled is enabled
+
+
 def _set_dashboard_auth_env(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -279,6 +294,55 @@ async def test_proxy_unauthenticated_client_cidr_does_not_allow_other_remote_pee
             spoofed = await remote_client.get("/v1/models", headers={"Host": "localhost"})
             assert spoofed.status_code == 401
             assert spoofed.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_proxy_unauthenticated_client_cidr_rejects_projected_client_when_raw_peer_is_not_allowlisted(
+    app_instance,
+    monkeypatch,
+):
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    _set_proxy_unauthenticated_client_cidrs_env(
+        monkeypatch,
+        cidrs="192.168.65.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        await _set_api_key_auth_enabled(False)
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as proxied_client:
+            response = await proxied_client.get(
+                "/v1/models",
+                headers={"X-Forwarded-For": "192.168.65.1"},
+            )
+
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_api_key"
+    assert payload["error"]["message"] == "Proxy authentication must be configured before remote access is allowed"
+
+
+@pytest.mark.asyncio
+async def test_proxy_unauthenticated_client_cidr_allows_raw_peer_when_projected_client_differs(
+    app_instance,
+    monkeypatch,
+):
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    _set_proxy_unauthenticated_client_cidrs_env(
+        monkeypatch,
+        cidrs="127.0.0.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        await _set_api_key_auth_enabled(False)
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as proxied_client:
+            response = await proxied_client.get(
+                "/v1/models",
+                headers={"X-Forwarded-For": "203.0.113.24"},
+            )
+
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio

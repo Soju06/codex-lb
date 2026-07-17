@@ -117,7 +117,7 @@ docker compose watch
 
 # Local
 uv sync && cd frontend && bun install && cd ..
-uv run fastapi run app/main.py --reload        # backend :2455
+uv run fastapi run app/main.py --reload --no-proxy-headers  # backend :2455
 cd frontend && bun run dev                     # frontend :5173
 ```
 

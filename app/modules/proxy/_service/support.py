@@ -60,6 +60,7 @@ _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
     default=None,
@@ -555,6 +556,12 @@ class _WebSocketRequestState:
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
+    # A narrowly classified pre-acceptance account/model rejection may move
+    # once to another account. Keep the original upstream error until that
+    # replacement connection is established so an empty replacement pool does
+    # not turn the upstream 400 into a proxy-generated 5xx/no-accounts error.
+    precreated_replay_reason: str | None = None
+    precreated_replay_account_id: str | None = None
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
@@ -798,6 +805,14 @@ def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestSta
     request_state.error_type_override = None
     request_state.error_param_override = None
     request_state.error_http_status_override = None
+
+
+def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequestState) -> None:
+    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        return
+    request_state.precreated_replay_reason = None
+    request_state.precreated_replay_account_id = None
+    _clear_websocket_request_error_overrides(request_state)
 
 
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:

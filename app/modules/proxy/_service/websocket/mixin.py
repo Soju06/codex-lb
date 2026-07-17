@@ -307,12 +307,14 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _FIRST_TOKEN_EVENT_TYPES,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
+    _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _event_type_from_payload,
@@ -412,6 +414,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
     _websocket_owner_switch_has_other_pending_requests,
     _websocket_precreated_auth_error_code,
+    _websocket_precreated_replay_fallback_error,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
     _websocket_response_id,
@@ -1292,6 +1295,7 @@ class _WebSocketMixin:
                                     pending_requests.remove(request_state)
                             await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
+                    await release_current_account_lease()
                     account_lease = request_state.websocket_stream_lease
                     request_state.websocket_stream_lease = None
                     if upstream_account_id is not None and account.id != upstream_account_id:
@@ -1968,6 +1972,16 @@ class _WebSocketMixin:
                 if request_state.preferred_account_id == forced_refresh_account_id:
                     request_state.preferred_account_id = None
 
+            selected_account_model_replacement = (
+                request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                and account.id != request_state.precreated_replay_account_id
+            )
+            if selected_account_model_replacement:
+                # Preserve the rejected account's 400 only when selection
+                # cannot find a replacement. Once this replacement attempt
+                # starts, a connection/open failure belongs to the replacement.
+                _clear_websocket_precreated_replay_fallback(request_state)
+
             try:
                 connect_result = await proxy._try_open_websocket_connect_attempt(
                     account,
@@ -1999,7 +2013,6 @@ class _WebSocketMixin:
                 # exclude it, and reselect a healthy account.
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
-                excluded_account_ids.add(failover.account_id)
                 # Record a capacity-style failure so that if every account
                 # attempt hits a transient refresh-claim failover, the loop
                 # still surfaces a proper terminal error after exhaustion
@@ -2007,7 +2020,7 @@ class _WebSocketMixin:
                 # credentials are fine (its refresh claim is just held by
                 # another replica), so this must be a 503/capacity-style
                 # upstream error, NOT a bogus 401 invalid_api_key.
-                last_failover_exc = ProxyResponseError(
+                refresh_failure = ProxyResponseError(
                     503,
                     openai_error(
                         "upstream_unavailable",
@@ -2015,17 +2028,40 @@ class _WebSocketMixin:
                         error_type="server_error",
                     ),
                 )
+                if selected_account_model_replacement:
+                    await proxy._emit_websocket_connect_failure(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        account_id=account.id,
+                        api_key=api_key,
+                        request_state=request_state,
+                        status_code=refresh_failure.status_code,
+                        payload=refresh_failure.payload,
+                        error_code="upstream_unavailable",
+                        error_message=(
+                            "Account refresh is temporarily unavailable; no healthy account could be reached."
+                        ),
+                    )
+                    return None, None
+                excluded_account_ids.add(failover.account_id)
+                last_failover_exc = refresh_failure
                 last_failover_account = account
                 continue
             except ProxyResponseError as exc:
-                action = await proxy._decide_websocket_failover_action(
-                    account=account,
-                    exc=exc,
-                    request_state=request_state,
-                    attempt=attempt + 1,
-                    max_attempts=max_attempts,
-                    deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
-                )
+                if selected_account_model_replacement:
+                    # The account/model retry budget selected this replacement;
+                    # its connection failure must be surfaced rather than
+                    # consuming another account through generic failover.
+                    action = "surface"
+                else:
+                    action = await proxy._decide_websocket_failover_action(
+                        account=account,
+                        exc=exc,
+                        request_state=request_state,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
+                    )
                 if action == "failover_next":
                     await proxy._load_balancer.release_account_lease(selected_stream_lease)
                     last_failover_exc = exc
@@ -2057,6 +2093,7 @@ class _WebSocketMixin:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 return None, None
             request_state.websocket_stream_lease = selected_stream_lease
+            _clear_websocket_precreated_replay_fallback(request_state)
             return connect_result
 
         if last_failover_exc is not None and last_failover_account is not None:
@@ -3786,6 +3823,50 @@ class _WebSocketMixin:
                     reallocate_sticky=True,
                 )
                 request_state.request_text = safe_request_text
+        if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+            retry_text = None
+            if not request_state.file_required_preferred_account:
+                retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if retry_text is not None:
+                request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                request_state.precreated_replay_account_id = account.id
+                request_state.error_code_override = (
+                    _normalize_error_code(
+                        _websocket_event_error_code(event_type, payload),
+                        _websocket_event_error_type(event_type, payload),
+                    )
+                    or "invalid_request_error"
+                )
+                request_state.error_message_override = (
+                    _websocket_event_error_message(event_type, payload) or "Upstream rejected the requested model"
+                )
+                request_state.error_type_override = (
+                    _websocket_event_error_type(event_type, payload) or "invalid_request_error"
+                )
+                request_state.error_param_override = _websocket_event_error_param(event_type, payload)
+                request_state.error_http_status_override = _facade()._http_error_status_from_payload(payload) or 400
+                await proxy._release_request_state_account_response_create_lease(request_state)
+                request_state.excluded_account_ids.add(account.id)
+                request_state.affinity_policy = replace(
+                    request_state.affinity_policy,
+                    reallocate_sticky=True,
+                )
+                request_state.request_text = retry_text
+                request_state.replay_count += 1
+                request_state.awaiting_response_created = True
+                request_state.response_id = None
+                request_state.response_event_count = 0
+                upstream_control.reconnect_requested = True
+                upstream_control.suppress_downstream_event = True
+                upstream_control.replay_request_state = request_state
+                _facade().logger.info(
+                    "Retrying pre-created request after account/model rejection request_id=%s account_id=%s model=%s",
+                    request_state.request_log_id or request_state.request_id,
+                    account.id,
+                    request_state.model,
+                )
+                return downstream_text
+            retry_error_code = None
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:
                 if not (
@@ -4344,6 +4425,10 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        replay_fallback = _websocket_precreated_replay_fallback_error(request_state)
+        if replay_fallback is not None:
+            status_code, payload, error_code, error_message, rejected_account_id = replay_fallback
+            account_id = rejected_account_id
         status_code, payload, error_code, error_message = _sanitize_websocket_connect_failure(
             request_state=request_state,
             status_code=status_code,
@@ -4475,6 +4560,9 @@ class _WebSocketMixin:
                 )
             if response_create_gate is not None:
                 await _release_websocket_response_create_gate(request_state, response_create_gate)
+            if request_state.websocket_stream_lease is not None:
+                await proxy._load_balancer.release_account_lease(request_state.websocket_stream_lease)
+                request_state.websocket_stream_lease = None
             if request_state.event_queue is not None:
                 await request_state.event_queue.put(
                     format_sse_event(

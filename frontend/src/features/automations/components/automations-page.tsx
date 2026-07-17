@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Inbox, Info, Pencil, Play, Plus, Trash2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { isEmailLabel } from "@/components/blur-email";
@@ -52,16 +53,6 @@ import type {
   AutomationScheduleDay,
 } from "@/features/automations/schemas";
 
-const WEEKDAY_OPTIONS: Array<{ value: AutomationScheduleDay; shortLabel: string }> = [
-  { value: "mon", shortLabel: "Mon" },
-  { value: "tue", shortLabel: "Tue" },
-  { value: "wed", shortLabel: "Wed" },
-  { value: "thu", shortLabel: "Thu" },
-  { value: "fri", shortLabel: "Fri" },
-  { value: "sat", shortLabel: "Sat" },
-  { value: "sun", shortLabel: "Sun" },
-];
-
 const EMPTY_AUTOMATION_JOBS: AutomationJob[] = [];
 const EMPTY_AUTOMATION_RUNS: AutomationRun[] = [];
 const SERVER_DEFAULT_TIMEZONE = "server_default";
@@ -70,15 +61,19 @@ const RUN_STATUS_FILTER_VALUES = ["running", "success", "partial", "failed"] as 
 const RUN_TRIGGER_FILTER_VALUES = ["scheduled", "manual"] as const;
 const JOB_TYPE_FILTER_VALUES = ["daily"] as const;
 
-function formatScheduleDays(days: AutomationScheduleDay[]): string {
+function formatScheduleDayLabel(day: AutomationScheduleDay, t: ReturnType<typeof useTranslation>["t"]): string {
+  return t(`settings.routing.workingDays.days.${day}`, { defaultValue: day.toUpperCase() });
+}
+
+function formatScheduleDays(days: AutomationScheduleDay[], t: ReturnType<typeof useTranslation>["t"]): string {
   if (days.length === 7) {
-    return "Every day";
+    return t("automations.schedule.everyDay");
   }
   if (days.join(",") === "mon,tue,wed,thu,fri") {
-    return "Weekdays";
+    return t("automations.schedule.weekdays");
   }
   return days
-    .map((day) => WEEKDAY_OPTIONS.find((option) => option.value === day)?.shortLabel ?? day.toUpperCase())
+    .map((day) => formatScheduleDayLabel(day, t))
     .join(", ");
 }
 
@@ -90,34 +85,35 @@ function formatScheduleSummary(
   days: AutomationScheduleDay[],
   time: string,
   timeFormat: TimeFormatPreference,
+  t: ReturnType<typeof useTranslation>["t"],
 ): string {
   const hour = formatHourValue(time, timeFormat);
   if (days.length === 7) {
-    return `Every day at ${hour}`;
+    return t("automations.schedule.everyDayAt", { time: hour });
   }
   const serializedDays = days.join(",");
   if (serializedDays === "mon,tue,wed,thu,fri") {
-    return `Weekdays at ${hour}`;
+    return t("automations.schedule.weekdaysAt", { time: hour });
   }
   if (serializedDays === "sat,sun") {
-    return `Weekends at ${hour}`;
+    return t("automations.schedule.weekendsAt", { time: hour });
   }
-  return `${formatScheduleDays(days)} at ${hour}`;
+  return t("automations.schedule.daysAt", { days: formatScheduleDays(days, t), time: hour });
 }
 
-function formatTimezoneLabel(value: string): string {
-  return value === SERVER_DEFAULT_TIMEZONE ? "Server default" : value;
+function formatTimezoneLabel(value: string, t: ReturnType<typeof useTranslation>["t"]): string {
+  return value === SERVER_DEFAULT_TIMEZONE ? t("automations.schedule.serverDefault") : value;
 }
 
-function formatTypeLabel(value: string): string {
+function formatTypeLabel(value: string, t: ReturnType<typeof useTranslation>["t"]): string {
   if (value === "daily") {
-    return "Daily refresh";
+    return t("automations.types.daily");
   }
   return value;
 }
 
-function formatStatusLabel(value: string): string {
-  return formatSlug(value);
+function formatStatusLabel(value: string, t: ReturnType<typeof useTranslation>["t"]): string {
+  return t(`automations.statuses.${value}`, { defaultValue: formatSlug(value) });
 }
 
 
@@ -154,6 +150,7 @@ function hasRunsFiltersApplied(filters: {
 }
 
 export function AutomationsPage() {
+  const { t } = useTranslation();
   const [editingJob, setEditingJob] = useState<AutomationJob | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
@@ -270,9 +267,9 @@ export function AutomationsPage() {
     () =>
       JOB_STATUS_FILTER_VALUES.map((entry) => ({
         value: entry,
-        label: formatStatusLabel(entry),
+        label: formatStatusLabel(entry, t),
       })),
-    [],
+    [t],
   );
 
   const jobsScheduleTypeOptions = useMemo(
@@ -282,10 +279,10 @@ export function AutomationsPage() {
         : [...JOB_TYPE_FILTER_VALUES]) as string[];
       return scheduleTypes.map((entry) => ({
         value: entry,
-        label: formatTypeLabel(entry),
+        label: formatTypeLabel(entry, t),
       }));
     },
-    [jobOptionsQuery.data],
+    [jobOptionsQuery.data, t],
   );
 
   const runsAccountOptions = useMemo(
@@ -330,18 +327,18 @@ export function AutomationsPage() {
     () =>
       RUN_STATUS_FILTER_VALUES.map((entry) => ({
         value: entry,
-        label: formatStatusLabel(entry),
+        label: formatStatusLabel(entry, t),
       })),
-    [],
+    [t],
   );
 
   const runsTriggerOptions = useMemo(
     () =>
       RUN_TRIGGER_FILTER_VALUES.map((entry) => ({
         value: entry,
-        label: formatStatusLabel(entry),
+        label: formatStatusLabel(entry, t),
       })),
-    [],
+    [t],
   );
 
   const jobsTotal = jobsQuery.data?.total ?? 0;
@@ -419,9 +416,9 @@ export function AutomationsPage() {
   return (
     <div className="animate-fade-in-up space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Automations</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("automations.page.title")}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Configure scheduled automations and inspect execution history.
+          {t("automations.page.subtitle")}
         </p>
       </div>
 
@@ -430,12 +427,12 @@ export function AutomationsPage() {
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-semibold">Jobs</h3>
-            <p className="text-xs text-muted-foreground">Create, run, and manage automation jobs.</p>
+            <h3 className="text-sm font-semibold">{t("automations.jobs.title")}</h3>
+            <p className="text-xs text-muted-foreground">{t("automations.jobs.description")}</p>
           </div>
           <Button type="button" size="sm" onClick={openCreateDialog}>
             <Plus className="mr-1.5 h-4 w-4" />
-            Add automation
+            {t("automations.jobs.add")}
           </Button>
         </div>
 
@@ -461,12 +458,12 @@ export function AutomationsPage() {
           <div className="rounded-xl border bg-card p-5">
             <EmptyState
               icon={Bot}
-              title={jobsFiltersApplied ? "No matching automations" : "No automations"}
-              description={
-                jobsFiltersApplied
-                  ? "No automation jobs match the current filters."
-                  : "Create your first automation and schedule it from the dialog."
-              }
+	              title={jobsFiltersApplied ? t("automations.jobs.emptyFilteredTitle") : t("automations.jobs.emptyTitle")}
+	              description={
+	                jobsFiltersApplied
+	                  ? t("automations.jobs.emptyFilteredDescription")
+	                  : t("automations.jobs.emptyDescription")
+	              }
             />
           </div>
         ) : (
@@ -476,30 +473,31 @@ export function AutomationsPage() {
                 <Table className="min-w-[980px] table-fixed">
                   <TableHeader>
                     <TableRow className="hover:bg-transparent">
-                      <TableHead className="w-56 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
-                      <TableHead className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Automation type</TableHead>
-                      <TableHead className="w-56 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Schedule</TableHead>
-                      <TableHead className="w-40 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
-                      <TableHead className="w-52 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Accounts</TableHead>
-                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Next run</TableHead>
-                      <TableHead className="w-28 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Last status</TableHead>
-                      <TableHead className="w-36 pr-4 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Actions</TableHead>
+	                      <TableHead className="w-56 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.jobs.columns.name")}</TableHead>
+	                      <TableHead className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.jobs.columns.type")}</TableHead>
+	                      <TableHead className="w-56 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.jobs.columns.schedule")}</TableHead>
+	                      <TableHead className="w-40 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.model")}</TableHead>
+	                      <TableHead className="w-52 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.jobs.columns.accounts")}</TableHead>
+	                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.jobs.columns.nextRun")}</TableHead>
+	                      <TableHead className="w-28 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.jobs.columns.lastStatus")}</TableHead>
+	                      <TableHead className="w-36 pr-4 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("apiKeys.table.actions")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {jobs.map((job) => {
                       const nextRun = job.nextRunAt ? formatTimeLong(job.nextRunAt) : null;
                       const accountSummary = formatAccountsSummary(job.accountIds, accountDisplayIndex, job.accountScopeAll);
-                      const scheduleSummary = formatScheduleSummary(
-                        job.schedule.days,
-                        job.schedule.time,
-                        timeFormat,
-                      );
-                      const scheduleTimezoneLabel = formatTimezoneLabel(job.schedule.timezone);
-                      const thresholdLabel =
-                        job.schedule.thresholdMinutes > 0
-                          ? `Spread up to ${job.schedule.thresholdMinutes} min`
-                          : "Immediate dispatch";
+	                      const scheduleSummary = formatScheduleSummary(
+	                        job.schedule.days,
+	                        job.schedule.time,
+	                        timeFormat,
+	                        t,
+	                      );
+	                      const scheduleTimezoneLabel = formatTimezoneLabel(job.schedule.timezone, t);
+	                      const thresholdLabel =
+	                        job.schedule.thresholdMinutes > 0
+	                          ? t("automations.schedule.spreadUpTo", { minutes: job.schedule.thresholdMinutes })
+	                          : t("automations.schedule.immediateDispatch");
                       const modelLabel = formatModelLabel(job.model, job.reasoningEffort);
                       const shouldBlurJobAccountPrimary =
                         blurred &&
@@ -523,7 +521,7 @@ export function AutomationsPage() {
                               </div>
                             </div>
                           </TableCell>
-                          <TableCell className="align-middle text-xs text-muted-foreground">{formatTypeLabel(job.schedule.type)}</TableCell>
+	                          <TableCell className="align-middle text-xs text-muted-foreground">{formatTypeLabel(job.schedule.type, t)}</TableCell>
                           <TableCell className="align-middle text-xs">
                             <div className="space-y-0.5 leading-tight">
                               <div className="truncate text-foreground/95" title={scheduleSummary}>{scheduleSummary}</div>
@@ -559,16 +557,17 @@ export function AutomationsPage() {
                                 <div className="text-muted-foreground">{nextRun.date}</div>
                               </div>
                             ) : (
-                              <span className="text-muted-foreground">Disabled</span>
+	                              <span className="text-muted-foreground">{t("common.states.disabled")}</span>
                             )}
                           </TableCell>
                           <TableCell className="align-middle text-xs">
                             {job.lastRun ? (
-                              <Badge variant={runStatusVariant((job.lastRun.effectiveStatus ?? job.lastRun.status) as AutomationRunStatus)}>
-                                {formatRunStatusLabel(
-                                  (job.lastRun.effectiveStatus ?? job.lastRun.status) as AutomationRunStatus,
-                                  job.lastRun.pendingAccounts,
-                                )}
+	                              <Badge variant={runStatusVariant((job.lastRun.effectiveStatus ?? job.lastRun.status) as AutomationRunStatus)}>
+	                                {formatRunStatusLabel(
+	                                  (job.lastRun.effectiveStatus ?? job.lastRun.status) as AutomationRunStatus,
+	                                  job.lastRun.pendingAccounts,
+	                                  t,
+	                                )}
                               </Badge>
                             ) : (
                               <span className="text-muted-foreground">-</span>
@@ -584,8 +583,8 @@ export function AutomationsPage() {
                               <Switch
                                 checked={job.enabled}
                                 disabled={busy}
-                                aria-label={`${job.enabled ? "Disable" : "Enable"} ${job.name}`}
-                                title={job.enabled ? "Disable automation" : "Enable automation"}
+	                                aria-label={job.enabled ? t("automations.jobs.disableAria", { name: job.name }) : t("automations.jobs.enableAria", { name: job.name })}
+	                                title={job.enabled ? t("automations.jobs.disableTitle") : t("automations.jobs.enableTitle")}
                                 onCheckedChange={(checked) => {
                                   void updateMutation.mutateAsync({
                                     automationId: job.id,
@@ -599,8 +598,8 @@ export function AutomationsPage() {
                                 variant="ghost"
                                 className="h-8 w-8"
                                 disabled={busy}
-                                aria-label={`Edit ${job.name}`}
-                                title="Edit automation"
+	                                aria-label={t("automations.jobs.editAria", { name: job.name })}
+	                                title={t("automations.jobs.editTitle")}
                                 onClick={() => {
                                   openEditDialog(job);
                                 }}
@@ -613,8 +612,8 @@ export function AutomationsPage() {
                                 variant="ghost"
                                 className="h-8 w-8"
                                 disabled={busy}
-                                aria-label={`Run now ${job.name}`}
-                                title="Run automation now"
+	                                aria-label={t("automations.jobs.runNowAria", { name: job.name })}
+	                                title={t("automations.jobs.runNowTitle")}
                                 onClick={() => {
                                   runNowDialog.show(job);
                                 }}
@@ -627,8 +626,8 @@ export function AutomationsPage() {
                                 variant="ghost"
                                 className="h-8 w-8 text-destructive hover:text-destructive"
                                 disabled={busy}
-                                aria-label={`Delete ${job.name}`}
-                                title="Delete automation"
+	                                aria-label={t("automations.jobs.deleteAria", { name: job.name })}
+	                                title={t("automations.jobs.deleteTitle")}
                                 onClick={() => deleteDialog.show(job)}
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -659,8 +658,8 @@ export function AutomationsPage() {
 
       <section className="space-y-3">
         <div>
-          <h3 className="text-sm font-semibold">Recent runs</h3>
-          <p className="text-xs text-muted-foreground">Inspect recent execution attempts across automation jobs.</p>
+	          <h3 className="text-sm font-semibold">{t("automations.runs.title")}</h3>
+	          <p className="text-xs text-muted-foreground">{t("automations.runs.description")}</p>
         </div>
 
         <AutomationRunsFilters
@@ -685,12 +684,12 @@ export function AutomationsPage() {
           <div className="rounded-xl border bg-card p-5">
             <EmptyState
               icon={Inbox}
-              title={runsFiltersApplied ? "No matching runs" : "No runs yet"}
-              description={
-                runsFiltersApplied
-                  ? "No automation runs match the current filters."
-                  : "Runs will appear here after automation jobs execute."
-              }
+	              title={runsFiltersApplied ? t("automations.runs.emptyFilteredTitle") : t("automations.runs.emptyTitle")}
+	              description={
+	                runsFiltersApplied
+	                  ? t("automations.runs.emptyFilteredDescription")
+	                  : t("automations.runs.emptyDescription")
+	              }
             />
           </div>
         ) : (
@@ -700,14 +699,14 @@ export function AutomationsPage() {
                 <Table className="min-w-[980px] table-fixed">
                   <TableHeader>
                     <TableRow className="hover:bg-transparent">
-                      <TableHead className="w-24 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
-                      <TableHead className="w-56 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Job</TableHead>
-                      <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Trigger</TableHead>
-                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Scheduled for</TableHead>
-                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Started at</TableHead>
-                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Finished at</TableHead>
-                      <TableHead className="w-48 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
-                      <TableHead className="w-64 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Error</TableHead>
+	                      <TableHead className="w-24 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.status")}</TableHead>
+	                      <TableHead className="w-56 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.runs.columns.job")}</TableHead>
+	                      <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.runs.columns.trigger")}</TableHead>
+	                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.runs.columns.scheduledFor")}</TableHead>
+	                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.runs.columns.startedAt")}</TableHead>
+	                      <TableHead className="w-36 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.runs.columns.finishedAt")}</TableHead>
+	                      <TableHead className="w-48 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.account")}</TableHead>
+	                      <TableHead className="w-64 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("automations.runs.columns.error")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -720,11 +719,11 @@ export function AutomationsPage() {
                       const hasGroupedAccounts = (run.totalAccounts ?? 0) > 1;
                       const groupedPending = run.pendingAccounts ?? 0;
                       const groupedCompleted = run.completedAccounts ?? 0;
-                      const groupedAccountsLabel = `${run.totalAccounts ?? 0} accounts`;
-                      const groupedAccountsSecondary =
-                        groupedPending > 0
-                          ? `${groupedCompleted} completed, ${groupedPending} pending`
-                          : "Grouped automation cycle";
+	                      const groupedAccountsLabel = t("automations.runs.groupedAccounts", { count: run.totalAccounts ?? 0 });
+	                      const groupedAccountsSecondary =
+	                        groupedPending > 0
+	                          ? t("automations.runs.groupedProgress", { completed: groupedCompleted, pending: groupedPending })
+	                          : t("automations.runs.groupedCycle");
                       const runAccountBlur = run.accountId ? accountBlurIndex.get(run.accountId) : null;
                       const shouldBlurRunAccountPrimary = !hasGroupedAccounts && blurred && !!runAccountBlur?.primary;
                       const shouldBlurRunAccountSecondary = !hasGroupedAccounts && blurred && !!runAccountBlur?.secondary;
@@ -735,9 +734,9 @@ export function AutomationsPage() {
                       return (
                         <TableRow key={run.id}>
                           <TableCell className="pl-4 align-middle">
-                            <Badge variant={runStatusVariant(effectiveStatus)}>
-                              {formatRunStatusLabel(effectiveStatus, run.pendingAccounts)}
-                            </Badge>
+	                            <Badge variant={runStatusVariant(effectiveStatus)}>
+	                              {formatRunStatusLabel(effectiveStatus, run.pendingAccounts, t)}
+	                            </Badge>
                           </TableCell>
                           <TableCell className="align-middle text-xs">
                             <div className="space-y-0.5 leading-tight">
@@ -812,8 +811,8 @@ export function AutomationsPage() {
                                 size="icon"
                                 variant="ghost"
                                 className="h-7 w-7 shrink-0"
-                                aria-label={`Run details ${run.id}`}
-                                title="Run details"
+	                                aria-label={t("automations.runs.detailsAria", { id: run.id })}
+	                                title={t("automations.runs.detailsTitle")}
                                 onClick={() => setSelectedRunId(run.id)}
                               >
                                 <Info className="h-4 w-4" />
@@ -860,9 +859,9 @@ export function AutomationsPage() {
 
       <ConfirmDialog
         open={deleteDialog.open}
-        title="Delete automation"
-        description="This automation and its run history will be removed."
-        confirmLabel="Delete"
+	        title={t("automations.deleteDialog.title")}
+	        description={t("automations.deleteDialog.description")}
+	        confirmLabel={t("common.actions.delete")}
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
           if (!deleteDialog.data) {
@@ -876,14 +875,14 @@ export function AutomationsPage() {
 
       <ConfirmDialog
         open={runNowDialog.open}
-        title="Run automation now"
-        description={
-          runNowDialog.data
-            ? `Start "${runNowDialog.data.name}" immediately? Scheduled dispatch offsets will still apply.`
-            : "Start this automation immediately?"
-        }
-        confirmLabel="Run now"
-        cancelLabel="Cancel"
+	        title={t("automations.runNowDialog.title")}
+	        description={
+	          runNowDialog.data
+	            ? t("automations.runNowDialog.descriptionWithName", { name: runNowDialog.data.name })
+	            : t("automations.runNowDialog.description")
+	        }
+	        confirmLabel={t("automations.runNowDialog.confirm")}
+	        cancelLabel={t("common.cancel")}
         onOpenChange={runNowDialog.onOpenChange}
         onConfirm={() => {
           if (!runNowDialog.data) {

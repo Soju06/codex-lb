@@ -141,6 +141,21 @@ describe("ReportsPage", () => {
     );
   });
 
+  it("shows the loading label without duplicating ellipsis punctuation", () => {
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        isLoading: true,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    expect(screen.queryByText("Loading......")).not.toBeInTheDocument();
+  });
+
   it("uses the live valid timezone for reports queries even when a cached value exists", async () => {
     window.localStorage.setItem(REPORTS_TIMEZONE_STORAGE_KEY, "UTC");
     getBrowserReportsTimeZoneMock.mockReset();

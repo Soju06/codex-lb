@@ -178,15 +178,12 @@ def test_backend_responses_websocket_session_ended_auth_failure_fails_over_befor
                     "text",
                     text=json.dumps(
                         {
-                            "type": "response.failed",
-                            "response": {
-                                "id": "resp_ws_session_expired",
-                                "status": "failed",
-                                "error": {
-                                    "type": "authentication_error",
-                                    "code": "invalid_api_key",
-                                    "message": "Your session has ended. Please log in again.",
-                                },
+                            "type": "error",
+                            "status": 401,
+                            "error": {
+                                "type": "authentication_error",
+                                "code": "invalid_api_key",
+                                "message": "Your session has ended. Please log in again.",
                             },
                         },
                         separators=(",", ":"),
@@ -306,6 +303,97 @@ def test_backend_responses_websocket_session_ended_auth_failure_fails_over_befor
     assert permanent_failures == [("acct_ws_expired", "account_session_expired")]
 
 
+def test_backend_responses_websocket_id_bearing_auth_failure_is_forwarded_without_replay(
+    app_instance,
+    monkeypatch,
+):
+    failure = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_id_bearing_auth_failure",
+            "status": "failed",
+            "error": {
+                "type": "authentication_error",
+                "code": "invalid_api_key",
+                "message": "Authentication token expired",
+            },
+        },
+    }
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[[_FakeUpstreamMessage("text", text=json.dumps(failure, separators=(",", ":")))]],
+    )
+    connect_accounts: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        connect_accounts.append("acct_ws_id_bearing_auth_failure")
+        return SimpleNamespace(id="acct_ws_id_bearing_auth_failure"), first_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "do not replay",
+                        "stream": True,
+                    }
+                )
+            )
+            forwarded = json.loads(websocket.receive_text())
+
+    assert forwarded == failure
+    assert connect_accounts == ["acct_ws_id_bearing_auth_failure"]
+
+
 def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fails_over(
     app_instance,
     monkeypatch,
@@ -315,15 +403,12 @@ def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fa
             "text",
             text=json.dumps(
                 {
-                    "type": "response.failed",
-                    "response": {
-                        "id": "resp_ws_auth_failed",
-                        "status": "failed",
-                        "error": {
-                            "type": "authentication_error",
-                            "code": "invalid_api_key",
-                            "message": "token invalidated",
-                        },
+                    "type": "error",
+                    "status": 401,
+                    "error": {
+                        "type": "authentication_error",
+                        "code": "invalid_api_key",
+                        "message": "token invalidated",
                     },
                 },
                 separators=(",", ":"),
@@ -457,15 +542,12 @@ def test_backend_responses_websocket_generic_auth_refresh_budget_is_per_account(
             "text",
             text=json.dumps(
                 {
-                    "type": "response.failed",
-                    "response": {
-                        "id": "resp_ws_auth_failed",
-                        "status": "failed",
-                        "error": {
-                            "type": "authentication_error",
-                            "code": "invalid_api_key",
-                            "message": "token invalidated",
-                        },
+                    "type": "error",
+                    "status": 401,
+                    "error": {
+                        "type": "authentication_error",
+                        "code": "invalid_api_key",
+                        "message": "token invalidated",
                     },
                 },
                 separators=(",", ":"),
@@ -8439,6 +8521,152 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
     assert second_event["type"] == "response.completed"
     assert connect_models == ["gpt-5.1", "gpt-5.1"]
     assert handled_error_codes == ["usage_limit_reached"]
+    assert len(first_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
+    assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(
+        json.loads(second_upstream.sent_text[0])
+    )
+
+
+def test_backend_responses_websocket_retries_stale_account_model_route_on_another_account(
+    app_instance,
+    monkeypatch,
+):
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_request_error",
+                            "message": (
+                                "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."
+                            ),
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    second_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_model_supported", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_model_supported",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    upstreams = [first_upstream, second_upstream]
+    account_ids = ["acct_ws_model_rejected", "acct_ws_model_supported"]
+    connect_models: list[str | None] = []
+    excluded_snapshots: list[set[str]] = []
+    handled_error_codes: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        index = len(connect_models)
+        connect_models.append(model)
+        excluded_snapshots.append(set(request_state.excluded_account_ids))
+        return SimpleNamespace(id=account_ids[index]), upstreams[index]
+
+    async def fake_handle_stream_error(self, account, error, code):
+        del self, account, error
+        handled_error_codes.append(code)
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "retry safely"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first_event = json.loads(websocket.receive_text())
+            second_event = json.loads(websocket.receive_text())
+
+    assert first_event["type"] == "response.created"
+    assert second_event["type"] == "response.completed"
+    assert connect_models == ["gpt-5.6-sol", "gpt-5.6-sol"]
+    assert excluded_snapshots == [set(), {account_ids[0]}]
+    assert handled_error_codes == []
+    assert first_upstream.closed is True
     assert len(first_upstream.sent_text) == 1
     assert len(second_upstream.sent_text) == 1
     assert _without_installation_metadata(json.loads(first_upstream.sent_text[0])) == _without_installation_metadata(

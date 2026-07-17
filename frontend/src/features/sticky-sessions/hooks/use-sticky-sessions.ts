@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDeferredValue, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import {
@@ -20,6 +21,7 @@ import type {
 const DEFAULT_STICKY_SESSIONS_LIMIT = 10;
 
 export function useStickySessions() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [params, setParams] = useState<StickySessionsListParams>({
     staleOnly: false,
@@ -75,18 +77,22 @@ export function useStickySessions() {
     mutationFn: (targets: StickySessionIdentifier[]) => deleteStickySessions({ sessions: targets }),
     onSuccess: async (response: StickySessionsDeleteResponse) => {
       if (response.deletedCount > 0 && response.failed.length === 0) {
-        toast.success(response.deletedCount === 1 ? "Sticky session deleted" : `Deleted ${response.deletedCount} sessions`);
+        toast.success(
+          response.deletedCount === 1
+            ? t("stickySessions.toasts.deletedOne")
+            : t("stickySessions.toasts.deletedMany", { count: response.deletedCount }),
+        );
       } else if (response.deletedCount > 0) {
         toast.warning(
-          `Deleted ${response.deletedCount} sessions. ${response.failed.length} could not be deleted.`,
+          t("stickySessions.toasts.deletedPartial", { deleted: response.deletedCount, failed: response.failed.length }),
         );
       } else {
-        toast.error("No selected sessions could be deleted");
+        toast.error(t("stickySessions.toasts.noneSelectedDeleted"));
       }
       await queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to delete sticky sessions");
+      toast.error(error.message || t("stickySessions.toasts.deleteFailed"));
     },
   });
 
@@ -100,26 +106,28 @@ export function useStickySessions() {
     onSuccess: async (response: StickySessionsDeleteFilteredResponse) => {
       if (response.deletedCount > 0) {
         toast.success(
-          response.deletedCount === 1 ? "Filtered sticky session deleted" : `Deleted ${response.deletedCount} filtered sessions`,
+          response.deletedCount === 1
+            ? t("stickySessions.toasts.filteredDeletedOne")
+            : t("stickySessions.toasts.filteredDeletedMany", { count: response.deletedCount }),
         );
       } else {
-        toast.error("No filtered sessions could be deleted");
+        toast.error(t("stickySessions.toasts.noneFilteredDeleted"));
       }
       await queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to delete filtered sticky sessions");
+      toast.error(error.message || t("stickySessions.toasts.deleteFilteredFailed"));
     },
   });
 
   const purgeMutation = useMutation({
     mutationFn: (staleOnly: boolean) => purgeStickySessions({ staleOnly }),
     onSuccess: (response) => {
-      toast.success(`Purged ${response.deletedCount} sticky sessions`);
+      toast.success(t("stickySessions.toasts.purged", { count: response.deletedCount }));
       void queryClient.invalidateQueries({ queryKey: ["sticky-sessions", "list"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to purge sticky sessions");
+      toast.error(error.message || t("stickySessions.toasts.purgeFailed"));
     },
   });
 

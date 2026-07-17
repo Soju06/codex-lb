@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, ResponsiveContainer, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 import type { ModelCostEntry } from "../schemas";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
@@ -21,6 +22,7 @@ type ChartDatum = ModelCostEntry & {
 };
 
 export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
+  const { t } = useTranslation();
   const [metric, setMetric] = useState<DistributionMetric>("cost");
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -79,7 +81,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">Distribution by Model</div>
+        <div className="text-sm font-semibold text-foreground">{t("reports.distribution.byModel")}</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div className="mt-4 flex items-center gap-4">
@@ -89,7 +91,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
               className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
               data-testid="model-distribution-center-label"
             >
-              Total
+              {t("reports.distribution.total")}
             </span>
             <span
               className="max-w-[76px] text-sm font-semibold leading-tight tabular-nums text-foreground"

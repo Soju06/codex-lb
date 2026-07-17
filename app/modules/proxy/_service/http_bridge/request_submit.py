@@ -91,6 +91,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _security_work_advisory_event,
     _service_as_image_fetch_session,
     _service_get_settings,
+    _service_get_settings_cache,
     _service_inline_input_image_urls,
     _service_lease_http_session,
     _service_time,
@@ -167,6 +168,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
+from app.modules.proxy.load_balancer import effective_account_concurrency_caps
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -1289,6 +1291,17 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             else:
                 await self._reconnect_http_bridge_session(session, request_state=request_state)
+            if request_state.account_response_create_lease is None:
+                current_settings = await _service_get_settings_cache().get()
+                request_state.account_response_create_lease = (
+                    await self._acquire_account_response_create_lease_or_overload(
+                        account_id=session.account.id,
+                        request_id=request_state.request_log_id or request_state.request_id,
+                        surface="http_bridge",
+                        concurrency_caps=effective_account_concurrency_caps(current_settings),
+                    )
+                )
+                request_state.account_response_create_release = self._load_balancer.release_account_lease
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
@@ -1296,9 +1309,13 @@ class _HTTPBridgeRequestSubmitMixin:
         except UpstreamWebSocketTransportError:
             raise
         except Exception as exc:
-            request_state.error_code_override, request_state.error_message_override = (
-                _http_bridge_precreated_retry_failure_error(exc)
-            )
+            (
+                request_state.error_http_status_override,
+                request_state.error_code_override,
+                request_state.error_message_override,
+                request_state.error_type_override,
+                request_state.error_param_override,
+            ) = _http_bridge_precreated_retry_failure_error(exc)
             if isinstance(exc, ProxyResponseError):
                 logger.info(
                     "HTTP bridge pre-created retry failed with terminal proxy error code=%s message=%s",
@@ -1365,9 +1382,13 @@ class _HTTPBridgeRequestSubmitMixin:
         except UpstreamWebSocketTransportError:
             raise
         except Exception as exc:
-            request_state.error_code_override, request_state.error_message_override = (
-                _http_bridge_precreated_retry_failure_error(exc)
-            )
+            (
+                request_state.error_http_status_override,
+                request_state.error_code_override,
+                request_state.error_message_override,
+                request_state.error_type_override,
+                request_state.error_param_override,
+            ) = _http_bridge_precreated_retry_failure_error(exc)
             if isinstance(exc, ProxyResponseError):
                 logger.info(
                     "HTTP bridge pre-created auth retry failed with terminal proxy error code=%s message=%s",

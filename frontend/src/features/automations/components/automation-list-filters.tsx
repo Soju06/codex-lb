@@ -1,4 +1,5 @@
 import { RotateCcw, Search } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,7 @@ export function AutomationJobsFilters({
   onScheduleTypeChange,
   onReset,
 }: AutomationJobsFiltersProps) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-2 rounded-xl border bg-card p-4">
       <div className="flex items-center gap-2">
@@ -44,39 +46,39 @@ export function AutomationJobsFilters({
             value={filters.search}
             onChange={(event) => onSearchChange(event.target.value)}
             className="h-8 pl-9"
-            placeholder="Search name, prompt, model..."
-            aria-label="Search automation jobs"
+	            placeholder={t("automations.filters.jobsSearchPlaceholder")}
+	            aria-label={t("automations.filters.jobsSearchAria")}
           />
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <MultiSelectFilter
-          label="Accounts"
+	          label={t("automations.jobs.columns.accounts")}
           values={filters.accountIds}
           options={accountOptions}
           onChange={onAccountChange}
         />
         <MultiSelectFilter
-          label="Models"
+	          label={t("apiKeys.table.models")}
           values={filters.models}
           options={modelOptions}
           onChange={onModelChange}
         />
         <MultiSelectFilter
-          label="Statuses"
+	          label={t("automations.filters.statuses")}
           values={filters.statuses}
           options={statusOptions}
           onChange={onStatusChange}
         />
         <MultiSelectFilter
-          label="Type"
+	          label={t("automations.filters.type")}
           values={filters.scheduleTypes}
           options={scheduleTypeOptions}
           onChange={onScheduleTypeChange}
         />
         <Button type="button" variant="ghost" size="sm" onClick={onReset} className="h-8 gap-1.5 text-xs text-muted-foreground">
           <RotateCcw className="h-3 w-3" aria-hidden="true" />
-          Reset
+	          {t("common.actions.reset")}
         </Button>
       </div>
     </div>
@@ -110,6 +112,7 @@ export function AutomationRunsFilters({
   onTriggerChange,
   onReset,
 }: AutomationRunsFiltersProps) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-2 rounded-xl border bg-card p-4">
       <div className="flex items-center gap-2">
@@ -119,39 +122,39 @@ export function AutomationRunsFilters({
             value={filters.search}
             onChange={(event) => onSearchChange(event.target.value)}
             className="h-8 pl-9"
-            placeholder="Search run id, job, model, error..."
-            aria-label="Search automation runs"
+	            placeholder={t("automations.filters.runsSearchPlaceholder")}
+	            aria-label={t("automations.filters.runsSearchAria")}
           />
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <MultiSelectFilter
-          label="Accounts"
+	          label={t("automations.jobs.columns.accounts")}
           values={filters.accountIds}
           options={accountOptions}
           onChange={onAccountChange}
         />
         <MultiSelectFilter
-          label="Models"
+	          label={t("apiKeys.table.models")}
           values={filters.models}
           options={modelOptions}
           onChange={onModelChange}
         />
         <MultiSelectFilter
-          label="Statuses"
+	          label={t("automations.filters.statuses")}
           values={filters.statuses}
           options={statusOptions}
           onChange={onStatusChange}
         />
         <MultiSelectFilter
-          label="Triggers"
+	          label={t("automations.filters.triggers")}
           values={filters.triggers}
           options={triggerOptions}
           onChange={onTriggerChange}
         />
         <Button type="button" variant="ghost" size="sm" onClick={onReset} className="h-8 gap-1.5 text-xs text-muted-foreground">
           <RotateCcw className="h-3 w-3" aria-hidden="true" />
-          Reset
+	          {t("common.actions.reset")}
         </Button>
       </div>
     </div>

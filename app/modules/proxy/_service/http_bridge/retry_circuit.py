@@ -91,15 +91,25 @@ class _HTTPBridgeRetryCircuitMixin:
         state: _HTTPBridgeRetryCircuitState,
     ) -> None:
         now_monotonic = time.monotonic()
+        now_wall = time.time()
+        threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
+        base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
+        if state.last_detail == "clean_close":
+            base_backoff = min(
+                base_backoff,
+                max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS),
+            )
         try:
             await self._durable_bridge.persist_retry_circuit(
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
                 consecutive_failures=state.consecutive_failures,
-                cooldown_until_epoch=time.time() + max(0.0, state.cooldown_until - now_monotonic),
+                cooldown_until_epoch=now_wall + max(0.0, state.cooldown_until - now_monotonic),
                 last_detail=state.last_detail,
-                updated_at_epoch=time.time(),
+                updated_at_epoch=now_wall,
+                failure_threshold=threshold,
+                conflict_cooldown_until_epoch=now_wall + base_backoff,
             )
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
         except Exception:

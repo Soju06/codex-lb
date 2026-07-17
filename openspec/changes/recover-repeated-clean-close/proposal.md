@@ -35,4 +35,6 @@ loop and require the Codex client to be restarted.
 - The retry remains bounded and does not create an unbounded replay loop.
 - Reader ownership follows the active socket across idle recovery, preventing
   locally generated close frames from being counted as upstream instability.
-- No API or database schema changes are introduced.
+- Adds the `http_bridge_retry_circuits` durable table and migration so retry
+  cooldown state survives cross-replica clean-close and incomplete-stream
+  failures.

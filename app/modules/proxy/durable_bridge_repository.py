@@ -22,6 +22,7 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
 )
 _PURGE_CLOSED_BATCH_SIZE = 500
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+_STARTUP_OWNERLESS_STALE_GRACE_SECONDS = 60
 
 
 def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
@@ -397,22 +398,29 @@ class DurableBridgeRepository:
         """Remove durable bridge rows left by the previous process instance.
 
         Also removes ownerless ACTIVE/DRAINING rows with expired leases -
-        these are stale rows from a prior shutdown that the background
-        cleanup scheduler has not yet purged.
+        when their last activity is old enough to prove they are stale rows
+        from a prior shutdown that the background cleanup scheduler has not yet
+        purged.  A graceful drain release intentionally clears ownership and
+        sets the lease to now, so last_seen_at is the safety boundary that keeps
+        a fresh continuity row available for another bridge owner.
         """
 
+        now = utcnow()
+        ownerless_abandoned_filter = (
+            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+            HttpBridgeSessionRecord.state.in_(
+                (HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING),
+            ),
+            HttpBridgeSessionRecord.lease_expires_at < now,
+            HttpBridgeSessionRecord.last_seen_at < now - timedelta(seconds=_STARTUP_OWNERLESS_STALE_GRACE_SECONDS),
+        )
+        startup_purge_filter = or_(
+            HttpBridgeSessionRecord.owner_instance_id == instance_id,
+            and_(*ownerless_abandoned_filter),
+        )
         result = await self._session.execute(
             select(HttpBridgeSessionRecord.id).where(
-                or_(
-                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                    and_(
-                        HttpBridgeSessionRecord.owner_instance_id.is_(None),
-                        HttpBridgeSessionRecord.state.in_(
-                            (HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING),
-                        ),
-                        HttpBridgeSessionRecord.lease_expires_at < utcnow(),
-                    ),
-                ),
+                startup_purge_filter,
             )
         )
         session_ids = list(result.scalars().all())
@@ -421,12 +429,18 @@ class DurableBridgeRepository:
         async with sqlite_writer_section():
             await self._session.execute(
                 delete(HttpBridgeSessionAlias).where(
-                    HttpBridgeSessionAlias.session_id.in_(session_ids),
+                    HttpBridgeSessionAlias.session_id.in_(
+                        select(HttpBridgeSessionRecord.id).where(
+                            HttpBridgeSessionRecord.id.in_(session_ids),
+                            startup_purge_filter,
+                        )
+                    ),
                 )
             )
             deleted = await self._session.execute(
                 delete(HttpBridgeSessionRecord)
                 .where(HttpBridgeSessionRecord.id.in_(session_ids))
+                .where(startup_purge_filter)
                 .returning(HttpBridgeSessionRecord.id)
             )
             await self._session.commit()

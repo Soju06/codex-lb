@@ -43,6 +43,13 @@ PLAN_CAPACITY_CREDITS_MONTHLY = {
     "free": 1134.0,
 }
 
+# Rows written by the same upstream fetch land within milliseconds of each
+# other; a sibling row only proves a *later* fetch (one that no longer
+# reported the stale window) when it is newer by more than this margin. This
+# is the canonical, single source of truth for the same-fetch threshold shared
+# by the weekly-primary remap tiebreak and the usage updater's sibling logic.
+SIBLING_FETCH_MARGIN_SECONDS = 5.0
+
 DEFAULT_WINDOW_MINUTES_PRIMARY = 300
 DEFAULT_WINDOW_MINUTES_SECONDARY = 10080
 DEFAULT_WINDOW_MINUTES_MONTHLY = 43200
@@ -281,12 +288,49 @@ def normalize_weekly_only_rows(
     return normalized_primary, list(normalized_secondary_by_account.values())
 
 
+def _has_real_quota_metadata(row: UsageWindowRow) -> bool:
+    """A row carries real quota metadata when it has a positive window
+    duration AND a reset deadline. Used by the weekly-primary remap tiebreak to
+    distinguish a real weekly sample from a no-data placeholder."""
+    return row.window_minutes is not None and row.window_minutes > 0 and row.reset_at is not None
+
+
+def _is_no_data_placeholder(row: UsageWindowRow) -> bool:
+    """A no-data placeholder is the absence of a measurement, not 0% used.
+
+    Such rows (no positive window duration AND no reset deadline) are written
+    when upstream omits a window slot entirely. Letting them represent 0% used
+    makes the dashboard jump to 100% remaining, so the tiebreak must never let a
+    placeholder displace a row carrying real quota metadata.
+    """
+    has_window = row.window_minutes is not None and row.window_minutes > 0
+    return not has_window and row.reset_at is None
+
+
 def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:
+    # Data-aware tiebreak first: a row carrying real quota metadata MUST win
+    # over a no-data placeholder regardless of recorded_at ordering. A
+    # placeholder is the absence of a measurement, not 0% used, so it must
+    # never displace a real weekly sample (otherwise the dashboard jumps to
+    # 100% remaining every refresh).
+    primary_has_real = _has_real_quota_metadata(primary_row)
+    secondary_has_real = _has_real_quota_metadata(secondary_row)
+    if primary_has_real and _is_no_data_placeholder(secondary_row):
+        return True
+    if secondary_has_real and _is_no_data_placeholder(primary_row):
+        return False
+
     primary_recorded_at = _normalize_recorded_at(primary_row.recorded_at)
     secondary_recorded_at = _normalize_recorded_at(secondary_row.recorded_at)
     if primary_recorded_at is not None and secondary_recorded_at is not None:
         if primary_recorded_at != secondary_recorded_at:
-            return primary_recorded_at > secondary_recorded_at
+            # Only a genuinely different fetch (beyond the sibling margin)
+            # decides on recorded_at. Same-fetch rows (sub-second write skew)
+            # fall through to reset-at precedence so the winner is not a coin
+            # flip per refresh.
+            delta_seconds = abs((primary_recorded_at - secondary_recorded_at).total_seconds())
+            if delta_seconds > SIBLING_FETCH_MARGIN_SECONDS:
+                return primary_recorded_at > secondary_recorded_at
     elif primary_recorded_at is not None:
         return True
     elif secondary_recorded_at is not None:

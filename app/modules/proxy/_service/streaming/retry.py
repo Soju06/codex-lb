@@ -1800,6 +1800,8 @@ class _StreamingRetryMixin:
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
+                            if not isinstance(tex, _TransientStreamError) or tex.preserve_on_selection_exhausted:
+                                last_retryable_stream_error = _RetryableStreamError(error_code, error_payload)
                             await _release_tracked_stream_lease(current_account_lease)
                             current_account_lease = None
                             excluded_account_ids.add(account.id)

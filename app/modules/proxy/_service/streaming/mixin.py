@@ -578,6 +578,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
+                if allow_transient_retry:
+                    raise _TransientStreamError(error_code, settlement.error, preserve_on_selection_exhausted=True)
                 yield format_sse_event(
                     response_failed_event(
                         error_code,
@@ -596,6 +598,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
+                if allow_transient_retry and _facade()._should_retry_transient_stream_error(error_code, error_message):
+                    raise _TransientStreamError(error_code, settlement.error)
                 if allow_retry:
                     raise _RetryableStreamError(error_code, settlement.error, exclude_account=True)
                 yield format_sse_event(
@@ -712,12 +716,13 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
+                    transient_response_id = event.response.id if event.response and event.response.id else None
                     if allow_transient_retry and _facade()._should_retry_transient_stream_error(
-                        code,
-                        error_message,
-                        response_id=response_id if event.type == "response.failed" else None,
+                        code, error_message, response_id=transient_response_id
                     ):
-                        raise _TransientStreamError(code, upstream_error)
+                        raise _TransientStreamError(
+                            code, upstream_error, preserve_on_selection_exhausted=transient_response_id is None
+                        )
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
                     upstream_error,

@@ -10,10 +10,10 @@ import anyio
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import _HTTPBridgeSession
+from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
 
-_HTTP_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD = 2
 _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
@@ -42,7 +42,6 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             if session.key in self._http_bridge_retry_circuit_loaded_keys:
                 return
-            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
             try:
                 persisted = await self._durable_bridge.lookup_retry_circuit(
                     session_key_kind=session.key.affinity_kind,
@@ -61,7 +60,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 return
 
             now_epoch = time.time()
-            if now_epoch - persisted.updated_at_epoch > _HTTP_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
+            if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
                 try:
                     await self._durable_bridge.clear_retry_circuit(
                         session_key_kind=session.key.affinity_kind,
@@ -77,6 +76,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     )
                 return
 
+            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
             cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
             self._http_bridge_retry_circuits[session.key] = _HTTPBridgeRetryCircuitState(
@@ -195,6 +195,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     detail,
                 )
             await self._persist_http_bridge_retry_circuit(session, state)
+            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
 
     async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":
@@ -211,6 +212,7 @@ class _HTTPBridgeRetryCircuitMixin:
                         session_key_value=session.key.affinity_key,
                         api_key_id=session.key.api_key_id,
                     )
+                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
                 except Exception:
                     logger.warning(

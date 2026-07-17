@@ -31,7 +31,9 @@ _ANONYMOUS_API_KEY_SCOPE = "__anonymous__"
 REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_sessions",
     "http_bridge_session_aliases",
+    "http_bridge_retry_circuits",
 )
+DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _PURGE_CLOSED_BATCH_SIZE = 500
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 
@@ -707,6 +709,43 @@ class DurableBridgeRepository:
                 await self._session.commit()
             deleted_count += len(deleted.scalars().all())
 
+    async def purge_retry_circuits_before(
+        self,
+        cutoff_epoch: float,
+        *,
+        batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
+    ) -> int:
+        deleted_count = 0
+        while True:
+            result = await self._session.execute(
+                select(
+                    HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope,
+                )
+                .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                .limit(batch_size)
+            )
+            keys = [tuple(row) for row in result.fetchall()]
+            if not keys:
+                return deleted_count
+            batch_deleted_count = 0
+            async with sqlite_writer_section():
+                for session_key_kind, session_key_hash, api_key_scope in keys:
+                    deleted = await self._session.execute(
+                        delete(HttpBridgeRetryCircuit)
+                        .where(HttpBridgeRetryCircuit.session_key_kind == session_key_kind)
+                        .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
+                        .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
+                        .where(HttpBridgeRetryCircuit.updated_at_epoch < cutoff_epoch)
+                        .returning(HttpBridgeRetryCircuit.session_key_hash)
+                    )
+                    batch_deleted_count += len(deleted.scalars().all())
+                await self._session.commit()
+            if batch_deleted_count == 0:
+                return deleted_count
+            deleted_count += batch_deleted_count
+
     async def upsert_alias(
         self,
         *,
@@ -1138,7 +1177,8 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
         result = await session.execute(
             text(
                 "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases')"
+                "WHERE type = 'table' "
+                "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits')"
             )
         )
     else:
@@ -1146,7 +1186,9 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' "
-                "AND table_name IN ('http_bridge_sessions', 'http_bridge_session_aliases')"
+                "AND table_name IN ("
+                "'http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits'"
+                ")"
             )
         )
     present = {str(row[0]) for row in result.fetchall()}

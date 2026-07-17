@@ -58,6 +58,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=2)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=1)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=3)
     ring_service = AsyncMock()
     ring_service.purge_stale_before = AsyncMock(return_value=0)
 
@@ -88,6 +89,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo.purge_before.assert_not_called()
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
+    bridge_repo.purge_retry_circuits_before.assert_called_once()
     ring_service.purge_stale_before.assert_called_once()
 
 
@@ -114,6 +116,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
     ring_service = AsyncMock()
     ring_service.purge_stale_before = AsyncMock(return_value=0)
 
@@ -148,6 +151,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     bridge_repo.purge_closed_before.assert_not_called()
     bridge_repo.purge_abandoned_before.assert_not_called()
+    bridge_repo.purge_retry_circuits_before.assert_not_called()
     ring_service.purge_stale_before.assert_called_once()
 
 
@@ -174,6 +178,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=1)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
     ring_service = AsyncMock()
     ring_service.purge_stale_before = AsyncMock(return_value=2)
 
@@ -204,6 +209,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
+    bridge_repo.purge_retry_circuits_before.assert_called_once()
     ring_service.purge_stale_before.assert_called_once()
 
 
@@ -259,6 +265,7 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
     bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    bridge_repo.purge_retry_circuits_before = AsyncMock(return_value=0)
     ring_service = AsyncMock()
     ring_service.purge_stale_before = AsyncMock(return_value=0)
 

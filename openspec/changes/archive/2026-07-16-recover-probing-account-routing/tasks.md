@@ -6,6 +6,9 @@
 - [x] 1.4 Preserve hard-sticky fail-closed ownership while cap-filtering fallback candidates, and atomically reserve concurrent fallback probes.
 - [x] 1.5 Preserve the stable local cap error when an unavailable hard-sticky owner has only saturated fallbacks.
 - [x] 1.6 Keep sticky probe reservations provisional through final lease and persistence gates, and classify cap exhaustion using only otherwise-available fallbacks.
+- [x] 1.7 Reject stale probe reservations with a runtime-version CAS and defer probe affinity until that CAS commits.
+- [x] 1.8 Classify hard-sticky cap exhaustion over complete fallback pools and preserve local cap errors for opportunistic traffic.
+- [x] 1.9 Defer sticky mutations through admission, reject backoff-only cap bypass, and preserve hard-sticky ownership on local cap errors.
 
 ## 2. Force Probe health settlement
 

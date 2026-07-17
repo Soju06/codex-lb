@@ -2425,7 +2425,9 @@ async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(m
     }
     assert selection.account is not None
     assert selection.account.id == active_free.id
-    assert sticky_repo.deletes == [("sticky-session-paused-team", StickySessionKind.CODEX_SESSION)]
+    # Rebinding is one atomic upsert; a delete-before-upsert would create an
+    # unnecessary unbound window for concurrent requests.
+    assert sticky_repo.deletes == []
     assert all(row.account_id != paused_team.id for row in sticky_repo.upserts)
     assert sticky_repo.upserts[-1].account_id == active_free.id
 

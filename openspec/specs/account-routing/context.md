@@ -20,11 +20,17 @@ opportunity when healthy accounts would otherwise mask it. The existing
 selection timestamp supplies the cadence and fair ordering. Unbound and fallback
 sticky selection reversibly reserve that timestamp under the runtime lock before
 sticky database work, preventing concurrent requests from consuming the same
-interval. The timestamp remains provisional through the final local lease gate
-and selection-state persistence, and is committed only when selection returns
-the probe. Reserve/release is deliberately separate from the health-observation
-version used by Force Probe settlement. Recovery therefore needs no scheduler,
-random sampling, or operator setting.
+interval. The reservation carries both that timestamp token and the runtime
+version it observed. Both must still match before the final lease and after
+selection-state persistence; otherwise the request releases the reservation and
+retries from the newer health state. Sticky selection returns one provisional
+desired-state mutation instead of writing during selection. The caller applies
+it only after cap classification, lease admission, state persistence, and the
+probe CAS; a stale probing snapshot or fail-closed cap result therefore cannot
+delete or replace the current owner. A successful rebind collapses the former
+delete-plus-upsert sequence into one atomic upsert. Reserve/release remains separate from the
+health-observation version used by Force Probe settlement. Recovery therefore
+needs no scheduler, random sampling, or operator setting.
 
 ## Constraints and failure modes
 
@@ -35,10 +41,19 @@ random sampling, or operator setting.
 - Hard-sticky fail-closed ownership does not let saturated fallback accounts
   bypass local concurrency caps. Saturated otherwise-available fallbacks return
   the stable local cap reason even when another under-cap fallback is unusable.
+  Availability is compared over complete pre-cap and post-cap pools because
+  opportunistic eligibility depends on what other foreground capacity exists;
+  once a local cap reason is established, opportunistic error translation does
+  not replace it. Nor can the post-cap selector revive an under-cap account that
+  remains only a transient-backoff fallback.
 - A lease race, stale persistence snapshot, or other local selection failure
   releases the provisional timestamp. After selection successfully returns a
   probe, a later caller cancellation may still postpone the next attempt by one
   quiet interval; that conservative bound cannot starve the account permanently.
+- A planned sticky mutation runs after admission commits. If that database write
+  fails, the request releases its local lease but retains the committed selection
+  timestamp; attempting to decrement the shared runtime version would make
+  concurrent health settlement ambiguous.
 - A failed real request can drain the account again through the ordinary error
   path. Recovery never permits replay after downstream output is visible.
 - Restarting a replica clears advisory health as before; persisted account

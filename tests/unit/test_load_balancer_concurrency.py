@@ -242,21 +242,6 @@ class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
         return self._initial_account_id
 
 
-class _BlockingStickyUpsertRepository(_StubStickySessionsRepository):
-    def __init__(self) -> None:
-        super().__init__()
-        self.upsert_started = asyncio.Event()
-        self.release_upsert = asyncio.Event()
-        self._block_next_upsert = True
-
-    async def upsert(self, *args: Any, **kwargs: Any) -> Any:
-        if self._block_next_upsert:
-            self._block_next_upsert = False
-            self.upsert_started.set()
-            await self.release_upsert.wait()
-        return await super().upsert(*args, **kwargs)
-
-
 @asynccontextmanager
 async def _repo_factory(
     accounts_repo: _StubAccountsRepository,
@@ -1188,7 +1173,9 @@ async def test_concurrent_sticky_fallbacks_reserve_one_due_probe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sticky_probe_reservation_rolls_back_when_final_lease_check_loses_race() -> None:
+async def test_sticky_probe_reservation_rolls_back_when_final_lease_check_loses_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     healthy = _make_account("acc-probe-cap-race-healthy")
     probing = _make_account("acc-probe-cap-race-probing")
@@ -1210,7 +1197,7 @@ async def test_sticky_probe_reservation_rolls_back_when_final_lease_check_loses_
         },
         secondary={},
     )
-    sticky_repo = _BlockingStickyUpsertRepository()
+    sticky_repo = _StubStickySessionsRepository()
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     balancer._runtime[probing.id] = RuntimeState(
         health_tier=HEALTH_TIER_PROBING,
@@ -1218,6 +1205,17 @@ async def test_sticky_probe_reservation_rolls_back_when_final_lease_check_loses_
         version=17,
     )
     caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=1, stream_limit=1)
+    original_sticky_selection = balancer._select_with_stickiness
+    sticky_selection_ready = asyncio.Event()
+    release_sticky_selection = asyncio.Event()
+
+    async def blocking_sticky_selection(*args: Any, **kwargs: Any) -> Any:
+        outcome = await original_sticky_selection(*args, **kwargs)
+        sticky_selection_ready.set()
+        await release_sticky_selection.wait()
+        return outcome
+
+    monkeypatch.setattr(balancer, "_select_with_stickiness", blocking_sticky_selection)
 
     selection_task = asyncio.create_task(
         balancer.select_account(
@@ -1228,12 +1226,12 @@ async def test_sticky_probe_reservation_rolls_back_when_final_lease_check_loses_
             concurrency_caps=caps,
         )
     )
-    await sticky_repo.upsert_started.wait()
+    await sticky_selection_ready.wait()
     # Model a cap counter that changes after the state snapshot without
     # replacing this request's provisional last_selected_at token.
     async with balancer._runtime_lock:
         balancer._runtime[probing.id].inflight_streams = 1
-    sticky_repo.release_upsert.set()
+    release_sticky_selection.set()
 
     selected = await selection_task
 
@@ -1246,6 +1244,313 @@ async def test_sticky_probe_reservation_rolls_back_when_final_lease_check_loses_
     async with balancer._runtime_lock:
         balancer._runtime[probing.id].inflight_streams = 0
     await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_sticky_probe_reservation_retries_when_health_changes_during_sticky_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-probe-cas-healthy")
+    probing = _make_account("acc-probe-cas-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                103,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                104,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=23,
+    )
+    original_sticky_selection = balancer._select_with_stickiness
+    sticky_selection_ready = asyncio.Event()
+    release_sticky_selection = asyncio.Event()
+
+    async def blocking_sticky_selection(*args: Any, **kwargs: Any) -> Any:
+        outcome = await original_sticky_selection(*args, **kwargs)
+        sticky_selection_ready.set()
+        await release_sticky_selection.wait()
+        return outcome
+
+    monkeypatch.setattr(balancer, "_select_with_stickiness", blocking_sticky_selection)
+
+    selection_task = asyncio.create_task(
+        balancer.select_account(
+            sticky_key="probe-health-cas",
+            sticky_kind=StickySessionKind.PROMPT_CACHE,
+            sticky_max_age_seconds=600,
+            routing_strategy="usage_weighted",
+        )
+    )
+    await sticky_selection_ready.wait()
+    async with balancer._runtime_lock:
+        runtime = balancer._runtime[probing.id]
+        assert runtime.last_selected_at not in (None, 0.0)
+        # Model a newer health observation while the reservation owner is doing
+        # sticky I/O. Its version is the CAS boundary; the stale PROBING state
+        # must neither be returned nor published as affinity.
+        runtime.health_tier = HEALTH_TIER_DRAINING
+        runtime.version += 1
+    release_sticky_selection.set()
+
+    selected = await selection_task
+
+    assert selected.account is not None
+    assert selected.account.id == healthy.id
+    assert sticky_repo.account_id == healthy.id
+    assert all(account_id != probing.id for _, account_id, _ in sticky_repo.upserts)
+    assert balancer._runtime[probing.id].last_selected_at == 0.0
+    assert balancer._runtime[probing.id].version == 24
+
+
+@pytest.mark.asyncio
+async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-probe-post-persist-healthy")
+    probing = _make_account("acc-probe-post-persist-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                107,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                108,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=31,
+    )
+    original_persist = balancer._persist_selection_state
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+    block_first_persist = True
+
+    async def blocking_persist(*args: Any, **kwargs: Any) -> set[str]:
+        nonlocal block_first_persist
+        if block_first_persist:
+            block_first_persist = False
+            persist_started.set()
+            await release_persist.wait()
+        return await original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(balancer, "_persist_selection_state", blocking_persist)
+    selection_task = asyncio.create_task(
+        balancer.select_account(
+            sticky_key="probe-post-persist-cas",
+            sticky_kind=StickySessionKind.PROMPT_CACHE,
+            sticky_max_age_seconds=600,
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+        )
+    )
+    await persist_started.wait()
+    async with balancer._runtime_lock:
+        runtime = balancer._runtime[probing.id]
+        assert runtime.inflight_streams == 1
+        runtime.health_tier = HEALTH_TIER_DRAINING
+        runtime.version += 1
+    release_persist.set()
+
+    selected = await selection_task
+
+    assert selected.account is not None
+    assert selected.account.id == healthy.id
+    assert selected.lease is not None
+    assert sticky_repo.account_id == healthy.id
+    assert all(account_id != probing.id for _, account_id, _ in sticky_repo.upserts)
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 0
+    assert probing_runtime.last_selected_at == 0.0
+    assert probing_runtime.version == 33
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_hard_sticky_cap_classification_uses_complete_fallback_pool() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    unavailable_owner = _make_account("acc-opportunistic-cap-owner")
+    unavailable_owner.status = AccountStatus.RATE_LIMITED
+    unavailable_owner.reset_at = now_epoch + 3600
+    fallback_a = _make_account("acc-opportunistic-cap-a")
+    fallback_b = _make_account("acc-opportunistic-cap-b")
+    accounts_repo = _StubAccountsRepository([unavailable_owner, fallback_a, fallback_b])
+    usage_repo = _StubUsageRepository(
+        primary={
+            fallback_a.id: _usage_row_with_percent(
+                105,
+                fallback_a.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+            fallback_b.id: _usage_row_with_percent(
+                106,
+                fallback_b.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = unavailable_owner.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    saturated_leases = [
+        *[await balancer.acquire_account_lease(fallback_a.id, kind="stream") for _ in range(8)],
+        *[await balancer.acquire_account_lease(fallback_b.id, kind="stream") for _ in range(8)],
+    ]
+
+    selected = await balancer.select_account(
+        sticky_key="opportunistic-cap-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        traffic_class="opportunistic",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert selected.error_message is not None
+    assert "Account stream capacity is exhausted" in selected.error_message
+    assert sticky_repo.account_id == unavailable_owner.id
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_hard_sticky_cap_exhaustion_rejects_under_cap_backoff_fallback() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    unavailable_owner = _make_account("acc-cap-backoff-owner")
+    unavailable_owner.status = AccountStatus.RATE_LIMITED
+    unavailable_owner.reset_at = now_epoch + 3600
+    saturated_fallback = _make_account("acc-cap-backoff-saturated")
+    backoff_fallback = _make_account("acc-cap-backoff-cooling")
+    accounts_repo = _StubAccountsRepository([unavailable_owner, saturated_fallback, backoff_fallback])
+    usage_repo = _StubUsageRepository(
+        primary={
+            saturated_fallback.id: _usage_row_with_percent(
+                109,
+                saturated_fallback.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+            backoff_fallback.id: _usage_row_with_percent(
+                110,
+                backoff_fallback.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = unavailable_owner.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[backoff_fallback.id] = RuntimeState(
+        error_count=3,
+        last_error_at=time.time(),
+    )
+    saturated_leases = [await balancer.acquire_account_lease(saturated_fallback.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(
+        sticky_key="cap-backoff-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert selected.error_message is not None
+    assert "Account stream capacity is exhausted" in selected.error_message
+    assert balancer._runtime[backoff_fallback.id].inflight_streams == 0
+    assert sticky_repo.account_id == unavailable_owner.id
+    assert sticky_repo.upserts == []
+    assert sticky_repo.deleted == []
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_hard_sticky_cap_exhaustion_discards_budget_reallocation_delete() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    unavailable_owner = _make_account("acc-cap-delete-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    unavailable_owner.reset_at = now_epoch + 3600
+    saturated_fallback = _make_account("acc-cap-delete-saturated")
+    accounts_repo = _StubAccountsRepository([unavailable_owner, saturated_fallback])
+    usage_repo = _StubUsageRepository(
+        primary={
+            unavailable_owner.id: _usage_row_with_percent(
+                111,
+                unavailable_owner.id,
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+            ),
+            saturated_fallback.id: _usage_row_with_percent(
+                112,
+                saturated_fallback.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = unavailable_owner.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    saturated_leases = [await balancer.acquire_account_lease(saturated_fallback.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(
+        sticky_key="cap-delete-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert selected.error_message is not None
+    assert "Account stream capacity is exhausted" in selected.error_message
+    assert sticky_repo.account_id == unavailable_owner.id
+    assert sticky_repo.upserts == []
+    assert sticky_repo.deleted == []
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1627,7 @@ async def test_codex_session_sticky_reallocates_under_budget_pressure() -> None:
 
     assert result.account is not None
     assert result.account.id == account_b.id
-    assert sticky_repo.deleted == [("hard-session", StickySessionKind.CODEX_SESSION)]
+    assert sticky_repo.deleted == []
     assert sticky_repo.account_id == account_b.id
     await balancer.release_account_lease(result.lease)
 

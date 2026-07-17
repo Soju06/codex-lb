@@ -135,6 +135,22 @@ class _ProbeReservation:
     account_id: str
     previous_last_selected_at: float | None
     reserved_at: float
+    expected_runtime_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class _StickyMutation:
+    # ``None`` is an intentional delete; absence of a _StickyMutation means
+    # preserve the current mapping. Keeping those states distinct lets final
+    # admission discard an early reallocation decision without compensating DB
+    # writes that could clobber another replica's newer owner.
+    account_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StickySelectionOutcome:
+    selection: SelectionResult
+    mutation: _StickyMutation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,23 +728,37 @@ class LoadBalancer:
                         stream_reserve_slots=stream_reserve_slots,
                     )
                     hard_sticky_fallback_cap_exhausted = False
+                    hard_sticky_owner_available = False
                     if hard_sticky:
                         # Keep only the established owner as a cap exception so
                         # its later lease check fails closed without rebinding.
                         # Every fallback must remain cap-eligible.
                         cap_eligible_ids = {state.account_id for state in cap_eligible_states}
                         fallback_states = [state for state in states if state.account_id != sticky_existing_account_id]
-                        available_fallback_ids = _available_account_ids_without_backoff(
+                        hard_sticky_owner_available = _pool_has_available_account_without_backoff(
+                            (state for state in states if state.account_id == sticky_existing_account_id),
+                            traffic_class=traffic_class,
+                        )
+                        cap_eligible_fallback_states = [
+                            state for state in fallback_states if state.account_id in cap_eligible_ids
+                        ]
+                        fallback_available_before_caps = _pool_has_available_account_without_backoff(
                             fallback_states,
                             traffic_class=traffic_class,
                         )
-                        # Cap eligibility alone is not route eligibility: a
-                        # rate-limited under-cap fallback must not hide that all
-                        # otherwise usable fallbacks were removed by local caps.
+                        fallback_available_after_caps = _pool_has_available_account_without_backoff(
+                            cap_eligible_fallback_states,
+                            traffic_class=traffic_class,
+                        )
+                        # Compare complete pools, not singleton candidates:
+                        # opportunistic eligibility depends on whether another
+                        # account can preserve foreground capacity. Classifying
+                        # each fallback alone would hide cap exhaustion whenever
+                        # two mutually-supporting candidates are both saturated.
                         hard_sticky_fallback_cap_exhausted = (
                             lease_kind is not None
-                            and bool(available_fallback_ids)
-                            and not available_fallback_ids.intersection(cap_eligible_ids)
+                            and fallback_available_before_caps
+                            and not fallback_available_after_caps
                         )
                         selection_states = [
                             state
@@ -750,6 +780,7 @@ class LoadBalancer:
                         traffic_class=traffic_class,
                         routing_costs_by_account_id=effective_routing_costs,
                     )
+                sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
                 if not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
                     result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
@@ -764,7 +795,7 @@ class LoadBalancer:
                     selection_error_code = None
                     try:
                         async with self._repo_factory() as repos:
-                            result = await self._select_with_stickiness(
+                            sticky_outcome = await self._select_with_stickiness(
                                 states=selection_states,
                                 account_map=account_map,
                                 sticky_key=sticky_key,
@@ -784,16 +815,27 @@ class LoadBalancer:
                                 ignore_standard_quota=False,
                                 routing_costs_by_account_id=effective_routing_costs,
                             )
+                            result = sticky_outcome.selection
                     except BaseException:
                         async with self._runtime_lock:
                             self._release_due_probe_reservation_locked(probe_reservation)
                         raise
-                    if result.account is None and hard_sticky_fallback_cap_exhausted:
-                        # The pinned owner was unavailable and the only wider
-                        # candidates were saturated. Report local pressure; do
-                        # not misclassify it as global upstream degradation.
+                    if hard_sticky_fallback_cap_exhausted and (
+                        result.account is None
+                        or result.account.account_id != sticky_existing_account_id
+                        or not hard_sticky_owner_available
+                    ):
+                        # The pinned owner was unavailable and every normally
+                        # usable fallback was saturated. A non-owner result here
+                        # can only be a backoff fallback from the post-cap pool
+                        # (including the owner itself if it is in backoff); it
+                        # must not bypass the stable local-cap outcome.
                         selection_error_code = _account_cap_error_code(lease_kind)
                         result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
+                        # Selection may have planned deletion/rebinding while
+                        # inspecting the unavailable owner. Discard that plan so
+                        # fail-closed cap pressure preserves hard ownership.
+                        sticky_outcome = _StickySelectionOutcome(selection=result)
                         logger.warning(
                             "Account cap exhausted during hard-sticky fallback lease_kind=%s reason=%s candidates=%s",
                             lease_kind,
@@ -803,6 +845,8 @@ class LoadBalancer:
                         _record_account_cap_rejection(lease_kind)
                 selected_account_map = account_map
                 selected_states = []
+                probe_reservation_invalidated = False
+                reserved_probe_admitted = False
                 async with self._runtime_lock:
                     selected: Account | None = None
                     selection_admitted = False
@@ -816,7 +860,15 @@ class LoadBalancer:
                             and probe_reservation is not None
                             and selected.id == probe_reservation.account_id
                         )
-                        if selected is None:
+                        if selected_reserved_probe and not self._probe_reservation_current_locked(probe_reservation):
+                            # A health mutation won the CAS while sticky DB work
+                            # was in flight. Do not return or persist affinity to
+                            # the stale probing snapshot; rebuild and select from
+                            # the newer runtime state instead.
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                            selected = None
+                            probe_reservation_invalidated = True
+                        elif selected is None:
                             error_message = result.error_message
                         elif lease_kind is not None and not self._account_lease_allowed_locked(
                             selected.id,
@@ -838,40 +890,58 @@ class LoadBalancer:
                                     record_selection=not selected_reserved_probe,
                                 )
 
-                    reserved_probe_admitted = selection_admitted and selected_reserved_probe
-                    if not reserved_probe_admitted:
-                        self._release_due_probe_reservation_locked(probe_reservation)
-                    for state in states:
-                        account = account_map.get(state.account_id)
-                        if account is None:
-                            continue
-                        self._sync_runtime_state(
-                            account,
-                            state,
-                            # A selected probe remains provisional through DB
-                            # persistence. Its reservation is committed below;
-                            # advancing last_selected_at here would make later
-                            # admission failures impossible to roll back.
-                            selected=(
-                                selection_admitted
-                                and result.account is not None
-                                and state.account_id == result.account.account_id
-                                and not reserved_probe_admitted
-                            ),
+                    if not probe_reservation_invalidated:
+                        reserved_probe_admitted = selection_admitted and selected_reserved_probe
+                        if not reserved_probe_admitted:
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                        for state in states:
+                            account = account_map.get(state.account_id)
+                            if account is None:
+                                continue
+                            self._sync_runtime_state(
+                                account,
+                                state,
+                                # A selected probe remains provisional through DB
+                                # persistence. Its reservation is committed below;
+                                # advancing last_selected_at here would make later
+                                # admission failures impossible to roll back.
+                                selected=(
+                                    selection_admitted
+                                    and result.account is not None
+                                    and state.account_id == result.account.account_id
+                                    and not reserved_probe_admitted
+                                ),
+                            )
+                            selected_states.append(state)
+                        if selection_admitted and selected is not None and result.account is not None:
+                            selected_reset_at = selected.reset_at
+                            for state in selected_states:
+                                if state.account_id == result.account.account_id:
+                                    state.status = result.account.status
+                                    state.deactivation_reason = result.account.deactivation_reason
+                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                    break
+                            selected_snapshot = _clone_account(selected)
+                            selected_snapshot.status = result.account.status
+                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                            selected_snapshot.reset_at = selected_reset_at
+
+                if probe_reservation_invalidated:
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
+                    if attempt >= _MAX_SELECTION_ATTEMPTS:
+                        break
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
                         )
-                        selected_states.append(state)
-                    if selection_admitted and selected is not None and result.account is not None:
-                        selected_reset_at = selected.reset_at
-                        for state in selected_states:
-                            if state.account_id == result.account.account_id:
-                                state.status = result.account.status
-                                state.deactivation_reason = result.account.deactivation_reason
-                                selected_reset_at = int(state.reset_at) if state.reset_at else None
-                                break
-                        selected_snapshot = _clone_account(selected)
-                        selected_snapshot.status = result.account.status
-                        selected_snapshot.deactivation_reason = result.account.deactivation_reason
-                        selected_snapshot.reset_at = selected_reset_at
+                    await asyncio.sleep(0)
+                    continue
 
                 try:
                     async with self._repo_factory() as repos:
@@ -925,9 +995,59 @@ class LoadBalancer:
                     selected_account_map = {}
                     await asyncio.sleep(0)
                     continue
-                if selected_snapshot is not None:
+                if selected_snapshot is not None and reserved_probe_admitted:
+                    reservation_committed = False
                     async with self._runtime_lock:
-                        self._commit_due_probe_reservation_locked(probe_reservation)
+                        reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                        if not reservation_committed:
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                    if not reservation_committed:
+                        # Runtime health changed while account-state persistence
+                        # was in flight. The lease and provisional affinity must
+                        # not escape; retry against a fresh runtime snapshot.
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        selected_snapshot = None
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        if attempt >= _MAX_SELECTION_ATTEMPTS:
+                            break
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        await asyncio.sleep(0)
+                        continue
+                should_persist_sticky_mutation = (
+                    sticky_outcome.mutation is not None
+                    and selection_error_code is None
+                    and (selected_snapshot is not None or result.account is None)
+                )
+                if should_persist_sticky_mutation:
+                    # Sticky decisions stay provisional until cap classification,
+                    # final lease admission, account-state persistence, and the
+                    # probe CAS (when present) all succeed. Applying one final
+                    # desired-state mutation avoids unsafe compensating writes.
+                    assert sticky_kind is not None
+                    try:
+                        async with self._repo_factory() as repos:
+                            await self._persist_sticky_mutation(
+                                sticky_repo=repos.sticky_sessions,
+                                sticky_key=sticky_key,
+                                sticky_kind=sticky_kind,
+                                mutation=sticky_outcome.mutation,
+                            )
+                    except BaseException:
+                        # Runtime admission may already be committed. Preserve
+                        # its selection timestamp, but never leak the local
+                        # concurrency lease when sticky persistence fails.
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        raise
                 break
 
         if selected_snapshot is None:
@@ -940,7 +1060,7 @@ class LoadBalancer:
             )
 
         if selected_snapshot is None:
-            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message:
+            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
                 return AccountSelection(
                     account=None,
                     error_message=error_message,
@@ -1014,6 +1134,17 @@ class LoadBalancer:
             account_id=result.account.account_id,
             previous_last_selected_at=previous_last_selected_at,
             reserved_at=reserved_at,
+            expected_runtime_version=runtime.version,
+        )
+
+    def _probe_reservation_current_locked(self, reservation: _ProbeReservation | None) -> bool:
+        if reservation is None:
+            return False
+        runtime = self._runtime.get(reservation.account_id)
+        return bool(
+            runtime is not None
+            and runtime.last_selected_at == reservation.reserved_at
+            and runtime.version == reservation.expected_runtime_version
         )
 
     def _release_due_probe_reservation_locked(self, reservation: _ProbeReservation | None) -> None:
@@ -1027,17 +1158,18 @@ class LoadBalancer:
             return
         runtime.last_selected_at = reservation.previous_last_selected_at
 
-    def _commit_due_probe_reservation_locked(self, reservation: _ProbeReservation | None) -> None:
+    def _commit_due_probe_reservation_locked(self, reservation: _ProbeReservation | None) -> bool:
         if reservation is None:
-            return
+            return False
         runtime = self._runtime.get(reservation.account_id)
-        if runtime is None or runtime.last_selected_at != reservation.reserved_at:
-            return
+        if runtime is None or not self._probe_reservation_current_locked(reservation):
+            return False
         # Only a selection that survived sticky persistence and final local
         # admission consumes the quiet interval. Unlike reserve/release, this
         # committed observation must invalidate older Force Probe settlement.
         runtime.last_selected_at = time.time()
         runtime.version += 1
+        return True
 
     async def _load_selection_inputs(
         self,
@@ -1520,22 +1652,36 @@ class LoadBalancer:
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
-    ) -> SelectionResult:
+    ) -> _StickySelectionOutcome:
         if not sticky_key or not sticky_repo:
-            return _select_account_preferring_budget_safe(
-                states,
-                prefer_earlier_reset=prefer_earlier_reset_accounts,
-                prefer_earlier_reset_window=prefer_earlier_reset_window,
-                routing_strategy=routing_strategy,
-                relative_availability_power=relative_availability_power,
-                relative_availability_top_k=relative_availability_top_k,
-                budget_threshold_pct=budget_threshold_pct,
-                traffic_class=traffic_class,
-                ignore_standard_quota=ignore_standard_quota,
-                routing_costs_by_account_id=routing_costs_by_account_id,
+            return _StickySelectionOutcome(
+                selection=_select_account_preferring_budget_safe(
+                    states,
+                    prefer_earlier_reset=prefer_earlier_reset_accounts,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
+                    routing_strategy=routing_strategy,
+                    relative_availability_power=relative_availability_power,
+                    relative_availability_top_k=relative_availability_top_k,
+                    budget_threshold_pct=budget_threshold_pct,
+                    traffic_class=traffic_class,
+                    ignore_standard_quota=ignore_standard_quota,
+                    routing_costs_by_account_id=routing_costs_by_account_id,
+                )
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
+
+        pending_mutation: _StickyMutation | None = None
+
+        def finish_selection(
+            selection: SelectionResult,
+            *,
+            persist_account_id: str | None = None,
+        ) -> _StickySelectionOutcome:
+            mutation = pending_mutation
+            if persist_account_id is not None:
+                mutation = _StickyMutation(account_id=persist_account_id)
+            return _StickySelectionOutcome(selection=selection, mutation=mutation)
 
         if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
             existing = await sticky_repo.get_account_id(
@@ -1618,9 +1764,10 @@ class LoadBalancer:
                         routing_costs=routing_costs_by_account_id,
                     )
                     if pinned_result.account is not None:
-                        if sticky_max_age_seconds is not None:
-                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                        return pinned_result
+                        return finish_selection(
+                            pinned_result,
+                            persist_account_id=pinned.account_id if sticky_max_age_seconds is not None else None,
+                        )
                 else:
                     # Reallocate only when a burn-first target exists and can
                     # currently be selected, avoiding sticky churn to
@@ -1669,13 +1816,12 @@ class LoadBalancer:
                                 routing_costs=routing_costs_by_account_id,
                             )
                             if pinned_result.account is not None:
-                                if sticky_max_age_seconds is not None:
-                                    await sticky_repo.upsert(
-                                        sticky_key,
-                                        pinned.account_id,
-                                        kind=sticky_kind,
-                                    )
-                                return pinned_result
+                                return finish_selection(
+                                    pinned_result,
+                                    persist_account_id=(
+                                        pinned.account_id if sticky_max_age_seconds is not None else None
+                                    ),
+                                )
                     reallocate_sticky = True
                 # Grace period: if the pinned account is rate-limited with a
                 # known reset time within a short window, retry selection
@@ -1699,11 +1845,12 @@ class LoadBalancer:
                         routing_costs=routing_costs_by_account_id,
                     )
                     if grace_result.account is not None:
-                        if sticky_max_age_seconds is not None:
-                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                        return grace_result
+                        return finish_selection(
+                            grace_result,
+                            persist_account_id=pinned.account_id if sticky_max_age_seconds is not None else None,
+                        )
                 if reallocate_sticky:
-                    await sticky_repo.delete(sticky_key, kind=sticky_kind)
+                    pending_mutation = _StickyMutation(account_id=None)
                 elif pinned.status not in _RECOVERABLE_STATUSES:
                     # Permanently down (PAUSED/DEACTIVATED) — let the
                     # fallback be persisted to rebind the mapping.
@@ -1718,7 +1865,7 @@ class LoadBalancer:
                 # fallback so the session sticks to one account during
                 # the outage instead of bouncing across random fallbacks.
             else:
-                await sticky_repo.delete(sticky_key, kind=sticky_kind)
+                pending_mutation = _StickyMutation(account_id=None)
 
         chosen = _select_account_preferring_budget_safe(
             states,
@@ -1735,8 +1882,21 @@ class LoadBalancer:
             routing_costs_by_account_id=routing_costs_by_account_id,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
-            await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
-        return chosen
+            return finish_selection(chosen, persist_account_id=chosen.account.account_id)
+        return finish_selection(chosen)
+
+    @staticmethod
+    async def _persist_sticky_mutation(
+        *,
+        sticky_repo: StickySessionsRepository,
+        sticky_key: str,
+        sticky_kind: StickySessionKind,
+        mutation: _StickyMutation,
+    ) -> None:
+        if mutation.account_id is None:
+            await sticky_repo.delete(sticky_key, kind=sticky_kind)
+            return
+        await sticky_repo.upsert(sticky_key, mutation.account_id, kind=sticky_kind)
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
         lock = await self._get_account_lock(account.id)
@@ -2159,28 +2319,24 @@ def _filter_states_for_account_caps(
     return filtered
 
 
-def _available_account_ids_without_backoff(
+def _pool_has_available_account_without_backoff(
     states: Iterable[AccountState],
     *,
     traffic_class: TrafficClass,
-) -> set[str]:
-    """Return candidates that pass non-cap routing eligibility on their own."""
-    now = time.time()
-    available_ids: set[str] = set()
-    for state in states:
-        # ``select_account`` normalizes expired quota/cooldown fields in place;
-        # classify on a copy so cap-error reporting cannot mutate the real
-        # selection snapshot before sticky persistence.
-        result = select_account(
-            [replace(state)],
-            now=now,
-            routing_strategy="single_account",
-            allow_backoff_fallback=False,
-            traffic_class=traffic_class,
-        )
-        if result.account is not None:
-            available_ids.add(state.account_id)
-    return available_ids
+) -> bool:
+    """Return whether the complete pool passes non-cap routing eligibility."""
+    # ``select_account`` normalizes expired quota/cooldown fields in place;
+    # classify on copies so cap-error reporting cannot mutate the real
+    # selection snapshot before sticky persistence. Keep the pool intact:
+    # opportunistic admission compares candidates with one another.
+    result = select_account(
+        [replace(state) for state in states],
+        now=time.time(),
+        routing_strategy="single_account",
+        allow_backoff_fallback=False,
+        traffic_class=traffic_class,
+    )
+    return result.account is not None
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:

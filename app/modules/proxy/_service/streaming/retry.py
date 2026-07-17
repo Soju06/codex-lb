@@ -89,6 +89,9 @@ def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mappi
     )
 
 
+_POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhausted"
+
+
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
     normalized_policy = policy.strip().lower()
     if normalized_policy not in _HTTP_DOWNSTREAM_TRANSPORT_POLICIES:
@@ -519,10 +522,16 @@ class _StreamingRetryMixin:
                         )
                         await asyncio.sleep(delay)
                         continue
-                    await proxy._handle_stream_error(account, exc.error, exc.code)
-                    if transient_retries > 1:
-                        await proxy._load_balancer.record_errors(account, transient_retries - 1)
                     error_message = str(exc.error.get("message") or "Upstream error")
+                    settlement.record_success = False
+                    settlement.error_code = exc.code
+                    settlement.error_message = error_message
+                    settlement.error = exc.error
+                    settlement.account_health_error = _facade()._should_penalize_stream_error(exc.code)
+                    if can_try_other_account:
+                        retry_exc = ProxyResponseError(502, openai_error(exc.code, error_message))
+                        setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
+                        raise retry_exc from exc
                     yield format_sse_event(
                         response_failed_event(
                             exc.code,
@@ -530,11 +539,6 @@ class _StreamingRetryMixin:
                             response_id=settlement.response_id or request_id,
                         )
                     )
-                    settlement.record_success = False
-                    settlement.error_code = exc.code
-                    settlement.error_message = error_message
-                    settlement.error = exc.error
-                    settlement.account_health_error = _facade()._should_penalize_stream_error(exc.code)
                     return
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -2211,6 +2215,24 @@ class _StreamingRetryMixin:
                                 error.code if error else None,
                                 error.type if error else None,
                             )
+                            if getattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, False):
+                                transient_error_payload = _stream_settlement_error_payload(settlement)
+                                if settlement.account_health_error:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        transient_error_payload,
+                                        settlement.error_code or "upstream_error",
+                                        http_status=retry_exc.status_code,
+                                    )
+                                last_transient_exc = retry_exc
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    settlement.error_code or error_code or "upstream_error",
+                                    transient_error_payload,
+                                )
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
+                                excluded_account_ids.add(account.id)
+                                continue
                             account_model_retry = await _retry_account_model_rejection(
                                 retry_exc,
                                 account,

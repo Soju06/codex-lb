@@ -51,6 +51,24 @@ def _payload() -> ResponsesRequest:
     return ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
 
 
+def _payload_with_file() -> ResponsesRequest:
+    return ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "read"},
+                        {"type": "input_file", "file_id": "file-owner-bound"},
+                    ],
+                }
+            ],
+        }
+    )
+
+
 def _use_legacy_forward_signature(
     headers: dict[str, str],
     *,
@@ -141,6 +159,29 @@ def test_parse_forwarded_request_rejects_unbound_file_owner_proof(downgrade: str
         headers[HTTP_BRIDGE_FILE_OWNER_HEADER] = "acc-attacker"
     else:
         headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_rejects_file_payload_without_full_context_signature() -> None:
+    payload = _payload_with_file()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_FILE_OWNER_HEADER, None)
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
 
     forwarded, error = parse_forwarded_request(
         headers,

@@ -39,7 +39,13 @@ def _build_request(path: str) -> Request:
     )
 
 
-def _build_login_request(path: str, *, client_host: str = "203.0.113.10", host: str = "lb.example") -> Request:
+def _build_login_request(
+    path: str,
+    *,
+    client_host: str = "203.0.113.10",
+    host: str = "lb.example",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
     return Request(
         {
             "type": "http",
@@ -49,7 +55,7 @@ def _build_login_request(path: str, *, client_host: str = "203.0.113.10", host: 
             "path": path,
             "raw_path": path.encode(),
             "query_string": b"",
-            "headers": [(b"host", host.encode())],
+            "headers": [(b"host", host.encode()), *(headers or [])],
             "client": (client_host, 12345),
             "server": (host.split(":", 1)[0], 80),
         }
@@ -295,6 +301,77 @@ async def test_login_password_caps_non_loopback_dashboard_session_ttl():
     ):
         response = await login_password(
             _build_login_request("/api/dashboard-auth/password/login"),
+            PasswordLoginRequest(password="password123"),
+            context,
+        )
+
+    assert isinstance(response, JSONResponse)
+    assert f"Max-Age={REMOTE_DASHBOARD_SESSION_TTL_SECONDS}" in response.headers["set-cookie"]
+    session_store.create.assert_called_once_with(
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=REMOTE_DASHBOARD_SESSION_TTL_SECONDS,
+        role=DashboardRole.ADMIN,
+        guest_verified=False,
+    )
+    limiter.check_and_increment.assert_awaited_once()
+    limiter.clear_for_key.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_login_password_caps_later_duplicate_forwarded_identity_from_loopback_socket():
+    limiter = SimpleNamespace(
+        check_and_increment=AsyncMock(),
+        clear_for_key=AsyncMock(),
+    )
+    session_store = SimpleNamespace(
+        create=Mock(return_value="session-1"),
+        get=lambda _sid: SimpleNamespace(
+            password_verified=True,
+            totp_verified=False,
+            role=DashboardRole.ADMIN,
+            guest_verified=False,
+        ),
+    )
+    context = cast(
+        DashboardAuthContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                verify_password=AsyncMock(),
+                get_session_state=AsyncMock(
+                    return_value=DashboardAuthSessionResponse(
+                        authenticated=True,
+                        password_required=True,
+                        totp_required_on_login=False,
+                        totp_configured=False,
+                    )
+                ),
+            ),
+            session=object(),
+        ),
+    )
+    settings = SimpleNamespace(password_hash="hash", dashboard_session_ttl_seconds=90 * 24 * 60 * 60)
+    settings_cache = SimpleNamespace(get=AsyncMock(return_value=settings))
+    runtime_settings = _runtime_settings()
+    runtime_settings.dashboard_trust_loopback_host_header_for_long_sessions = True
+
+    with (
+        patch("app.core.auth.dashboard_session_ttl._get_settings", return_value=runtime_settings),
+        patch("app.core.request_locality.get_settings", return_value=runtime_settings),
+        patch("app.modules.dashboard_auth.api.get_password_rate_limiter", return_value=limiter),
+        patch("app.modules.dashboard_auth.api.get_dashboard_session_store", return_value=session_store),
+        patch("app.modules.dashboard_auth.api.get_settings_cache", return_value=settings_cache),
+    ):
+        response = await login_password(
+            _build_login_request(
+                "/api/dashboard-auth/password/login",
+                client_host="127.0.0.1",
+                host="127.0.0.1:2455",
+                headers=[
+                    (b"x-forwarded-for", b""),
+                    (b"x-forwarded-for", b"203.0.113.24"),
+                ],
+            ),
             PasswordLoginRequest(password="password123"),
             context,
         )

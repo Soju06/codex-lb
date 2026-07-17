@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
@@ -32,6 +33,7 @@ type DonutDatum = {
 };
 
 export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonutProps) {
+  const { t } = useTranslation();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
@@ -47,7 +49,7 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
 			const isDeleted = ac.isDeleted;
 			return {
 				id: isDeleted ? "__deleted__" : (ac.accountId ?? `__unknown_${i}__`),
-				label: isDeleted ? "Deleted Account" : (ac.email ?? "Unknown Account"),
+				label: isDeleted ? t("apis.accountCost.deletedAccount") : (ac.email ?? t("apis.accountCost.unknownAccount")),
 				isDeleted,
 				value: ac.costUsd,
 				color: isDeleted ? consumedColor : palette[i % palette.length],
@@ -75,7 +77,7 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
     }
 
     return { chartData: data, legendItems: items };
-  }, [accountCosts, totalCostUsd, isDark, consumedColor]);
+  }, [accountCosts, totalCostUsd, isDark, consumedColor, t]);
 
   const setActiveLegend = (legendId: string | null) => {
     setActiveLegendId(legendId);
@@ -108,8 +110,8 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
     <div data-testid="account-cost-panel">
       <div className="mb-5">
         <div>
-          <h3 className="text-sm font-semibold">7-Day Cost by Account</h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">Breakdown of usage cost</p>
+          <h3 className="text-sm font-semibold">{t("apis.accountCost.title")}</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">{t("apis.accountCost.description")}</p>
         </div>
       </div>
 
@@ -147,7 +149,7 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
             </PieChart>
             <div className="absolute inset-[22px] flex items-center justify-center rounded-full text-center pointer-events-none">
               <div>
-                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">7-Day Cost</p>
+                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("apis.accountCost.centerLabel")}</p>
                 <p className="text-base font-semibold tabular-nums">{formatCurrency(totalCostUsd)}</p>
               </div>
             </div>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Pin } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -30,14 +31,14 @@ import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
 
-function kindLabel(kind: StickySessionKind): string {
+function kindLabel(kind: StickySessionKind, t: ReturnType<typeof useTranslation>["t"]): string {
   switch (kind) {
     case "codex_session":
-      return "Codex session";
+      return t("stickySessions.kinds.codexSession");
     case "sticky_thread":
-      return "Sticky thread";
+      return t("stickySessions.kinds.stickyThread");
     case "prompt_cache":
-      return "Prompt cache";
+      return t("stickySessions.kinds.promptCache");
   }
 }
 
@@ -66,6 +67,7 @@ export type StickySessionsSectionProps = {
 };
 
 export function StickySessionsSection({ disabled = false }: StickySessionsSectionProps) {
+  const { t } = useTranslation();
   const {
     params,
     setAccountQuery,
@@ -152,9 +154,9 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
           <Pin className="h-4 w-4 text-primary" aria-hidden="true" />
         </div>
         <div>
-          <h3 className="text-sm font-semibold">Sticky sessions</h3>
+          <h3 className="text-sm font-semibold">{t("stickySessions.title")}</h3>
           <p className="text-xs text-muted-foreground">
-            Inspect durable mappings and purge stale prompt-cache affinity rows.
+            {t("stickySessions.description")}
           </p>
         </div>
       </div>
@@ -162,15 +164,15 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
 
       <div className="grid gap-2 sm:grid-cols-2">
-        <Input
-          aria-label="Filter sticky sessions by account"
-          placeholder="Filter by account..."
+	        <Input
+	          aria-label={t("stickySessions.filters.accountAria")}
+	          placeholder={t("stickySessions.filters.accountPlaceholder")}
           value={params.accountQuery}
           onChange={(event) => setAccountQuery(event.target.value)}
         />
-        <Input
-          aria-label="Filter sticky sessions by key"
-          placeholder="Filter by key..."
+	        <Input
+	          aria-label={t("stickySessions.filters.keyAria")}
+	          placeholder={t("stickySessions.filters.keyPlaceholder")}
           value={params.keyQuery}
           onChange={(event) => setKeyQuery(event.target.value)}
         />
@@ -179,16 +181,16 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
       <div className="flex flex-col gap-3 rounded-lg border px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">Visible rows</span>
+	            <span className="text-xs text-muted-foreground">{t("stickySessions.summary.visibleRows")}</span>
             <span className="text-sm font-medium tabular-nums">{total}</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">Stale prompt-cache</span>
+	            <span className="text-xs text-muted-foreground">{t("stickySessions.summary.stalePromptCache")}</span>
             <span className="text-sm font-medium tabular-nums">{staleCount}</span>
           </div>
           {selectedCount > 0 ? (
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-muted-foreground">Selected</span>
+	              <span className="text-xs text-muted-foreground">{t("stickySessions.summary.selected")}</span>
               <span className="text-sm font-medium tabular-nums">{selectedCount}</span>
             </div>
           ) : null}
@@ -202,7 +204,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
             disabled={busy || !hasActiveTextFilter || total === 0}
             onClick={() => deleteFilteredDialog.show(total)}
           >
-            Delete Filtered
+	            {t("stickySessions.actions.deleteFiltered")}
           </Button>
           <Button
             type="button"
@@ -212,7 +214,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
             disabled={busy || selectedCount === 0}
             onClick={() => deleteSelectedDialog.show(selectedEntries)}
           >
-            Delete Sessions
+	            {t("stickySessions.actions.deleteSessions")}
           </Button>
           <Button
             type="button"
@@ -222,7 +224,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
             disabled={busy || staleCount === 0}
             onClick={() => purgeDialog.show()}
           >
-            Purge stale
+	            {t("stickySessions.actions.purgeStale")}
           </Button>
         </div>
       </div>
@@ -232,11 +234,11 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
           <SpinnerBlock />
         </div>
       ) : !hasAnyRows ? (
-        <EmptyState
-          icon={Pin}
-          title="No sticky sessions"
-          description="Sticky mappings appear here after routed requests create them."
-        />
+	        <EmptyState
+	          icon={Pin}
+	          title={t("stickySessions.empty.title")}
+	          description={t("stickySessions.empty.description")}
+	        />
       ) : (
         <>
           {hasEntries ? (
@@ -246,7 +248,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                   <TableRow>
                     <TableHead className="w-[5%] min-w-[3rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       <Checkbox
-                        aria-label="Select all sticky sessions on current page"
+	                        aria-label={t("stickySessions.table.selectAllAria")}
                         checked={allVisibleSelected ? true : someVisibleSelected ? "indeterminate" : false}
                         disabled={busy || !hasEntries}
                         onCheckedChange={(checked) => setAllVisibleSelected(checked === true)}
@@ -258,11 +260,11 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                         className="cursor-pointer text-left transition-colors hover:text-foreground"
                         onClick={() => setSort("key", nextSortDirection(params.sortBy, params.sortDir, "key"))}
                       >
-                        {`Key${sortIndicator(params.sortBy, params.sortDir, "key") ?? ""}`}
+	                        {`${t("stickySessions.table.key")}${sortIndicator(params.sortBy, params.sortDir, "key") ?? ""}`}
                       </button>
                     </TableHead>
                     <TableHead className="w-[14%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Kind
+	                      {t("stickySessions.table.kind")}
                     </TableHead>
                     <TableHead className="w-[18%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
                       <button
@@ -270,7 +272,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                         className="cursor-pointer text-left transition-colors hover:text-foreground"
                         onClick={() => setSort("account", nextSortDirection(params.sortBy, params.sortDir, "account"))}
                       >
-                        {`Account${sortIndicator(params.sortBy, params.sortDir, "account") ?? ""}`}
+	                        {`${t("dashboard.requests.columns.account")}${sortIndicator(params.sortBy, params.sortDir, "account") ?? ""}`}
                       </button>
                     </TableHead>
                     <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
@@ -281,14 +283,14 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                           setSort("updated_at", nextSortDirection(params.sortBy, params.sortDir, "updated_at"))
                         }
                       >
-                        {`Updated${sortIndicator(params.sortBy, params.sortDir, "updated_at") ?? ""}`}
+	                        {`${t("stickySessions.table.updated")}${sortIndicator(params.sortBy, params.sortDir, "updated_at") ?? ""}`}
                       </button>
                     </TableHead>
                     <TableHead className="w-[16%] min-w-[9rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Expiry
+	                      {t("apiKeys.table.expiry")}
                     </TableHead>
                     <TableHead className="w-[6%] min-w-[4.5rem] pr-4 text-right align-middle text-[11px] uppercase tracking-wider text-muted-foreground/80">
-                      Actions
+	                      {t("apiKeys.table.actions")}
                     </TableHead>
                   </TableRow>
                 </TableHeader>
@@ -301,7 +303,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                       <TableRow key={`${entry.kind}:${entry.key}`} data-state={selected ? "selected" : undefined}>
                         <TableCell className="pl-4">
                           <Checkbox
-                            aria-label={`Select sticky session ${entry.key}`}
+	                            aria-label={t("stickySessions.table.selectRowAria", { key: entry.key })}
                             checked={selected}
                             disabled={busy}
                             onCheckedChange={(checked) => setSelected(entry, checked === true)}
@@ -311,7 +313,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                           {entry.key}
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline">{kindLabel(entry.kind)}</Badge>
+	                          <Badge variant="outline">{kindLabel(entry.kind, t)}</Badge>
                         </TableCell>
                         <TableCell className="truncate text-xs">{entry.displayName}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">
@@ -319,11 +321,11 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {entry.isStale ? (
-                            <Badge variant="secondary">Stale</Badge>
+	                            <Badge variant="secondary">{t("stickySessions.states.stale")}</Badge>
                           ) : expires ? (
                             `${expires.date} ${expires.time}`
                           ) : (
-                            "Durable"
+	                            t("stickySessions.states.durable")
                           )}
                         </TableCell>
                         <TableCell className="pr-4 text-right">
@@ -335,7 +337,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                             disabled={busy}
                             onClick={() => deleteDialog.show({ key: entry.key, kind: entry.kind })}
                           >
-                            Remove
+	                            {t("common.actions.remove")}
                           </Button>
                         </TableCell>
                       </TableRow>
@@ -345,11 +347,11 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
               </Table>
             </div>
           ) : (
-            <EmptyState
-              icon={Pin}
-              title="No sticky sessions on this page"
-              description="The current page is empty. Use pagination to navigate to another page."
-            />
+	            <EmptyState
+	              icon={Pin}
+	              title={t("stickySessions.emptyPage.title")}
+	              description={t("stickySessions.emptyPage.description")}
+	            />
           )}
           <div className="flex justify-end pt-3">
             <PaginationControls
@@ -366,13 +368,16 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
 
       <ConfirmDialog
         open={deleteDialog.open}
-        title="Remove sticky session"
-        description={
-          deleteDialog.data
-            ? `${kindLabel(deleteDialog.data.kind)} mapping ${deleteDialog.data.key} will stop pinning future requests.`
-            : ""
-        }
-        confirmLabel="Delete"
+	        title={t("stickySessions.removeDialog.title")}
+	        description={
+	          deleteDialog.data
+	            ? t("stickySessions.removeDialog.description", {
+	                kind: kindLabel(deleteDialog.data.kind, t),
+	                key: deleteDialog.data.key,
+	              })
+	            : ""
+	        }
+	        confirmLabel={t("common.actions.delete")}
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
           if (!deleteDialog.data) {
@@ -386,13 +391,13 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
 
       <ConfirmDialog
         open={deleteSelectedDialog.open}
-        title="Delete selected sticky sessions"
-        description={
-          selectedDeleteCount === 1
-            ? "Delete the selected sticky session? Failed deletions will be reported."
-            : `Delete ${selectedDeleteCount} selected sticky sessions? Failed deletions will be reported.`
-        }
-        confirmLabel="Delete Sessions"
+	        title={t("stickySessions.deleteSelectedDialog.title")}
+	        description={
+	          selectedDeleteCount === 1
+	            ? t("stickySessions.deleteSelectedDialog.descriptionOne")
+	            : t("stickySessions.deleteSelectedDialog.descriptionMany", { count: selectedDeleteCount })
+	        }
+	        confirmLabel={t("stickySessions.actions.deleteSessions")}
         onOpenChange={deleteSelectedDialog.onOpenChange}
         onConfirm={() => {
           if (selectedDeleteTargets.length === 0) {
@@ -408,9 +413,9 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
 
       <ConfirmDialog
         open={deleteFilteredDialog.open}
-        title="Delete filtered sticky sessions"
-        description={`Delete all ${deleteFilteredDialog.data ?? 0} sticky sessions that match the current filters?`}
-        confirmLabel="Delete Filtered"
+	        title={t("stickySessions.deleteFilteredDialog.title")}
+	        description={t("stickySessions.deleteFilteredDialog.description", { count: deleteFilteredDialog.data ?? 0 })}
+	        confirmLabel={t("stickySessions.actions.deleteFiltered")}
         onOpenChange={deleteFilteredDialog.onOpenChange}
         onConfirm={() => {
           void deleteFilteredMutation.mutateAsync().then(() => {
@@ -423,9 +428,9 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
 
       <ConfirmDialog
         open={purgeDialog.open}
-        title="Purge stale prompt-cache mappings"
-        description="Only expired prompt-cache entries will be deleted. Durable session and sticky-thread mappings stay intact."
-        confirmLabel="Purge"
+	        title={t("stickySessions.purgeDialog.title")}
+	        description={t("stickySessions.purgeDialog.description")}
+	        confirmLabel={t("stickySessions.actions.purge")}
         onOpenChange={purgeDialog.onOpenChange}
         onConfirm={() => {
           void purgeMutation.mutateAsync(true).finally(() => {

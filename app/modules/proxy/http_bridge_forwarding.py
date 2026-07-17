@@ -15,7 +15,7 @@ from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
-from app.core.openai.requests import ResponsesRequest
+from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.types import JsonObject
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
@@ -339,9 +339,11 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
-    if context.file_owner_account_id is not None:
-        # The rolling-upgrade primary signature does not bind this additive
-        # field. Never allow a stripped/forged proof to downgrade to it.
+    if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
+        # The rolling-upgrade primary signature does not bind the additive
+        # file-owner proof. Never allow a stripped/forged proof to downgrade to
+        # it, and never allow payloads with file references to fall back after a
+        # stripped proof made the owner value look absent.
         return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /

@@ -198,6 +198,7 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
             "object": "response.compaction",
             "output": [
                 {
+                    "id": "cmp_modeled_context",
                     "type": "compaction",
                     "encrypted_content": "MODELED_CONTEXT",
                 }
@@ -206,8 +207,27 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     )
 
     assert proxy_api_module._compact_response_output_item(payload) == {
+        "id": "cmp_modeled_context",
         "type": "compaction",
         "encrypted_content": "MODELED_CONTEXT",
+    }
+
+
+def test_compact_response_output_item_preserves_summary_item_id() -> None:
+    payload = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "compaction_summary": {
+                "id": "cmp_summary_context",
+                "encrypted_content": "SUMMARY_CONTEXT",
+            },
+        }
+    )
+
+    assert proxy_api_module._compact_response_output_item(payload) == {
+        "id": "cmp_summary_context",
+        "type": "compaction",
+        "encrypted_content": "SUMMARY_CONTEXT",
     }
 
 

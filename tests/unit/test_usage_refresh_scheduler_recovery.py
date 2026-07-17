@@ -243,6 +243,50 @@ async def test_reconcile_recoverable_account_statuses_restores_rate_limited_afte
 
 
 @pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_keeps_elapsed_reset_until_block_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    past_reset = int(now - 1)
+    blocked_at = int(now - 10)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_account(
+        "acc_rate_limited_floor",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=past_reset,
+                recorded_at=_epoch_to_naive_utc(now - 5),
+                window_minutes=300,
+            )
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == past_reset
+    assert account.blocked_at == blocked_at
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
 async def test_reconcile_recoverable_account_statuses_keeps_legacy_rate_limited_when_primary_is_not_recent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

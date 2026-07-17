@@ -133,6 +133,9 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
         prefer_earlier_reset_window=settings.prefer_earlier_reset_window,
+        show_reset_credit_badges=settings.show_reset_credit_badges,
+        auto_redeem_reset_credits_before_expiry=settings.auto_redeem_reset_credits_before_expiry,
+        show_reset_credit_expiry_badge=settings.show_reset_credit_expiry_badge,
         routing_strategy=settings.routing_strategy,
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
@@ -655,6 +658,21 @@ async def update_settings(
                     else current.prefer_earlier_reset_accounts
                 ),
                 prefer_earlier_reset_window=payload.prefer_earlier_reset_window or current.prefer_earlier_reset_window,
+                show_reset_credit_badges=(
+                    payload.show_reset_credit_badges
+                    if payload.show_reset_credit_badges is not None
+                    else current.show_reset_credit_badges
+                ),
+                auto_redeem_reset_credits_before_expiry=(
+                    payload.auto_redeem_reset_credits_before_expiry
+                    if payload.auto_redeem_reset_credits_before_expiry is not None
+                    else current.auto_redeem_reset_credits_before_expiry
+                ),
+                show_reset_credit_expiry_badge=(
+                    payload.show_reset_credit_expiry_badge
+                    if payload.show_reset_credit_expiry_badge is not None
+                    else current.show_reset_credit_expiry_badge
+                ),
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
                 relative_availability_power=(
                     payload.relative_availability_power
@@ -812,6 +830,9 @@ async def update_settings(
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",
             "prefer_earlier_reset_window",
+            "show_reset_credit_badges",
+            "auto_redeem_reset_credits_before_expiry",
+            "show_reset_credit_expiry_badge",
             "routing_strategy",
             "relative_availability_power",
             "relative_availability_top_k",

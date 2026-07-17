@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { useTranslation } from "react-i18next";
 import {
   MultiSelectFilter,
   type MultiSelectOption,
@@ -38,6 +39,7 @@ export function ReportsFilters({
   onPresetSelect,
   onFiltersChange,
 }: ReportsFiltersProps) {
+  const { t } = useTranslation();
   const maxDate = localDateISO();
 
   return (
@@ -59,13 +61,13 @@ export function ReportsFilters({
       })}
 
       <MultiSelectFilter
-        label="Accounts"
+        label={t("dashboard.filters.accounts")}
         values={filters.accountId}
         options={accountOptions}
         onChange={(accountId) => onFiltersChange({ ...filters, accountId })}
       />
       <MultiSelectFilter
-        label="Model"
+        label={t("dashboard.filters.model")}
         values={filters.model ? [filters.model] : []}
         options={modelOptions}
         onChange={(models) =>
@@ -73,7 +75,7 @@ export function ReportsFilters({
         }
       />
       <MultiSelectFilter
-        label="UserAgent"
+        label={t("reports.filters.userAgent")}
         values={filters.useragent ? [filters.useragent] : []}
         options={useragentOptions}
         onChange={(useragents) =>
@@ -84,7 +86,7 @@ export function ReportsFilters({
       <div className="ml-auto flex items-center gap-2">
         <input
           type="date"
-          aria-label="Start date"
+          aria-label={t("reports.filters.startDate")}
           max={maxDate}
           value={filters.startDate}
           onChange={(e) => onFiltersChange({ ...filters, startDate: e.target.value })}
@@ -93,7 +95,7 @@ export function ReportsFilters({
         <span className="text-xs text-muted-foreground">—</span>
         <input
           type="date"
-          aria-label="End date"
+          aria-label={t("reports.filters.endDate")}
           max={maxDate}
           value={filters.endDate}
           onChange={(e) => onFiltersChange({ ...filters, endDate: e.target.value })}

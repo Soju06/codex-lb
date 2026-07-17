@@ -1,4 +1,5 @@
 import { RotateCcw, Search } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,8 @@ export function RequestFilters({
   onStatusChange,
   onReset,
 }: RequestFiltersProps) {
+  const { t } = useTranslation();
+
   return (
     <div className="space-y-2 rounded-xl border bg-card p-4">
       <div className="flex items-center gap-2">
@@ -44,7 +47,7 @@ export function RequestFilters({
             value={filters.search}
             onChange={(event) => onSearchChange(event.target.value)}
             className="h-8 pl-9"
-            placeholder="Search request id, account, API key, model, error..."
+            placeholder={t("dashboard.filters.searchPlaceholder")}
           />
         </div>
 
@@ -53,25 +56,25 @@ export function RequestFilters({
 
       <div className="flex flex-wrap items-center gap-2">
         <MultiSelectFilter
-          label="Accounts"
+          label={t("dashboard.filters.accounts")}
           values={filters.accountIds}
           options={accountOptions}
           onChange={onAccountChange}
         />
         <MultiSelectFilter
-          label="API Keys"
+          label={t("dashboard.filters.apiKeys")}
           values={filters.apiKeyIds}
           options={apiKeyOptions}
           onChange={onApiKeyChange}
         />
         <MultiSelectFilter
-          label="Models"
+          label={t("dashboard.filters.models")}
           values={filters.modelOptions}
           options={modelOptions}
           onChange={onModelChange}
         />
         <MultiSelectFilter
-          label="Statuses"
+          label={t("dashboard.filters.statuses")}
           values={filters.statuses}
           options={statusOptions}
           onChange={onStatusChange}
@@ -79,7 +82,7 @@ export function RequestFilters({
 
         <Button type="button" variant="ghost" size="sm" onClick={onReset} className="h-8 gap-1.5 text-xs text-muted-foreground">
           <RotateCcw className="h-3 w-3" aria-hidden="true" />
-          Reset
+          {t("common.actions.reset")}
         </Button>
       </div>
     </div>

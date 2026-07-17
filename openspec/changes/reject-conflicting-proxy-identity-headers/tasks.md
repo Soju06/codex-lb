@@ -8,4 +8,4 @@
 
 - [x] 2.1 Cover agreeing, disagreeing, malformed, empty, repeated, singleton, chain, untrusted-peer, and generic-precedence cases
 - [x] 2.2 Prove the owned HTTP/WebSocket boundary rejects projected allowlist bypasses and conflicting identities while accepting agreement
-- [ ] 2.3 Run focused tests, Ruff, ty, strict OpenSpec validation, full fast CI, bridge tests, diff checks, and a clean Codex review
+- [x] 2.3 Run focused tests, Ruff, ty, strict OpenSpec validation, full fast CI, bridge tests, diff checks, and a clean Codex review

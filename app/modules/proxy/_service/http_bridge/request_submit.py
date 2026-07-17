@@ -1295,6 +1295,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 and hard_session_affinity
                 and request_state.previous_response_id is not None
             )
+            clean_close_hard_continuity_anchor = (
+                close_classification == "clean"
+                and hard_session_affinity
+                and request_state.hard_continuity_anchor
+            )
             clean_close_retry_for_current_close = (
                 close_classification == "clean"
                 and request_state.clean_close_retry_close_generation != close_generation
@@ -1384,12 +1389,13 @@ class _HTTPBridgeRequestSubmitMixin:
                     require_preferred_account=True,
                     **reconnect_reader_kwargs,
                 )
-            elif clean_close_hard_continuation:
+            elif clean_close_hard_continuation or clean_close_hard_continuity_anchor:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
-                    # A continuation's previous_response_id is account-bound.
-                    # Do not migrate it while recovering a clean handoff close.
+                    # Continuity anchors (previous_response_id and turn-state)
+                    # are account-bound. Do not migrate them while recovering a
+                    # clean handoff close.
                     require_same_account=True,
                     **reconnect_reader_kwargs,
                 )

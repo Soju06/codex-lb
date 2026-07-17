@@ -1333,14 +1333,15 @@ class ProxyService(
                 )
                 # Leading telemetry records latency without assigning a response
                 # or releasing this gate; only response-created proves progress.
-                should_retire_stuck_session = bool(pending_states) and all(
+                stale_candidate_states = [state for state in pending_states if not state.draining_until_terminal]
+                should_retire_stuck_session = bool(stale_candidate_states) and all(
                     self._http_bridge_pending_state_is_stale(
                         state,
                         now=now,
                         threshold_seconds=threshold_seconds,
                         session_closed=bridge_session.closed,
                     )
-                    for state in pending_states
+                    for state in stale_candidate_states
                 )
             _log_http_bridge_startup_wait_timeout(
                 stage="response_create_gate",

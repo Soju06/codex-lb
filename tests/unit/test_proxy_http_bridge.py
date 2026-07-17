@@ -15283,17 +15283,16 @@ async def test_http_bridge_reconnect_failure_keeps_reader_handoff_session_closed
         "get_settings_cache",
         lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
     )
-    monkeypatch.setattr(
-        service,
-        "_select_account_with_budget_for_stream",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                account=None,
-                error_code="no_accounts",
-                error_message="No active accounts available",
-            )
-        ),
-    )
+
+    async def select_no_account(*_args: object, **_kwargs: object) -> object:
+        assert session.closed is False
+        return SimpleNamespace(
+            account=None,
+            error_code="no_accounts",
+            error_message="No active accounts available",
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", AsyncMock(side_effect=select_no_account))
 
     with pytest.raises(ProxyResponseError):
         await service._reconnect_http_bridge_session(
@@ -15450,13 +15449,16 @@ async def test_http_bridge_clean_close_before_response_does_not_penalize_account
         ),
     )
     fail_pending = AsyncMock()
+    retire = AsyncMock()
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
 
     await service._relay_http_bridge_upstream_messages(session)
 
     assert fail_pending.await_args is not None
     assert fail_pending.await_args.kwargs["penalize_account"] is False
+    retire.assert_awaited_once_with(session, detail="stream_incomplete")
 
 
 @pytest.mark.asyncio

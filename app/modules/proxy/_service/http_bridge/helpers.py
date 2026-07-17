@@ -1946,6 +1946,11 @@ def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelop
     )
 
 
+def _mark_http_bridge_reader_handoff_reconnect_failed(session: Any, old_reader: Any) -> None:
+    if old_reader is not None:
+        session.closed = True
+
+
 def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseError:
     return ProxyResponseError(
         502,

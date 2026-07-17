@@ -642,6 +642,8 @@ class LoadBalancer:
             while True:
                 attempt += 1
                 if sticky_kind is not None:
+                    async with self._runtime_lock:
+                        pass
                     async with self._repo_factory() as repos:
                         sticky_existing_account_id = await repos.sticky_sessions.get_account_id(
                             sticky_key,
@@ -1742,7 +1744,7 @@ class LoadBalancer:
                 runtime = self._runtime.setdefault(account_id, RuntimeState())
                 if runtime.probe_success_streak > 0:
                     runtime.probe_success_streak = 0
-                    runtime.version += 1
+                runtime.version += 1
             return
 
         # Usage reads intentionally run without the per-account lock. Capture a

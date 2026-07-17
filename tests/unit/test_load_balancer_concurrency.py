@@ -387,6 +387,7 @@ async def test_unsuccessful_force_probe_resets_probe_success_streak() -> None:
     balancer._runtime[account.id] = RuntimeState(
         health_tier=HEALTH_TIER_PROBING,
         probe_success_streak=2,
+        version=7,
     )
 
     await balancer.record_probe_result(
@@ -397,6 +398,29 @@ async def test_unsuccessful_force_probe_resets_probe_success_streak() -> None:
     runtime = balancer._runtime[account.id]
     assert runtime.health_tier == HEALTH_TIER_PROBING
     assert runtime.probe_success_streak == 0
+    assert runtime.version == 8
+    assert runtime.error_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unsuccessful_force_probe_bumps_version_without_success_streak() -> None:
+    account = _make_account("acc-force-probe-rejected-without-streak")
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        probe_success_streak=0,
+        version=11,
+    )
+
+    await balancer.record_probe_result(
+        account_id=account.id,
+        http_status=400,
+    )
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    assert runtime.probe_success_streak == 0
+    assert runtime.version == 12
     assert runtime.error_count == 0
 
 

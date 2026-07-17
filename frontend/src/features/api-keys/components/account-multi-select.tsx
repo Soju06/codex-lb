@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { ChevronsUpDown, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,7 +35,7 @@ type LimitChip = {
   percent: number | null;
 };
 
-function buildLimitChips(account: AccountSummary): LimitChip[] {
+function buildLimitChips(account: AccountSummary, t: ReturnType<typeof useTranslation>["t"]): LimitChip[] {
   const chips: LimitChip[] = [];
   const monthlyOnly =
     account.windowMinutesMonthly != null &&
@@ -44,7 +45,10 @@ function buildLimitChips(account: AccountSummary): LimitChip[] {
   if (monthlyOnly || account.usage?.monthlyRemainingPercent != null) {
     chips.push({
       key: `${account.accountId}-monthly`,
-      label: `Monthly ${formatPercentNullable(account.usage?.monthlyRemainingPercent)} left`,
+      label: t("apiKeys.accountSelect.limitLeft", {
+        label: t("common.quota.monthly"),
+        percent: formatPercentNullable(account.usage?.monthlyRemainingPercent),
+      }),
       percent: account.usage?.monthlyRemainingPercent ?? null,
     });
   }
@@ -52,14 +56,20 @@ function buildLimitChips(account: AccountSummary): LimitChip[] {
   if (!monthlyOnly && (account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null)) {
     chips.push({
       key: `${account.accountId}-primary`,
-      label: `${formatWindowLabel("primary", account.windowMinutesPrimary)} ${formatPercentNullable(account.usage?.primaryRemainingPercent)} left`,
+      label: t("apiKeys.accountSelect.limitLeft", {
+        label: formatWindowLabel("primary", account.windowMinutesPrimary),
+        percent: formatPercentNullable(account.usage?.primaryRemainingPercent),
+      }),
       percent: account.usage?.primaryRemainingPercent ?? null,
     });
   }
   if (!monthlyOnly && (account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null)) {
     chips.push({
       key: `${account.accountId}-secondary`,
-      label: `${formatWindowLabel("secondary", account.windowMinutesSecondary)} ${formatPercentNullable(account.usage?.secondaryRemainingPercent)} left`,
+      label: t("apiKeys.accountSelect.limitLeft", {
+        label: formatWindowLabel("secondary", account.windowMinutesSecondary),
+        percent: formatPercentNullable(account.usage?.secondaryRemainingPercent),
+      }),
       percent: account.usage?.secondaryRemainingPercent ?? null,
     });
   }
@@ -82,13 +92,14 @@ function chipToneClass(percent: number | null): string {
 }
 
 function AccountOption({ account }: { account: AccountSummary }) {
+  const { t } = useTranslation();
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const subtitle =
     account.displayName && account.displayName !== account.email
       ? `${account.email} · ${formatSlug(account.planType)}`
       : formatSlug(account.planType);
-  const limitChips = buildLimitChips(account);
+  const limitChips = buildLimitChips(account, t);
 
   return (
     <div className="min-w-0 flex-1 py-0.5">
@@ -97,7 +108,7 @@ function AccountOption({ account }: { account: AccountSummary }) {
           <div className="truncate text-sm font-medium">{title}</div>
           <div
             className="truncate text-[11px] text-muted-foreground"
-            title={`Account ID ${account.accountId}`}
+            title={t("accounts.detail.accountIdTitle", { accountId: account.accountId })}
           >
             {subtitle}
           </div>
@@ -125,13 +136,15 @@ function AccountOption({ account }: { account: AccountSummary }) {
 export function AccountMultiSelect({
   value,
   onChange,
-  placeholder = "All accounts",
+  placeholder,
   triggerId,
   ariaInvalid = false,
   ariaDescribedBy,
   triggerClassName,
   allowPausedAccounts = false,
 }: AccountMultiSelectProps) {
+  const { t } = useTranslation();
+  const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
   const { accountsQuery } = useAccounts();
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const selectableAccounts = useMemo(
@@ -187,7 +200,7 @@ export function AccountMultiSelect({
   }, [onChange]);
 
   const label =
-    value.length === 0 ? placeholder : `${value.length} account${value.length > 1 ? "s" : ""} selected`;
+    value.length === 0 ? placeholderLabel : t("apiKeys.accountSelect.selected", { count: value.length });
 
   return (
     <div className="space-y-1.5">
@@ -203,7 +216,7 @@ export function AccountMultiSelect({
             disabled={accountsQuery.isLoading}
           >
             <span className="truncate text-left">
-              {accountsQuery.isLoading ? "Loading accounts..." : label}
+              {accountsQuery.isLoading ? t("apiKeys.accountSelect.loading") : label}
             </span>
             <ChevronsUpDown className="ml-1 size-4 shrink-0 opacity-50" />
           </Button>
@@ -213,7 +226,7 @@ export function AccountMultiSelect({
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search accounts..."
+              placeholder={t("accounts.list.searchPlaceholder")}
               className="h-7 text-xs"
               onClick={(event) => event.stopPropagation()}
               onKeyDown={(event) => event.stopPropagation()}
@@ -225,7 +238,7 @@ export function AccountMultiSelect({
             onCheckedChange={selectAll}
             onSelect={(event) => event.preventDefault()}
           >
-            All accounts
+            {t("apiKeys.accountSelect.all")}
           </DropdownMenuCheckboxItem>
           <DropdownMenuSeparator />
           {filtered.map((account) => (
@@ -240,7 +253,7 @@ export function AccountMultiSelect({
             </DropdownMenuCheckboxItem>
           ))}
           {filtered.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">No accounts found</div>
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">{t("apiKeys.accountSelect.empty")}</div>
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>

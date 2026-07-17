@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   AreaChart,
   Area,
@@ -22,6 +24,7 @@ function formatTps(value: number): string {
 }
 
 export function TokensPerSecondChart({ startDate, endDate, data }: TokensPerSecondChartProps) {
+  const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
     tps: d.medianTps ?? 0,
@@ -29,7 +32,7 @@ export function TokensPerSecondChart({ startDate, endDate, data }: TokensPerSeco
 
   return (
     <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Tokens per Second</div>
+      <div className="text-sm font-semibold text-foreground">{t("reports.charts.tokensPerSecond")}</div>
       <div className="mt-4 h-[200px]">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
@@ -53,7 +56,7 @@ export function TokensPerSecondChart({ startDate, endDate, data }: TokensPerSeco
               tickFormatter={formatTps}
             />
             <Tooltip
-              content={<ChartTooltip names={{ tps: "Median TPS" }} formatValue={formatTps} />}
+              content={<ChartTooltip names={{ tps: t("reports.charts.medianTps") }} formatValue={formatTps} />}
             />
             <Area
               type="monotone"

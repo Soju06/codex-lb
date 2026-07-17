@@ -445,16 +445,24 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[str, str]:
+def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
-        return code, message
+        error_type = parsed.type if parsed and parsed.type else "server_error"
+        error_param = parsed.param if parsed else None
+        return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
-        return "upstream_unavailable", "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out"
+        return (
+            502,
+            "upstream_unavailable",
+            "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out",
+            "server_error",
+            None,
+        )
     message = str(exc).strip() or "HTTP bridge pre-created retry failed"
-    return "upstream_unavailable", message
+    return 502, "upstream_unavailable", message, "server_error", None
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
@@ -563,6 +571,17 @@ def _normalize_http_bridge_error_event(
             resets_in = raw_error.get("resets_in_seconds")
             if isinstance(resets_in, int | float):
                 rate_limit_metadata["resets_in_seconds"] = resets_in
+
+    if request_state is not None:
+        if request_state.error_code_override is not None:
+            error_code_value = request_state.error_code_override
+            explicit_error_code = True
+        if request_state.error_type_override is not None:
+            error_type_value = request_state.error_type_override
+        if request_state.error_message_override is not None:
+            error_message_value = request_state.error_message_override
+        if request_state.error_param_override is not None:
+            error_param_value = request_state.error_param_override
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":
@@ -1663,83 +1682,19 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _http_bridge_prewarm_canary_bucket(
-    settings: Any,
-    *,
-    session: _HTTPBridgeSession,
-    request_state: _WebSocketRequestState,
-    text_data: str,
-) -> tuple[str, str | None]:
-    if not getattr(settings, "http_responses_session_bridge_codex_prewarm_enabled", False):
-        return "not_eligible", None
-    reason = _http_bridge_prewarm_eligible_reason(session, request_state=request_state, text_data=text_data)
-    raw_percent = getattr(settings, "http_responses_session_bridge_codex_prewarm_canary_percent", None)
-    api_key_id = session.key.api_key_id or (request_state.api_key.id if request_state.api_key else None)
-    allowlist = set(getattr(settings, "http_responses_session_bridge_codex_prewarm_allow_api_key_ids", []) or [])
-    denylist = set(getattr(settings, "http_responses_session_bridge_codex_prewarm_deny_api_key_ids", []) or [])
-    if api_key_id is not None and api_key_id in denylist:
-        return "control", reason or "legacy_all"
-    if allowlist and api_key_id not in allowlist:
-        return "control", reason or "legacy_all"
-    if raw_percent is None:
-        return "treatment", reason or "legacy_all"
-    if reason is None:
-        return "not_eligible", None
-    percent = max(0.0, min(100.0, float(raw_percent)))
-    sample_identity = "|".join(
-        (
-            api_key_id or "no_api_key",
-            request_state.session_id or session.key.affinity_kind,
-            session.key.affinity_key,
-        )
-    )
-    digest = sha256(sample_identity.encode("utf-8")).digest()
-    sample = int.from_bytes(digest[:8], "big") / float(2**64)
-    return ("treatment" if sample * 100.0 < percent else "control", reason)
+def _http_bridge_prewarm_enabled(settings: Any) -> bool:
+    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+
+    The canary percent and allow/deny cohort scaffolding was one-time
+    rollout tooling retired by ``reduce-settings-surface-phase-4``.
+    """
+    return bool(getattr(settings, "http_responses_session_bridge_codex_prewarm_enabled", False))
 
 
-def _http_bridge_prewarm_eligible_reason(
-    session: _HTTPBridgeSession,
-    *,
-    request_state: _WebSocketRequestState,
-    text_data: str,
-) -> str | None:
-    if request_state.previous_response_id is not None:
-        return None
-    if _http_bridge_request_input_size_bytes(text_data) < 50_000:
-        return None
-    gap_seconds = max(0.0, request_state.started_at - session.last_used_at)
-    if gap_seconds < 120.0 and request_state.session_id is not None:
-        return None
-    return "first_turn_50k_gap_2m"
-
-
-def _http_bridge_request_input_size_bytes(text_data: str) -> int:
-    try:
-        payload = json.loads(text_data)
-    except json.JSONDecodeError:
-        return len(text_data.encode("utf-8"))
-    if not isinstance(payload, dict):
-        return len(text_data.encode("utf-8"))
-    input_value = payload.get("input")
-    if input_value is None:
-        return 0
-    return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-
-
-def _record_http_bridge_prewarm_outcome(
-    *,
-    outcome: str,
-    cohort: str | None,
-    bucket: str | None,
-) -> None:
+def _record_http_bridge_prewarm_outcome(*, outcome: str) -> None:
     if not PROMETHEUS_AVAILABLE or http_bridge_prewarm_total is None:
         return
-    http_bridge_prewarm_total.labels(
-        outcome=outcome,
-        cohort=cohort or "unknown",
-        bucket=bucket or "unknown",
-    ).inc()
+    http_bridge_prewarm_total.labels(outcome=outcome).inc()
 
 
 def _record_http_bridge_stuck_retire(
@@ -2122,7 +2077,7 @@ for _helper_name in (
     "_effective_http_bridge_idle_ttl_seconds",
     "_http_bridge_eviction_priority",
     "_build_http_bridge_prewarm_text",
-    "_http_bridge_prewarm_canary_bucket",
+    "_http_bridge_prewarm_enabled",
     "_record_http_bridge_prewarm_outcome",
     "_record_http_bridge_stuck_retire",
     "_http_bridge_payload_without_previous_response_id",

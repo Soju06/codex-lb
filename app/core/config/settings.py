@@ -79,6 +79,21 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     "CODEX_LB_MEMORY_WARNING_THRESHOLD_MB",
     "CODEX_LB_IMAGES_HOST_MODEL",
     "CODEX_LB_IMAGES_MAX_PARTIAL_IMAGES",
+    # Phase 3 (reduce-settings-surface-phase-3)
+    "CODEX_LB_DATABASE_BACKGROUND_POOL_SIZE",
+    "CODEX_LB_DATABASE_BACKGROUND_MAX_OVERFLOW",
+    "CODEX_LB_DATABASE_POOL_TIMEOUT_SECONDS",
+    "CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS",
+    "CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT",
+    "CODEX_LB_DRAIN_SECONDARY_THRESHOLD_PCT",
+    "CODEX_LB_DRAIN_ERROR_WINDOW_SECONDS",
+    "CODEX_LB_DRAIN_ERROR_COUNT_THRESHOLD",
+    "CODEX_LB_PROBE_QUIET_SECONDS",
+    "CODEX_LB_PROBE_SUCCESS_STREAK_REQUIRED",
+    # Phase 4 (reduce-settings-surface-phase-4)
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ALLOW_API_KEY_IDS",
+    "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_DENY_API_KEY_IDS",
 )
 
 
@@ -225,12 +240,11 @@ class Settings(BaseSettings):
 
     data_dir: Path = Field(default_factory=_default_home_dir)
     database_url: str = DEFAULT_DATABASE_URL
+    # Pool timeout and recycle are fixed constants in ``app/db/session.py``;
+    # the background-task engine always derives its pool sizing from the two
+    # settings below.
     database_pool_size: int = Field(default=15, gt=0)
     database_max_overflow: int = Field(default=10, ge=0)
-    database_background_pool_size: int | None = Field(default=None, gt=0)
-    database_background_max_overflow: int | None = Field(default=None, ge=0)
-    database_pool_timeout_seconds: float = Field(default=30.0, gt=0)
-    database_pool_recycle_seconds: int = Field(default=1800, gt=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
@@ -283,17 +297,6 @@ class Settings(BaseSettings):
     http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
-    http_responses_session_bridge_codex_prewarm_canary_percent: float | None = Field(
-        default=None,
-        ge=0.0,
-        le=100.0,
-    )
-    http_responses_session_bridge_codex_prewarm_allow_api_key_ids: Annotated[list[str], NoDecode] = Field(
-        default_factory=list
-    )
-    http_responses_session_bridge_codex_prewarm_deny_api_key_ids: Annotated[list[str], NoDecode] = Field(
-        default_factory=list
-    )
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
@@ -304,6 +307,11 @@ class Settings(BaseSettings):
     sticky_session_cleanup_enabled: bool = True
     # Data retention (0 = disabled). Non-zero values have safety floors so
     # every in-product consumer window stays inside retained data.
+    # DEPRECATED: retention is managed from the dashboard runtime settings
+    # (`dashboard_settings.request_log_retention_days` /
+    # `usage_history_retention_days`); a non-NULL dashboard value wins. These
+    # env fields remain one release as aliases for unset dashboard values and
+    # will be removed in a later phase.
     request_log_retention_days: int = Field(default=0, ge=0, le=3650)
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
@@ -380,15 +388,10 @@ class Settings(BaseSettings):
     # constants in ``app/core/resilience/circuit_breaker.py``)
     circuit_breaker_enabled: bool = False
 
-    # Soft drain & deterministic failover
+    # Soft drain & deterministic failover (drain/probe thresholds are fixed
+    # constants in ``app/core/balancer/logic.py``)
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
-    drain_primary_threshold_pct: float = 85.0
-    drain_secondary_threshold_pct: float = 90.0
-    drain_error_window_seconds: float = 60.0
-    drain_error_count_threshold: int = 2
-    probe_quiet_seconds: float = 60.0
-    probe_success_streak_required: int = 3
 
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
@@ -554,28 +557,6 @@ class Settings(BaseSettings):
                         normalized.append(instance_id)
             return normalized
         raise TypeError("http_responses_session_bridge_instance_ring must be a list or comma-separated string")
-
-    @field_validator(
-        "http_responses_session_bridge_codex_prewarm_allow_api_key_ids",
-        "http_responses_session_bridge_codex_prewarm_deny_api_key_ids",
-        mode="before",
-    )
-    @classmethod
-    def _normalize_http_bridge_prewarm_api_key_ids(cls, value: StringListInput) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            entries = [entry.strip() for entry in value.split(",")]
-            return [entry for entry in entries if entry]
-        if isinstance(value, list):
-            normalized: list[str] = []
-            for entry in value:
-                if isinstance(entry, str):
-                    api_key_id = entry.strip()
-                    if api_key_id:
-                        normalized.append(api_key_id)
-            return normalized
-        raise TypeError("prewarm api key ids must be a list or comma-separated string")
 
     @field_validator("http_responses_session_bridge_advertise_base_url", mode="before")
     @classmethod

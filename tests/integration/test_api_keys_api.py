@@ -28,6 +28,7 @@ from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, Limit
 from app.modules.model_sources.forwarding import (
     SourceChatCompletion,
     SourceResponsesStream,
+    SourceTimings,
     SourceUsage,
     SourceUsageHolder,
 )
@@ -467,6 +468,27 @@ async def test_api_key_create_rejects_unknown_assigned_account_ids(async_client)
     )
     assert create.status_code == 400
     assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_api_key_create_rejects_duplicate_limit_rules(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "duplicate-limits-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 100},
+                {"limitType": "total_tokens", "limitWindow": "daily", "maxValue": 200},
+            ],
+        },
+    )
+
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json() == []
 
 
 @pytest.mark.asyncio
@@ -1017,6 +1039,7 @@ async def test_source_routed_chat_completion_settles_api_key_usage(async_client,
                 },
             },
             usage=SourceUsage(input_tokens=11, output_tokens=7, cached_input_tokens=3),
+            timings=None,
             upstream_status_code=200,
         )
 
@@ -1054,6 +1077,59 @@ async def test_source_routed_chat_completion_settles_api_key_usage(async_client,
         assert latest_log.output_tokens == 7
         assert latest_log.cached_input_tokens == 3
         assert latest_log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_source_routed_chat_completion_records_upstream_timings(async_client, monkeypatch):
+    """vLLM (and compatible forks) can attach a ``metrics`` object with its own
+    TTFT/generation timing alongside ``usage``; the request log must carry it
+    through as latency_first_token_ms/latency_ms so the dashboard can apply its
+    existing generation-only TPS calculation."""
+    model = "vllm-chat-timings"
+    source_id = await _create_model_source(async_client, name="vllm-timings", model=model)
+
+    async def fake_forward(source, payload):
+        return SourceChatCompletion(
+            payload={
+                "id": "chatcmpl_source_timings",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 28, "completion_tokens": 9, "total_tokens": 37},
+                "metrics": {
+                    "time_to_first_token_ms": 108.83,
+                    "generation_time_ms": 162.98,
+                    "queue_time_ms": 0.037,
+                    "mean_itl_ms": 20.37,
+                    "tokens_per_second": 33.11,
+                },
+            },
+            usage=SourceUsage(input_tokens=28, output_tokens=9),
+            timings=SourceTimings(latency_first_token_ms=109, latency_ms=272),
+            upstream_status_code=200,
+        )
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model_source_id == source_id))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.latency_first_token_ms == 109
+        assert latest_log.latency_ms == 272
 
 
 @pytest.mark.asyncio
@@ -1107,6 +1183,7 @@ async def test_source_routed_chat_completion_applies_api_key_enforcement(async_c
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             },
             usage=SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0),
+            timings=None,
             upstream_status_code=200,
         )
 

@@ -41,6 +41,20 @@ _TRANSIENT_CODES = frozenset(
 )
 
 
+def _is_account_model_unsupported_error(
+    *,
+    code: str | None,
+    message: str | None,
+    model: str | None,
+) -> bool:
+    """Match only the account-entitlement rejection for the requested model."""
+    if code != "invalid_request_error" or message is None or model is None:
+        return False
+    normalized_message = " ".join(message.split())
+    expected_message = f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+    return normalized_message == expected_message
+
+
 def classify_upstream_failure(
     *,
     error_code: str,

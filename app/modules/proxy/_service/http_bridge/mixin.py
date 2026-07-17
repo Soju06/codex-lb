@@ -163,8 +163,10 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_precreated_replay_fallback,
     _copy_websocket_route_metadata_to_session,
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeOwnerForward,
@@ -2156,6 +2158,15 @@ class _HTTPBridgeMixin(
         else:
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
+        selected_account_model_replacement = False
+
+        def record_selected_account_takeover(
+            selected_account_id: str | None, preferred_account_id: str | None = session.account.id
+        ) -> None:
+            _record_same_account_takeover(
+                preferred_account_id=preferred_account_id,
+                selected_account_id=selected_account_id,
+            )
 
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
@@ -2167,14 +2178,11 @@ class _HTTPBridgeMixin(
                 session.account_lease = None
             await self._load_balancer.release_account_lease(lease)
 
-        async def release_selected_account_lease_and_reraise_if_hard_close_bound() -> None:
-            if hard_close_account_bound:
-                await release_selected_account_lease()
-                raise
-
         async def abandon_selected_account_retry(selected_account: Any) -> None:
             nonlocal preferred_candidate_id
-            await release_selected_account_lease_and_reraise_if_hard_close_bound()
+            if hard_close_account_bound or selected_account_model_replacement:
+                await release_selected_account_lease()
+                raise
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
@@ -2255,10 +2263,7 @@ class _HTTPBridgeMixin(
                     else:
                         preferred_candidate_id = None
                     continue
-                _record_same_account_takeover(
-                    preferred_account_id=session.account.id,
-                    selected_account_id=None,
-                )
+                record_selected_account_takeover(None)
                 status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
                 raise ProxyResponseError(
                     status_code,
@@ -2271,16 +2276,19 @@ class _HTTPBridgeMixin(
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
                     await self._load_balancer.release_account_lease(selection.lease)
-                _record_same_account_takeover(
-                    preferred_account_id=required_preferred_account_id,
-                    selected_account_id=account.id,
-                )
+                record_selected_account_takeover(account.id, required_preferred_account_id)
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease
                 if reuse_current_account_lease and account.id == session.account.id
                 else selection.lease
             )
+            selected_account_model_replacement = (
+                request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                and account.id != request_state.precreated_replay_account_id
+            )
+            if selected_account_model_replacement:
+                _clear_websocket_precreated_replay_fallback(request_state)
             selected_is_preferred = account.id == session.account.id
             force_refresh = forced_refresh_account_id == account.id
             if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
@@ -2305,10 +2313,7 @@ class _HTTPBridgeMixin(
                     request_state=request_state,
                 )
                 _copy_websocket_route_metadata_to_session(session, request_state)
-                _record_same_account_takeover(
-                    preferred_account_id=session.account.id,
-                    selected_account_id=account.id,
-                )
+                record_selected_account_takeover(account.id)
                 break
             except ProxyResponseError as exc:
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
@@ -2330,10 +2335,7 @@ class _HTTPBridgeMixin(
                         request_state=request_state,
                     )
                     _copy_websocket_route_metadata_to_session(session, request_state)
-                    _record_same_account_takeover(
-                        preferred_account_id=session.account.id,
-                        selected_account_id=account.id,
-                    )
+                    record_selected_account_takeover(account.id)
                     break
                 except ProxyResponseError as retry_exc:
                     if retry_exc.status_code != 401:
@@ -2376,9 +2378,7 @@ class _HTTPBridgeMixin(
         if selected_account_lease is not session.account_lease:
             await self._load_balancer.release_account_lease(session.account_lease)
         session.account_lease = selected_account_lease
-        session.account = account
-        session.headers = connect_headers
-        session.upstream = upstream
+        session.account, session.headers, session.upstream = account, connect_headers, upstream
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
         session.last_upstream_close_code = None

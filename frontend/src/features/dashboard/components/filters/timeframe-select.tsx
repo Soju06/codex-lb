@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   Select,
   SelectContent,
@@ -19,13 +21,15 @@ export type TimeframeSelectProps = {
 };
 
 export function TimeframeSelect({ value, onChange }: TimeframeSelectProps) {
+  const { t } = useTranslation();
+
   return (
     <Select value={value} onValueChange={(next) => { if (isTimeframeValue(next)) onChange(next); }}>
       <SelectTrigger size="sm" className="w-28">
-        <SelectValue placeholder="Timeframe" />
+        <SelectValue placeholder={t("dashboard.filters.timeframe")} />
       </SelectTrigger>
       <SelectContent align="start">
-        <SelectItem value="all">All</SelectItem>
+        <SelectItem value="all">{t("common.time.all")}</SelectItem>
         <SelectItem value="1h">1h</SelectItem>
         <SelectItem value="24h">24h</SelectItem>
         <SelectItem value="7d">7d</SelectItem>

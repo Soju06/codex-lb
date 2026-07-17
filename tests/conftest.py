@@ -299,6 +299,14 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.core.config.settings_cache import get_settings_cache
+
+        settings_cache = get_settings_cache()
+        settings_cache._cached_settings = None
+        settings_cache._cached_at = 0.0
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()

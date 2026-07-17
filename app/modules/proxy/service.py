@@ -578,6 +578,8 @@ from app.modules.proxy._service.support import (
     _StreamSettlement,  # noqa: F401
     _TerminalStreamError,  # noqa: F401
     _TransientStreamError,  # noqa: F401
+    _ttft_event_visible_at,  # noqa: F401
+    _TTFTReasoningDeltaState,  # noqa: F401
     _wait_for_websocket_continuity_gap,  # noqa: F401
     _websocket_full_replay_should_wait_for_continuity,  # noqa: F401
     _websocket_request_can_replay_before_visible_output,  # noqa: F401

@@ -293,11 +293,13 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,
     _event_type_from_payload,
+    _finalize_ttft_latency_ms,
     _RequestLogFailureMetadata,
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
     _TransientStreamError,
+    _ttft_event_latency_ms,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -512,10 +514,9 @@ class _StreamingMixin(_StreamingRetryMixin):
         route: ResolvedUpstreamRoute | None = None
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
-        saw_text_delta = False
-        terminal_event_seen = False
+        saw_text_delta = terminal_event_seen = False
         latency_first_token_ms: int | None = None
-        ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str] = {}
+        ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], Any] = {}
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
@@ -761,10 +762,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
-                    if latency_first_token_ms is None and _facade()._is_ttft_event(
-                        event_type, first_payload, ttft_reasoning_deltas
-                    ):
-                        latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
+                    if latency_first_token_ms is None:
+                        latency_first_token_ms = _ttft_event_latency_ms(
+                            event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
+                        )
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         settlement.downstream_text_visible = True
@@ -930,10 +931,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False
-                if latency_first_token_ms is None and _facade()._is_ttft_event(
-                    event_type, event_payload, ttft_reasoning_deltas
-                ):
-                    latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
+                if latency_first_token_ms is None:
+                    latency_first_token_ms = _ttft_event_latency_ms(
+                        event_type, event_payload, ttft_reasoning_deltas, attempt_started_at
+                    )
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
@@ -1038,8 +1039,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
-            if latency_first_token_ms is None and _facade()._finalize_ttft_reasoning_deltas(ttft_reasoning_deltas):
-                latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
+            if latency_first_token_ms is None:
+                latency_first_token_ms = _finalize_ttft_latency_ms(ttft_reasoning_deltas, attempt_started_at)
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier

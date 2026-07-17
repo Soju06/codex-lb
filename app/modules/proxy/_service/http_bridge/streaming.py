@@ -146,9 +146,9 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
-    _is_ttft_event,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _ttft_event_visible_at,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -2198,12 +2198,14 @@ class _HTTPBridgeStreamingMixin:
                 keepalive_count = 0
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
-                if request_state.latency_first_token_ms is None and _is_ttft_event(
-                    block_event_type, block_payload, request_state.ttft_reasoning_deltas
-                ):
-                    request_state.latency_first_token_ms = int(
-                        (_service_time().monotonic() - request_state.started_at) * 1000
+                if request_state.latency_first_token_ms is None:
+                    ttft_visible_at = _ttft_event_visible_at(
+                        block_event_type, block_payload, request_state.ttft_reasoning_deltas
                     )
+                    if ttft_visible_at is not None:
+                        request_state.latency_first_token_ms = max(
+                            0, int((ttft_visible_at - request_state.started_at) * 1000)
+                        )
                 if not propagate_http_errors and _is_previous_response_not_found_error(
                     code=_normalize_error_code(
                         _websocket_event_error_code(block_event_type, block_payload),

@@ -120,19 +120,43 @@ def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> b
     return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
 
 
+@dataclass(slots=True)
+class _TTFTReasoningDeltaState:
+    text: str
+    visible_at: float | None = None
+
+
+def _visible_reasoning_prefix_before_blank_comment_candidate(text: str) -> str:
+    if "\n" not in text:
+        return ""
+    prefix, _candidate = text.rsplit("\n", 1)
+    return _strip_blank_html_comment_lines(prefix).strip()
+
+
 def _finalize_ttft_reasoning_deltas(
-    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str],
-) -> bool:
-    visible = any(_strip_blank_html_comment_lines(text) for text in pending_reasoning_deltas.values())
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+) -> float | None:
+    visible_at_values: list[float] = []
+    now: float | None = None
+    for pending in pending_reasoning_deltas.values():
+        if not _strip_blank_html_comment_lines(pending.text):
+            continue
+        if pending.visible_at is not None:
+            visible_at_values.append(pending.visible_at)
+            continue
+        if now is None:
+            now = time.monotonic()
+        visible_at_values.append(now)
     pending_reasoning_deltas.clear()
-    return visible
+    return min(visible_at_values) if visible_at_values else None
 
 
-def _is_ttft_event(
+def _ttft_event_visible_at(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
-    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str] | None = None,
-) -> bool:
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+) -> float | None:
+    now = time.monotonic()
     pending = pending_reasoning_deltas if pending_reasoning_deltas is not None else {}
     event_key = _reasoning_summary_delta_key(payload) if payload is not None else (None, None, None)
     if (
@@ -140,33 +164,72 @@ def _is_ttft_event(
         and not _is_reasoning_summary_interleavable_event(event_type)
         and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
     ):
-        if _finalize_ttft_reasoning_deltas(pending):
-            return True
+        visible_at = _finalize_ttft_reasoning_deltas(pending)
+        if visible_at is not None:
+            return visible_at
     if event_type == "response.reasoning_summary_text.delta":
         delta = payload.get("delta") if payload is not None else None
         if not isinstance(delta, str):
-            return False
-        combined = pending.pop(event_key, "") + delta
+            return None
+        previous = pending.pop(event_key, None)
+        combined = (previous.text if previous is not None else "") + delta
         cleaned = _strip_blank_html_comment_lines(combined)
         if cleaned != combined:
-            return bool(cleaned)
+            return previous.visible_at if previous is not None and previous.visible_at is not None else now
         if _could_be_blank_html_comment_line(combined):
-            pending[event_key] = combined
-            return False
-        return bool(combined)
+            visible_at = None if previous is None else previous.visible_at
+            if visible_at is None and _visible_reasoning_prefix_before_blank_comment_candidate(combined):
+                visible_at = now
+            pending[event_key] = _TTFTReasoningDeltaState(combined, visible_at=visible_at)
+            return None
+        return now if combined else None
     if event_type == "response.reasoning_summary_text.done" and event_key in pending:
-        return bool(_strip_blank_html_comment_lines(pending.pop(event_key)))
+        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)})
+        return visible_at
     if event_type in _TTFT_TOOL_DELTA_EVENT_TYPES:
         if payload is None:
-            return False
-        return any(isinstance(payload.get(key), str) and bool(payload[key]) for key in ("delta", "arguments"))
+            return None
+        has_visible_part = any(
+            isinstance(payload.get(key), str) and bool(payload[key]) for key in ("delta", "arguments")
+        )
+        return now if has_visible_part else None
     if event_type in _TTFT_EVENT_TYPES:
         delta = payload.get("delta") if payload is not None else None
-        return isinstance(delta, str) and bool(delta)
+        return now if isinstance(delta, str) and bool(delta) else None
     if event_type != "response.output_item.added" or not isinstance(payload, dict):
-        return False
+        return None
     item = payload.get("item")
-    return isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES
+    return now if isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES else None
+
+
+def _is_ttft_event(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+) -> bool:
+    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas) is not None
+
+
+def _ttft_latency_ms_from_visible_at(visible_at: float | None, started_at: float) -> int | None:
+    return None if visible_at is None else max(0, int((visible_at - started_at) * 1000))
+
+
+def _ttft_event_latency_ms(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    started_at: float,
+) -> int | None:
+    return _ttft_latency_ms_from_visible_at(
+        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas), started_at
+    )
+
+
+def _finalize_ttft_latency_ms(
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    started_at: float,
+) -> int | None:
+    return _ttft_latency_ms_from_visible_at(_finalize_ttft_reasoning_deltas(pending_reasoning_deltas), started_at)
 
 
 def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
@@ -621,7 +684,9 @@ class _WebSocketRequestState:
     started_at: float
     responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
-    ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str] = field(default_factory=dict)
+    ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] = field(
+        default_factory=dict
+    )
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None

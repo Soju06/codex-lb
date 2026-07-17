@@ -3541,10 +3541,14 @@ class _WebSocketMixin:
                     request_state.latency_first_upstream_event_ms = elapsed_ms
                 if event_type == "response.created" and request_state.latency_response_created_ms is None:
                     request_state.latency_response_created_ms = elapsed_ms
-                if request_state.latency_first_token_ms is None and _facade()._is_ttft_event(
-                    event_type, payload, request_state.ttft_reasoning_deltas
-                ):
-                    request_state.latency_first_token_ms = elapsed_ms
+                if request_state.latency_first_token_ms is None:
+                    ttft_visible_at = _facade()._ttft_event_visible_at(
+                        event_type, payload, request_state.ttft_reasoning_deltas
+                    )
+                    if ttft_visible_at is not None:
+                        request_state.latency_first_token_ms = max(
+                            0, int((ttft_visible_at - request_state.started_at) * 1000)
+                        )
                 actual_service_tier = _facade()._service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
@@ -4187,10 +4191,10 @@ class _WebSocketMixin:
             request_state.api_key_reservation = None
             return
 
-        if request_state.latency_first_token_ms is None and _finalize_ttft_reasoning_deltas(
-            request_state.ttft_reasoning_deltas
-        ):
-            request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
+        if request_state.latency_first_token_ms is None:
+            ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+            if ttft_visible_at is not None:
+                request_state.latency_first_token_ms = max(0, int((ttft_visible_at - request_state.started_at) * 1000))
 
         if event_type == "error":
             error = event.error if event else None
@@ -4604,10 +4608,12 @@ class _WebSocketMixin:
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
-            if request_state.latency_first_token_ms is None and _finalize_ttft_reasoning_deltas(
-                request_state.ttft_reasoning_deltas
-            ):
-                request_state.latency_first_token_ms = latency_ms
+            if request_state.latency_first_token_ms is None:
+                ttft_visible_at = _finalize_ttft_reasoning_deltas(request_state.ttft_reasoning_deltas)
+                if ttft_visible_at is not None:
+                    request_state.latency_first_token_ms = max(
+                        0, int((ttft_visible_at - request_state.started_at) * 1000)
+                    )
             await proxy._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,

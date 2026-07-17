@@ -242,6 +242,29 @@ async def test_stream_responses_ttft_counts_reasoning_delta_as_first_token(monke
     assert latency_first_token_ms < 40
 
 
+def test_ttft_reasoning_finalizer_uses_visible_prefix_arrival_time() -> None:
+    pending: dict[
+        tuple[str | None, int | None, int | None],
+        proxy_service._TTFTReasoningDeltaState,
+    ] = {}
+    started_at = time.monotonic()
+
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.reasoning_summary_text.delta",
+            {"type": "response.reasoning_summary_text.delta", "delta": "Plan\n\n<!"},
+            pending,
+        )
+        is None
+    )
+    time.sleep(0.03)
+
+    visible_at = proxy_service._finalize_ttft_reasoning_deltas(pending)
+
+    assert visible_at is not None
+    assert int((visible_at - started_at) * 1000) < 20
+
+
 @pytest.mark.asyncio
 async def test_stream_responses_pre_attempt_wait_lands_in_queue_not_ttft(monkeypatch) -> None:
     settings = _make_proxy_settings()
@@ -392,4 +415,4 @@ async def test_stream_responses_ttft_flushes_visible_reasoning_at_eof(monkeypatc
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
     assert len(chunks) == 11
-    assert latency_first_token_ms >= 20
+    assert latency_first_token_ms < 20

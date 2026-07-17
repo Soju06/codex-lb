@@ -10728,6 +10728,71 @@ async def test_stream_with_retry_preserves_account_model_rejection_without_repla
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_persists_security_lineage_on_final_retryable_denial(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_stream_security_final")
+    mark_security_lineage = AsyncMock()
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=regular_account, error_message=None)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        raise proxy_service._RetryableStreamError(
+            proxy_service._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+            {"message": cyber_message},
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-stream-security-final"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"]["code"] == proxy_service._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE
+    mark_security_lineage.assert_awaited_once_with(
+        "sid-stream-security-final",
+        account_id=regular_account.id,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replacement_failure_kind", "expected_status", "expected_code"),
     [
@@ -14411,6 +14476,54 @@ async def test_compact_responses_does_not_fallback_to_ordinary_pool_after_securi
         response=None,
         request_service_tier=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_persists_security_lineage_on_final_denial(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_compact_security_final")
+    select_account = AsyncMock(return_value=AccountSelection(account=regular_account, error_message=None))
+    mark_security_lineage = AsyncMock()
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_COMPACT_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            400,
+            openai_error(
+                "invalid_request_error",
+                cyber_message,
+                error_type="invalid_request_error",
+            ),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await service.compact_responses(payload, {"session_id": "sid-compact-final"})
+
+    mark_security_lineage.assert_awaited_once_with(
+        "sid-compact-final",
+        account_id=regular_account.id,
+    )
+    assert select_account.await_count == 1
 
 
 @pytest.mark.asyncio

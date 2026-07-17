@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 
 import pytest
@@ -1175,6 +1176,78 @@ async def test_oauth_flow_states_migration_upgrade_and_downgrade(tmp_path):
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         assert await _has_flow_table(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_detach_migration_backfills_legacy_markers(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'security-lineage-detach.sqlite'}"
+    parent_revision = "20260711_020000_add_sticky_session_security_lineage"
+    detach_revision = "20260711_030000_detach_security_lineage_markers"
+    security_lineage_id = "legacy-root-security-session"
+    marker_key = f"@security-work/v2/{hashlib.sha256(security_lineage_id.encode('utf-8')).hexdigest()}"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (
+                        key,
+                        kind,
+                        account_id,
+                        requires_security_work_authorized,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :key,
+                        'codex_session',
+                        'acc_legacy_security',
+                        1,
+                        '2026-01-01 00:00:00',
+                        '2026-01-01 00:00:00'
+                    )
+                    """
+                ),
+                {"key": security_lineage_id},
+            )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, detach_revision, bootstrap_legacy=False))
+
+        async with engine.connect() as conn:
+            marker = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT account_id, requires_security_work_authorized
+                        FROM sticky_sessions
+                        WHERE key = :marker_key
+                          AND kind = 'codex_session'
+                        """
+                    ),
+                    {"marker_key": marker_key},
+                )
+            ).one()
+            legacy_row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT account_id, requires_security_work_authorized
+                        FROM sticky_sessions
+                        WHERE key = :key
+                          AND kind = 'codex_session'
+                        """
+                    ),
+                    {"key": security_lineage_id},
+                )
+            ).one()
+
+        assert marker == (None, True)
+        assert legacy_row == ("acc_legacy_security", True)
     finally:
         await engine.dispose()
 

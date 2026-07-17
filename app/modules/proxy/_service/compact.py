@@ -1375,16 +1375,20 @@ class _CompactMixin:
                             safe_retry_budget -= 1
                             continue
                         if _is_security_work_authorization_required_error(code, error_message):
-                            if (
+                            can_persist_security_lineage = (
                                 not account.security_work_authorized
-                                and account.id != preferred_account_id
                                 and not request_contains_input_file_ids
-                                and _account_attempt < _compact_max_account_attempts() - 1
-                            ):
+                            )
+                            if can_persist_security_lineage:
                                 await proxy._mark_security_lineage_requirement(
                                     security_lineage_id,
                                     account_id=account.id,
                                 )
+                            if (
+                                can_persist_security_lineage
+                                and account.id != preferred_account_id
+                                and _account_attempt < _compact_max_account_attempts() - 1
+                            ):
                                 last_exc = exc
                                 excluded_account_ids.add(account.id)
                                 require_security_work_authorized = True

@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 
+import aiohttp
 import pytest
 
 import app.modules.proxy.service as proxy_module
@@ -123,7 +124,7 @@ def _model_capacity_sse_event() -> str:
             "type": "response.failed",
             "response": {
                 "error": {
-                    "code": "server_error",
+                    "code": "invalid_request_error",
                     "message": "Selected model is at capacity. Please try a different model.",
                 },
             },
@@ -333,6 +334,85 @@ async def test_stream_previsible_upstream_close_sleeps_and_retries_same_account(
     assert [event for event in events if event.get("type") == "response.failed"] == []
     assert seen_account_ids == ["acc_previsible_close_retry", "acc_previsible_close_retry"]
     assert sleeps
+
+
+@pytest.mark.asyncio
+async def test_stream_previsible_client_error_exhaustion_surfaces_upstream_unavailable(async_client, monkeypatch):
+    """If every account disconnects before first output, surface the upstream failure, not no_accounts."""
+    await _import_account(async_client, "acc_previsible_disconnect_a", "previsible-disconnect-a@example.com")
+    await _import_account(async_client, "acc_previsible_disconnect_b", "previsible-disconnect-b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if False:
+            yield ""
+        raise aiohttp.ServerDisconnectedError("Server disconnected")
+
+    async def fake_sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    error_codes = [event["response"]["error"]["code"] for event in events if event.get("type") == "response.failed"]
+    assert error_codes[-1] == "upstream_unavailable"
+    assert "no_accounts" not in error_codes
+    assert len(set(seen_account_ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_pinned_previsible_close_exhaustion_surfaces_stream_incomplete(async_client, monkeypatch):
+    """Pinned previous-response EOF cannot fail over, so preserve the stream failure for the client."""
+    upstream_account_id = "acc_pinned_previsible_close"
+    owner_account_id = await _import_account(
+        async_client,
+        upstream_account_id,
+        "pinned-previsible-close@example.com",
+    )
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if False:
+            yield ""
+        return
+
+    async def fake_sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "previous_response_id": "resp_pinned_previsible_close",
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    error_codes = [event["response"]["error"]["code"] for event in events if event.get("type") == "response.failed"]
+    assert error_codes[-1] == "stream_incomplete"
+    assert "previous_response_owner_unavailable" not in error_codes
+    assert set(seen_account_ids) == {upstream_account_id}
 
 
 @pytest.mark.asyncio

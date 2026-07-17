@@ -1,4 +1,5 @@
 import { Plus, Upload } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import {
   Dialog,
@@ -17,6 +18,7 @@ export type AddAccountDialogProps = {
 };
 
 export function AddAccountDialog({ open, onOpenChange, onImport, onAddAccount }: AddAccountDialogProps) {
+  const { t } = useTranslation();
   // Close the chooser first, then defer the action to the next frame. Opening a
   // second modal Dialog in the same tick the chooser closes can leave Radix's
   // `pointer-events: none` stuck on <body>, making the next dialog uninteractive.
@@ -29,8 +31,8 @@ export function AddAccountDialog({ open, onOpenChange, onImport, onAddAccount }:
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add account</DialogTitle>
-          <DialogDescription>Choose how you want to add a ChatGPT account.</DialogDescription>
+          <DialogTitle>{t("accounts.addDialog.title")}</DialogTitle>
+          <DialogDescription>{t("accounts.addDialog.description")}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-2">
@@ -46,9 +48,9 @@ export function AddAccountDialog({ open, onOpenChange, onImport, onAddAccount }:
               <Plus className="h-4 w-4 text-muted-foreground" />
             </span>
             <span className="min-w-0">
-              <span className="block text-sm font-medium">Add account</span>
+              <span className="block text-sm font-medium">{t("accounts.addDialog.oauthTitle")}</span>
               <span className="mt-0.5 block text-xs text-muted-foreground">
-                Sign in with OAuth (browser or device code)
+                {t("accounts.addDialog.oauthDescription")}
               </span>
             </span>
           </button>
@@ -65,9 +67,9 @@ export function AddAccountDialog({ open, onOpenChange, onImport, onAddAccount }:
               <Upload className="h-4 w-4 text-muted-foreground" />
             </span>
             <span className="min-w-0">
-              <span className="block text-sm font-medium">Import</span>
+              <span className="block text-sm font-medium">{t("common.actions.import")}</span>
               <span className="mt-0.5 block text-xs text-muted-foreground">
-                Import an exported auth.json file
+                {t("accounts.addDialog.importDescription")}
               </span>
             </span>
           </button>

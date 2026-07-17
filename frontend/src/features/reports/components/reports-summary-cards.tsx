@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { cn } from "@/lib/utils";
 
 import type { ReportComparison, ReportSummary } from "../schemas";
@@ -13,17 +15,24 @@ export type ReportsSummaryCardsProps = {
 };
 
 export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCardsProps) {
+  const { t } = useTranslation();
   const cards = [
     {
-      label: "Total Cost",
+      id: "total-cost",
+      label: t("reports.summary.totalCost"),
       value: `$${summary.totalCostUsd.toFixed(2)}`,
-      sub: `avg $${summary.avgCostPerDay.toFixed(2)}/day`,
+      sub: t("reports.summary.avgCostPerDay", { cost: `$${summary.avgCostPerDay.toFixed(2)}` }),
       comparison: buildComparison(summary.totalCostUsd, comparison.previous.totalCostUsd, comparison.canCompare),
     },
     {
-      label: "Tokens",
+      id: "tokens",
+      label: t("reports.summary.tokens"),
       value: formatNumber(summary.totalInputTokens + summary.totalOutputTokens),
-      sub: `Input ${formatNumber(summary.totalInputTokens)} · Cache ${formatNumber(summary.totalCachedTokens)} · Output ${formatNumber(summary.totalOutputTokens)}`,
+      sub: t("reports.summary.tokensSub", {
+        input: formatNumber(summary.totalInputTokens),
+        cache: formatNumber(summary.totalCachedTokens),
+        output: formatNumber(summary.totalOutputTokens),
+      }),
       comparison: buildComparison(
         summary.totalInputTokens + summary.totalOutputTokens,
         comparison.previous.totalTokens,
@@ -31,9 +40,13 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       ),
     },
     {
-      label: "Requests",
+      id: "requests",
+      label: t("reports.summary.requests"),
       value: formatNumber(summary.totalRequests),
-      sub: `avg ${summary.avgRequestsPerDay.toFixed(0)}/day · ${summary.activeAccounts} accounts`,
+      sub: t("reports.summary.requestsSub", {
+        requests: summary.avgRequestsPerDay.toFixed(0),
+        accounts: summary.activeAccounts,
+      }),
       comparison: buildComparison(summary.totalRequests, comparison.previous.totalRequests, comparison.canCompare),
     },
   ];
@@ -42,8 +55,8 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       {cards.map((card) => (
         <div
-          key={card.label}
-          data-testid={`report-summary-card-${card.label}`}
+          key={card.id}
+          data-testid={`report-summary-card-${card.id}`}
           className="rounded-xl border bg-card p-4"
         >
           <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">

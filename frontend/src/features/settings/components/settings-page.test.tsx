@@ -18,6 +18,7 @@ const firewallSectionMock = vi.fn();
 const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
+const dataRetentionSettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
@@ -66,6 +67,13 @@ vi.mock("@/features/settings/components/password-settings", () => ({
 
 vi.mock("@/features/settings/components/session-settings", () => ({
   SessionSettings: () => <div>Session Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/data-retention-settings", () => ({
+  DataRetentionSettings: (props: unknown) => {
+    dataRetentionSettingsMock(props);
+    return <div>Data Retention Settings</div>;
+  },
 }));
 
 vi.mock("@/features/api-keys/components/api-keys-section", () => ({
@@ -153,6 +161,7 @@ describe("SettingsPage", () => {
     quotaPlannerSectionMock.mockReset();
     stickySessionsSectionMock.mockReset();
     modelSourcesSettingsMock.mockReset();
+    dataRetentionSettingsMock.mockReset();
   });
 
   async function expandAdvancedSettings() {
@@ -170,12 +179,14 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Firewall Section")).not.toBeInTheDocument();
     expect(screen.queryByText("Quota Planner Section")).not.toBeInTheDocument();
     expect(screen.queryByText("Sticky Sessions Section")).not.toBeInTheDocument();
+    expect(screen.queryByText("Data Retention Settings")).not.toBeInTheDocument();
     expect(routingSettingsMock).not.toHaveBeenCalled();
     expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
     expect(modelSourcesSettingsMock).not.toHaveBeenCalled();
     expect(firewallSectionMock).not.toHaveBeenCalled();
     expect(quotaPlannerSectionMock).not.toHaveBeenCalled();
     expect(stickySessionsSectionMock).not.toHaveBeenCalled();
+    expect(dataRetentionSettingsMock).not.toHaveBeenCalled();
 
     // Core sections stay visible without any interaction.
     expect(screen.getByText("Appearance Settings")).toBeInTheDocument();
@@ -194,6 +205,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Firewall Section")).toBeInTheDocument();
     expect(screen.getByText("Quota Planner Section")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
+    expect(screen.getByText("Data Retention Settings")).toBeInTheDocument();
   });
 
   it("disables write-capable sections for read-only guests", async () => {
@@ -215,6 +227,7 @@ describe("SettingsPage", () => {
     expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
   });
 
   it("keeps guest access settings available for writable sessions", async () => {

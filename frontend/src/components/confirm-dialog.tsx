@@ -8,6 +8,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import i18n from "@/i18n";
 
 export type ConfirmDialogProps = {
   open: boolean;
@@ -26,10 +27,10 @@ export function ConfirmDialog({
   open,
   title,
   description,
-  confirmLabel = "Confirm",
+  confirmLabel = i18n.t("common.confirm"),
   confirmDisabled = false,
   keepOpenOnConfirm = false,
-  cancelLabel = "Cancel",
+  cancelLabel = i18n.t("common.cancel"),
   onConfirm,
   onOpenChange,
   children,

@@ -60,6 +60,7 @@ _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
     default=None,
@@ -534,8 +535,6 @@ class _WebSocketRequestState:
     bridge_request_deadline: float | None = None
     prewarm_status: str | None = None
     prewarm_latency_ms: int | None = None
-    prewarm_canary_bucket: str | None = None
-    prewarm_eligible_reason: str | None = None
     session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
     archive_request_id: str | None = None
@@ -548,6 +547,7 @@ class _WebSocketRequestState:
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
     request_kind: str = "normal"
+    generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -556,6 +556,12 @@ class _WebSocketRequestState:
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
+    # A narrowly classified pre-acceptance account/model rejection may move
+    # once to another account. Keep the original upstream error until that
+    # replacement connection is established so an empty replacement pool does
+    # not turn the upstream 400 into a proxy-generated 5xx/no-accounts error.
+    precreated_replay_reason: str | None = None
+    precreated_replay_account_id: str | None = None
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
@@ -801,6 +807,14 @@ def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestSta
     request_state.error_http_status_override = None
 
 
+def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequestState) -> None:
+    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        return
+    request_state.precreated_replay_reason = None
+    request_state.precreated_replay_account_id = None
+    _clear_websocket_request_error_overrides(request_state)
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
@@ -814,7 +828,15 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         return False
     if request_state.replay_count >= 1:
         return False
-    if request_state.last_downstream_sequence_number is not None:
+    sequenced_created_only_prewarm = (
+        request_state.generate_false_prewarm
+        and request_state.last_downstream_sequence_number == 0
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.response_event_count == 1
+        and not request_state.downstream_visible
+    )
+    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:
         return False

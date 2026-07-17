@@ -1,5 +1,6 @@
 import { Trash2 } from "lucide-react";
 import { useId } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,6 +54,7 @@ export type LimitRuleCardProps = {
 };
 
 export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) {
+  const { t } = useTranslation();
   const fieldId = useId();
   const isCost = rule.limitType === "cost_usd";
   const isCredits = rule.limitType === "credits";
@@ -101,7 +103,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium text-muted-foreground">Limit rule</span>
+        <span className="text-xs font-medium text-muted-foreground">{t("apiKeys.limitRule.title")}</span>
         <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
           <Trash2 className="size-3.5" />
         </Button>
@@ -109,7 +111,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
 
       <div className="grid grid-cols-2 gap-2">
         <div>
-          <label htmlFor={`${fieldId}-type`} className="text-xs text-muted-foreground">Type</label>
+          <label htmlFor={`${fieldId}-type`} className="text-xs text-muted-foreground">{t("apiKeys.limitRule.type")}</label>
           <Select value={rule.limitType} onValueChange={handleLimitTypeChange}>
             <SelectTrigger id={`${fieldId}-type`} className="h-8 text-xs">
               <SelectValue />
@@ -117,7 +119,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
             <SelectContent>
               {LIMIT_TYPES.map((k) => (
                 <SelectItem key={k} value={k}>
-                  {LIMIT_TYPE_LABELS[k]}
+                  {t(`apiKeys.limitTypes.${k}`, { defaultValue: LIMIT_TYPE_LABELS[k] })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -125,7 +127,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
         </div>
 
         <div>
-          <label htmlFor={`${fieldId}-window`} className="text-xs text-muted-foreground">Window</label>
+          <label htmlFor={`${fieldId}-window`} className="text-xs text-muted-foreground">{t("apiKeys.limitRule.window")}</label>
           <Select value={rule.limitWindow} onValueChange={handleWindowChange}>
             <SelectTrigger id={`${fieldId}-window`} className="h-8 text-xs">
               <SelectValue />
@@ -133,7 +135,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
             <SelectContent>
               {LIMIT_WINDOWS.map((k) => (
                 <SelectItem key={k} value={k}>
-                  {WINDOW_LABELS[k]}
+                  {t(`apiKeys.limitWindows.${k}`, { defaultValue: WINDOW_LABELS[k] })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -143,7 +145,11 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
 
       <div>
         <label htmlFor={`${fieldId}-max-value`} className="text-xs text-muted-foreground">
-          {isCost ? "Max value (USD)" : isCredits ? "Max value (credits)" : "Max value (tokens)"}
+          {isCost
+            ? t("apiKeys.limitRule.maxValueUsd")
+            : isCredits
+              ? t("apiKeys.limitRule.maxValueCredits")
+              : t("apiKeys.limitRule.maxValueTokens")}
         </label>
         <Input
           id={`${fieldId}-max-value`}
@@ -157,14 +163,14 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
       </div>
 
       <div>
-        <p className="text-xs text-muted-foreground">Model filter</p>
+        <p className="text-xs text-muted-foreground">{t("apiKeys.limitRule.modelFilter")}</p>
         <ModelMultiSelect
           value={modelFilterArray}
           onChange={(models) => {
             if (isCredits) return;
             onChange({ ...rule, modelFilter: models[0] || null });
           }}
-          placeholder={isCredits ? "Credits limits apply globally" : "All models"}
+          placeholder={isCredits ? t("apiKeys.limitRule.creditsGlobal") : t("apiKeys.modelSelect.all")}
         />
       </div>
     </div>

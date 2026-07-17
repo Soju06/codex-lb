@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.api_keys.service import PooledCreditData, _compute_pooled_credits
 
@@ -40,7 +40,7 @@ def _make_usage(
         recorded_at=now,
         window=window,
         used_percent=used_percent,
-        reset_at=int(now.timestamp()) + window_minutes * 60,
+        reset_at=naive_utc_to_epoch(now) + window_minutes * 60,
         window_minutes=window_minutes,
     )
 

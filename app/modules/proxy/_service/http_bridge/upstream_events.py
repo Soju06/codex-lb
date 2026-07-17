@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -27,8 +27,10 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage, UpstreamWebSocketTransportError
+from app.core.errors import response_failed_event
 from app.core.openai.parsing import parse_sse_event_payload
+from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
@@ -101,8 +103,10 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_precreated_replay_fallback,
     _event_type_from_payload,
     _HTTPBridgeSession,
     _record_response_event,
@@ -214,6 +218,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         *,
         error_code: str,
         error_message: str,
+        penalize_account: bool = True,
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
@@ -233,6 +238,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 error_message=error_message,
                 api_key=None,
                 response_create_gate=session.response_create_gate,
+                penalize_account=penalize_account,
             )
         finally:
             if session.admission_waiter_count > 0:
@@ -304,30 +310,42 @@ class _HTTPBridgeUpstreamEventsMixin:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
-                retried = await self._retry_http_bridge_precreated_request(session)
+                retried = False
+                # A process-network receive failure follows a successful send;
+                # replay is not safe merely because output is not visible.
+                if message.error_code != "proxy_network_unavailable":
+                    retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 async with session.lifecycle_lock:
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
-                        error_code="stream_incomplete",
+                        error_code=message.error_code or "stream_incomplete",
                         error_message=_upstream_websocket_disconnect_message(message),
+                        penalize_account=message.error_code != "proxy_network_unavailable",
                     )
                 break
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "HTTP bridge upstream reader crashed account_id=%s bridge_kind=%s",
                 session.account.id,
                 session.key.affinity_kind,
                 exc_info=True,
             )
+            error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
+            account_neutral = error_code == "proxy_network_unavailable"
             async with session.lifecycle_lock:
                 await self._fail_http_bridge_reader_and_maybe_retire(
                     session,
-                    error_code="stream_incomplete",
-                    error_message="HTTP bridge upstream reader crashed before response.completed",
+                    error_code=error_code,
+                    error_message=(
+                        str(exc)
+                        if isinstance(exc, UpstreamWebSocketTransportError)
+                        else "HTTP bridge upstream reader crashed before response.completed"
+                    ),
+                    penalize_account=not account_neutral,
                 )
         finally:
             if session.upstream is relay_upstream:
@@ -747,7 +765,74 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                     )
                     event_block = f"data: {rewritten_text}\n\n"
-        elif retry_error_code is not None and not is_previous_response_not_found_event:
+        elif (
+            retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            and not is_previous_response_not_found_event
+            and status_request_state is not None
+            and _websocket_auth_request_can_switch_account(status_request_state)
+        ):
+            rejected_account_id = session.account.id
+            status_request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            status_request_state.precreated_replay_account_id = rejected_account_id
+            previous_upstream_turn_state = session.upstream_turn_state
+            previous_downstream_turn_state = session.downstream_turn_state
+            previous_headers = session.headers
+            await self._release_request_state_account_response_create_lease(status_request_state)
+            async with session.pending_lock:
+                if status_request_state not in session.pending_requests:
+                    session.pending_requests.appendleft(status_request_state)
+                    session.queued_request_count += 1
+                status_request_state.awaiting_response_created = True
+                status_request_state.response_id = None
+            retried = await self._retry_http_bridge_precreated_request(session)
+            if retried:
+                logger.info(
+                    "Retried HTTP bridge request after account/model rejection "
+                    "request_id=%s rejected_account_id=%s model=%s",
+                    status_request_state.request_log_id or status_request_state.request_id,
+                    rejected_account_id,
+                    status_request_state.model,
+                )
+                return
+            replacement_session_selected = session.account.id != rejected_account_id
+            if not replacement_session_selected:
+                session.upstream_turn_state = previous_upstream_turn_state
+                session.downstream_turn_state = previous_downstream_turn_state
+                session.headers = previous_headers
+            async with session.pending_lock:
+                if status_request_state in session.pending_requests:
+                    session.pending_requests.remove(status_request_state)
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+            if replacement_session_selected:
+                # Reconnect may have committed the session to a replacement
+                # account before its replacement lease or send failed.  Never
+                # graft the rejected account's turn metadata back onto that
+                # socket; retire the now-unused replacement session instead.
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                await self._retire_http_bridge_after_drain_if_ready(session)
+                payload = cast(
+                    dict[str, JsonValue],
+                    dict(
+                        response_failed_event(
+                            status_request_state.error_code_override or "upstream_unavailable",
+                            status_request_state.error_message_override or "HTTP bridge replacement retry failed",
+                            error_type=status_request_state.error_type_override or "server_error",
+                            response_id=status_request_state.request_id,
+                            error_param=status_request_state.error_param_override,
+                        )
+                    ),
+                )
+                event_block = format_sse_event(payload)
+                event = parse_sse_event_payload(payload)
+                event_type = "response.failed"
+            if status_request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+                _clear_websocket_precreated_replay_fallback(status_request_state)
+        elif (
+            retry_error_code is not None
+            and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            and not is_previous_response_not_found_event
+        ):
             await self._handle_stream_error(
                 session.account,
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
@@ -815,7 +900,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         settlement_event_type = event_type
         if event_type == "error" and normalize_error_event:
             http_status = _http_error_status_from_payload(payload)
-            if status_request_state is not None:
+            if status_request_state is not None and status_request_state.error_http_status_override is None:
                 status_request_state.error_http_status_override = http_status
             (
                 event_block,
@@ -832,7 +917,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             settlement_event_type = event_type
         elif event_type == "error":
             http_status = _http_error_status_from_payload(payload)
-            if status_request_state is not None:
+            if status_request_state is not None and status_request_state.error_http_status_override is None:
                 status_request_state.error_http_status_override = http_status
             (
                 _settlement_event_block,

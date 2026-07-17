@@ -1,4 +1,5 @@
 import { Flame, Shield, ShieldCheck } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -35,6 +36,7 @@ export function AccountListItem({
   showResetCreditBadge = true,
   onSelect,
 }: AccountListItemProps) {
+  const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const status = normalizeStatus(account.status);
@@ -43,7 +45,7 @@ export function AccountListItem({
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || t("accounts.detail.unknownWorkspace");
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
   const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
@@ -70,10 +72,10 @@ export function AccountListItem({
     !monthlyOnly && hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
   const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow) + Number(showMonthlyRow);
   const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
-  const warmupLabel = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
+  const warmupLabel = account.limitWarmupEnabled ? t("accounts.listItem.warmupOn") : t("accounts.listItem.warmupOff");
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
-    : "No attempts";
+    : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
 
@@ -100,7 +102,7 @@ export function AccountListItem({
               title
             )}
           </p>
-          <p className="truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
+          <p className="truncate text-xs text-muted-foreground" title={showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined}>
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
           </p>
         </div>
@@ -112,7 +114,7 @@ export function AccountListItem({
         {account.securityWorkAuthorized === true ? (
           <ShieldCheck
             className="h-3.5 w-3.5 text-emerald-600"
-            aria-label="Trusted Access for Cyber"
+            aria-label={t("accounts.actions.trustedAccess")}
           />
         ) : null}
         <StatusBadge status={status} />
@@ -125,7 +127,7 @@ export function AccountListItem({
       >
         {showMonthlyRow ? (
           <MiniQuotaRow
-            label="Monthly"
+            label={t("common.quota.monthly")}
             percent={monthly}
             resetAt={account.resetAtMonthly}
           />
@@ -139,7 +141,7 @@ export function AccountListItem({
         ) : null}
         {showSecondaryRow ? (
           <MiniQuotaRow
-            label="Weekly"
+            label={t("common.quota.weekly")}
             percent={secondary}
             resetAt={account.resetAtSecondary}
           />
@@ -158,6 +160,7 @@ function RoutingPolicyBadge({
 }: {
   policy: AccountRoutingPolicy | undefined;
 }) {
+  const { t } = useTranslation();
   if (policy === "burn_first") {
     return (
       <Badge
@@ -165,7 +168,7 @@ function RoutingPolicyBadge({
         className="shrink-0 gap-1 border-amber-300 bg-amber-50 px-1.5 text-[11px] text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
       >
         <Flame className="h-3 w-3" aria-hidden="true" />
-        Burn first
+        {t("common.routingPolicies.burnFirst")}
       </Badge>
     );
   }
@@ -176,7 +179,7 @@ function RoutingPolicyBadge({
         className="shrink-0 gap-1 border-sky-300 bg-sky-50 px-1.5 text-[11px] text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300"
       >
         <Shield className="h-3 w-3" aria-hidden="true" />
-        Preserve
+        {t("common.routingPolicies.preserve")}
       </Badge>
     );
   }
@@ -185,7 +188,7 @@ function RoutingPolicyBadge({
       variant="outline"
       className="shrink-0 px-1.5 text-[11px] text-muted-foreground"
     >
-      Normal
+      {t("common.routingPolicies.normal")}
     </Badge>
   );
 }
@@ -199,6 +202,7 @@ function MiniQuotaRow({
   percent: number | null;
   resetAt: string | null | undefined;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[11px]">
@@ -208,18 +212,18 @@ function MiniQuotaRow({
         </span>
       </div>
       <MiniQuotaBar
-        aria-label={`${label} credits remaining`}
+        aria-label={t("accounts.listItem.quotaRemainingAria", { label })}
         percent={percent}
         testId={`mini-quota-track-${label.toLowerCase()}`}
       />
       <div className="text-[10px] text-muted-foreground">
-        {formatMiniQuotaResetLabel(resetAt ?? null)}
+        {formatMiniQuotaResetLabel(resetAt ?? null, t)}
       </div>
     </div>
   );
 }
 
-function formatMiniQuotaResetLabel(resetAt: string | null): string {
+function formatMiniQuotaResetLabel(resetAt: string | null, t: ReturnType<typeof useTranslation>["t"]): string {
   const label = formatQuotaResetLabel(resetAt);
-  return label.startsWith("Reset ") ? label : `Reset ${label}`;
+  return label.startsWith("Reset ") ? label : t("accounts.listItem.resetAt", { label });
 }

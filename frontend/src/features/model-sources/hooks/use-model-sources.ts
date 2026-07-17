@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import {
@@ -13,6 +14,7 @@ import type {
 } from "@/features/model-sources/schemas";
 
 export function useModelSources() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
 
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
@@ -24,13 +26,13 @@ export function useModelSources() {
   const createMutation = useMutation({
     mutationFn: (payload: ModelSourceCreateRequest) => createModelSource(payload),
     onSuccess: () => {
-      toast.success("Model source created");
+      toast.success(t("modelSources.toasts.created"));
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create model source");
+      toast.error(error.message || t("modelSources.toasts.createFailed"));
     },
   });
 
@@ -38,26 +40,26 @@ export function useModelSources() {
     mutationFn: ({ sourceId, payload }: { sourceId: string; payload: ModelSourceUpdateRequest }) =>
       updateModelSource(sourceId, payload),
     onSuccess: () => {
-      toast.success("Model source updated");
+      toast.success(t("modelSources.toasts.updated"));
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update model source");
+      toast.error(error.message || t("modelSources.toasts.updateFailed"));
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (sourceId: string) => deleteModelSource(sourceId),
     onSuccess: () => {
-      toast.success("Model source deleted");
+      toast.success(t("modelSources.toasts.deleted"));
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to delete model source");
+      toast.error(error.message || t("modelSources.toasts.deleteFailed"));
     },
   });
 

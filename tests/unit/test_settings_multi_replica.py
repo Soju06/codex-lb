@@ -18,8 +18,6 @@ def test_settings_multi_replica_defaults():
     assert settings.leader_election_ttl_seconds == 60
     assert settings.auth_guardian_enabled is False
     assert settings.circuit_breaker_enabled is False
-    assert settings.circuit_breaker_failure_threshold == 5
-    assert settings.circuit_breaker_recovery_timeout_seconds == 60
     assert settings.backpressure_max_concurrent_requests == 0
     assert settings.bulkhead_proxy_limit == 512
     assert settings.bulkhead_dashboard_limit == 50
@@ -113,16 +111,15 @@ def test_settings_circuit_breaker_enabled_from_env(monkeypatch):
     assert settings.circuit_breaker_enabled is True
 
 
-def test_settings_circuit_breaker_failure_threshold_from_env(monkeypatch):
+def test_settings_circuit_breaker_tuning_env_overrides_are_removed(monkeypatch):
+    # Failure threshold and recovery timeout became fixed constants in
+    # app/core/resilience/circuit_breaker.py (issue #1340 phase 2); the env
+    # vars are ignored and the fields no longer exist.
     monkeypatch.setenv("CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "10")
-    settings = Settings()
-    assert settings.circuit_breaker_failure_threshold == 10
-
-
-def test_settings_circuit_breaker_recovery_timeout_from_env(monkeypatch):
     monkeypatch.setenv("CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS", "120")
     settings = Settings()
-    assert settings.circuit_breaker_recovery_timeout_seconds == 120
+    assert not hasattr(settings, "circuit_breaker_failure_threshold")
+    assert not hasattr(settings, "circuit_breaker_recovery_timeout_seconds")
 
 
 def test_settings_backpressure_max_concurrent_requests_from_env(monkeypatch):

@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, Download } from "lucide-react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { buildContinuousDailyRows } from "../daily-series";
 import type { DailyReportRow } from "../schemas";
@@ -24,6 +26,7 @@ function formatTokens(v: number): string {
 }
 
 export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableProps) {
+  const { t } = useTranslation();
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "date",
     direction: "desc",
@@ -42,15 +45,15 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm font-semibold text-foreground">Daily Breakdown</div>
+        <div className="text-sm font-semibold text-foreground">{t("reports.dailyBreakdown.title")}</div>
         <Button
           variant="outline"
           size="sm"
           className="h-7 gap-1 text-xs"
-          onClick={() => exportCSV(csvRows)}
+          onClick={() => exportCSV(csvRows, t)}
         >
           <Download className="h-3 w-3" />
-          CSV
+          {t("reports.dailyBreakdown.csv")}
         </Button>
       </div>
       <div className="overflow-x-auto">
@@ -60,37 +63,37 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
             <tr className="border-b text-left text-muted-foreground">
               <SortableHeader
                 align="left"
-                label="Day"
+                label={t("reports.dailyBreakdown.columns.day")}
                 isActive={sort.key === "date"}
                 direction={sort.direction}
                 onClick={() => toggleSort("date")}
               />
               <SortableHeader
-                label="Reqs"
+                label={t("reports.dailyBreakdown.columns.reqs")}
                 isActive={sort.key === "requests"}
                 direction={sort.direction}
                 onClick={() => toggleSort("requests")}
               />
               <SortableHeader
-                label="Input Tokens"
+                label={t("reports.dailyBreakdown.columns.inputTokens")}
                 isActive={sort.key === "inputTokens"}
                 direction={sort.direction}
                 onClick={() => toggleSort("inputTokens")}
               />
               <SortableHeader
-                label="Output Tokens"
+                label={t("reports.dailyBreakdown.columns.outputTokens")}
                 isActive={sort.key === "outputTokens"}
                 direction={sort.direction}
                 onClick={() => toggleSort("outputTokens")}
               />
               <SortableHeader
-                label="Cost"
+                label={t("reports.dailyBreakdown.columns.cost")}
                 isActive={sort.key === "costUsd"}
                 direction={sort.direction}
                 onClick={() => toggleSort("costUsd")}
               />
               <SortableHeader
-                label="Accounts"
+                label={t("reports.dailyBreakdown.columns.accounts")}
                 isActive={sort.key === "activeAccounts"}
                 direction={sort.direction}
                 onClick={() => toggleSort("activeAccounts")}
@@ -221,8 +224,17 @@ function sortRows(
   return sorted;
 }
 
-function exportCSV(rows: DailyReportRow[]) {
-  const headers = ["Date", "Requests", "Input Tokens", "Output Tokens", "Cached Tokens", "Cost USD", "Active Accounts", "Errors"];
+function exportCSV(rows: DailyReportRow[], t: TFunction) {
+  const headers = [
+    t("reports.dailyBreakdown.csvColumns.date"),
+    t("reports.dailyBreakdown.csvColumns.requests"),
+    t("reports.dailyBreakdown.csvColumns.inputTokens"),
+    t("reports.dailyBreakdown.csvColumns.outputTokens"),
+    t("reports.dailyBreakdown.csvColumns.cachedTokens"),
+    t("reports.dailyBreakdown.csvColumns.costUsd"),
+    t("reports.dailyBreakdown.csvColumns.activeAccounts"),
+    t("reports.dailyBreakdown.csvColumns.errors"),
+  ];
   const lines = rows.map((r) =>
     [r.date, r.requests, r.inputTokens, r.outputTokens, r.cachedInputTokens, r.costUsd.toFixed(4), r.activeAccounts, r.errorCount].join(","),
   );

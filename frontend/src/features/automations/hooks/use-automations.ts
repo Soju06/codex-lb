@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import {
@@ -22,6 +23,7 @@ export function useAutomations(
   selectedAutomationId: string | null,
   options: UseAutomationsOptions = {},
 ) {
+  const { t } = useTranslation();
   const enableQueries = options.enableQueries ?? true;
   const queryClient = useQueryClient();
 
@@ -53,11 +55,11 @@ export function useAutomations(
   const createMutation = useMutation({
     mutationFn: (payload: AutomationCreateRequest) => createAutomation(payload),
     onSuccess: async () => {
-      toast.success("Automation created");
+      toast.success(t("automations.toasts.created"));
       await invalidate();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create automation");
+      toast.error(error.message || t("automations.toasts.createFailed"));
     },
   });
 
@@ -65,33 +67,33 @@ export function useAutomations(
     mutationFn: ({ automationId, payload }: { automationId: string; payload: AutomationUpdateRequest }) =>
       updateAutomation(automationId, payload),
     onSuccess: async () => {
-      toast.success("Automation updated");
+      toast.success(t("automations.toasts.updated"));
       await invalidate();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update automation");
+      toast.error(error.message || t("automations.toasts.updateFailed"));
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (automationId: string) => deleteAutomation(automationId),
     onSuccess: async () => {
-      toast.success("Automation deleted");
+      toast.success(t("automations.toasts.deleted"));
       await invalidate();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to delete automation");
+      toast.error(error.message || t("automations.toasts.deleteFailed"));
     },
   });
 
   const runNowMutation = useMutation({
     mutationFn: (automationId: string) => runAutomationNow(automationId),
     onSuccess: async () => {
-      toast.success("Automation run queued");
+      toast.success(t("automations.toasts.runQueued"));
       await invalidate();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to run automation");
+      toast.error(error.message || t("automations.toasts.runFailed"));
     },
   });
 

@@ -275,6 +275,36 @@ def _http_bridge_capacity_wait_plan(
     return bounded_wait_seconds, account_capacity_wait_seconds, message
 
 
+def _http_bridge_can_replace_retired_gate_session(
+    exc: ProxyResponseError,
+    *,
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+    request_was_enqueued: bool,
+) -> bool:
+    # A gate timeout happens before this waiter is appended or sent.  Once the
+    # stale owner has retired the session, only that fully cleaned pre-submit
+    # state is safe to carry to a replacement; any response/replay/downstream
+    # marker makes the upstream acceptance boundary ambiguous.
+    code, _message = _proxy_error_code_message(exc)
+    return (
+        code == "response_create_gate_timeout"
+        and session.closed
+        and session.key.strength == "hard"
+        and not request_was_enqueued
+        and request_state.request_text is not None
+        and request_state.event_queue is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and request_state.replay_count == 0
+        and request_state.last_downstream_sequence_number is None
+        and not request_state.downstream_visible
+        and not request_state.awaiting_response_created
+        and request_state.response_create_gate is None
+        and not request_state.response_create_gate_acquired
+    )
+
+
 async def _iter_account_capacity_wait_sse(
     *,
     request_id: str,
@@ -1520,6 +1550,112 @@ class _HTTPBridgeStreamingMixin:
                     default_code="upstream_error",
                     default_message="Upstream error",
                 )
+                return
+            async with session.pending_lock:
+                request_was_enqueued = request_state in session.pending_requests
+            if _http_bridge_can_replace_retired_gate_session(
+                exc,
+                session=session,
+                request_state=request_state,
+                request_was_enqueued=request_was_enqueued,
+            ):
+                _log_http_bridge_event(
+                    "replace_retired_gate",
+                    session.key,
+                    account_id=session.account.id,
+                    model=effective_payload.model,
+                    detail="reason=response_create_gate_timeout_stuck_pending",
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                    owner_check_applied=True,
+                )
+                replacement_preferred_account_id = request_state.preferred_account_id
+                if request_state.previous_response_id is not None and replacement_preferred_account_id is None:
+                    replacement_preferred_account_id = session.account.id
+                while True:
+                    try:
+                        replacement_session = await self._get_or_create_http_bridge_session(
+                            bridge_session_key,
+                            headers=dict(headers),
+                            affinity=affinity,
+                            api_key=api_key,
+                            request_model=effective_payload.model,
+                            request_service_tier=request_state.requested_service_tier,
+                            idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                                affinity=affinity,
+                                idle_ttl_seconds=idle_ttl_seconds,
+                                codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                                prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+                            ),
+                            max_sessions=max_sessions,
+                            previous_response_id=request_state.previous_response_id,
+                            gateway_safe_mode=runtime_config.gateway_safe_mode,
+                            allow_forward_to_owner=False,
+                            forwarded_request=forwarded_request,
+                            forwarded_original_request_unanchored=original_request_unanchored,
+                            durable_lookup=durable_lookup,
+                            request_stage=request_state.request_stage,
+                            preferred_account_id=replacement_preferred_account_id,
+                            fallback_on_preferred_account_unavailable=not (
+                                file_required_preferred_account or request_state.previous_response_id is not None
+                            ),
+                            allow_previous_response_recovery_rebind=request_state.previous_response_id is not None,
+                            request_usage_budget=request_state.request_usage_budget,
+                            request_deadline=request_deadline,
+                            session_header_fallback_key=session_header_fallback_key,
+                        )
+                    except ProxyResponseError as capacity_exc:
+                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        if wait_plan is None:
+                            raise
+                        bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                        logger.info(
+                            "Waiting for an account to recover before replacing retired HTTP bridge gate "
+                            "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
+                            request_id,
+                            effective_payload.model,
+                            bounded_wait_seconds,
+                            account_capacity_wait_seconds,
+                            message,
+                        )
+                        async for line in _iter_account_capacity_wait_sse(
+                            request_id=request_id,
+                            reason=message,
+                            sleep_seconds=bounded_wait_seconds,
+                            emit_keepalives=not propagate_http_errors,
+                        ):
+                            yield line
+                        if _service_time().monotonic() >= request_deadline:
+                            raise
+                        continue
+                    break
+                if initial_handoff_scope_id is not None:
+                    _release_http_bridge_unanchored_handoff(
+                        initial_handoff_session,
+                        request_scope_id=initial_handoff_scope_id,
+                    )
+                    _reserve_http_bridge_unanchored_handoff(
+                        replacement_session,
+                        request_scope_id=initial_handoff_scope_id,
+                    )
+                    initial_handoff_session = replacement_session
+                replacement_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
+                    replacement_session,
+                    request_state=request_state,
+                    text_data=text_data,
+                    queue_limit=queue_limit,
+                    propagate_http_errors=propagate_http_errors,
+                    downstream_turn_state=downstream_turn_state,
+                    request_deadline=request_deadline,
+                )
+                try:
+                    async for event_block in replacement_events:
+                        yield event_block
+                finally:
+                    try:
+                        await replacement_events.aclose()
+                    except Exception:
+                        pass
                 return
             if (
                 _http_bridge_should_attempt_soft_affinity_reroute(

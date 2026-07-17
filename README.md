@@ -37,7 +37,9 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 ```bash
 # Docker (recommended)
 docker volume create codex-lb-data
+docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
+  --network codex-lb-net \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
@@ -251,6 +253,12 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/dmdfami"><img src="https://avatars.githubusercontent.com/u/222630288?v=4?s=100" width="100px;" alt="DOMANHDUC"/><br /><sub><b>DOMANHDUC</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=dmdfami" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/HeroOfOdyssey"><img src="https://avatars.githubusercontent.com/u/144704328?v=4?s=100" width="100px;" alt="Kwan Perry"/><br /><sub><b>Kwan Perry</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=HeroOfOdyssey" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/jamesx0416"><img src="https://avatars.githubusercontent.com/u/105842516?v=4?s=100" width="100px;" alt="James"/><br /><sub><b>James</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=jamesx0416" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=jamesx0416" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mereyabdenbekuly-ctrl"><img src="https://avatars.githubusercontent.com/u/234955825?v=4?s=100" width="100px;" alt="SSY"/><br /><sub><b>SSY</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mereyabdenbekuly-ctrl" title="Documentation">📖</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/fozbek"><img src="https://avatars.githubusercontent.com/u/17993880?v=4?s=100" width="100px;" alt="Fatih Özbek"/><br /><sub><b>Fatih Özbek</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=fozbek" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ShiroKSH"><img src="https://avatars.githubusercontent.com/u/218489957?v=4?s=100" width="100px;" alt="Kushida"/><br /><sub><b>Kushida</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ShiroKSH" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ShiroKSH" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aididhaiqal"><img src="https://avatars.githubusercontent.com/u/10329190?v=4?s=100" width="100px;" alt="Aidid Haiqal"/><br /><sub><b>Aidid Haiqal</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=aididhaiqal" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=aididhaiqal" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

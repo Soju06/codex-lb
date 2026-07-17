@@ -158,8 +158,6 @@ async def test_add_log_persists_ttft_phase_and_prewarm_fields(db_setup) -> None:
             latency_bridge_queue_wait_ms=40,
             prewarm_status="success",
             prewarm_latency_ms=120,
-            prewarm_canary_bucket="treatment",
-            prewarm_eligible_reason="first_turn_50k_gap_2m",
             session_previous_gap_ms=180000,
         )
 
@@ -173,8 +171,6 @@ async def test_add_log_persists_ttft_phase_and_prewarm_fields(db_setup) -> None:
     assert persisted.latency_bridge_queue_wait_ms == 40
     assert persisted.prewarm_status == "success"
     assert persisted.prewarm_latency_ms == 120
-    assert persisted.prewarm_canary_bucket == "treatment"
-    assert persisted.prewarm_eligible_reason == "first_turn_50k_gap_2m"
     assert persisted.session_previous_gap_ms == 180000
 
 

@@ -132,6 +132,10 @@ export const DashboardSettingsSchema = z
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
+    requestLogRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
+    usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
+    requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
+    usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -203,6 +207,10 @@ export const SettingsUpdateRequestSchema = z
     weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional(),
     guestAccessEnabled: z.boolean().optional(),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
+    // Tri-state overrides: absent = unchanged, null = clear (inherit env
+    // alias), value = store the override.
+    requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional(),
+    usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional(),
   })
   .superRefine((settings, ctx) => {
     if (
@@ -215,6 +223,30 @@ export const SettingsUpdateRequestSchema = z
         code: "custom",
         path: ["proxyAccountStreamRecoveryReserve"],
         message: "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
+      });
+    }
+    if (
+      settings.requestLogRetentionOverrideDays !== undefined &&
+      settings.requestLogRetentionOverrideDays !== null &&
+      settings.requestLogRetentionOverrideDays !== 0 &&
+      settings.requestLogRetentionOverrideDays < 30
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["requestLogRetentionOverrideDays"],
+        message: "request_log_retention_override_days must be 0 (disabled) or >= 30",
+      });
+    }
+    if (
+      settings.usageHistoryRetentionOverrideDays !== undefined &&
+      settings.usageHistoryRetentionOverrideDays !== null &&
+      settings.usageHistoryRetentionOverrideDays !== 0 &&
+      settings.usageHistoryRetentionOverrideDays < 45
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["usageHistoryRetentionOverrideDays"],
+        message: "usage_history_retention_override_days must be 0 (disabled) or >= 45",
       });
     }
   });

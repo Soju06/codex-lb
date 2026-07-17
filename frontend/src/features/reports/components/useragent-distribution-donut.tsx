@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, ResponsiveContainer, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 import type { UseragentCostEntry } from "../schemas";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
@@ -17,6 +18,7 @@ const LEGEND_ROW_HEIGHT_REM = 2;
 
 type ChartDatum = UseragentCostEntry & {
   id: string;
+  displayUseragent: string;
   fill: string;
   metricLabel: string;
   metricValue: number;
@@ -28,6 +30,7 @@ function getUseragentColor(useragent: string, index: number) {
 }
 
 export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
+  const { t } = useTranslation();
   const [metric, setMetric] = useState<DistributionMetric>("cost");
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -41,6 +44,9 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
   const chartData: ChartDatum[] = data.map((entry, index) => ({
     ...entry,
     id: `${entry.useragent}-${index}`,
+    displayUseragent: entry.useragent === MISSING_USERAGENT_LABEL
+      ? t("reports.distribution.missingUserAgent")
+      : entry.useragent,
     fill: getUseragentColor(entry.useragent, index),
     metricLabel: formatDistributionMetricValue(
       isCostMetric ? entry.costUsd : entry.requests,
@@ -87,7 +93,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">Distribution by UserAgent</div>
+        <div className="text-sm font-semibold text-foreground">{t("reports.distribution.byUserAgent")}</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div className="mt-4 flex items-center gap-4">
@@ -97,7 +103,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
               className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
               data-testid="useragent-distribution-center-label"
             >
-              Total
+              {t("reports.distribution.total")}
             </span>
             <span
               className="max-w-[76px] text-sm font-semibold leading-tight tabular-nums text-foreground"
@@ -154,7 +160,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                   style={{ background: entry.fill }}
                 />
-                <span className="text-foreground">{entry.useragent}</span>
+                <span className="text-foreground">{entry.displayUseragent}</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="tabular-nums text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>

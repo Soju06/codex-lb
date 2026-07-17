@@ -17,6 +17,11 @@ from app.modules.request_logs.repository import RequestLogsRepository
 
 logger = logging.getLogger(__name__)
 
+# Scheduler poll cadence (fixed; issue #1340 / PRINCIPLES.md P2). The
+# scheduler keeps ``interval_seconds`` as a constructor field so tests can
+# exercise the loop with a short interval.
+_INTERVAL_SECONDS = 30
+
 
 _T = TypeVar("_T")
 
@@ -82,6 +87,6 @@ class AutomationsScheduler:
 def build_automations_scheduler() -> AutomationsScheduler:
     settings = get_settings()
     return AutomationsScheduler(
-        interval_seconds=settings.automations_scheduler_interval_seconds,
+        interval_seconds=_INTERVAL_SECONDS,
         enabled=settings.automations_scheduler_enabled,
     )

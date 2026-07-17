@@ -143,11 +143,8 @@ config:
   # @param config.leaderElectionTtlSeconds Leader election TTL in seconds
   leaderElectionTtlSeconds: 30
   # @param config.circuitBreakerEnabled Enable circuit breaker for upstream requests
+  # (failure threshold and recovery timeout are fixed application constants)
   circuitBreakerEnabled: true
-  # @param config.circuitBreakerFailureThreshold Number of failures before opening circuit
-  circuitBreakerFailureThreshold: 5
-  # @param config.circuitBreakerRecoveryTimeoutSeconds Seconds before half-open state
-  circuitBreakerRecoveryTimeoutSeconds: 60
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
   backpressureMaxConcurrentRequests: 200
   # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
@@ -177,9 +174,8 @@ config:
   # @param config.sessionBridgeAdvertiseBaseUrl Optional explicit owner-handoff base URL. Empty = auto-advertise headless-service DNS for the current pod
   sessionBridgeAdvertiseBaseUrl: ""
   # @param config.stickySessionCleanupEnabled Enable periodic cleanup of stale sticky sessions
+  # (the cleanup interval is a fixed application constant)
   stickySessionCleanupEnabled: true
-  # @param config.stickySessionCleanupIntervalSeconds Interval between sticky session cleanup runs
-  stickySessionCleanupIntervalSeconds: 300
 
 # @section Authentication parameters
 auth:

@@ -19,7 +19,7 @@ Settings are environment variables with the `CODEX_LB_` prefix, or a `.env.local
 
 ## Everything else
 
-The remaining settings (timeouts, connection pools, bulkheads, session bridge, leader election, observability, circuit breakers, ...) are advanced operational tunables with tested defaults. Do not tune them unless the documentation for your specific scenario says so:
+The remaining settings (timeouts, connection pools, bulkheads, session bridge, leader election, observability, circuit breakers, ...) are advanced operational tunables with tested defaults. The full generated [settings reference](reference/settings.md) lists every variable with its type and default. Do not tune them unless the documentation for your specific scenario says so:
 
 - [Deployment on Kubernetes / multi-replica](deployment/kubernetes.md)
 - [Remote access and reverse proxies](deployment/remote.md)

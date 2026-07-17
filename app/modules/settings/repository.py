@@ -70,6 +70,8 @@ class SettingsRepository:
             weekly_pace_working_days="0,1,2,3,4,5,6",
             weekly_pace_smoothing_minutes=30,
             limit_warmup_staggered_idle_enabled=False,
+            request_log_retention_days=None,
+            usage_history_retention_days=None,
         )
         self._session.add(row)
         try:
@@ -129,6 +131,10 @@ class SettingsRepository:
         weekly_pace_smoothing_minutes: int | None = None,
         guest_access_enabled: bool | None = None,
         limit_warmup_staggered_idle_enabled: bool | None = None,
+        request_log_retention_days: int | None = None,
+        usage_history_retention_days: int | None = None,
+        clear_request_log_retention: bool = False,
+        clear_usage_history_retention: bool = False,
         expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
@@ -229,6 +235,17 @@ class SettingsRepository:
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
+        # Retention overrides are tri-state: a clear flag resets the column to
+        # NULL (inherit the deprecated env alias); a non-None value stores an
+        # override; neither leaves the stored value untouched.
+        if clear_request_log_retention:
+            settings.request_log_retention_days = None
+        elif request_log_retention_days is not None:
+            settings.request_log_retention_days = request_log_retention_days
+        if clear_usage_history_retention:
+            settings.usage_history_retention_days = None
+        elif usage_history_retention_days is not None:
+            settings.usage_history_retention_days = usage_history_retention_days
         # Force the optimistic-version CAS to run even when the payload makes no
         # net change. `version_id_col` only raises `StaleDataError` when the
         # flush emits an ORM UPDATE; a full-row save that assigns values all

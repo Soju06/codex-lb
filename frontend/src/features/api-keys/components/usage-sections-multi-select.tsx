@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { ChevronsUpDown } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,20 +29,22 @@ function parseSections(raw: string): Set<UsageSection> {
   return new Set(sections);
 }
 
-function formatSections(raw: string, allSectionsLabel: string): string {
+function formatSections(raw: string, allSectionsLabel: string, t: ReturnType<typeof useTranslation>["t"]): string {
   const sections = parseSections(raw);
   if (sections.size === USAGE_SECTIONS.length) return allSectionsLabel;
-  if (sections.size === 0) return "None";
+  if (sections.size === 0) return t("common.options.none");
   return USAGE_SECTIONS.filter((s) => sections.has(s))
-    .map((s) => USAGE_SECTION_LABELS[s])
+    .map((s) => t(`apiKeys.usageSections.${s}`, { defaultValue: USAGE_SECTION_LABELS[s] }))
     .join(", ");
 }
 
 export function UsageSectionsMultiSelect({
   value,
   onChange,
-  placeholder = "All sections",
+  placeholder,
 }: UsageSectionsMultiSelectProps) {
+  const { t } = useTranslation();
+  const placeholderLabel = placeholder ?? t("apiKeys.usageSections.allSections");
   const selected = useMemo(() => parseSections(value), [value]);
 
   const toggle = useCallback(
@@ -57,7 +60,7 @@ export function UsageSectionsMultiSelect({
     [onChange, selected],
   );
 
-  const label = value.trim() === "" ? "None" : formatSections(value, placeholder);
+  const label = value.trim() === "" ? t("common.options.none") : formatSections(value, placeholderLabel, t);
 
   return (
     <DropdownMenu>
@@ -75,7 +78,7 @@ export function UsageSectionsMultiSelect({
             onCheckedChange={() => toggle(section)}
             onSelect={(event) => event.preventDefault()}
           >
-            {USAGE_SECTION_LABELS[section]}
+            {t(`apiKeys.usageSections.${section}`, { defaultValue: USAGE_SECTION_LABELS[section] })}
           </DropdownMenuCheckboxItem>
         ))}
       </DropdownMenuContent>

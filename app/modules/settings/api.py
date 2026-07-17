@@ -168,6 +168,10 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
+        request_log_retention_days=settings.request_log_retention_days,
+        usage_history_retention_days=settings.usage_history_retention_days,
+        request_log_retention_override_days=settings.request_log_retention_override_days,
+        usage_history_retention_override_days=settings.usage_history_retention_override_days,
         version=settings.version,
     )
 
@@ -782,6 +786,24 @@ async def update_settings(
                     if payload.limit_warmup_staggered_idle_enabled is not None
                     else current.limit_warmup_staggered_idle_enabled
                 ),
+                request_log_retention_override_days=(
+                    payload.request_log_retention_override_days
+                    if "request_log_retention_override_days" in payload.model_fields_set
+                    else None
+                ),
+                usage_history_retention_override_days=(
+                    payload.usage_history_retention_override_days
+                    if "usage_history_retention_override_days" in payload.model_fields_set
+                    else None
+                ),
+                clear_request_log_retention_override=(
+                    "request_log_retention_override_days" in payload.model_fields_set
+                    and payload.request_log_retention_override_days is None
+                ),
+                clear_usage_history_retention_override=(
+                    "usage_history_retention_override_days" in payload.model_fields_set
+                    and payload.usage_history_retention_override_days is None
+                ),
             ),
             # CAS anchor: omitted fields above were merged from `current`
             # (version checked against expectedVersion when supplied), so the
@@ -840,6 +862,8 @@ async def update_settings(
             "weekly_pace_smoothing_minutes",
             "guest_access_enabled",
             "limit_warmup_staggered_idle_enabled",
+            "request_log_retention_override_days",
+            "usage_history_retention_override_days",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

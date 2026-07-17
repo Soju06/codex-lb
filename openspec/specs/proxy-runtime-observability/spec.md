@@ -153,6 +153,21 @@ When the service retires an HTTP bridge session because pending precreated repla
 - **THEN** the console log includes a HTTP bridge event with `event=retire_stale_pending`
 - **AND** the event includes only hashed bridge identity and low-cardinality metadata
 
+### Requirement: Process-wide network recovery is observable without sensitive resolver data
+
+The service MUST emit low-cardinality structured diagnostics when it detects a process-wide DNS or route failure, rotates shared transport state, retries a safe request, recovers, or exhausts the request budget. Diagnostics MUST NOT contain DNS server addresses, request payloads, API keys, access tokens, raw continuity keys, or account email addresses.
+
+#### Scenario: Recovery diagnostics are emitted
+
+- **WHEN** a safe Responses request enters and later exits process-wide network recovery
+- **THEN** logs identify the recovery stage, request id, transport, attempt count, and internal account id when known
+- **AND** logs do not expose resolver configuration or request content
+
+#### Scenario: Concurrent rotation is coalesced visibly
+
+- **WHEN** several callers report a network failure from the same shared client generation
+- **THEN** diagnostics distinguish the caller that rotated the client from callers that reused the already-rotated replacement
+
 ### Requirement: Request-log metadata keeps local routing failures unbound from upstream status
 
 When request routing fails before contacting upstream, `upstream_status_code` MUST be
@@ -272,20 +287,46 @@ The proxy MUST persist nullable low-cardinality request-log fields for TTFT phas
 - **THEN** the request log can record first upstream event latency separately from first downstream token latency
 
 ### Requirement: Codex prewarm canary outcomes are observable
-The proxy MUST record visible-request prewarm status, latency, canary bucket, and eligibility cohort using stable strings, and MUST emit a prewarm outcome counter labelled only by outcome, cohort, and bucket.
 
-#### Scenario: Canary miss is visible without raw identifiers
-- **WHEN** Codex prewarm is enabled but deterministic canary sampling excludes an otherwise eligible request
-- **THEN** the visible request log records `prewarm_status=canary_miss`
-- **AND** metrics increment the prewarm counter for the stable cohort and bucket
-- **AND** logs and metrics do not include raw API keys, raw session ids, prompt text, or affinity key values
+The proxy MUST record visible-request prewarm status and latency using
+stable strings, and MUST emit a prewarm outcome counter labelled only by
+outcome. Prewarm eligibility is the prewarm enabled flag alone: no
+deterministic canary sampling or allow/deny cohort exists, so no canary
+bucket or eligibility cohort dimension is recorded and the
+`prewarm_status=canary_miss` value MUST NOT occur.
+
+#### Scenario: Prewarm outcome is visible without raw identifiers
+
+- **WHEN** Codex prewarm is enabled and a visible request triggers or skips
+  a session prewarm
+- **THEN** the visible request log records `prewarm_status` (and prewarm
+  latency when a prewarm was attempted)
+- **AND** metrics increment the outcome-labelled prewarm counter
+- **AND** logs and metrics do not include raw API keys, raw session ids,
+  prompt text, or affinity key values
+
+#### Scenario: Canary sampling no longer excludes eligible requests
+
+- **WHEN** Codex prewarm is enabled
+- **THEN** no request is excluded by deterministic canary sampling
+- **AND** `prewarm_status=canary_miss` is never recorded
+- **AND** the prewarm counter and request log carry no canary bucket or
+  eligibility cohort dimension (the legacy request-log columns remain
+  unwritten for one release for rolling-upgrade safety, then are dropped)
 
 ### Requirement: 24-hour TTFT breakdown queries are available
-Operators MUST have an OpenSpec context runbook or dashboard artifact with 24-hour TTFT breakdown queries by user agent group, upstream transport, model/cache ratio, session gap cohort, prompt size cohort, and prewarm bucket/outcome/cohort.
+
+Operators MUST have an OpenSpec context runbook or dashboard artifact with
+24-hour TTFT breakdown queries by user agent group, upstream transport,
+model/cache ratio, session gap cohort, prompt size cohort, and prewarm
+status/outcome.
 
 #### Scenario: Operator investigates TTFT regression
-- **WHEN** an operator needs to inspect the last 24 hours of request-log latency
-- **THEN** the repository provides SQL that reports p50, p90, p95 TTFT and total latency for the requested breakdowns
+
+- **WHEN** an operator needs to inspect the last 24 hours of request-log
+  latency
+- **THEN** the repository provides SQL that reports p50, p90, p95 TTFT and
+  total latency for the requested breakdowns
 
 ### Requirement: Dashboard request logs show generation speed
 

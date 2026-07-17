@@ -267,8 +267,8 @@ Single-replica deployments can use SQLite, but **multi-replica requires PostgreS
   
 - **Circuit Breaker**: Enabled by default (`config.circuitBreakerEnabled=true`)
   - Protects upstream API endpoints from cascading failures
-  - Opens after `config.circuitBreakerFailureThreshold=5` consecutive failures
-  - Enters half-open state after `config.circuitBreakerRecoveryTimeoutSeconds=60` seconds
+  - Opens after 5 consecutive failures; enters half-open state after 60
+    seconds (fixed application constants)
   - Prevents thundering herd when upstream is degraded
 
 ### Session Bridge Ring

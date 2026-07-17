@@ -7,9 +7,6 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, AsyncIterator, Literal, Mapping, cast
 
-from app.core.auth.refresh import (
-    RefreshError,
-)
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -50,6 +47,9 @@ from app.core.errors import (
 )
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+)
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
@@ -425,6 +425,11 @@ def _should_penalize_stream_error(code: str | None) -> bool:
 def _should_retry_transient_stream_error(code: str | None, message: str | None) -> bool:
     if code is None or code == "stream_idle_timeout":
         return False
+    if code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+        # Serialized terminal events arrive only after upstream dispatch. The
+        # stable code keeps settlement account-neutral, but cannot prove that
+        # replaying the POST is safe.
+        return False
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if code != "upstream_unavailable" or not message:
@@ -433,19 +438,6 @@ def _should_retry_transient_stream_error(code: str | None, message: str | None) 
     if any(marker in normalized_message for marker in _facade()._UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MESSAGE_MARKERS):
         return False
     return any(marker in normalized_message for marker in _facade()._UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS)
-
-
-def _refresh_upstream_proxy_fail_closed_reason(exc: RefreshError) -> str | None:
-    if exc.code != "upstream_proxy_unavailable":
-        return None
-    reason = exc.upstream_proxy_fail_closed_reason
-    if reason:
-        return reason
-    marker = "Upstream proxy route unavailable:"
-    if exc.message.startswith(marker):
-        parsed = exc.message.removeprefix(marker).strip()
-        return parsed or "unavailable"
-    return "unavailable"
 
 
 def _classify_upstream_close(

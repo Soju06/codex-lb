@@ -6,6 +6,7 @@ import pytest
 
 from app.core.usage import (
     SIBLING_FETCH_MARGIN_SECONDS,
+    _should_prefer_primary_row,
     capacity_for_plan,
     normalize_rate_limit_windows,
     normalize_usage_window,
@@ -172,7 +173,7 @@ def test_should_use_weekly_primary_beats_no_data_secondary_placeholder_regardles
     # weekly primary in the same fetch, so a recorded_at tiebreak let the
     # placeholder win and the dashboard jumped to 100% remaining. The data-aware
     # tiebreak must let the real weekly primary win regardless of which row is
-    # microseconds newer.
+    # milliseconds newer.
     now = utcnow()
     real_weekly = _real_weekly_primary(now)
     placeholder_written_after = _no_data_secondary_placeholder(now + timedelta(milliseconds=13))
@@ -249,7 +250,7 @@ def test_two_real_same_fetch_weekly_rows_resolve_by_reset_at_not_subsecond_timin
         used_percent=50.0,
         window_minutes=10080,
         reset_at=300,
-        # Written microseconds after the primary (the race that used to flip).
+        # Written milliseconds after the primary (the race that used to flip).
         recorded_at=now + timedelta(milliseconds=8),
     )
 
@@ -368,3 +369,156 @@ def test_5h_primary_window_never_enters_weekly_tiebreak():
     no_data_secondary = _no_data_secondary_placeholder(now + timedelta(milliseconds=5))
 
     assert should_use_weekly_primary(five_hour_primary, no_data_secondary) is False
+
+
+def test_untimestamped_real_primary_beats_timestamped_placeholder():
+    # Exactly-one-missing-timestamp edge case: when only one recorded_at is
+    # present, fetch ordering cannot be determined, so timestamp presence must
+    # NOT decide the winner. A real weekly primary with recorded_at=None must
+    # beat a timestamped no-data secondary placeholder (otherwise this
+    # reproduces the original placeholder-wins bug for untimestamped rows).
+    now = utcnow()
+    untimestamped_real_primary = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=74.0,
+        window_minutes=10080,
+        reset_at=int((now + timedelta(days=2)).timestamp()),
+        recorded_at=None,
+    )
+    timestamped_placeholder = _no_data_secondary_placeholder(now)
+
+    assert should_use_weekly_primary(untimestamped_real_primary, timestamped_placeholder) is True
+
+
+def test_timestamped_real_primary_beats_untimestamped_placeholder():
+    # Mirror of the above: a real weekly primary with a timestamp must beat an
+    # untimestamped no-data secondary placeholder, so a placeholder cannot win
+    # merely by being the only timestamped row.
+    now = utcnow()
+    timestamped_real_primary = _real_weekly_primary(now)
+    untimestamped_placeholder = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=0.0,
+        window_minutes=0,
+        reset_at=None,
+        recorded_at=None,
+    )
+
+    assert should_use_weekly_primary(timestamped_real_primary, untimestamped_placeholder) is True
+
+
+def test_weekly_primary_without_reset_at_falls_back_to_stable_default():
+    # Partial-metadata matrix: a weekly primary that has positive window_minutes
+    # but NO reset_at (e.g. an elapsed window before expiry-rewrite) is NOT
+    # "real quota metadata" (needs both). Against a no-data placeholder in the
+    # same fetch, neither data-aware branch fires; reset-at precedence finds no
+    # deadline on either side; the stable weekly-primary default wins.
+    now = utcnow()
+    weekly_primary_no_reset = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=50.0,
+        window_minutes=10080,
+        reset_at=None,
+        recorded_at=now,
+    )
+    placeholder = _no_data_secondary_placeholder(now + timedelta(milliseconds=3))
+
+    assert should_use_weekly_primary(weekly_primary_no_reset, placeholder) is True
+
+
+def test_helper_timestamped_primary_placeholder_loses_to_untimestamped_real_secondary():
+    # The reverse exactly-one-missing case cannot be reached through the public
+    # should_use_weekly_primary (a no-data primary has window_minutes=0, so the
+    # weekly guard returns False immediately). Test the private tiebreak helper
+    # directly to lock down that branch: a timestamped no-data primary must NOT
+    # beat an untimestamped real secondary — timestamp presence alone never
+    # decides the winner.
+    now = utcnow()
+    timestamped_primary_placeholder = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=0.0,
+        window_minutes=0,
+        reset_at=None,
+        recorded_at=now,
+    )
+    untimestamped_real_secondary = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=15.0,
+        window_minutes=10080,
+        reset_at=300,
+        recorded_at=None,
+    )
+
+    assert _should_prefer_primary_row(timestamped_primary_placeholder, untimestamped_real_secondary) is False
+
+
+def test_both_timestamps_none_real_primary_beats_placeholder():
+    # Both recorded_at unavailable: fetch ordering cannot be determined, so the
+    # data-aware tiebreak runs — a real weekly primary beats a no-data
+    # placeholder even with no timestamps on either side.
+    now = utcnow()
+    real_primary = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=74.0,
+        window_minutes=10080,
+        reset_at=int((now + timedelta(days=2)).timestamp()),
+        recorded_at=None,
+    )
+    placeholder = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=0.0,
+        window_minutes=0,
+        reset_at=None,
+        recorded_at=None,
+    )
+
+    assert _should_prefer_primary_row(real_primary, placeholder) is True
+    assert _should_prefer_primary_row(placeholder, real_primary) is False
+
+
+def test_genuine_both_placeholder_same_fetch_uses_stable_default():
+    # Two genuine no-data placeholders (both window_minutes=0, reset_at=None)
+    # in the same fetch. Note: this state is unreachable through the public
+    # should_use_weekly_primary (the primary would fail the weekly-window
+    # guard), so this exercises the private helper to confirm the stable
+    # weekly-primary default (True) when no discriminator is available.
+    now = utcnow()
+    primary_placeholder = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=0.0,
+        window_minutes=0,
+        reset_at=None,
+        recorded_at=now,
+    )
+    secondary_placeholder = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=0.0,
+        window_minutes=0,
+        reset_at=None,
+        recorded_at=now + timedelta(milliseconds=3),
+    )
+
+    assert _should_prefer_primary_row(primary_placeholder, secondary_placeholder) is True
+
+
+def test_same_fetch_real_rows_secondary_with_later_reset_at_wins():
+    # Reverse reset-precedence direction: two real same-fetch weekly rows where
+    # the SECONDARY has the later reset_at — it must win (the helper returns
+    # False, meaning primary is not preferred).
+    now = utcnow()
+    primary_earlier_reset = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=50.0,
+        window_minutes=10080,
+        reset_at=300,
+        recorded_at=now,
+    )
+    secondary_later_reset = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=50.0,
+        window_minutes=10080,
+        reset_at=400,
+        recorded_at=now + timedelta(milliseconds=8),
+    )
+
+    assert _should_prefer_primary_row(primary_earlier_reset, secondary_later_reset) is False

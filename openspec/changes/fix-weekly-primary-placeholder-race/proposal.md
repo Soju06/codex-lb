@@ -8,7 +8,7 @@ no-data placeholder (`window_minutes` falsy, `reset_at` null, `used_percent`
 `0.0`, no credit metadata). codex-lb is supposed to remap that weekly
 `primary` row into the `secondary` slot via `should_use_weekly_primary`, but
 the tiebreak in `_should_prefer_primary_row` decides the winner by which row's
-`recorded_at` is a few microseconds later. Both rows are written in the same
+`recorded_at` is a few milliseconds later. Both rows are written in the same
 refresh cycle ~10 ms apart, so the winner is effectively a coin flip per
 refresh. When the no-data placeholder wins, the dashboard reads it as "0% used
 = 100% remaining" and the chart spikes to full.
@@ -24,7 +24,7 @@ weekly quota is misreported everywhere it is surfaced.
   metadata (positive `window_minutes` and a `reset_at`) MUST win over a
   competing `secondary` row that carries no quota metadata, regardless of
   sub-second `recorded_at` ordering.
-- Stop letting a sub-`_SIBLING_FETCH_MARGIN_SECONDS` `recorded_at`
+- Stop letting a sub-`SIBLING_FETCH_MARGIN_SECONDS` `recorded_at`
   difference decide the winner between rows written in the same refresh cycle;
   treat such rows as same-fetch and fall through to the data-quality tiebreaker.
 - Apply the same data-aware tiebreak consistently to account-summary remap,
@@ -59,5 +59,5 @@ None.
   required. Existing stored rows are reinterpreted in place by the corrected
   tiebreak on the next read.
 - No new `CODEX_LB_*` setting is introduced; the existing
-  `_SIBLING_FETCH_MARGIN_SECONDS` constant (already used by the updater for
+  `SIBLING_FETCH_MARGIN_SECONDS` constant (already used by the updater for
   sibling-row freshness) is reused as the same-fetch threshold.

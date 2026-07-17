@@ -33,6 +33,28 @@ def upgrade() -> None:
                 sa.Column("prohibit_fast_mode", sa.Boolean(), nullable=False, server_default=sa.false())
             )
 
+    quota_columns = _columns(bind, "quota_planner_settings")
+    if quota_columns:
+        with op.batch_alter_table("quota_planner_settings") as batch_op:
+            if "auto_redeem_expiring_reset_credits" not in quota_columns:
+                batch_op.add_column(
+                    sa.Column(
+                        "auto_redeem_expiring_reset_credits",
+                        sa.Boolean(),
+                        nullable=False,
+                        server_default=sa.false(),
+                    )
+                )
+            if "reset_credit_redeem_lead_minutes" not in quota_columns:
+                batch_op.add_column(
+                    sa.Column(
+                        "reset_credit_redeem_lead_minutes",
+                        sa.Integer(),
+                        nullable=False,
+                        server_default="30",
+                    )
+                )
+
     bridge_columns = _columns(bind, "http_bridge_sessions")
     if bridge_columns:
         with op.batch_alter_table("http_bridge_sessions") as batch_op:

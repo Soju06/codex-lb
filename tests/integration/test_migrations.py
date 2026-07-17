@@ -292,6 +292,18 @@ async def test_security_lineage_reconcile_preserves_previously_deployed_aggregat
             await session.execute(
                 text("ALTER TABLE http_bridge_sessions ADD COLUMN latest_pending_custom_tool_call_ids TEXT")
             )
+            await session.execute(
+                text(
+                    "ALTER TABLE quota_planner_settings "
+                    "ADD COLUMN auto_redeem_expiring_reset_credits BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+            await session.execute(
+                text(
+                    "ALTER TABLE quota_planner_settings "
+                    "ADD COLUMN reset_credit_redeem_lead_minutes INTEGER NOT NULL DEFAULT 30"
+                )
+            )
             await session.commit()
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
@@ -303,10 +315,18 @@ async def test_security_lineage_reconcile_preserves_previously_deployed_aggregat
             sticky_columns = {
                 str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
             }
+            quota_columns = {
+                str(row[1])
+                for row in (await session.execute(text("PRAGMA table_info('quota_planner_settings')"))).all()
+            }
             revision = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
 
         assert "prohibit_fast_mode" in dashboard_columns
         assert "requires_security_work_authorized" in sticky_columns
+        assert {
+            "auto_redeem_expiring_reset_credits",
+            "reset_credit_redeem_lead_minutes",
+        } <= quota_columns
         assert revision == _HEAD_REVISION
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
 

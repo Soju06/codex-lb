@@ -107,6 +107,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_turn_state_alias_key,
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
+    _mark_http_bridge_reader_handoff_reconnect_failed,
+    _persist_http_bridge_previous_response_alias,
+    _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
     _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
@@ -141,19 +144,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 from app.modules.proxy._service.http_bridge.session_registry import _HTTPBridgeSessionRegistryMixin
 from app.modules.proxy._service.http_bridge.streaming import _HTTPBridgeStreamingMixin
 from app.modules.proxy._service.http_bridge.upstream_events import _HTTPBridgeUpstreamEventsMixin
-from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
-from app.modules.proxy._service.observability import (
-    _hash_identifier_or_none as _hash_identifier_or_none,
-)
-from app.modules.proxy._service.observability import (
-    _interesting_header_keys as _interesting_header_keys,
-)
-from app.modules.proxy._service.observability import (
-    _tools_hash as _tools_hash,
-)
-from app.modules.proxy._service.observability import (
-    _truncate_identifier as _truncate_identifier,
-)
+from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -2087,6 +2078,7 @@ class _HTTPBridgeMixin(
             nonlocal preferred_candidate_id
             if hard_close_account_bound or selected_account_model_replacement:
                 await release_selected_account_lease()
+                _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
@@ -2105,6 +2097,7 @@ class _HTTPBridgeMixin(
                 session.closed = True
                 raise
 
+        session.closed = False if old_reader is not None else session.closed
         while True:
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
             selection = await self._select_account_with_budget_for_stream(
@@ -2181,6 +2174,7 @@ class _HTTPBridgeMixin(
                     continue
                 record_selected_account_takeover(None)
                 status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
+                _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise ProxyResponseError(
                     status_code,
                     openai_error(
@@ -2193,6 +2187,7 @@ class _HTTPBridgeMixin(
                 if selection.lease is not None:
                     await self._load_balancer.release_account_lease(selection.lease)
                 record_selected_account_takeover(account.id, required_preferred_account_id)
+                _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease
@@ -2229,6 +2224,7 @@ class _HTTPBridgeMixin(
             except ProxyResponseError as exc:
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
                     await release_selected_account_lease()
+                    _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                     raise
                 try:
                     account = await self._ensure_fresh_with_budget(
@@ -2246,6 +2242,7 @@ class _HTTPBridgeMixin(
                 except ProxyResponseError as retry_exc:
                     if retry_exc.status_code != 401:
                         await release_selected_account_lease()
+                        _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                         raise
                     await self._handle_proxy_error(account, retry_exc)
                     await abandon_selected_account_retry(account)
@@ -2266,6 +2263,7 @@ class _HTTPBridgeMixin(
                     await abandon_selected_account_retry(account)
                     continue
                 await release_selected_account_lease()
+                _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
@@ -2276,6 +2274,7 @@ class _HTTPBridgeMixin(
                     await abandon_selected_account_retry(account)
                     continue
                 await release_selected_account_lease()
+                _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise
         try:
             await old_upstream.close()

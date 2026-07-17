@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 
@@ -79,7 +80,7 @@ async def test_inject_sse_keepalives_cancels_idle_source_when_downstream_closes(
     stream = inject_sse_keepalives(source(), 0.01)
     assert await anext(stream) == SSE_KEEPALIVE_FRAME
 
-    await stream.aclose()
+    await cast(Any, stream).aclose()
 
     assert source_cancelled.is_set()
 

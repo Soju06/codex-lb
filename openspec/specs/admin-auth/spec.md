@@ -51,7 +51,7 @@ The system SHALL enforce both a minimum and a maximum length on dashboard passwo
 
 ### Requirement: Dashboard password sessions use a configurable absolute lifetime
 
-The system SHALL issue dashboard password-authenticated sessions with an absolute lifetime controlled by persisted dashboard settings. The default persisted lifetime SHALL be 1 year. Configured lifetimes at or below 30 days SHALL apply to newly issued dashboard password sessions by setting both the encrypted session expiry payload and the cookie `Max-Age` to the same value. Configured lifetimes above 30 days SHALL apply only in standard dashboard auth mode when the request is socket-level local, or when an explicit loopback-host-header override is enabled and the request uses a loopback dashboard URL with no forwarded-client headers. Non-loopback, proxy-aware, trusted-header, or bridge-without-override requests MUST receive a 12-hour effective lifetime without rewriting the persisted setting.
+The system SHALL issue dashboard password-authenticated sessions with an absolute lifetime controlled by persisted dashboard settings. The default persisted lifetime SHALL be 1 year. Configured lifetimes at or below 30 days SHALL apply to newly issued dashboard password sessions by setting both the encrypted session expiry payload and the cookie `Max-Age` to the same value. Configured lifetimes above 30 days SHALL apply only in standard dashboard auth mode when the request is socket-level local, or when an explicit loopback-host-header override is enabled, the request uses a loopback dashboard URL, and every field value of every forwarded client-IP header is empty. Non-loopback, proxy-aware, trusted-header, or bridge-without-override requests MUST receive a 12-hour effective lifetime without rewriting the persisted setting.
 
 #### Scenario: Newly issued dashboard password session honors configured lifetime
 
@@ -69,8 +69,15 @@ The system SHALL issue dashboard password-authenticated sessions with an absolut
 
 - **WHEN** an admin configures a dashboard session lifetime greater than 30 days and successfully completes password authentication through a loopback dashboard URL whose socket peer is not loopback
 - **AND** the explicit loopback-host-header override is enabled
-- **AND** no forwarded-client headers are present
+- **AND** every field value of every forwarded client-IP header is empty
 - **THEN** the newly issued dashboard session expires after the configured absolute lifetime
+
+#### Scenario: Later duplicate forwarded client identity disables the long session override
+
+- **WHEN** a non-loopback socket peer authenticates through a loopback dashboard URL with the explicit loopback-host-header override enabled
+- **AND** a forwarded client-IP header contains an empty first field followed by a non-empty field
+- **THEN** the newly issued dashboard session expires after 12 hours
+- **AND** the cookie `Max-Age` is `43200`
 
 #### Scenario: Long dashboard password session falls back for non-loopback access
 

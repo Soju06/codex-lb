@@ -5224,7 +5224,7 @@ async def _run_session_anchor_owner_stream(
     Returns the previous_response_id values passed to each prepare call.
     """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    prefix_items = [
+    prefix_items: list[proxy_service.JsonValue] = [
         {"role": "user", "content": [{"type": "input_text", "text": "a"}]},
         {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "c"}]},

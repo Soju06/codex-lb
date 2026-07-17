@@ -13025,12 +13025,11 @@ async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_first_event_connection_reset_fails_over(monkeypatch):
+async def test_stream_responses_first_event_connection_reset_surfaces_without_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_a = _make_account("acc_reset_stream_a")
-    account_b = _make_account("acc_reset_stream_b")
     record_error = AsyncMock()
     record_success = AsyncMock()
     seen_excluded_account_ids: list[set[str]] = []
@@ -13041,14 +13040,12 @@ async def test_stream_responses_first_event_connection_reset_fails_over(monkeypa
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = kwargs.get("exclude_account_ids")
         seen_excluded_account_ids.append(set(cast(set[str], excluded_account_ids)))
-        if len(seen_excluded_account_ids) == 1:
-            return AccountSelection(account=account_a, error_message=None)
-        return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
-    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_a))
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         if account_id == account_a.chatgpt_account_id:
@@ -13066,12 +13063,13 @@ async def test_stream_responses_first_event_connection_reset_fails_over(monkeypa
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
-    assert event["response"]["id"] == "resp_reset_ok"
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_excluded_account_ids == [set()]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     record_error.assert_awaited_once_with(account_a)
-    record_success.assert_awaited_once_with(account_b)
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -866,6 +866,14 @@ class _WebSocketMixin:
                         )
                         await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
+                    async with pending_lock:
+                        pending_requests.append(request_state)
+                    proxy._start_request_state_api_key_reservation_heartbeat(
+                        request_state,
+                        api_key=request_state.api_key or api_key,
+                        surface="websocket",
+                    )
+                    request_state_registered = True
                     retry_delay_seconds = backoff_seconds(request_state.replay_count)
                     if retry_delay_seconds > 0:
                         _facade().logger.info(
@@ -875,14 +883,6 @@ class _WebSocketMixin:
                             retry_delay_seconds,
                         )
                         await asyncio.sleep(retry_delay_seconds)
-                    async with pending_lock:
-                        pending_requests.append(request_state)
-                    proxy._start_request_state_api_key_reservation_heartbeat(
-                        request_state,
-                        api_key=request_state.api_key or api_key,
-                        surface="websocket",
-                    )
-                    request_state_registered = True
                 else:
                     downstream_idle_timeout_seconds = runtime_settings.proxy_downstream_websocket_idle_timeout_seconds
                     message: Any | None = deferred_downstream_message
@@ -1199,7 +1199,12 @@ class _WebSocketMixin:
                                 for pending in pending_requests
                             )
                         if wait_for_created_only_replay:
-                            await asyncio.wait({upstream_reader}, timeout=0.05)
+                            try:
+                                await asyncio.wait({upstream_reader}, timeout=0.05)
+                            except asyncio.CancelledError:
+                                await proxy._release_websocket_request_state_reservation(request_state)
+                                await _release_websocket_response_create_gate(request_state, response_create_gate)
+                                raise
                     if upstream_reader is not None and upstream_reader.done():
                         try:
                             await upstream_reader

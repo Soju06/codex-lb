@@ -952,6 +952,38 @@ def test_websocket_precreated_retry_error_code_classifies_exact_account_model_re
     )
 
 
+def test_websocket_precreated_retry_error_code_classifies_model_capacity_message():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_model_capacity",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Selected model is at capacity. Please try a different model.",
+        },
+    }
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        == "server_is_overloaded"
+    )
+
+
 @pytest.mark.parametrize(
     ("kind", "expected"),
     [("account_model", "account_model_unsupported"), ("auth", "invalid_api_key")],
@@ -1193,6 +1225,16 @@ def test_upstream_unavailable_certificate_connect_error_is_not_transient_retry()
             message,
         )
         is False
+    )
+
+
+def test_selected_model_capacity_message_is_transient_retry() -> None:
+    assert (
+        proxy_service._should_retry_transient_stream_error(
+            "invalid_request_error",
+            "Selected model is at capacity. Please try a different model.",
+        )
+        is True
     )
 
 

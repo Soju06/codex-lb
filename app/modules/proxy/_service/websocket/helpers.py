@@ -329,6 +329,7 @@ from app.modules.proxy.helpers import (
     _is_account_model_unsupported_error,
     _normalize_error_code,
     _parse_openai_error,
+    is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -703,6 +704,8 @@ def _websocket_precreated_retry_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+    if is_upstream_model_capacity_error(error_message):
+        return "server_is_overloaded"
     if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
     return error_code

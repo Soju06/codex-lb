@@ -39,6 +39,11 @@ _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exc
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
+_MODEL_CAPACITY_MESSAGE_MARKERS = (
+    "selected model is at capacity",
+    "model is at capacity",
+    "try a different model",
+)
 
 
 def _is_account_model_unsupported_error(
@@ -55,6 +60,15 @@ def _is_account_model_unsupported_error(
     return normalized_message == expected_message
 
 
+def is_upstream_model_capacity_error(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized_message = " ".join(message.lower().split())
+    return all(marker in normalized_message for marker in ("model", "capacity")) or any(
+        marker in normalized_message for marker in _MODEL_CAPACITY_MESSAGE_MARKERS
+    )
+
+
 def classify_upstream_failure(
     *,
     error_code: str,
@@ -67,7 +81,11 @@ def classify_upstream_failure(
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
-    elif error_code in _TRANSIENT_CODES or (http_status is not None and http_status >= 500):
+    elif (
+        error_code in _TRANSIENT_CODES
+        or is_upstream_model_capacity_error(error.get("message"))
+        or (http_status is not None and http_status >= 500)
+    ):
         failure_class = "retryable_transient"
     else:
         failure_class = "non_retryable"

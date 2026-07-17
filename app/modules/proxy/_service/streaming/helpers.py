@@ -385,6 +385,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     classify_upstream_failure,
+    is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -431,6 +432,8 @@ def _should_retry_transient_stream_error(code: str | None, message: str | None) 
         # replaying the POST is safe.
         return False
     if code in _facade()._TRANSIENT_RETRY_CODES:
+        return True
+    if is_upstream_model_capacity_error(message):
         return True
     if code != "upstream_unavailable" or not message:
         return False

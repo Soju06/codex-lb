@@ -34009,6 +34009,99 @@ async def test_reconnect_http_bridge_security_rebind_clears_previous_response_st
 
 
 @pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_restarts_reader_before_local_close(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_reader_handoff")
+    old_upstream = AsyncMock()
+    new_upstream = SimpleNamespace(response_header=lambda _name: None)
+    old_reader_started = asyncio.Event()
+    old_reader_cancelled = asyncio.Event()
+    replacement_reader_started = asyncio.Event()
+    release_replacement_reader = asyncio.Event()
+    session_holder = {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def blocked_old_reader() -> None:
+        old_reader_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            old_reader_cancelled.set()
+            raise
+        finally:
+            session_holder["session"].closed = True
+
+    async def close_old_upstream() -> None:
+        assert old_reader_cancelled.is_set()
+
+    async def replacement_reader(target_session) -> None:
+        assert target_session.upstream is new_upstream
+        replacement_reader_started.set()
+        await release_replacement_reader.wait()
+
+    async def open_replacement(*_args, **_kwargs):
+        assert session_holder["session"].closed is False
+        return new_upstream
+
+    old_upstream.close.side_effect = close_old_upstream
+    monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", replacement_reader)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_replacement)
+    old_reader = asyncio.create_task(blocked_old_reader())
+    await old_reader_started.wait()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_reader_handoff",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-reader-handoff", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-reader-handoff"),
+        request_model="gpt-5.5",
+        account=account,
+        upstream=old_upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        upstream_reader=old_reader,
+    )
+    session_holder["session"] = session
+
+    try:
+        await service._reconnect_http_bridge_session(session, request_state=request_state, restart_reader=True)
+        await asyncio.wait_for(replacement_reader_started.wait(), timeout=1.0)
+
+        assert old_reader.cancelled()
+        assert session.upstream is new_upstream
+        assert session.upstream_reader is not None
+        assert session.upstream_reader is not old_reader
+        assert session.upstream_reader.done() is False
+        old_upstream.close.assert_awaited_once()
+    finally:
+        release_replacement_reader.set()
+        replacement_task = session.upstream_reader
+        if replacement_task is not None:
+            await replacement_task
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_fails_over_after_repeated_401_refresh_retry(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

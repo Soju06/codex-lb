@@ -17,7 +17,7 @@ insert-heavy tables so the visibility map stays fresh enough for index-only
 scans even after crash recovery resets the cumulative statistics counters.
 
 Revision ID: 20260717_000000_optimize_dashboard_hot_path_indexes
-Revises: 20260716_010000_add_dashboard_retention_settings
+Revises: 20260717_000000_merge_retention_and_reset_credit_display_heads
 Create Date: 2026-07-17 00:00:00.000000
 """
 
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260717_000000_optimize_dashboard_hot_path_indexes"
-down_revision = "20260716_010000_add_dashboard_retention_settings"
+down_revision = "20260717_000000_merge_retention_and_reset_credit_display_heads"
 branch_labels = None
 depends_on = None
 

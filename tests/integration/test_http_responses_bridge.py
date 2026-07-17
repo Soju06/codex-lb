@@ -5577,10 +5577,19 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
     assert json.loads(fake_upstream.sent_text[1])["prompt_cache_key"] == "backend-http-prompt-b"
 
 
+@pytest.mark.parametrize(
+    ("second_model", "expected_connection_count"),
+    [
+        pytest.param("gpt-5.1", 1, id="same-model-reuse"),
+        pytest.param("gpt-5.4", 2, id="model-transition-fork"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_replayed(
+async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_compatible(
     async_client,
     monkeypatch,
+    second_model: str,
+    expected_connection_count: int,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -5589,7 +5598,8 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         "backend-http-bridge-turn-state@example.com",
     )
     account = await _get_account(account_id)
-    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    available_upstreams = deque(_FakeBridgeUpstreamWebSocket() for _ in range(3))
+    connected_upstreams: list[_FakeBridgeUpstreamWebSocket] = []
     connect_calls: list[tuple[str | None, proxy_module.StickySessionKind | None]] = []
 
     async def fake_select_account_with_budget(
@@ -5641,7 +5651,9 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         session=None,
     ):
         del headers, access_token, account_id_header, base_url, session
-        return fake_upstream
+        upstream = available_upstreams.popleft()
+        connected_upstreams.append(upstream)
+        return upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
@@ -5665,7 +5677,7 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         async_client,
         "/backend-api/codex/responses",
         json_body={
-            "model": "gpt-5.1",
+            "model": second_model,
             "instructions": "Return exactly OK.",
             "input": "hello-again",
             "prompt_cache_key": "backend-http-turn-state-b",
@@ -5674,11 +5686,31 @@ async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_re
         },
         headers={"x-codex-turn-state": turn_state},
     )
+    third_events: list[dict] | None = None
+    if second_model != "gpt-5.1":
+        third_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello-on-original-model",
+                "prompt_cache_key": "backend-http-turn-state-c",
+                "stream": True,
+            },
+            headers={"x-codex-turn-state": turn_state},
+        )
 
     _assert_created_text_delta_completed(first_events)
     _assert_created_text_delta_completed(second_events)
+    if third_events is not None:
+        _assert_created_text_delta_completed(third_events)
     assert turn_state.startswith("http_turn_")
-    assert connect_calls == [("backend-http-turn-state-a", proxy_module.StickySessionKind.PROMPT_CACHE)]
+    assert connect_calls[0] == ("backend-http-turn-state-a", proxy_module.StickySessionKind.PROMPT_CACHE)
+    assert len(connect_calls) == expected_connection_count
+    expected_request_counts = [2] if expected_connection_count == 1 else [2, 1]
+    assert [len(upstream.sent_text) for upstream in connected_upstreams] == expected_request_counts
+    assert connected_upstreams[0].closed is False
 
 
 @pytest.mark.asyncio

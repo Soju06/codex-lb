@@ -106,6 +106,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_reusable_for_request,
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
+    _http_bridge_turn_state_alias_has_live_owner,
     _http_bridge_turn_state_alias_key,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
@@ -119,6 +120,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
     _refresh_reused_http_bridge_session_with_handoff,
+    _register_http_bridge_turn_state_aliases_locked,
     _renew_durable_http_bridge_lease,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
@@ -529,6 +531,9 @@ class _HTTPBridgeMixin(
                         if _http_bridge_alias_target_is_stale(alias_session):
                             self._http_bridge_turn_state_index.pop(alias_index_key, None)
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                        elif not _http_bridge_models_compatible(alias_session.request_model, request_model):
+                            model_transition_rebind, model_transition_parent_key = True, alias_key
+                            key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
                         elif not _http_bridge_compatible(
                             alias_session, request_model, request_service_tier, True
                         ) or not _http_bridge_session_matches_preferred_account(
@@ -544,10 +549,7 @@ class _HTTPBridgeMixin(
                                 turn_state=incoming_turn_state,
                                 settings=settings,
                             )
-                            for alias in alias_session.downstream_turn_state_aliases:
-                                self._http_bridge_turn_state_index[
-                                    _http_bridge_turn_state_alias_key(alias, alias_session.key.api_key_id)
-                                ] = alias_session.key
+                            _register_http_bridge_turn_state_aliases_locked(self, alias_session)
                             key = alias_session.key
                     elif incoming_turn_state.startswith("http_turn_"):
                         if previous_response_id is not None:
@@ -633,7 +635,7 @@ class _HTTPBridgeMixin(
                     request_model=request_model,
                     request_service_tier=request_service_tier,
                     request_scope_id=request_scope_id,
-                    allow_model_fork=reusable,
+                    allow_model_fork=reusable or model_transition_rebind,
                 )
                 if fork_key is not None:
                     model_transition_parent_key = key
@@ -1607,16 +1609,13 @@ class _HTTPBridgeMixin(
 
     async def _register_http_bridge_turn_state(self, session: "_HTTPBridgeSession", turn_state: str) -> None:
         async with self._http_bridge_lock:
-            if session.closed:
+            if session.closed or _http_bridge_turn_state_alias_has_live_owner(self, session, turn_state):
                 return
             registration_generation = _track_alias_registration(session, turn_state, turn_state=True)
             session.downstream_turn_state_aliases.add(turn_state)
             if session.downstream_turn_state is None:
                 session.downstream_turn_state = turn_state
-            for alias in session.downstream_turn_state_aliases:
-                self._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
-                    session.key
-                )
+            _register_http_bridge_turn_state_aliases_locked(self, session)
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
             await _persist_http_bridge_turn_state_alias(
                 self,

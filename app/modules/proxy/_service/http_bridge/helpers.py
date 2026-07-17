@@ -971,6 +971,28 @@ def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -
     return (turn_state, api_key_id)
 
 
+def _http_bridge_turn_state_alias_has_live_owner(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    turn_state: str,
+) -> bool:
+    alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+    existing_key = service._http_bridge_turn_state_index.get(alias_key)
+    if existing_key is None or existing_key == session.key:
+        return False
+    return not _http_bridge_alias_target_is_stale(service._http_bridge_sessions.get(existing_key))
+
+
+def _register_http_bridge_turn_state_aliases_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+) -> None:
+    for alias in session.downstream_turn_state_aliases:
+        service._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
+            session.key
+        )
+
+
 def _http_bridge_previous_response_alias_key(response_id: str, api_key_id: str | None) -> tuple[str, str | None]:
     return (response_id.strip(), api_key_id)
 

@@ -1620,14 +1620,16 @@ def test_http_bridge_pending_state_with_first_event_latency_only_is_stale() -> N
 
 
 @pytest.mark.parametrize(
-    "anchor_kwargs",
+    ("previous_response_id", "session_id", "hard_continuity_anchor"),
     [
-        {"previous_response_id": "resp-anchored"},
-        {"session_id": "turn-anchored", "hard_continuity_anchor": True},
+        ("resp-anchored", None, False),
+        (None, "turn-anchored", True),
     ],
 )
 def test_http_bridge_pending_state_with_continuity_anchor_is_not_stale(
-    anchor_kwargs: dict[str, object],
+    previous_response_id: str | None,
+    session_id: str | None,
+    hard_continuity_anchor: bool,
 ) -> None:
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-anchored-pending",
@@ -1639,7 +1641,9 @@ def test_http_bridge_pending_state_with_continuity_anchor_is_not_stale(
         transport="http",
         response_create_gate_acquired=True,
         awaiting_response_created=True,
-        **anchor_kwargs,
+        previous_response_id=previous_response_id,
+        session_id=session_id,
+        hard_continuity_anchor=hard_continuity_anchor,
     )
 
     assert (
@@ -1653,14 +1657,16 @@ def test_http_bridge_pending_state_with_continuity_anchor_is_not_stale(
 
 
 @pytest.mark.parametrize(
-    "anchor_kwargs",
+    ("previous_response_id", "session_id", "hard_continuity_anchor"),
     [
-        {"previous_response_id": "resp-closed-anchored"},
-        {"session_id": "turn-closed-anchored", "hard_continuity_anchor": True},
+        ("resp-closed-anchored", None, False),
+        (None, "turn-closed-anchored", True),
     ],
 )
 def test_http_bridge_closed_session_pending_anchor_is_stale(
-    anchor_kwargs: dict[str, object],
+    previous_response_id: str | None,
+    session_id: str | None,
+    hard_continuity_anchor: bool,
 ) -> None:
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-closed-anchored-pending",
@@ -1672,7 +1678,9 @@ def test_http_bridge_closed_session_pending_anchor_is_stale(
         transport="http",
         response_create_gate_acquired=True,
         awaiting_response_created=True,
-        **anchor_kwargs,
+        previous_response_id=previous_response_id,
+        session_id=session_id,
+        hard_continuity_anchor=hard_continuity_anchor,
     )
 
     assert (
@@ -1708,6 +1716,59 @@ def test_http_bridge_pending_state_with_plain_session_header_is_stale() -> None:
         )
         is True
     )
+
+
+def test_http_bridge_synthesized_downstream_turn_state_is_not_hard_anchor() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-synth-turn-state",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+    )
+
+    http_bridge_streaming_module._apply_http_bridge_downstream_turn_state(
+        request_state,
+        downstream_turn_state="synthesized-turn-state",
+        incoming_turn_state_header=None,
+    )
+
+    assert request_state.session_id == "synthesized-turn-state"
+    assert request_state.hard_continuity_anchor is False
+
+
+@pytest.mark.parametrize(
+    ("incoming_turn_state_header", "previous_response_id"),
+    [
+        ("client-turn-state", None),
+        (None, "resp-continuation"),
+    ],
+)
+def test_http_bridge_real_continuity_sets_hard_anchor(
+    incoming_turn_state_header: str | None,
+    previous_response_id: str | None,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-real-anchor",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        previous_response_id=previous_response_id,
+    )
+
+    http_bridge_streaming_module._apply_http_bridge_downstream_turn_state(
+        request_state,
+        downstream_turn_state="real-turn-state",
+        incoming_turn_state_header=incoming_turn_state_header,
+    )
+
+    assert request_state.session_id == "real-turn-state"
+    assert request_state.hard_continuity_anchor is True
 
 
 @pytest.mark.asyncio
@@ -2534,7 +2595,8 @@ async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolve
         queued_request_count=1,
     )
     await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
-    assert session.key in service._http_bridge_retry_circuits
+    retry_circuits = cast(Any, service)._http_bridge_retry_circuits
+    assert session.key in retry_circuits
 
     await service._process_http_bridge_upstream_text(
         session,
@@ -2583,7 +2645,7 @@ async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolve
     assert session.last_completed_response_id == "resp_precreated_completed"
     assert session.queued_request_count == 0
     assert not session.pending_requests
-    assert session.key not in service._http_bridge_retry_circuits
+    assert session.key not in retry_circuits
     register_previous.assert_awaited_once()
     finalize.assert_awaited_once()
 
@@ -17920,6 +17982,7 @@ async def test_http_bridge_clean_close_before_response_does_not_penalize_account
 
     await service._relay_http_bridge_upstream_messages(session)
 
+    assert fail_pending.await_args is not None
     assert fail_pending.await_args.kwargs["penalize_account"] is False
 
 
@@ -18120,7 +18183,8 @@ async def test_http_bridge_clean_close_retry_circuit_is_bounded() -> None:
 
     cooldown = await service._http_bridge_precreated_retry_cooldown_seconds(session)
     assert 0 < cooldown <= 30.0
-    assert service._http_bridge_retry_circuits[session.key].last_detail == "clean_close"
+    retry_circuits = cast(Any, service)._http_bridge_retry_circuits
+    assert retry_circuits[session.key].last_detail == "clean_close"
 
 
 @pytest.mark.asyncio

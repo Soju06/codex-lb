@@ -593,7 +593,7 @@ class ModelRegistry:
             normalized_slug
         )
         if tier_plans is None:
-            return self.plan_types_for_model(slug)
+            return frozenset() if self._snapshot.account_catalogs_authoritative else self.plan_types_for_model(slug)
         return tier_plans.get(normalized_service_tier, frozenset())
 
     def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:

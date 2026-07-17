@@ -464,6 +464,24 @@ async def test_account_ids_for_model_service_tier_tracks_account_catalogs():
 
 
 @pytest.mark.asyncio
+async def test_plan_types_for_model_service_tier_rejects_missing_authoritative_tier_map():
+    model = replace(_model("gpt-5.5"), raw={})
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"pro": [model]},
+        per_account_results={"account-pro": ("pro", [])},
+        active_account_plans={"account-pro": "pro"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is True
+    assert registry.plan_types_for_model("gpt-5.5") == frozenset({"pro"})
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "flex") == frozenset()
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", "flex") == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_account_ids_for_model_tracks_complete_account_catalogs():
     shared = _model("gpt-5.4")
     sol = _model("gpt-5.6-sol")

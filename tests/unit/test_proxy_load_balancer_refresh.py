@@ -2710,6 +2710,67 @@ async def test_select_account_canonicalizes_quota_omission_provenance_for_equiva
 
 
 @pytest.mark.asyncio
+async def test_select_account_rejects_quota_override_for_unadvertised_service_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc-gated-unadvertised-tier", "gated-unadvertised-tier@example.com")
+    account.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=1,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=10.0,
+                recorded_at=now,
+            )
+        }
+    )
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    spark_model = replace(registry.get_models_with_fallback()["gpt-5.3-codex-spark"], raw={})
+    await registry.update(
+        {"pro": [spark_model]},
+        per_account_results={account.id: ("pro", [])},
+        active_account_plans={account.id: "pro"},
+    )
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        service_tier="flex",
+    )
+
+    assert selection.account is None
+    assert selection.catalog_omission_quota_admission is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
 async def test_select_account_preserves_authoritative_service_tier_accounts_when_quota_overrides_catalog(
     monkeypatch,
 ) -> None:

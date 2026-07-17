@@ -1980,6 +1980,11 @@ def test_dashboard_hot_path_postgresql_indexes_build_concurrently() -> None:
     assert source.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 2
     assert "_COVERING_INDEX_NAME" in source
     assert "_LABELS_INDEX_NAME" in source
+    # Redundant indexes are dropped without blocking writers, and leftover
+    # invalid indexes from an interrupted concurrent build are rebuilt instead
+    # of being silently accepted by IF NOT EXISTS.
+    assert source.count("DROP INDEX CONCURRENTLY IF EXISTS") >= 2
+    assert "indisvalid" in source
 
 
 def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Path) -> None:
@@ -1996,9 +2001,10 @@ def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Pa
         }
 
     assert "idx_logs_requested_at" not in log_indexes
-    assert "idx_logs_request_status_api_key_time" not in log_indexes
     assert "idx_logs_api_key_time_account" not in log_indexes
     assert "ix_additional_usage_history_account_id" not in usage_indexes
+    # Kept: the sessionless response-owner fallback needs its ordered retrieval.
+    assert "idx_logs_request_status_api_key_time" in log_indexes
     assert "idx_logs_dash_usage_covering" in log_indexes
     assert "ix_additional_usage_distinct_labels" in usage_indexes
 

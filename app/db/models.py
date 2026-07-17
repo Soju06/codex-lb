@@ -1737,6 +1737,14 @@ Index(
     RequestLog.id.desc(),
 )
 Index(
+    "idx_logs_request_status_api_key_time",
+    RequestLog.request_id,
+    RequestLog.status,
+    RequestLog.api_key_id,
+    RequestLog.requested_at.desc(),
+    RequestLog.id.desc(),
+)
+Index(
     "idx_logs_request_status_api_key_session_time",
     RequestLog.request_id,
     RequestLog.status,

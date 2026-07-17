@@ -2,7 +2,7 @@
 
 ### Requirement: Dashboard usage aggregation reads are index-only on PostgreSQL
 
-PostgreSQL deployments MUST maintain a covering partial index (`idx_logs_dash_usage_covering`) on `request_logs (requested_at)` that includes every column referenced by the dashboard slot aggregation (`account_id`, `api_key_id`, `model`, `reasoning_effort`, `request_kind`, `status`, `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_tokens`, `cost_usd`, `id`) and is filtered to `deleted_at IS NULL`, so the aggregation can be satisfied without heap access. SQLite deployments MUST maintain the same index as a partial index on `requested_at`.
+PostgreSQL deployments MUST maintain a covering partial index (`idx_logs_dash_usage_covering`) on `request_logs (requested_at)` that includes every column referenced by the quota-planner slot aggregation (`account_id`, `api_key_id`, `model`, `reasoning_effort`, `request_kind`, `status`, `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_tokens`, `cost_usd`, `id`) and is filtered to `deleted_at IS NULL`, so the aggregation can be satisfied without heap access. SQLite deployments MUST maintain the same index as a partial index on `requested_at`.
 
 #### Scenario: Slot aggregation avoids heap churn
 
@@ -17,6 +17,13 @@ PostgreSQL deployments MUST maintain a covering partial index (`idx_logs_dash_us
 - **GIVEN** `idx_logs_dash_usage_covering` or `ix_additional_usage_distinct_labels` was already created manually as a live hotfix
 - **WHEN** the schema migration is applied
 - **THEN** the migration MUST complete without failing on duplicate index creation
+
+#### Scenario: Interrupted concurrent build is repaired, not accepted
+
+- **GIVEN** the database backend is PostgreSQL
+- **AND** a previous `CREATE INDEX CONCURRENTLY` for `idx_logs_dash_usage_covering` or `ix_additional_usage_distinct_labels` was interrupted, leaving an invalid index (`pg_index.indisvalid = false`) under the same name
+- **WHEN** the schema migration is applied
+- **THEN** the migration MUST drop the invalid index and rebuild it rather than accepting it via `IF NOT EXISTS`
 
 ### Requirement: Distinct quota-label lookups are index-only
 
@@ -41,10 +48,15 @@ PostgreSQL deployments MUST set per-table autovacuum storage parameters on `requ
 
 ### Requirement: Redundant request-log indexes are not maintained
 
-The schema MUST NOT maintain indexes on `request_logs` or `additional_usage_history` whose key columns are a strict prefix of (or interchangeable with) another maintained index on the same table. Specifically, `idx_logs_requested_at`, `idx_logs_request_status_api_key_time`, `idx_logs_api_key_time_account`, and `ix_additional_usage_history_account_id` are dropped; their read paths are served by `idx_logs_requested_at_id`, `idx_logs_request_status_api_key_session_time`, `idx_logs_api_key_time`, and `ix_additional_usage_distinct_labels` respectively.
+The schema MUST NOT maintain indexes on `request_logs` or `additional_usage_history` whose read paths are fully served by another maintained index on the same table. Specifically, `idx_logs_requested_at`, `idx_logs_api_key_time_account`, and `ix_additional_usage_history_account_id` are dropped; their read paths are served by `idx_logs_requested_at_id`, `idx_logs_api_key_time`, and `ix_additional_usage_distinct_labels` respectively. `idx_logs_request_status_api_key_time` MUST be kept: the sessionless response-owner fallback lookup orders by `requested_at DESC, id DESC` after an equality prefix, and the session-scoped index (`idx_logs_request_status_api_key_session_time`) cannot return that order because `session_id` precedes the ordering columns. On PostgreSQL the redundant indexes MUST be dropped with `DROP INDEX CONCURRENTLY` so writers are not queued behind an `ACCESS EXCLUSIVE` lock during startup migration.
 
 #### Scenario: Reads previously served by a dropped index use its wider twin
 
 - **WHEN** a query filters or orders by the leading columns of a dropped redundant index
 - **THEN** the query MUST be satisfiable by the wider index that shares the same leading key columns
 - **AND** query results MUST remain semantically identical
+
+#### Scenario: Sessionless response-owner fallback keeps ordered retrieval
+
+- **WHEN** the response-owner lookup falls back to a sessionless search by `request_id` and `status`
+- **THEN** the newest matching row by `requested_at DESC, id DESC` MUST be retrievable from `idx_logs_request_status_api_key_time` in index order

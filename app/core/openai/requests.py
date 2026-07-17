@@ -810,7 +810,8 @@ class ResponsesRequest(BaseModel):
             # forwarding and model-source egress.
             payload.pop("tools", None)
         if (
-            self._shared_instruction_cache_key is not None
+            self.previous_response_id is None
+            and self._shared_instruction_cache_key is not None
             and _shared_instruction_cache_boundary(payload["input"]) is None
         ):
             payload["prompt_cache_key"] = self._shared_instruction_cache_key
@@ -835,7 +836,7 @@ class ResponsesRequest(BaseModel):
 
     def to_payload(self) -> JsonObject:
         payload = self.model_dump_for_forwarding()
-        if self._shared_instruction_cache_key is not None:
+        if self.previous_response_id is None and self._shared_instruction_cache_key is not None:
             boundary = _shared_instruction_cache_boundary(payload["input"])
             if boundary is None:
                 payload["prompt_cache_key"] = self._shared_instruction_cache_key

@@ -54,9 +54,9 @@ def test_shared_instruction_cache_clears_state_for_anchored_model_copy() -> None
     assert request.enable_shared_instruction_cache() is True
 
     anchored = request.model_copy(update={"previous_response_id": "resp_previous"})
+    payload = anchored.to_payload()
     assert anchored.enable_shared_instruction_cache() is False
 
-    payload = anchored.to_payload()
     assert payload["prompt_cache_key"] == "client-cache-key"
     assert payload["input"] == anchored.input
 

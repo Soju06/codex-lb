@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import random
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -34,6 +35,21 @@ class StubEncryptor(TokenEncryptor):
         return f"token-for-{encrypted.decode() if encrypted else ''}"
 
 
+class _FakeDashboardSettings:
+    def __init__(self, *, auto_redeem_reset_credits_before_expiry: bool = False) -> None:
+        self.auto_redeem_reset_credits_before_expiry = auto_redeem_reset_credits_before_expiry
+
+
+class _FakeSettingsRepository:
+    def __init__(self, *, auto_redeem_reset_credits_before_expiry: bool = False) -> None:
+        self._settings = _FakeDashboardSettings(
+            auto_redeem_reset_credits_before_expiry=auto_redeem_reset_credits_before_expiry,
+        )
+
+    async def get_or_create(self) -> _FakeDashboardSettings:
+        return self._settings
+
+
 def _make_account(
     account_id: str,
     *,
@@ -53,15 +69,23 @@ def _make_account(
     )
 
 
-def _response(available_count: int = 1) -> ResetCreditsResponse:
+def _response(
+    available_count: int = 1,
+    *,
+    expires_at: datetime | str | None = "2026-07-12T00:00:00Z",
+) -> ResetCreditsResponse:
     return ResetCreditsResponse.model_validate(
         {
             "credits": [
-                {"id": "c1", "status": "available", "expires_at": "2026-07-12T00:00:00Z"},
+                {"id": "c1", "status": "available", "expires_at": expires_at},
             ],
             "available_count": available_count,
         }
     )
+
+
+def _response_expiring_in(seconds: int) -> ResetCreditsResponse:
+    return _response(expires_at=datetime.now(UTC) + timedelta(seconds=seconds))
 
 
 @pytest.mark.asyncio
@@ -327,6 +351,7 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
 
     monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
     monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
+    monkeypatch.setattr(scheduler_module, "SettingsRepository", lambda session: _FakeSettingsRepository())
     monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
 
@@ -375,6 +400,7 @@ async def test_refresh_once_closes_account_read_session_before_fetch(monkeypatch
 
     monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
     monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
+    monkeypatch.setattr(scheduler_module, "SettingsRepository", lambda session: _FakeSettingsRepository())
     monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
     monkeypatch.setattr(scheduler_module, "fetch_reset_credits", fetch_fn)
@@ -385,6 +411,368 @@ async def test_refresh_once_closes_account_read_session_before_fetch(monkeypatch
     snapshot = store.get(account.id)
     assert snapshot is not None
     assert snapshot.available_count == 8
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_uses_consume_route_for_auto_redeem(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_auto_route")
+    captured: dict[str, Any] = {}
+
+    class _FakeRepo:
+        async def list_accounts(self) -> list[Account]:
+            return [account]
+
+    class _FakeSession:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        yield _FakeSession()
+
+    async def refresh_stub(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
+    monkeypatch.setattr(
+        scheduler_module,
+        "SettingsRepository",
+        lambda session: _FakeSettingsRepository(auto_redeem_reset_credits_before_expiry=True),
+    )
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
+    monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: RateLimitResetCreditsStore())
+    monkeypatch.setattr(scheduler_module, "refresh_reset_credits_for_accounts", refresh_stub)
+
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    await scheduler._refresh_once()
+
+    assert captured["accounts"] == [account]
+    assert captured["resolve_route"] is scheduler_module._resolve_reset_credits_refresh_route
+    assert captured["auto_redeem_resolve_route"] is scheduler_module._resolve_reset_credits_consume_route
+    assert captured["auto_redeem_before_expiry"] is True
+    assert captured["auto_redeem_window_seconds"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_disabled_by_default_does_not_call_redeem() -> None:
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_manual")
+    redeem_calls: list[str] = []
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(240)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_window_seconds=60,
+    )
+
+    assert redeem_calls == []
+    snapshot = store.get(account.id)
+    assert snapshot is not None
+    assert snapshot.available_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_uses_existing_helper_for_soonest_expiring_credit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.rate_limit_reset_credits.api as reset_credits_api
+    import app.modules.rate_limit_reset_credits.redeem_coordination as redeem_coordination
+
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_auto")
+    latest_account = _make_account("acc_auto")
+    redeem_calls: list[dict[str, Any]] = []
+
+    class _FakeLockSession:
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == account.id
+            return latest_account
+
+    lock_session = _FakeLockSession()
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        yield lock_session
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(240)
+
+    async def redeem_helper(**kwargs: Any) -> None:
+        cached_snapshot = store.get(account.id)
+        assert cached_snapshot is not None
+        assert cached_snapshot.available_count == 1
+        redeem_calls.append(kwargs)
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(reset_credits_api, "_redeem_soonest_reset_credit", redeem_helper)
+    monkeypatch.setattr(redeem_coordination, "get_pinned_redeem_credit_id", AsyncMock(return_value=None))
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert len(redeem_calls) == 1
+    assert redeem_calls[0]["account"] is latest_account
+    assert redeem_calls[0]["store"] is store
+    assert redeem_calls[0]["fetch_fn"] is fetch_fn
+    assert redeem_calls[0]["lock_session"] is lock_session
+    assert isinstance(redeem_calls[0]["redeem_request_id"], str)
+    assert redeem_calls[0]["redeem_request_id"].startswith("auto-reset-credit:")
+    assert redeem_calls[0]["skip_if_redeem_request_pinned"] is True
+    assert redeem_calls[0]["expected_credit_id"] == "c1"
+    assert redeem_calls[0]["expected_credit_expires_at"] == store.get(account.id).credits[0].expires_at
+    assert callable(redeem_calls[0]["refresh_usage"])
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_reloads_account_and_skips_if_no_longer_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.rate_limit_reset_credits.redeem_coordination as redeem_coordination
+
+    store = RateLimitResetCreditsStore()
+    stale_account = _make_account("acc_auto_paused", status=AccountStatus.ACTIVE)
+    latest_account = _make_account("acc_auto_paused", status=AccountStatus.PAUSED)
+    redeem_calls: list[str] = []
+
+    class _FakeLockSession:
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == stale_account.id
+            return latest_account
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        yield _FakeLockSession()
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(240)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(redeem_coordination, "get_pinned_redeem_credit_id", AsyncMock(return_value=None))
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[stale_account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert redeem_calls == []
+    snapshot = store.get(stale_account.id)
+    assert snapshot is not None
+    assert snapshot.available_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_ignores_expiry_outside_five_minute_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_far")
+    redeem_calls: list[str] = []
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(3600)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert redeem_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_ignores_snapshot_without_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_no_expiry")
+    redeem_calls: list[str] = []
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response(expires_at=None)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=60,
+    )
+
+    assert redeem_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_skips_when_automatic_request_is_already_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.rate_limit_reset_credits.redeem_coordination as redeem_coordination
+
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_already_pinned")
+    redeem_calls: list[str] = []
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(240)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+
+    monkeypatch.setattr(redeem_coordination, "get_pinned_redeem_credit_id", AsyncMock(return_value="credit-pinned"))
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert redeem_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_skips_when_helper_finds_pin_inside_redeem_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.rate_limit_reset_credits.redeem_coordination as redeem_coordination
+    from app.modules.rate_limit_reset_credits.api import ResetCreditRedeemRequestAlreadyPinned
+
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_inner_pin")
+    redeem_calls: list[str] = []
+
+    class _FakeLockSession:
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == account.id
+            return account
+
+    lock_session = _FakeLockSession()
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        yield lock_session
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(240)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        redeem_calls.append(kwargs["account"].id)
+        raise ResetCreditRedeemRequestAlreadyPinned(
+            account_id=kwargs["account"].id,
+            redeem_request_id=kwargs["redeem_request_id"],
+            credit_id="credit-pinned",
+        )
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(redeem_coordination, "get_pinned_redeem_credit_id", AsyncMock(return_value=None))
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert redeem_calls == ["acc_inner_pin"]
+    snapshot = store.get(account.id)
+    assert snapshot is not None
+    assert snapshot.available_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_failure_is_isolated_to_one_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.modules.rate_limit_reset_credits.redeem_coordination as redeem_coordination
+
+    store = RateLimitResetCreditsStore()
+    accounts = [_make_account("acc_redeem_fail"), _make_account("acc_redeem_ok")]
+    issued_lock_sessions: list[Any] = []
+    redeem_calls: list[tuple[str, Any]] = []
+
+    class _FakeLockSession:
+        def __init__(self, account: Account) -> None:
+            self.account = account
+
+        async def get(self, model: Any, account_id: str) -> Account | None:
+            assert model is Account
+            assert account_id == self.account.id
+            return self.account
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        lock_session = _FakeLockSession(accounts[len(issued_lock_sessions)])
+        issued_lock_sessions.append(lock_session)
+        yield lock_session
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _response_expiring_in(30)
+
+    async def redeem_fn(**kwargs: Any) -> None:
+        account = kwargs["account"]
+        redeem_calls.append((account.id, kwargs["lock_session"]))
+        if account.id == "acc_redeem_fail":
+            raise RuntimeError("stub redeem failed")
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(redeem_coordination, "get_pinned_redeem_credit_id", AsyncMock(return_value=None))
+
+    await refresh_reset_credits_for_accounts(
+        accounts=accounts,
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        redeem_fn=redeem_fn,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
+
+    assert redeem_calls == [
+        ("acc_redeem_fail", issued_lock_sessions[0]),
+        ("acc_redeem_ok", issued_lock_sessions[1]),
+    ]
+    assert [account_id for account_id, _lock_session in redeem_calls] == ["acc_redeem_fail", "acc_redeem_ok"]
+    assert store.get("acc_redeem_fail") is not None
+    assert store.get("acc_redeem_ok") is not None
 
 
 # --- tick desynchronization (replicas must not fetch in lockstep) ---

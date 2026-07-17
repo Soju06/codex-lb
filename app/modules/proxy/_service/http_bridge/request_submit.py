@@ -1528,6 +1528,11 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.require_security_work_authorized = True
         request_state.preferred_account_id = None
         request_state.excluded_account_ids.add(owner_account_id)
+        # The replacement bridge session may belong to a different account.
+        # Keep the shared response-create gate, but drop the old account-local
+        # create lease so the replay is counted against the account that
+        # actually receives the new response.create.
+        await self._release_request_state_account_response_create_lease(request_state)
 
         request_state.replay_count += 1
         if request_state.response_id is not None and not request_state.awaiting_response_created:
@@ -1570,6 +1575,17 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized=require_security_work_authorized,
             )
             reconnected = True
+            if request_state.account_response_create_lease is None:
+                current_settings = await _service_get_settings_cache().get()
+                request_state.account_response_create_lease = (
+                    await self._acquire_account_response_create_lease_or_overload(
+                        account_id=session.account.id,
+                        request_id=request_state.request_log_id or request_state.request_id,
+                        surface="http_bridge",
+                        concurrency_caps=effective_account_concurrency_caps(current_settings),
+                    )
+                )
+                request_state.account_response_create_release = self._load_balancer.release_account_lease
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()

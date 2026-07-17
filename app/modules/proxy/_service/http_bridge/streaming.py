@@ -955,10 +955,18 @@ class _HTTPBridgeStreamingMixin:
             durable_lookup=durable_lookup,
         )
         request_state.require_security_work_authorized = require_security_work_authorized
+        security_required_unanchored_full_resend = (
+            require_security_work_authorized
+            and durable_lookup is not None
+            and request_state.previous_response_id is None
+            and not request_contains_input_file_ids
+            and _http_bridge_payload_looks_like_full_resend(effective_payload)
+        )
         request_state.preferred_account_id = (
             durable_lookup.account_id
             if (
                 durable_lookup is not None
+                and not security_required_unanchored_full_resend
                 and (
                     request_state.previous_response_id is not None
                     or bridge_session_key.strength == "hard"

@@ -4091,8 +4091,12 @@ class _WebSocketMixin:
                         retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
                     if retry_text:
                         request_state.replay_count += 1
-                        request_state.replay_downstream_response_id = None
-                        request_state.suppress_next_created_downstream = False
+                        if request_state.response_id is not None and not request_state.awaiting_response_created:
+                            request_state.replay_downstream_response_id = request_state.response_id
+                            request_state.suppress_next_created_downstream = True
+                        else:
+                            request_state.replay_downstream_response_id = None
+                            request_state.suppress_next_created_downstream = False
                         request_state.response_id = None
                         request_state.awaiting_response_created = True
                         request_state.require_security_work_authorized = True

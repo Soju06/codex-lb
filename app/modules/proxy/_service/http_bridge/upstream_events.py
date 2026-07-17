@@ -809,7 +809,6 @@ class _HTTPBridgeUpstreamEventsMixin:
             if status_request_state is not None:
                 setattr(status_request_state, "account_health_error_handled", True)
             if status_request_state is not None and not has_other_pending_requests:
-                await self._release_request_state_account_response_create_lease(status_request_state)
                 retried = await self._retry_http_bridge_owner_failover_request(
                     session,
                     status_request_state,

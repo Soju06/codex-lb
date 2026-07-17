@@ -13,11 +13,17 @@ import anyio
 import pytest
 
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
-from app.db.models import StickySession
+from app.db.models import HttpBridgeSessionState, StickySession
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.affinity import _sticky_key_from_session_header
 from tests.unit.test_proxy_http_bridge import _make_app_settings, _make_bridge_session
-from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
+from tests.unit.test_proxy_utils import (
+    _make_account,
+    _make_proxy_settings,
+    _repo_factory,
+    _RequestLogsRecorder,
+    _SettingsCache,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -471,6 +477,115 @@ async def test_http_bridge_stream_reads_sticky_security_requirement_without_dura
     assert get_or_create.await_args is not None
     assert get_or_create.await_args.kwargs["durable_lookup"] is None
     assert get_or_create.await_args.kwargs["require_security_work_authorized"] is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_security_classified_full_resend_drops_ordinary_owner_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    app_settings = _make_app_settings()
+    dashboard_settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+    )
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "prior"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "security follow-up"}]},
+            ],
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="classified-full-resend",
+        canonical_kind="session_header",
+        canonical_key="classified-full-resend",
+        api_key_scope="__anonymous__",
+        account_id="acc-ordinary-denied-owner",
+        owner_instance_id=None,
+        owner_epoch=1,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="classified-full-resend",
+        latest_response_id="resp-security-classified",
+        latest_input_item_count=1,
+        latest_input_full_fingerprint=None,
+        model="gpt-5.6-sol",
+        requires_security_work_authorized=True,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="classified-full-resend",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    assert request_state.event_queue is not None
+    await request_state.event_queue.put(None)
+    session = _make_bridge_session(key_value="classified-full-resend")
+    get_or_create = AsyncMock(return_value=session)
+
+    def prepare_request(
+        _payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        request_state.security_lineage_id = "classified-full-resend"
+        return request_state, '{"type":"response.create","input":["full resend"]}'
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard_settings)),
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_security_lineage_requires_security_work_authorized", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", prepare_request)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "classified-full-resend"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == []
+    assert get_or_create.await_args is not None
+    assert get_or_create.await_args.kwargs["require_security_work_authorized"] is True
+    assert get_or_create.await_args.kwargs["preferred_account_id"] is None
+    assert get_or_create.await_args.kwargs["durable_lookup"] is durable_lookup
+    assert request_state.preferred_account_id is None
 
 
 @pytest.mark.asyncio
@@ -928,6 +1043,79 @@ async def test_http_bridge_failed_precreated_owner_failover_restores_original_co
     assert session.requires_security_work_authorized is require_security_work_authorized
     assert list(session.pending_requests) == [request_state]
     assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_security_work_authorized", [False, True])
+async def test_http_bridge_owner_failover_reacquires_replacement_account_create_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    require_security_work_authorized: bool,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner_account = _make_account("acc_http_owner_lease_old")
+    replacement_account = _make_account("acc_http_owner_lease_new")
+    replacement_upstream = AsyncMock()
+    old_lease = object()
+    replacement_lease = object()
+    release_lease = AsyncMock()
+    acquire_lease = AsyncMock(return_value=replacement_lease)
+    session = _make_bridge_session()
+    session.account = owner_account
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-owner-failover-replacement-lease",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        awaiting_response_created=True,
+        previous_response_id="resp-owner",
+        proxy_injected_previous_response_id=True,
+        preferred_account_id=owner_account.id,
+        request_text='{"type":"response.create","previous_response_id":"resp-owner","input":["tail"]}',
+        fresh_upstream_request_text='{"type":"response.create","input":["full resend"]}',
+        fresh_upstream_request_is_retry_safe=True,
+        account_response_create_lease=cast(Any, old_lease),
+        account_response_create_release=release_lease,
+    )
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+
+    async def reconnect(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        require_security_work_authorized: bool,
+    ) -> None:
+        assert target_session is session
+        assert request_state.account_response_create_lease is None
+        target_session.account = replacement_account
+        target_session.upstream = cast(proxy_service.UpstreamResponsesWebSocket, replacement_upstream)
+        target_session.requires_security_work_authorized = require_security_work_authorized
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", acquire_lease)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_owner_failover_request(
+        session,
+        request_state,
+        require_security_work_authorized=require_security_work_authorized,
+    )
+
+    release_lease.assert_awaited_once_with(old_lease)
+    acquire_lease.assert_awaited_once_with(
+        account_id=replacement_account.id,
+        request_id=request_state.request_id,
+        surface="http_bridge",
+        concurrency_caps=proxy_service.effective_account_concurrency_caps(settings),
+    )
+    assert request_state.account_response_create_lease is replacement_lease
+    assert request_state.account_response_create_release is release_lease
+    replacement_upstream.send_text.assert_awaited_once_with(request_state.request_text)
 
 
 @pytest.mark.asyncio

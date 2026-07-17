@@ -844,7 +844,6 @@ class _CompactMixin:
                     if (
                         require_security_work_authorized
                         and selection.error_code == _no_security_work_authorized_accounts_code()
-                        and last_exc is not None
                     ):
                         if security_lineage_id:
                             logger.info(
@@ -857,7 +856,29 @@ class _CompactMixin:
                                 response=None,
                                 request_service_tier=request_service_tier,
                             )
-                            raise last_exc
+                            if last_exc is not None:
+                                raise last_exc
+                            log_error_code = selection.error_code or "no_security_work_authorized_accounts"
+                            raise ProxyResponseError(
+                                503,
+                                openai_error(
+                                    log_error_code,
+                                    selection.error_message or "No accounts marked as authorized for security work",
+                                    error_type="server_error",
+                                ),
+                            )
+                        if last_exc is None:
+                            log_error_code = selection.error_code or "no_accounts"
+                            log_error_message = selection.error_message or "No active accounts available"
+                            status_code = 429 if log_error_code == "account_response_create_cap" else 503
+                            raise ProxyResponseError(
+                                status_code,
+                                openai_error(
+                                    log_error_code,
+                                    log_error_message,
+                                    error_type="rate_limit_error" if status_code == 429 else "server_error",
+                                ),
+                            )
                         logger.info(
                             "No security-work-authorized account available for unrooted compact retry; "
                             "continuing normal account failover request_id=%s",

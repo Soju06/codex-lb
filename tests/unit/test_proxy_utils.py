@@ -14504,8 +14504,8 @@ async def test_websocket_replays_created_only_previous_response_security_work_er
     assert request_state.replay_count == 1
     assert request_state.previous_response_id is None
     assert request_state.require_security_work_authorized is True
-    assert request_state.replay_downstream_response_id is None
-    assert request_state.suppress_next_created_downstream is False
+    assert request_state.replay_downstream_response_id == "resp_created_security_previous"
+    assert request_state.suppress_next_created_downstream is True
     handle_stream_error.assert_not_awaited()
 
 
@@ -14892,6 +14892,58 @@ async def test_compact_responses_does_not_fallback_to_ordinary_pool_after_securi
         response=None,
         request_service_tier=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_settles_rooted_security_lineage_when_trusted_pool_missing_before_upstream(
+    monkeypatch,
+):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No accounts marked as authorized for security work",
+            error_code="no_security_work_authorized_accounts",
+            requires_security_work_authorized=True,
+        )
+    )
+    settle_compact_usage = AsyncMock()
+    core_compact = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_security_lineage_requires_security_work_authorized", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    api_key = _make_api_key_data("compact-security-rooted-missing-pool")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-compact-security-rooted-missing-pool",
+        key_id=api_key.id,
+        model=payload.model,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-missing-trusted-pool"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "no_security_work_authorized_accounts"
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["require_security_work_authorized"] is True
+    settle_compact_usage.assert_awaited_once_with(
+        api_key=api_key,
+        api_key_reservation=reservation,
+        response=None,
+        request_service_tier=None,
+    )
+    core_compact.assert_not_awaited()
 
 
 @pytest.mark.asyncio

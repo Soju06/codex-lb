@@ -14,9 +14,11 @@ import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
   formatCurrency,
+  formatLocalDateTimeSeconds,
   formatPercentNullable,
   formatQuotaResetLabel,
   formatResetRelative,
+  formatSingleUnitRemaining,
   formatWindowLabel,
 } from "@/utils/formatters";
 
@@ -158,6 +160,7 @@ function ResetCreditsRow({
   resetCredits,
   loading,
   unavailable,
+  nearestExpiresAt,
   resetDisabled,
   onReset,
 }: {
@@ -165,6 +168,7 @@ function ResetCreditsRow({
   resetCredits?: AccountUsageResetCredits | null;
   loading?: boolean;
   unavailable?: boolean;
+  nearestExpiresAt?: string | null;
   resetDisabled?: boolean;
   onReset?: (accountId: string) => void;
 }) {
@@ -180,21 +184,28 @@ function ResetCreditsRow({
       : unavailable && resetCredits == null
         ? t("common.states.unavailable")
         : t("accounts.usage.resetCredits.available", { count: availableCount });
+  const expiryCountdown = nearestExpiresAt ? formatSingleUnitRemaining(nearestExpiresAt) : null;
 
   return (
-    <div className="flex items-center justify-between rounded-md border bg-background/60 px-3 py-2 text-xs">
+    <div className="flex items-center justify-between gap-3 rounded-md border bg-background/60 px-3 py-2 text-xs">
       <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
         <RotateCcw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         <span className="truncate font-medium">{t("accounts.usage.resetCredits.title")}</span>
       </span>
-      <span className="flex shrink-0 items-center gap-2">
-        <span className="tabular-nums font-semibold">{valueLabel}</span>
+      <span className="flex min-w-0 flex-1 items-center justify-end gap-2">
+        {nearestExpiresAt && expiryCountdown ? (
+          <span className="min-w-0 max-w-[min(18rem,42vw)] truncate text-[11px] text-muted-foreground">
+            {t("accounts.usage.resetCredits.expires", { time: formatLocalDateTimeSeconds(nearestExpiresAt) })}{" "}
+            <span className="tabular-nums">({expiryCountdown.label})</span>
+          </span>
+        ) : null}
+        <span className="shrink-0 tabular-nums font-semibold">{valueLabel}</span>
         {onReset ? (
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            className="h-6 gap-1 px-1.5 text-[11px]"
+            className="h-6 shrink-0 gap-1 px-1.5 text-[11px]"
             aria-label={t("accounts.usageResetDialog.title")}
             onClick={() => onReset(accountId)}
             disabled={resetDisabled || availableCount <= 0}
@@ -252,6 +263,7 @@ export function AccountUsagePanel({
         resetCredits={resetCredits}
         loading={resetCreditsLoading}
         unavailable={resetCreditsUnavailable}
+        nearestExpiresAt={account.resetCreditNearestExpiresAt ?? null}
         resetDisabled={resetDisabled}
         onReset={onReset}
       />

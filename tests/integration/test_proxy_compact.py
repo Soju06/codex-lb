@@ -326,7 +326,13 @@ async def test_proxy_compact_normalizes_summary_output_for_codex_remote_v2(async
     assert response.status_code == 200
     compact_json = response.json()
     assert compact_json["object"] == "response.compaction"
-    assert compact_json["output"] == [{"type": "compaction", "encrypted_content": "enc_compact_v2"}]
+    assert compact_json["output"] == [
+        {
+            "id": "cmp_compact_v2",
+            "type": "compaction",
+            "encrypted_content": "enc_compact_v2",
+        }
+    ]
 
 
 @pytest.mark.asyncio

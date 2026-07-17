@@ -42,15 +42,41 @@ The application MUST enforce firewall allowlist for proxy-facing paths `/backend
 - **THEN** dashboard endpoints under `/api/*` remain accessible (subject to dashboard auth only)
 
 ### Requirement: Trusted proxy header handling
-Firewall IP resolution MUST optionally use `X-Forwarded-For` only when proxy header trust is enabled and the socket source IP belongs to configured trusted proxy CIDR list.
 
-#### Scenario: Trusted proxy source
-- **WHEN** `firewall_trust_proxy_headers=true`, source socket IP matches trusted CIDR, and `X-Forwarded-For` is present
-- **THEN** firewall uses first valid IP from `X-Forwarded-For`
+Firewall IP resolution MUST use forwarded client headers only when proxy-header trust is enabled and the socket source IP belongs to the configured trusted proxy CIDR list. `X-Forwarded-For` and RFC 7239 `Forwarded` values MUST be resolved from right to left through one shared trusted-hop algorithm. Other client-IP headers, including `X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP`, MUST NOT affect firewall identity. Every repeated field value MUST be combined in arrival order before resolution. A missing, malformed, ambiguous, obfuscated, unknown, or non-IP trusted-proxy chain MUST return no resolved client IP so an active firewall allowlist fails closed.
+
+#### Scenario: Trusted proxy chain
+
+- **WHEN** `firewall_trust_proxy_headers=true`
+- **AND** the source socket IP and downstream proxy hops match configured trusted CIDRs
+- **AND** a valid `X-Forwarded-For` or `Forwarded` chain is present
+- **THEN** the firewall resolves the originating client by traversing the chain from right to left
+
+#### Scenario: Trusted proxy appends a separate field
+
+- **WHEN** a client supplies a spoofed loopback value in the first `X-Forwarded-For` or `Forwarded` field
+- **AND** a trusted socket proxy appends the actual remote client in a second field
+- **THEN** the firewall combines both fields in arrival order
+- **AND** resolves the actual remote client rather than the spoofed loopback value
+
+#### Scenario: Singleton proxy headers do not authorize firewall access
+
+- **WHEN** a trusted socket proxy supplies only `X-Real-IP`, `True-Client-IP`, or `CF-Connecting-IP`
+- **THEN** firewall client resolution returns no client IP
+- **AND** an active firewall allowlist denies the request
 
 #### Scenario: Untrusted proxy source
-- **WHEN** source socket IP is outside trusted CIDR list
-- **THEN** firewall ignores `X-Forwarded-For` and uses socket client IP
+
+- **WHEN** the source socket IP is outside the configured trusted CIDR list
+- **THEN** the firewall ignores forwarded client headers
+- **AND** uses the socket client IP
+
+#### Scenario: Trusted source supplies no complete valid chain
+
+- **WHEN** proxy-header trust is enabled and the source socket IP is trusted
+- **AND** the forwarded client chain is missing or contains an invalid hop
+- **THEN** firewall client resolution returns no client IP
+- **AND** an active firewall allowlist denies the request
 
 ### Requirement: Firewall IP cache TTL is operator-configurable with a safe default
 
@@ -73,4 +99,22 @@ The application MUST cache firewall allow/deny decisions per source IP for a con
 - **WHEN** an operator adds or removes an entry via `POST /api/firewall/ips` or `DELETE /api/firewall/ips/{ip}`
 - **THEN** the firewall cache is invalidated for all IPs before the API response is returned
 - **AND** the next request from any IP re-checks the database
+
+### Requirement: Enabled proxy-header trust requires source configuration
+
+The application MUST fail settings validation when `firewall_trust_proxy_headers` is enabled and the normalized `firewall_trusted_proxy_cidrs` list is empty. The validation MUST apply independently of dashboard authentication mode and MUST identify the conflicting settings. An empty trusted-proxy CIDR list MUST remain valid while proxy-header trust is disabled.
+
+#### Scenario: Enabled trust with empty CIDRs fails startup
+
+- **WHEN** `firewall_trust_proxy_headers=true`
+- **AND** `firewall_trusted_proxy_cidrs` is empty or contains only whitespace and delimiters
+- **THEN** settings validation fails before the application starts
+- **AND** the error identifies that enabled proxy-header trust requires at least one trusted-proxy CIDR
+
+#### Scenario: Disabled trust permits an empty CIDR list
+
+- **WHEN** `firewall_trust_proxy_headers=false`
+- **AND** `firewall_trusted_proxy_cidrs` normalizes to an empty list
+- **THEN** settings validation succeeds
+- **AND** forwarded client-IP headers remain untrusted
 

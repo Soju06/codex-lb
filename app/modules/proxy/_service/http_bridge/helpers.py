@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Literal, Mapping, TypeGuard, TypeVar, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -123,6 +123,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _http_bridge_session_supports_service_tier,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -724,6 +725,29 @@ def _http_bridge_models_compatible(existing_model: str | None, request_model: st
     return existing_model.strip().lower() == request_model.strip().lower()
 
 
+def _http_bridge_compatible(
+    session: _HTTPBridgeSession,
+    request_model: str | None,
+    request_service_tier: str | None,
+    same_model_required: bool = False,
+) -> bool:
+    """Check catalog compatibility while preserving stricter legacy reuse paths."""
+
+    model_compatible = not same_model_required or _http_bridge_models_compatible(
+        session.request_model,
+        request_model,
+    )
+    return model_compatible and _http_bridge_session_supports_service_tier(
+        session,
+        request_model=request_model,
+        request_service_tier=request_service_tier,
+    )
+
+
+def _http_bridge_alias_target_is_stale(session: _HTTPBridgeSession | None) -> bool:
+    return session is None or session.closed or not _http_bridge_session_account_active(session)
+
+
 def _http_bridge_incompatible_model_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
@@ -762,7 +786,21 @@ def _http_bridge_incompatible_model_fork_key(
     return fork_key
 
 
-def _http_bridge_unanchored_parallel_fork_key(
+def _http_bridge_locally_owned_fork_key(
+    fork_key: "_HTTPBridgeSessionKey",
+    forwarded_request: bool,
+    forwarded_original_request_unanchored: bool,
+) -> "_HTTPBridgeSessionKey | None":
+    if not forwarded_request:
+        return None
+    if fork_key.affinity_kind == "internal_request_parallel":
+        return fork_key
+    if forwarded_original_request_unanchored and fork_key.affinity_kind == "internal_unanchored_parallel":
+        return fork_key
+    return None
+
+
+def _http_bridge_parallel_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
     session: "_HTTPBridgeSession | None",
@@ -770,38 +808,76 @@ def _http_bridge_unanchored_parallel_fork_key(
     incoming_turn_state: str | None,
     previous_response_id: str | None,
     request_model: str | None,
+    request_service_tier: str | None,
     request_scope_id: str,
+    allow_model_fork: bool = True,
+    same_model_required: bool = False,
 ) -> "_HTTPBridgeSessionKey | None":
-    """Give independent process-session requests separate websocket lanes."""
+    """Give incompatible or concurrent requests an independent websocket lane."""
 
-    if key.affinity_kind != "session_header" or incoming_turn_state is not None or previous_response_id is not None:
-        return None
     reason: str | None = None
-    if inflight_creation:
-        reason = "session_creation_inflight"
-    elif session is not None and not session.closed:
-        if _http_bridge_session_has_visible_requests(session):
-            reason = "active_request"
-        elif (
-            reservation_id := getattr(session, "unanchored_reservation_id", None)
-        ) is not None and reservation_id != request_scope_id:
-            reason = "session_reserved"
-        elif not _http_bridge_models_compatible(session.request_model, request_model):
-            reason = "model_change"
-    if reason is None:
+    if key.affinity_kind == "session_header" and incoming_turn_state is None and previous_response_id is None:
+        if inflight_creation:
+            reason = "session_creation_inflight"
+        elif session is not None and not session.closed:
+            if _http_bridge_session_has_visible_requests(session):
+                reason = "active_request"
+            elif (
+                reservation_id := getattr(session, "unanchored_reservation_id", None)
+            ) is not None and reservation_id != request_scope_id:
+                reason = "session_reserved"
+            elif not _http_bridge_models_compatible(session.request_model, request_model):
+                reason = "model_change"
+    if reason is not None:
+        fork_key = _HTTPBridgeSessionKey(
+            "internal_unanchored_parallel",
+            sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+            key.api_key_id,
+        )
+        _log_http_bridge_event(
+            "unanchored_parallel_fork",
+            fork_key,
+            account_id=None,
+            model=request_model,
+            detail=f"reason={reason}",
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(request_model) if request_model else None,
+            owner_check_applied=False,
+        )
+        return fork_key
+
+    if session is None or session.closed or not _http_bridge_session_account_active(session):
         return None
+    if allow_model_fork:
+        model_fork_key = _http_bridge_incompatible_model_fork_key(
+            key=key,
+            existing_model=session.request_model,
+            request_model=request_model,
+            request_scope_id=request_scope_id,
+        )
+        if model_fork_key is not None:
+            return model_fork_key
+    if _http_bridge_compatible(
+        session,
+        request_model,
+        request_service_tier,
+        same_model_required,
+    ):
+        return None
+    if incoming_turn_state is not None or previous_response_id is not None:
+        raise ProxyResponseError(502, _http_bridge_continuity_lost_error_envelope())
 
     fork_key = _HTTPBridgeSessionKey(
-        "internal_unanchored_parallel",
-        sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+        "internal_request_parallel",
+        sha256(f"{key.affinity_kind}\0{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
         key.api_key_id,
     )
     _log_http_bridge_event(
-        "unanchored_parallel_fork",
-        key,
-        account_id=None,
+        "request_compatibility_fork",
+        fork_key,
+        account_id=session.account.id,
         model=request_model,
-        detail=f"reason={reason}",
+        detail=f"source_kind={key.affinity_kind}",
         cache_key_family=key.affinity_kind,
         model_class=_extract_model_class(request_model) if request_model else None,
         owner_check_applied=False,
@@ -909,6 +985,28 @@ def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -
     return (turn_state, api_key_id)
 
 
+def _http_bridge_turn_state_alias_has_live_owner(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    turn_state: str,
+) -> bool:
+    alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+    existing_key = service._http_bridge_turn_state_index.get(alias_key)
+    if existing_key is None or existing_key == session.key:
+        return False
+    return not _http_bridge_alias_target_is_stale(service._http_bridge_sessions.get(existing_key))
+
+
+def _register_http_bridge_turn_state_aliases_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+) -> None:
+    for alias in session.downstream_turn_state_aliases:
+        service._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
+            session.key
+        )
+
+
 def _http_bridge_previous_response_alias_key(response_id: str, api_key_id: str | None) -> tuple[str, str | None]:
     return (response_id.strip(), api_key_id)
 
@@ -991,6 +1089,34 @@ def _http_bridge_session_reusable_for_request(
     if previous_response_id is not None:
         return True
     return not session.codex_session
+
+
+def _http_bridge_session_reusable_for_previous_response(
+    session: "_HTTPBridgeSession | None",
+    request_model: str | None,
+    request_service_tier: str | None,
+    require_security_work_authorized: bool = False,
+) -> TypeGuard["_HTTPBridgeSession"]:
+    return (
+        session is not None
+        and not session.closed
+        and _http_bridge_session_account_active(session)
+        and _http_bridge_compatible(session, request_model, request_service_tier, True)
+        and _http_bridge_session_meets_security_requirement(session, require_security_work_authorized)
+    )
+
+
+def _http_bridge_alias_fails_security_requirement(
+    session: "_HTTPBridgeSession | None",
+    request_model: str | None,
+    request_service_tier: str | None,
+    require_security_work_authorized: bool,
+) -> bool:
+    return (
+        session is not None
+        and _http_bridge_compatible(session, request_model, request_service_tier, True)
+        and not _http_bridge_session_meets_security_requirement(session, require_security_work_authorized)
+    )
 
 
 def _apply_http_bridge_reuse_metadata(

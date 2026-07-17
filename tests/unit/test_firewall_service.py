@@ -89,3 +89,4 @@ async def test_is_ip_allowed_follows_allowlist_mode():
     assert await service.is_ip_allowed("127.0.0.1") is True
     assert await service.is_ip_allowed("192.168.0.1") is False
     assert await service.is_ip_allowed("invalid-ip") is False
+    assert await service.is_ip_allowed(None) is False

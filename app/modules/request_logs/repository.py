@@ -59,6 +59,13 @@ def _store_recent_count(key: tuple, total: int, ttl_seconds: float) -> None:
     _recent_count_cache[key] = (total, time.monotonic() + ttl_seconds)
 
 
+@dataclass(frozen=True, slots=True)
+class PreviousResponseOwnerRecord:
+    account_id: str
+    requested_at: datetime | None
+    session_id: str | None
+
+
 class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -76,13 +83,13 @@ class RequestLogsRepository:
         )
         return list(result.scalars().all())
 
-    async def find_latest_account_id_for_response_id(
+    async def find_latest_owner_record_for_response_id(
         self,
         *,
         response_id: str,
         api_key_id: str | None,
         session_id: str | None = None,
-    ) -> str | None:
+    ) -> PreviousResponseOwnerRecord | None:
         response_id_value = response_id.strip()
         if not response_id_value:
             return None
@@ -95,27 +102,55 @@ class RequestLogsRepository:
         if api_key_id is not None:
             base_conditions.append(RequestLog.api_key_id == api_key_id)
 
-        async def _lookup_account_id(conditions: list[ColumnElement[bool]]) -> str | None:
+        async def _lookup_owner_record(
+            conditions: list[ColumnElement[bool]],
+        ) -> PreviousResponseOwnerRecord | None:
             stmt = (
-                select(RequestLog.account_id)
+                select(RequestLog.account_id, RequestLog.requested_at, RequestLog.session_id)
                 .where(and_(*conditions))
                 .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
                 .limit(1)
             )
             result = await self._session.execute(stmt)
-            account_id = result.scalar_one_or_none()
+            row = result.one_or_none()
+            if row is None:
+                return None
+            account_id, requested_at, owner_session_id = row
             if not isinstance(account_id, str):
                 return None
             stripped = account_id.strip()
-            return stripped or None
+            if not stripped:
+                return None
+            normalized_owner_session_id = (
+                owner_session_id.strip() if isinstance(owner_session_id, str) and owner_session_id.strip() else None
+            )
+            return PreviousResponseOwnerRecord(
+                account_id=stripped,
+                requested_at=requested_at if isinstance(requested_at, datetime) else None,
+                session_id=normalized_owner_session_id,
+            )
 
         session_id_value = session_id.strip() if isinstance(session_id, str) else ""
         if session_id_value:
-            scoped_owner = await _lookup_account_id([*base_conditions, RequestLog.session_id == session_id_value])
+            scoped_owner = await _lookup_owner_record([*base_conditions, RequestLog.session_id == session_id_value])
             if scoped_owner is not None:
                 return scoped_owner
 
-        return await _lookup_account_id(base_conditions)
+        return await _lookup_owner_record(base_conditions)
+
+    async def find_latest_account_id_for_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_id: str | None,
+        session_id: str | None = None,
+    ) -> str | None:
+        owner = await self.find_latest_owner_record_for_response_id(
+            response_id=response_id,
+            api_key_id=api_key_id,
+            session_id=session_id,
+        )
+        return owner.account_id if owner is not None else None
 
     async def aggregate_by_bucket(
         self,

@@ -105,6 +105,10 @@ const SettingsPayloadSchema = z.looseObject({
   upstreamProxyRoutingEnabled: z.boolean().optional(),
   upstreamProxyDefaultPoolId: z.string().nullable().optional(),
   preferEarlierResetAccounts: z.boolean().optional(),
+  preferEarlierResetWindow: z.enum(["primary", "secondary"]).optional(),
+  showResetCreditBadges: z.boolean().optional(),
+  autoRedeemResetCreditsBeforeExpiry: z.boolean().optional(),
+  showResetCreditExpiryBadge: z.boolean().optional(),
   routingStrategy: z
     .enum([
       "usage_weighted",

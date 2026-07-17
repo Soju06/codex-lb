@@ -12,13 +12,17 @@ import {
   models,
   overview,
   requestLogs,
+  resetCreditSnapshots,
   settings,
+  upstreamProxyAdmin,
   unauthenticatedSession,
 } from "./fixtures";
 import { createAccountSummary } from "../src/test/mocks/factories";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = path.resolve(__dirname, "../../docs/screenshots");
+const SCREENSHOT_PORT = process.env.SCREENSHOT_PORT ?? "4173";
+const BASE_URL = process.env.SCREENSHOT_BASE_URL ?? `http://localhost:${SCREENSHOT_PORT}`;
 const THEME_KEY = "codex-lb-theme";
 const SETTLE_MS = 1500;
 
@@ -70,6 +74,20 @@ async function interceptApi(
       return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "account_not_found", message: "Account not found" } }) });
     }
     if (p === "/api/settings") return fulfill(route, settings);
+    if (p === "/api/settings/upstream-proxy") return fulfill(route, upstreamProxyAdmin);
+    const usageResetCreditsMatch = p.match(/^\/api\/accounts\/([^/]+)\/usage-reset-credits$/);
+    if (usageResetCreditsMatch) {
+      const accountId = decodeURIComponent(usageResetCreditsMatch[1]);
+      const snapshot = resetCreditSnapshots[accountId];
+      return fulfill(route, {
+        accountId,
+        rateLimitResetCredits: { availableCount: snapshot?.availableCount ?? 0 },
+      });
+    }
+    const resetCreditsMatch = p.match(/^\/api\/accounts\/([^/]+)\/rate-limit-reset-credits$/);
+    if (resetCreditsMatch) {
+      return fulfill(route, resetCreditSnapshots[decodeURIComponent(resetCreditsMatch[1])] ?? null);
+    }
     if (p === "/api/models") return fulfill(route, { models });
     if (p === "/api/api-keys" || p === "/api/api-keys/") return fulfill(route, apiKeys);
 
@@ -116,7 +134,7 @@ async function capture(
     (document.head ?? document.documentElement).appendChild(style);
   }, DISABLE_ANIMATIONS_CSS);
 
-  await page.goto(`http://localhost:4173${opts.route}`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE_URL}${opts.route}`, { waitUntil: "networkidle" });
 
   if (opts.waitFor) {
     await page.waitForSelector(opts.waitFor, { timeout: 10_000 });
@@ -183,7 +201,7 @@ test("accounts list keeps many rows in an internal scroll region", async ({ page
     (document.head ?? document.documentElement).appendChild(style);
   }, DISABLE_ANIMATIONS_CSS);
   await page.setViewportSize({ width: 1440, height: 1200 });
-  await page.goto("http://localhost:4173/accounts", { waitUntil: "networkidle" });
+  await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
   await page.waitForSelector('[data-testid="account-list-scroll-region"]', { timeout: 10_000 });
 
   const scrollRegion = page.getByTestId("account-list-scroll-region");
@@ -277,7 +295,7 @@ test("accounts list card ends after the final row when all accounts fit", async 
     (document.head ?? document.documentElement).appendChild(style);
   }, DISABLE_ANIMATIONS_CSS);
   await page.setViewportSize({ width: 1440, height: 1200 });
-  await page.goto("http://localhost:4173/accounts", { waitUntil: "networkidle" });
+  await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
 
   const scrollRegion = page.getByTestId("account-list-scroll-region");
   const listCard = page.getByTestId("accounts-list-card");

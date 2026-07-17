@@ -1473,14 +1473,20 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.last_upstream_close_code,
                 response_events_seen=request_state.response_event_count,
             )
+            close_generation = session.last_upstream_close_generation
             hard_session_affinity = session.key.strength == "hard"
             clean_close_hard_continuation = (
                 close_classification == "clean"
                 and hard_session_affinity
                 and request_state.previous_response_id is not None
             )
-            additional_clean_close_retry = (
+            clean_close_retry_for_current_close = (
                 close_classification == "clean"
+                and request_state.clean_close_retry_close_generation != close_generation
+                and not request_state.clean_close_retry_in_progress
+            )
+            additional_clean_close_retry = (
+                clean_close_retry_for_current_close
                 and request_state.replay_count == 1
                 and request_state.response_event_count == 0
                 and request_state.clean_close_replay_count < clean_close_retry_max_count
@@ -1531,6 +1537,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.headers = {
                     key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
                 }
+            if close_classification == "clean":
+                if not clean_close_retry_for_current_close:
+                    return False
+                request_state.clean_close_retry_in_progress = True
+                request_state.clean_close_retry_close_generation = close_generation
             if additional_clean_close_retry:
                 request_state.clean_close_replay_count += 1
         retry_jitter_seconds = (
@@ -1612,6 +1623,8 @@ class _HTTPBridgeRequestSubmitMixin:
             else:
                 logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
             return False
+        finally:
+            request_state.clean_close_retry_in_progress = False
 
     async def _retry_http_bridge_precreated_auth_request(
         self: Any,

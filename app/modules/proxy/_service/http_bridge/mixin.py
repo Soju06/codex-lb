@@ -1609,8 +1609,7 @@ class _HTTPBridgeMixin(
             if session.closed:
                 stale_keys.append(key)
                 continue
-            # The request owns this idle session until submit makes activity visible;
-            # pruning it during admission or durable refresh would invalidate the handoff.
+            # The request owns this idle session until submit makes activity visible.
             if getattr(session, "unanchored_reservation_id", None) is not None:
                 continue
             pending_count = self._http_bridge_pending_count_nowait(session, context="idle_prune")
@@ -2018,7 +2017,6 @@ class _HTTPBridgeMixin(
                             "HTTP responses session bridge reader did not shut down cleanly",
                         ),
                     )
-                session.closed = False  # A downstream reconnect hands the reader to a replacement socket.
         deadline = _websocket_connect_deadline(
             request_state,
             _http_bridge_request_budget_seconds(_service_get_settings()),
@@ -2093,6 +2091,19 @@ class _HTTPBridgeMixin(
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
+
+        async def open_replacement_upstream(selected_account: Any, selected_headers: dict[str, str]) -> Any:
+            session.closed = False
+            try:
+                return await self._open_upstream_websocket_with_budget(
+                    selected_account,
+                    selected_headers,
+                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    request_state=request_state,
+                )
+            except Exception:
+                session.closed = True
+                raise
 
         while True:
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
@@ -2211,12 +2222,7 @@ class _HTTPBridgeMixin(
                 connect_headers = _websocket_safe_headers_with_turn_state(
                     session.headers, _preferred_http_bridge_reconnect_turn_state(session)
                 )
-                upstream = await self._open_upstream_websocket_with_budget(
-                    account,
-                    connect_headers,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
-                    request_state=request_state,
-                )
+                upstream = await open_replacement_upstream(account, connect_headers)
                 _copy_websocket_route_metadata_to_session(session, request_state)
                 record_selected_account_takeover(account.id)
                 break
@@ -2233,12 +2239,7 @@ class _HTTPBridgeMixin(
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         session.headers, _preferred_http_bridge_reconnect_turn_state(session)
                     )
-                    upstream = await self._open_upstream_websocket_with_budget(
-                        account,
-                        connect_headers,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
-                        request_state=request_state,
-                    )
+                    upstream = await open_replacement_upstream(account, connect_headers)
                     _copy_websocket_route_metadata_to_session(session, request_state)
                     record_selected_account_takeover(account.id)
                     break

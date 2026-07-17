@@ -17871,6 +17871,100 @@ async def test_http_bridge_stale_reader_does_not_close_reconnected_upstream(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_reconnect_failure_keeps_reader_handoff_session_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect-fails-closed",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+    )
+    session = _make_bridge_session(key_value="bridge-reconnect-fails-closed")
+    session.closed = True
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
+
+    async def old_reader() -> None:
+        await asyncio.sleep(60.0)
+
+    session.upstream_reader = asyncio.create_task(old_reader())
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="primary",
+        routing_strategy="usage_weighted",
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_for_stream",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                account=None,
+                error_code="no_accounts",
+                error_message="No active accounts available",
+            )
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError):
+        await service._reconnect_http_bridge_session(
+            session,
+            request_state=request_state,
+            restart_reader=True,
+        )
+
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_consumes_each_clean_close_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-clean-close-generation",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+        replay_count=1,
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-clean-generation", None),
+        key_value="bridge-clean-generation",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.last_upstream_close_code = 1000
+    session.last_upstream_close_generation = 7
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+    assert await service._retry_http_bridge_precreated_request(session) is False
+    assert request_state.clean_close_replay_count == 1
+    assert request_state.clean_close_retry_close_generation == 7
+    assert send_text.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_send_network_failure_is_neutral_and_not_replayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

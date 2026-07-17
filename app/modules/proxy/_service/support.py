@@ -765,6 +765,8 @@ class _WebSocketRequestState:
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.
     clean_close_replay_count: int = 0
+    clean_close_retry_in_progress: bool = False
+    clean_close_retry_close_generation: int | None = None
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
@@ -919,6 +921,7 @@ class _HTTPBridgeSession:
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
+    last_upstream_close_generation: int = 0
     closed: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False

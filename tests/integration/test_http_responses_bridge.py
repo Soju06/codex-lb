@@ -6334,15 +6334,14 @@ async def test_v1_responses_http_bridge_rejects_oversized_response_create_before
         fail_get_or_create_http_bridge_session,
     )
 
-    response = await async_client.post(
-        "/v1/responses",
-        json={
-            "model": "gpt-5.1",
-            "instructions": "Return exactly OK.",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "x" * 256}]}],
-            "prompt_cache_key": "oversized-http-bridge",
-        },
-    )
+    request_json = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "x" * 256}]}],
+        "prompt_cache_key": "oversized-http-bridge",
+    }
+
+    response = await async_client.post("/v1/responses", json=request_json)
 
     assert response.status_code == 400
     payload = response.json()
@@ -6357,6 +6356,21 @@ async def test_v1_responses_http_bridge_rejects_oversized_response_create_before
     assert meta["reason"]["error_code"] == "payload_too_large"
     assert meta["request"]["transport"] == "http"
     assert meta["request"]["request_text_bytes"] > 128
+
+    duplicate_response = await async_client.post("/v1/responses", json=request_json)
+    assert duplicate_response.status_code == 400
+    assert len(list(tmp_path.glob("*.response-create.json.gz"))) == 1
+    assert len(list(tmp_path.glob("*.meta.json"))) == 1
+
+    meta_files[0].unlink()
+    orphan_retry_response = await async_client.post("/v1/responses", json=request_json)
+    assert orphan_retry_response.status_code == 400
+    complete_pairs = [
+        dump_path
+        for dump_path in tmp_path.glob("*.response-create.json.gz")
+        if (tmp_path / f"{dump_path.name[: -len('.response-create.json.gz')]}.meta.json").exists()
+    ]
+    assert complete_pairs
 
 
 @pytest.mark.asyncio

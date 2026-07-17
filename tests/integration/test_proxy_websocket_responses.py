@@ -7500,11 +7500,13 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
         "stream": True,
     }
 
-    with TestClient(app_instance) as client:
+    def send_oversized_request() -> dict[str, Any]:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(request_payload))
-            error_event = json.loads(websocket.receive_text())
+            return json.loads(websocket.receive_text())
 
+    with TestClient(app_instance) as client:
+        error_event = send_oversized_request()
     assert error_event["type"] == "error"
     assert error_event["status"] == 400
     assert error_event["error"]["code"] == "payload_too_large"
@@ -7518,6 +7520,23 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
     assert meta["reason"]["error_code"] == "payload_too_large"
     assert meta["request"]["transport"] == "websocket"
     assert meta["request"]["request_text_bytes"] > 128
+
+    with TestClient(app_instance) as client:
+        duplicate_event = send_oversized_request()
+    assert duplicate_event["status"] == 400
+    assert len(list(tmp_path.glob("*.response-create.json.gz"))) == 1
+    assert len(list(tmp_path.glob("*.meta.json"))) == 1
+
+    meta_files[0].unlink()
+    with TestClient(app_instance) as client:
+        orphan_retry_event = send_oversized_request()
+    assert orphan_retry_event["status"] == 400
+    complete_pairs = [
+        dump_path
+        for dump_path in tmp_path.glob("*.response-create.json.gz")
+        if (tmp_path / f"{dump_path.name[: -len('.response-create.json.gz')]}.meta.json").exists()
+    ]
+    assert complete_pairs
 
 
 def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succeeds(

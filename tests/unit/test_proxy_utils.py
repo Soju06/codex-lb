@@ -22884,6 +22884,222 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_websocket_services_close_replay_before_new_downstream_request(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    connect_calls: list[str | None] = []
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(websocket_mixin_module, "backoff_seconds", lambda attempt: 0.0)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self, first_request_text: str, second_request_text: str) -> None:
+            self._first_request_text = first_request_text
+            self._second_request_text = second_request_text
+            self._step = 0
+            self._first_created = asyncio.Event()
+            self._done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if self._step == 0:
+                self._step = 1
+                return {"type": "websocket.receive", "text": self._first_request_text}
+            if self._step == 1:
+                await self._first_created.wait()
+                self._step = 2
+                return {"type": "websocket.receive", "text": self._second_request_text}
+            await self._done.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            payload = json.loads(text)
+            response_payload = payload.get("response") or {}
+            if payload.get("type") == "response.created" and response_payload.get("id") == "resp_ws_replay_first":
+                self._first_created.set()
+            if payload.get("type") == "response.completed" and response_payload.get("id") == "resp_ws_new_second":
+                self._done.set()
+            if payload.get("type") in {"response.failed", "error"}:
+                self._done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self._done.set()
+
+    class _QueuedUpstreamWebSocket:
+        def __init__(self, messages: list[SimpleNamespace]) -> None:
+            self.sent_text: list[str] = []
+            self.closed = False
+            self._messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
+            for message in messages:
+                self._messages.put_nowait(message)
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> SimpleNamespace:
+            return await self._messages.get()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    def event(payload: dict[str, object]) -> SimpleNamespace:
+        return SimpleNamespace(
+            kind="text",
+            text=json.dumps(payload, separators=(",", ":")),
+            data=None,
+            close_code=None,
+            error=None,
+            error_code=None,
+        )
+
+    first_upstream = _QueuedUpstreamWebSocket(
+        [
+            event({"type": "response.created", "response": {"id": "resp_ws_replay_first", "status": "in_progress"}}),
+            SimpleNamespace(kind="close", text=None, data=None, close_code=1011, error=None, error_code=None),
+        ]
+    )
+    replay_upstream = _QueuedUpstreamWebSocket(
+        [
+            event(
+                {"type": "response.created", "response": {"id": "resp_ws_replay_first_retry", "status": "in_progress"}}
+            ),
+            event(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_replay_first_retry",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                    },
+                }
+            ),
+            SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None, error_code=None),
+        ]
+    )
+    second_upstream = _QueuedUpstreamWebSocket(
+        [
+            event({"type": "response.created", "response": {"id": "resp_ws_new_second", "status": "in_progress"}}),
+            event(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_new_second",
+                        "status": "completed",
+                        "usage": {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+                    },
+                }
+            ),
+        ]
+    )
+    upstreams = [first_upstream, replay_upstream, second_upstream]
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        connect_calls.append(request_state.request_id)
+        return _make_account(f"acc_ws_replay_order_{len(connect_calls)}"), upstreams.pop(0)
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_service.ProxyService,
+        "_revalidate_open_websocket_account",
+        AsyncMock(side_effect=lambda current_account, **_: (current_account, None, None)),
+    )
+
+    first_request = {
+        "type": "response.create",
+        "model": "gpt-5.4-mini",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
+        "stream": True,
+    }
+    second_request = {
+        "type": "response.create",
+        "model": "gpt-5.4-mini",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
+        "stream": True,
+    }
+    downstream = _FakeDownstreamWebSocket(
+        json.dumps(first_request, separators=(",", ":")),
+        json.dumps(second_request, separators=(",", ":")),
+    )
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"x-codex-turn-state": "turn_replay_order"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        api_key=None,
+    )
+
+    emitted_events = [json.loads(item) for item in downstream.sent_text]
+    assert [event["type"] for event in emitted_events] == [
+        "response.created",
+        "response.completed",
+        "response.created",
+        "response.completed",
+    ]
+    assert [event["response"]["id"] for event in emitted_events if "response" in event] == [
+        "resp_ws_replay_first",
+        "resp_ws_replay_first",
+        "resp_ws_new_second",
+        "resp_ws_new_second",
+    ]
+    assert len(first_upstream.sent_text) == 1
+    assert len(replay_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
+    replay_request = _json_text_without_installation_metadata(replay_upstream.sent_text[0])
+    sent_second_request = _json_text_without_installation_metadata(second_upstream.sent_text[0])
+    assert replay_request["type"] == first_request["type"]
+    assert replay_request["model"] == first_request["model"]
+    assert replay_request["input"] == first_request["input"]
+    assert sent_second_request["type"] == second_request["type"]
+    assert sent_second_request["model"] == second_request["model"]
+    assert sent_second_request["input"] == second_request["input"]
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_websocket_prefers_previous_response_owner_from_request_logs(monkeypatch):
     request_logs = _RequestLogsRecorder()
     request_logs.response_owner_by_id[("resp_prev_owner", None, "sid_owner")] = "acc_owner_prev"

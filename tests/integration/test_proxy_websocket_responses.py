@@ -9114,7 +9114,9 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
 
     upstreams = [
         upstream_created_then_eof("resp_ws_eof"),
-        upstream_created_then_eof("resp_ws_eof_retry", sequence_number=1),
+        upstream_created_then_eof("resp_ws_eof_retry_1", sequence_number=1),
+        upstream_created_then_eof("resp_ws_eof_retry_2", sequence_number=1),
+        upstream_created_then_eof("resp_ws_eof_retry_3", sequence_number=1),
     ]
     log_calls: list[dict[str, object]] = []
 
@@ -9172,6 +9174,7 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(websocket_mixin_module, "backoff_seconds", lambda attempt: 0.0)
 
     request_payload = {
         "type": "response.create",
@@ -9193,9 +9196,115 @@ def test_backend_responses_websocket_emits_response_failed_before_close_on_upstr
     assert failed_event["response"]["error"]["code"] == "stream_incomplete"
     assert "close_code=1011" in failed_event["response"]["error"]["message"]
     assert len(log_calls) == 1
-    assert log_calls[0]["request_id"] == "resp_ws_eof_retry"
+    assert log_calls[0]["request_id"] == "resp_ws_eof_retry_3"
     assert log_calls[0]["status"] == "error"
     assert log_calls[0]["error_code"] == "stream_incomplete"
+
+
+def test_backend_responses_websocket_retries_repeated_created_only_upstream_eof(app_instance, monkeypatch):
+    def upstream_created_then_eof(response_id: str) -> _FakeUpstreamWebSocket:
+        return _FakeUpstreamWebSocket(
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": response_id, "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage("error", error="no close frame received or sent"),
+            ]
+        )
+
+    final_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_eof_retry_final", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_eof_retry_final",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    upstreams = [
+        upstream_created_then_eof("resp_ws_eof_retry_first"),
+        upstream_created_then_eof("resp_ws_eof_retry_second"),
+        final_upstream,
+    ]
+    connect_calls = 0
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        nonlocal connect_calls
+        del self, headers, kwargs
+        connect_calls += 1
+        return SimpleNamespace(id="acct_ws_repeated_eof"), upstreams.pop(0)
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(websocket_mixin_module, "backoff_seconds", lambda attempt: 0.0)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created_event = json.loads(websocket.receive_text())
+            completed_event = json.loads(websocket.receive_text())
+
+    assert created_event["type"] == "response.created"
+    assert created_event["response"]["id"] == "resp_ws_eof_retry_first"
+    assert completed_event["type"] == "response.completed"
+    assert completed_event["response"]["id"] == "resp_ws_eof_retry_first"
+    assert connect_calls == 3
+    assert upstreams == []
+    assert len(log_calls) == 1
+    assert log_calls[0]["request_id"] == "resp_ws_eof_retry_first"
+    assert log_calls[0]["status"] == "success"
 
 
 def test_backend_responses_websocket_closes_before_replaying_exposed_sequence(

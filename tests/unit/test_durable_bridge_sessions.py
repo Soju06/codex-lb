@@ -179,6 +179,45 @@ async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_alias
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_round_trip(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+        consecutive_failures=3,
+        cooldown_until_epoch=1234.5,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1200.0,
+    )
+
+    persisted = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+    )
+    assert persisted is not None
+    assert persisted.consecutive_failures == 3
+    assert persisted.cooldown_until_epoch == 1234.5
+    assert persisted.last_detail == "stream_incomplete"
+
+    await coordinator.clear_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+    )
+    assert (
+        await coordinator.lookup_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-circuit",
+            api_key_id="key-1",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_turn_state_lookup_does_not_fall_back_to_canonical_session_key(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

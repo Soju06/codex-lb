@@ -1656,6 +1656,28 @@ class HttpBridgeSessionAlias(Base):
     )
 
 
+class HttpBridgeRetryCircuit(Base):
+    __tablename__ = "http_bridge_retry_circuits"
+
+    session_key_kind: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    api_key_scope: Mapped[str] = mapped_column(String(255), primary_key=True)
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    cooldown_until_epoch: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.0,
+        server_default=text("0"),
+    )
+    last_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at_epoch: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)

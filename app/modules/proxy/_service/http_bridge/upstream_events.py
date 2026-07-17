@@ -53,6 +53,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
     _build_stream_incomplete_terminal_event_for_request,
+    _classify_upstream_close,
     _find_websocket_request_state_by_response_id,
     _http_error_status_from_payload,
     _is_missing_tool_output_error,
@@ -219,6 +220,9 @@ class _HTTPBridgeUpstreamEventsMixin:
         error_code: str,
         error_message: str,
         penalize_account: bool = True,
+        upstream_close_code: int | None = None,
+        response_events_seen: int | None = None,
+        transport_classification: str | None = None,
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
@@ -228,6 +232,40 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if _http_bridge_request_counts_against_queue(request_state)
             )
             session.queued_request_count = max(0, session.queued_request_count - failed_pending_count)
+            observed_response_events = max(
+                (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
+                default=0,
+            )
+        observed_close_code = (
+            upstream_close_code if upstream_close_code is not None else session.last_upstream_close_code
+        )
+        observed_response_events = (
+            response_events_seen if response_events_seen is not None else observed_response_events
+        )
+        close_classification = (
+            _classify_upstream_close(observed_close_code, response_events_seen=observed_response_events)
+            if observed_close_code is not None
+            else None
+        )
+        _log_http_bridge_event(
+            "reader_failure",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=failed_pending_count,
+            detail=error_code,
+            error_message=_truncate_identifier(error_message),
+            upstream_close_code=observed_close_code,
+            response_events_seen=observed_response_events,
+            transport_classification=transport_classification
+            or (
+                f"websocket_close_{close_classification}"
+                if close_classification is not None
+                else "websocket_transport_error"
+            ),
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
         try:
             await self._fail_pending_websocket_requests(
                 account=session.account,
@@ -253,7 +291,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
             else:
-                await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
+                if close_classification == "clean":
+                    await self._retire_stale_pending_http_bridge_session(
+                        session,
+                        detail=error_code,
+                        retry_circuit_detail="clean_close",
+                    )
+                else:
+                    await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
         return session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(
@@ -308,6 +353,10 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 async with session.pending_lock:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                    response_events_seen = max(
+                        (request_state.response_event_count for request_state in session.pending_requests),
+                        default=0,
+                    )
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 retried = False
@@ -317,12 +366,34 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
+                close_classification = (
+                    _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
+                    if message.close_code is not None
+                    else None
+                )
                 async with session.lifecycle_lock:
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
                         error_code=message.error_code or "stream_incomplete",
                         error_message=_upstream_websocket_disconnect_message(message),
-                        penalize_account=message.error_code != "proxy_network_unavailable",
+                        upstream_close_code=message.close_code,
+                        response_events_seen=response_events_seen,
+                        transport_classification=(
+                            f"websocket_close_{close_classification}"
+                            if close_classification is not None
+                            else "websocket_transport_error"
+                        ),
+                        penalize_account=(
+                            message.error_code != "proxy_network_unavailable"
+                            and not (
+                                message.kind == "close"
+                                and _classify_upstream_close(
+                                    message.close_code,
+                                    response_events_seen=response_events_seen,
+                                )
+                                == "clean"
+                            )
+                        ),
                     )
                 break
         except asyncio.CancelledError:
@@ -891,6 +962,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             if terminal_request_state.input_item_count > 0:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
+
+        if (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and not terminal_request_state.suppressed_duplicate_tool_call
+        ):
+            await self._clear_http_bridge_retry_circuit(session)
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

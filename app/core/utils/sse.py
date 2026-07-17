@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 
 from app.core.errors import ResponseFailedEvent
 from app.core.types import JsonValue
@@ -26,6 +26,7 @@ async def inject_sse_keepalives(
     interval_seconds: float,
     *,
     keepalive_frame: str = SSE_KEEPALIVE_FRAME,
+    on_keepalive: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     """Wrap an SSE event iterator and emit comment heartbeats on idle gaps.
 
@@ -56,6 +57,8 @@ async def inject_sse_keepalives(
                     timeout=interval_seconds,
                 )
             except asyncio.TimeoutError:
+                if on_keepalive is not None:
+                    on_keepalive()
                 yield keepalive_frame
                 continue
             except StopAsyncIteration:

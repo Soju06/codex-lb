@@ -13,6 +13,7 @@ from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeRepository,
+    DurableBridgeRetryCircuitSnapshot,
     DurableBridgeSessionSnapshot,
     durable_bridge_api_key_scope,
 )
@@ -140,6 +141,56 @@ class DurableBridgeSessionCoordinator:
         async with self._session() as session:
             snapshots = await DurableBridgeRepository(session).get_sessions_by_ids(session_ids)
         return [_to_lookup(snapshot) for snapshot in snapshots]
+
+    async def lookup_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+            )
+
+    async def persist_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+        consecutive_failures: int,
+        cooldown_until_epoch: float,
+        last_detail: str | None,
+        updated_at_epoch: float,
+    ) -> None:
+        async with self._session() as session:
+            await DurableBridgeRepository(session).upsert_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                consecutive_failures=consecutive_failures,
+                cooldown_until_epoch=cooldown_until_epoch,
+                last_detail=last_detail,
+                updated_at_epoch=updated_at_epoch,
+            )
+
+    async def clear_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+    ) -> None:
+        async with self._session() as session:
+            await DurableBridgeRepository(session).delete_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+            )
 
     async def claim_live_session(
         self,

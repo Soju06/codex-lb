@@ -70,7 +70,6 @@ from app.core.errors import (
     OpenAIErrorEnvelope,
     ResponseFailedEvent,
     is_previous_response_not_found_error,
-    is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
@@ -1695,6 +1694,7 @@ class ProxyService(
         preferred_account_id: str | None = None,
         require_security_work_authorized: bool = False,
         security_lineage_id: str | None = None,
+        allow_security_lineage_account_migration: bool = True,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
@@ -1747,9 +1747,12 @@ class ProxyService(
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
-                require_security_work_authorized = (
-                    require_security_work_authorized
-                    or await self._security_lineage_requires_security_work_authorized(security_lineage_id)
+                require_security_work_authorized = require_security_work_authorized or (
+                    allow_security_lineage_account_migration
+                    and await self._security_lineage_requires_security_work_authorized(
+                        security_lineage_id,
+                        api_key_id=api_key.id if api_key is not None else None,
+                    )
                 )
                 stream_reserve_slots = (
                     (
@@ -1847,6 +1850,7 @@ class ProxyService(
                             security_lineage_id,
                             preferred_selection,
                             require_security_work_authorized=require_security_work_authorized,
+                            api_key_id=api_key.id if api_key is not None else None,
                         )
                     if not fallback_on_preferred_account_unavailable:
                         logger.warning(
@@ -1917,6 +1921,7 @@ class ProxyService(
                     security_lineage_id,
                     selection,
                     require_security_work_authorized=require_security_work_authorized,
+                    api_key_id=api_key.id if api_key is not None else None,
                 )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
@@ -2031,8 +2036,11 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
     }
 
 
+_LOCAL_ACCOUNT_CAP_CODES = {"account_response_create_cap", "account_stream_cap"}
+
+
 def _is_local_account_cap_code(code: str | None) -> bool:
-    return code in {"account_response_create_cap", "account_stream_cap"}
+    return code in _LOCAL_ACCOUNT_CAP_CODES
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
@@ -2087,12 +2095,7 @@ def _openai_error_envelope_from_response_failed_payload(
     return envelope
 
 
-def _is_previous_response_not_found_message(message: str | None) -> bool:
-    return is_previous_response_not_found_message(message)
-
-
-def _previous_response_id_from_not_found_message(message: str | None) -> str | None:
-    return previous_response_id_from_not_found_message(message)
+_previous_response_id_from_not_found_message = previous_response_id_from_not_found_message
 
 
 def _message_mentions_previous_response_id(message: str | None, previous_response_id: str | None) -> bool:
@@ -2113,10 +2116,7 @@ def _message_mentions_previous_response_id(message: str | None, previous_respons
 
 
 def _normalize_session_id(session_id: str | None) -> str | None:
-    if not isinstance(session_id, str):
-        return None
-    stripped = session_id.strip()
-    return stripped or None
+    return (session_id.strip() or None) if isinstance(session_id, str) else None
 
 
 _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
@@ -2247,7 +2247,7 @@ def _partial_output_proxy_error_event_block(
         error.type if error else None,
     )
     error_message = error.message if error else None
-    effective_previous_response_id = previous_response_id or _previous_response_id_from_not_found_message(
+    effective_previous_response_id = previous_response_id or previous_response_id_from_not_found_message(
         error_message,
     )
     rewritten_error = _rewrite_previous_response_stream_error(

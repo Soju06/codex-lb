@@ -1274,6 +1274,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
+                request_text_contains_file_ids = _http_bridge_request_contains_input_file_ids(request_text)
+                if request_text_contains_file_ids:
+                    return False
                 if not request_state.file_required_preferred_account:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)

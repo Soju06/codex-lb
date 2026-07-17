@@ -54,8 +54,10 @@ class _WebSocketServiceProtocol(Protocol):
     _send_downstream_websocket_bytes: Any
     _send_downstream_websocket_text: Any
     _settle_stream_api_key_usage: Any
+    _security_lineage_requires_security_work_authorized: Any
     _start_request_state_api_key_reservation_heartbeat: Any
     _try_open_websocket_connect_attempt: Any
+    _websocket_existing_account_security_reconnect_required: Any
     _websocket_continuity_index: Any
     _websocket_continuity_state_for_request: Any
     _websocket_previous_response_account_index: Any

@@ -12,7 +12,6 @@ import anyio
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
-from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ImageFetchSession,
@@ -92,6 +91,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_alias_key,
     _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_contains_input_file_ids,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
@@ -244,15 +244,11 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
-class _HTTPBridgeMixin(
-    _HTTPBridgeStreamingMixin,
-    _HTTPBridgeAccountSessionsMixin,
-    _HTTPBridgeActivityMixin,
-    _HTTPBridgeOwnerForwardingMixin,
-    _HTTPBridgeRequestSubmitMixin,
-    _HTTPBridgeUpstreamEventsMixin,
-    _HTTPBridgeServiceProtocol,
-):
+# fmt: off
+class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixin, _HTTPBridgeActivityMixin,
+                       _HTTPBridgeOwnerForwardingMixin, _HTTPBridgeRequestSubmitMixin,
+                       _HTTPBridgeUpstreamEventsMixin, _HTTPBridgeServiceProtocol):
+# fmt: on
     async def _close_http_bridge_session_bounded(
         self,
         session: "_HTTPBridgeSession",
@@ -2203,6 +2199,10 @@ class _HTTPBridgeMixin(
                 preferred_account_id=preferred_candidate_id,
                 require_security_work_authorized=session.requires_security_work_authorized,
                 security_lineage_id=request_state.security_lineage_id,
+                allow_security_lineage_account_migration=not (
+                    request_state.file_required_preferred_account
+                    or _http_bridge_request_contains_input_file_ids(request_state.request_text)
+                ),
                 lease_kind=None if reuse_current_account_lease else "stream",
                 estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
                     request_state.request_usage_budget

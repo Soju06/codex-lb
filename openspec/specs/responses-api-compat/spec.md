@@ -1130,6 +1130,7 @@ When a direct Responses WebSocket request depends on `previous_response_id`, the
 ### Requirement: Failed precreated HTTP bridge replay retires stale sessions
 
 When an HTTP bridge request is still pending before upstream `response.completed` and the upstream websocket closes or times out before the pending request can be completed, the service MUST fail the pending request terminally and retire the affected bridge session if precreated replay does not reconnect and resend successfully.
+The upstream reader MUST additionally enforce `http_responses_session_bridge_response_created_timeout_seconds` as the per-attempt startup cutoff for pending HTTP bridge requests that have been sent upstream but have not received `response.created`. The default cutoff MUST be 120 seconds. When a single safely replayable unanchored request reaches that cutoff, the bridge MAY reconnect and resend it before emitting a terminal error. Requests that contain account-scoped `input_file.file_id` references MUST NOT be replayed on another account by this startup cutoff. When the cutoff expires and replay is unavailable or unsafe, the affected request MUST fail with `error.code = "response_created_timeout"`; if another pending request shares the same upstream bridge, the bridge MUST retire the shared connection and fail remaining pending work with a retryable bridge/session error rather than allowing late anonymous upstream events to attach to the wrong request.
 
 #### Scenario: Precreated replay fails after upstream disconnect
 
@@ -1140,6 +1141,23 @@ When an HTTP bridge request is still pending before upstream `response.completed
 - **AND** the per-session response-create gate is released
 - **AND** the bridge session is closed and removed from local reuse
 - **AND** the terminal error preserves the original failure code such as `stream_incomplete` or `upstream_request_timeout`
+
+#### Scenario: HTTP bridge startup cutoff fails requests that never receive response.created
+
+- **WHEN** an HTTP bridge request has been sent upstream
+- **AND** upstream does not emit `response.created` within `http_responses_session_bridge_response_created_timeout_seconds`
+- **AND** the request cannot be safely replayed before visible output
+- **THEN** the request is removed from the bridge queue and failed with `error.code = "response_created_timeout"`
+- **AND** the response-create gate and any response-create lease held by that request are released
+- **AND** a file-backed request is not resent on another account solely because the startup cutoff elapsed
+
+#### Scenario: HTTP bridge startup cutoff retires multiplexed bridge after one request times out
+
+- **WHEN** an HTTP bridge session has more than one pending request
+- **AND** one pending request reaches the configured response-created startup cutoff
+- **THEN** only the timed-out request is failed with `error.code = "response_created_timeout"`
+- **AND** the shared bridge is retired so any late anonymous upstream `response.created` cannot be assigned to another pending request
+- **AND** the remaining pending bridge work is failed with a retryable bridge/session error
 
 #### Scenario: Terminal logging failure does not preserve stale bridge ownership
 

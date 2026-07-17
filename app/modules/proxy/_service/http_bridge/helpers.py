@@ -616,13 +616,13 @@ def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestSt
 
 def _http_bridge_request_contains_input_file_ids(text: str | None) -> bool:
     if text is None:
-        return True
+        return False
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return True
+        return False
     if not isinstance(payload, Mapping):
-        return True
+        return False
     return bool(extract_input_file_ids(payload.get("input")))
 
 

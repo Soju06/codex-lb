@@ -44,6 +44,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
@@ -697,7 +698,7 @@ class _HTTPBridgeStreamingMixin:
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
             if bridge_uses_responses_lite:
-                return self._prepare_http_bridge_request(
+                request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -706,14 +707,17 @@ class _HTTPBridgeStreamingMixin:
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
                 )
-            return self._prepare_http_bridge_request(
-                request_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                request_id=request_id,
-                client_ip=client_ip,
-            )
+            else:
+                request_state, text_data = self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                )
+            request_state.original_request_contains_input_file_ids = bool(extract_input_file_ids(request_payload.input))
+            return request_state, text_data
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -812,12 +816,14 @@ class _HTTPBridgeStreamingMixin:
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
         durable_full_resend_anchor_fingerprint: str | None = None
-        require_security_work_authorized = bool(
+        request_contains_input_file_ids = bool(extract_input_file_ids(effective_payload.input))
+        require_security_work_authorized = not request_contains_input_file_ids and bool(
             durable_lookup is not None and durable_lookup.requires_security_work_authorized
         )
-        if not require_security_work_authorized:
+        if not request_contains_input_file_ids and not require_security_work_authorized:
             require_security_work_authorized = await self._security_lineage_requires_security_work_authorized(
-                _sticky_key_from_session_header(headers)
+                _sticky_key_from_session_header(headers),
+                api_key_id=api_key.id if api_key is not None else None,
             )
         durable_model_transition_lookup = (
             durable_lookup
@@ -855,8 +861,33 @@ class _HTTPBridgeStreamingMixin:
                 stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
             )
             if (
+                require_security_work_authorized
+                and not live_local_session_exists
+                and not forwards_to_active_owner
+                and payload.previous_response_id is None
+                and bridge_session_key.strength == "hard"
+                and durable_lookup.latest_response_id is not None
+                and not _http_bridge_payload_looks_like_full_resend(payload)
+            ):
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="security_lineage_context_unavailable",
+                    previous_response_id=durable_lookup.latest_response_id,
+                    session_id=durable_lookup.canonical_key,
+                    upstream_error_code="security_lineage_context_unavailable",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "security_lineage_context_unavailable",
+                        "Security-classified session context is unavailable; "
+                        "resend the full conversation before retrying.",
+                    ),
+                )
+            if (
                 not live_local_session_exists
                 and not forwards_to_active_owner
+                and not require_security_work_authorized
                 and payload.previous_response_id is None
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
@@ -1436,6 +1467,10 @@ class _HTTPBridgeStreamingMixin:
                 else (durable_lookup.account_id if durable_lookup is not None else previous_preferred_account_id)
             )
             request_state.file_required_preferred_account = previous_file_required_preferred_account
+            request_state.original_request_contains_input_file_ids = (
+                request_state.original_request_contains_input_file_ids
+                or bool(extract_input_file_ids(untrimmed_effective_payload.input))
+            )
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             # Session-level anchor injection may be attached to a payload
@@ -1519,6 +1554,11 @@ class _HTTPBridgeStreamingMixin:
             request_state.preferred_account_id = previous_request_state.preferred_account_id
             request_state.require_security_work_authorized = previous_request_state.require_security_work_authorized
             request_state.file_required_preferred_account = previous_request_state.file_required_preferred_account
+            request_state.original_request_contains_input_file_ids = (
+                previous_request_state.original_request_contains_input_file_ids
+                or request_state.original_request_contains_input_file_ids
+                or request_contains_input_file_ids
+            )
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
                 # so the client's next full resend can prefix-match it.

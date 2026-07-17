@@ -278,7 +278,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 )
                 try:
                     if receive_timeout is None:
-                        message = await session.upstream.receive()
+                        message = await asyncio.wait_for(
+                            session.upstream.receive(),
+                            timeout=(runtime_settings.http_responses_session_bridge_response_created_timeout_seconds),
+                        )
                     elif receive_timeout.timeout_seconds <= 0:
                         raise asyncio.TimeoutError()
                     else:
@@ -288,7 +291,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                 except asyncio.TimeoutError:
                     if receive_timeout is None:
-                        raise
+                        continue
                     retried_startup_request = False
                     terminal_error_code = receive_timeout.error_code
                     terminal_error_message = receive_timeout.error_message
@@ -425,6 +428,11 @@ class _HTTPBridgeUpstreamEventsMixin:
         if not expired_requests:
             return ()
         for request_state in expired_requests:
+            request_state.error_code_override = error_code
+            request_state.error_message_override = error_message
+            request_state.error_type_override = "server_error"
+            request_state.error_param_override = None
+            request_state.error_http_status_override = 502
             await self._fail_pending_websocket_requests(
                 account=session.account,
                 account_id_value=session.account.id,
@@ -801,6 +809,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             if status_request_state is not None:
                 setattr(status_request_state, "account_health_error_handled", True)
             if status_request_state is not None and not has_other_pending_requests:
+                await self._release_request_state_account_response_create_lease(status_request_state)
                 retried = await self._retry_http_bridge_owner_failover_request(
                     session,
                     status_request_state,
@@ -1068,7 +1077,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # replay, but it is not evidence that this lineage contains an
                 # account-scoped file. Persist the security requirement first
                 # so later turns cannot remain on the denied ordinary owner.
-                security_retry_has_file_ids = (
+                original_request_has_file_ids = (
+                    terminal_request_state.original_request_contains_input_file_ids
+                    or _http_bridge_request_contains_input_file_ids(terminal_request_state.request_text)
+                )
+                security_retry_has_file_ids = original_request_has_file_ids or (
                     security_retry_text is not None
                     and _http_bridge_request_contains_input_file_ids(security_retry_text)
                 )
@@ -1082,6 +1095,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     await self._mark_security_lineage_requirement(
                         terminal_request_state.security_lineage_id,
                         account_id=session.account.id,
+                        api_key_id=session.key.api_key_id,
                     )
                     terminal_request_state.require_security_work_authorized = True
                     session.requires_security_work_authorized = True

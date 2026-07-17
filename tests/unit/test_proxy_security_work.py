@@ -156,6 +156,83 @@ async def test_security_lineage_persists_root_requirement_for_child_turn_without
 
 
 @pytest.mark.asyncio
+async def test_security_lineage_marker_does_not_migrate_account_scoped_file_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StickyLineageRepository:
+        def __init__(self) -> None:
+            self.entries: dict[str, StickySession] = {}
+
+        async def get_entry(self, key: str, *, kind: proxy_service.StickySessionKind):
+            assert kind == proxy_service.StickySessionKind.CODEX_SESSION
+            return self.entries.get(key)
+
+        async def upsert(
+            self,
+            key: str,
+            account_id: str | None,
+            *,
+            kind: proxy_service.StickySessionKind,
+            requires_security_work_authorized: bool = False,
+        ):
+            prior = self.entries.get(key)
+            self.entries[key] = StickySession(
+                key=key,
+                kind=kind,
+                account_id=account_id,
+                requires_security_work_authorized=(
+                    requires_security_work_authorized
+                    or (prior.requires_security_work_authorized if prior is not None else False)
+                ),
+            )
+            return self.entries[key]
+
+    sticky_repo = _StickyLineageRepository()
+
+    class _RepoContext:
+        async def __aenter__(self):
+            return SimpleNamespace(sticky_sessions=sticky_repo)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    service = proxy_service.ProxyService(lambda: _RepoContext())
+    settings = _make_app_settings()
+    ordinary_account = _make_account("acc_file_owner_after_classified_root")
+    trusted_account = _make_account("acc_file_trusted_after_classified_root")
+    trusted_account.security_work_authorized = True
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(account=ordinary_account, error_message=None, error_code=None)
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    await service._mark_security_lineage_requirement(
+        "root-with-file-request",
+        account_id=trusted_account.id,
+    )
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 10,
+        request_id="classified-file-request",
+        kind="stream",
+        sticky_key="root-with-file-request",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        security_lineage_id="root-with-file-request",
+        allow_security_lineage_account_migration=False,
+    )
+
+    assert selection.account is ordinary_account
+    select_account_call = select_account.await_args
+    assert select_account_call is not None
+    assert select_account_call.kwargs["require_security_work_authorized"] is False
+
+
+@pytest.mark.asyncio
 async def test_approved_account_cyber_denial_persists_root_without_ordinary_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,6 +279,7 @@ async def test_approved_account_cyber_denial_persists_root_without_ordinary_repl
     persist_requirement.assert_awaited_once_with(
         "root-approved-cyber-denial",
         account_id=trusted_account.id,
+        api_key_id=None,
     )
     assert upstream_control.replay_request_state is None
     assert upstream_control.reconnect_requested is True
@@ -389,7 +467,7 @@ async def test_http_bridge_stream_reads_sticky_security_requirement_without_dura
     ]
 
     assert chunks == []
-    sticky_requirement.assert_awaited_once_with("sticky-security-root")
+    sticky_requirement.assert_awaited_once_with("sticky-security-root", api_key_id=None)
     assert get_or_create.await_args is not None
     assert get_or_create.await_args.kwargs["durable_lookup"] is None
     assert get_or_create.await_args.kwargs["require_security_work_authorized"] is True
@@ -502,6 +580,7 @@ async def test_http_bridge_authorized_cyber_denial_persists_durable_requirement_
     persist_lineage.assert_awaited_once_with(
         "root-http-approved-cyber-denial",
         account_id=trusted_account.id,
+        api_key_id=None,
     )
     persist_durable.assert_awaited_once_with(session_id="durable-http-approved-cyber-denial")
     retry_security_work.assert_not_awaited()
@@ -567,6 +646,7 @@ async def test_http_bridge_unapproved_cyber_denial_also_persists_durable_require
     persist_lineage.assert_awaited_once_with(
         "root-http-unapproved-cyber-denial",
         account_id=owner_account.id,
+        api_key_id=None,
     )
     persist_durable.assert_awaited_once_with(session_id="durable-http-unapproved-cyber-denial")
     retry_security_work.assert_not_awaited()
@@ -918,6 +998,66 @@ async def test_process_websocket_security_retry_releases_response_create_gate() 
 
 
 @pytest.mark.asyncio
+async def test_websocket_classified_fresh_replay_drops_previous_owner_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    trusted_account = _make_account("acc_ws_security_fresh_replay_trusted")
+    trusted_account.security_work_authorized = True
+    upstream = cast(UpstreamResponsesWebSocket, AsyncMock())
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(account=trusted_account, error_message=None, error_code=None)
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(return_value=upstream))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_security_fresh_replay_select",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="websocket",
+        previous_response_id="resp_ws_security_ordinary_owner",
+        preferred_account_id="acc_ws_security_ordinary_owner",
+        proxy_injected_previous_response_id=True,
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.1",'
+            '"previous_response_id":"resp_ws_security_ordinary_owner","input":["tail"]}'
+        ),
+        fresh_upstream_request_text='{"type":"response.create","model":"gpt-5.1","input":["self-contained"]}',
+        fresh_upstream_request_is_retry_safe=True,
+        require_security_work_authorized=True,
+        security_lineage_id="root-ws-security-fresh-replay-select",
+    )
+
+    account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key="turn-ws-security-fresh-replay-select",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(Any, SimpleNamespace(send_text=AsyncMock())),
+    )
+
+    assert account is trusted_account
+    assert selected_upstream is upstream
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert json.loads(request_state.request_text or "{}")["input"] == ["self-contained"]
+    select_account_call = select_account.await_args
+    assert select_account_call is not None
+    assert select_account_call.kwargs["preferred_account_id"] is None
+    assert select_account_call.kwargs["fallback_on_preferred_account_unavailable"] is True
+    assert select_account_call.kwargs["require_security_work_authorized"] is True
+
+
+@pytest.mark.asyncio
 async def test_process_websocket_security_retry_never_migrates_file_pinned_owner() -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_security_file_owner")
@@ -1087,10 +1227,62 @@ async def test_process_websocket_security_denial_without_fresh_replay_body_marks
     mark_security_lineage.assert_awaited_once_with(
         "root-ws-security-no-fresh-body",
         account_id=account.id,
+        api_key_id=None,
     )
     assert upstream_control.replay_request_state is None
     assert upstream_control.reconnect_requested is True
     assert request_state.require_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_process_websocket_security_denial_with_original_file_body_keeps_owner() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc-ws-security-file-original")
+    mark_security_lineage = AsyncMock()
+    service._mark_security_lineage_requirement = mark_security_lineage
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws-security-file-original",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        transport="websocket",
+        previous_response_id="resp-ws-security-file-anchor",
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.6-sol",'
+            '"previous_response_id":"resp-ws-security-file-anchor",'
+            '"input":[{"type":"input_file","file_id":"file-ws-owner"}]}'
+        ),
+        security_lineage_id="root-ws-security-file-original",
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-ws-security-file-original",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    mark_security_lineage.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+    assert request_state.require_security_work_authorized is False
 
 
 @pytest.mark.asyncio
@@ -1148,6 +1340,7 @@ async def test_http_bridge_security_denial_without_fresh_replay_body_marks_root_
     mark_security_lineage.assert_awaited_once_with(
         "root-http-security-no-fresh-body",
         account_id=account.id,
+        api_key_id=None,
     )
     retry_security_work.assert_not_awaited()
     assert request_state.require_security_work_authorized is True
@@ -1156,6 +1349,59 @@ async def test_http_bridge_security_denial_without_fresh_replay_body_marks_root_
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
     assert session.closed is True
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_security_denial_with_original_file_body_keeps_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc-http-security-file-original")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-security-file-original",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-http-security-file-anchor",
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.6-sol",'
+            '"previous_response_id":"resp-http-security-file-anchor",'
+            '"input":[{"type":"input_file","file_id":"file-http-owner"}]}'
+        ),
+        security_lineage_id="root-http-security-file-original",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    session.account = account
+    terminal_text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp-http-security-file-original",
+                "status": "failed",
+                "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+            },
+        },
+        separators=(",", ":"),
+    )
+    mark_security_lineage = AsyncMock()
+    retry_security_work = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_security_lineage)
+    monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
+
+    await service._process_http_bridge_upstream_text(session, terminal_text)
+
+    mark_security_lineage.assert_not_awaited()
+    retry_security_work.assert_not_awaited()
+    assert request_state.require_security_work_authorized is False
+    assert session.requires_security_work_authorized is False
+    assert session.upstream_control.retire_after_drain is False
 
 
 @pytest.mark.asyncio

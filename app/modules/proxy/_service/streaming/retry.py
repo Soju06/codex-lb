@@ -348,6 +348,7 @@ class _StreamingRetryMixin:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
+        security_lineage_requirement_marked = False
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
@@ -417,6 +418,17 @@ class _StreamingRetryMixin:
                 settlement,
                 request_id,
             )
+
+        async def _mark_security_lineage_requirement_once(account: Account) -> None:
+            nonlocal security_lineage_requirement_marked
+            if security_lineage_requirement_marked:
+                return
+            await proxy._mark_security_lineage_requirement(
+                security_lineage_id,
+                account_id=account.id,
+                api_key_id=api_key.id if api_key is not None else None,
+            )
+            security_lineage_requirement_marked = True
 
         def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
             # Only a proxy-injected owner anchor with locally verified full
@@ -764,6 +776,7 @@ class _StreamingRetryMixin:
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
                             security_lineage_id=security_lineage_id,
+                            allow_security_lineage_account_migration=not request_contains_input_file_ids,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=not file_required_preferred_account,
@@ -1653,21 +1666,22 @@ class _StreamingRetryMixin:
                                     break
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
                                     security_lineage_can_be_classified = not (
-                                        account.id == file_preferred_account_id
-                                        or require_preferred_account
-                                        or request_contains_input_file_ids
+                                        account.id == file_preferred_account_id or request_contains_input_file_ids
                                     )
                                     if security_lineage_can_be_classified:
-                                        await proxy._mark_security_lineage_requirement(
-                                            security_lineage_id,
-                                            account_id=account.id,
-                                        )
+                                        await _mark_security_lineage_requirement_once(account)
                                     if (
                                         account.security_work_authorized
                                         or not security_lineage_can_be_classified
                                         or attempt >= max_attempts - 1
                                     ):
                                         raise
+                                    if require_preferred_account:
+                                        if not _move_verified_fresh_replay_from_owner(
+                                            account_id=account.id,
+                                            outcome="owner_security_work_denial",
+                                        ):
+                                            raise
                                     _facade().logger.info(
                                         "Retrying on security-work-authorized account request_id=%s account_id=%s",
                                         request_id,
@@ -1864,20 +1878,14 @@ class _StreamingRetryMixin:
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     if _facade()._is_security_work_authorization_required_error(exc.code, exc.error.get("message")):
-                        can_persist_security_lineage = (
-                            not account.security_work_authorized
-                            and not request_contains_input_file_ids
-                        )
+                        can_persist_security_lineage = not request_contains_input_file_ids
+                        can_retry_security_work = can_persist_security_lineage and not account.security_work_authorized
                         if can_persist_security_lineage:
-                            await proxy._mark_security_lineage_requirement(
-                                security_lineage_id,
-                                account_id=account.id,
-                            )
+                            await _mark_security_lineage_requirement_once(account)
                         if (
-                            account.security_work_authorized
+                            not can_retry_security_work
                             or account.id == file_preferred_account_id
                             or require_preferred_account
-                            or request_contains_input_file_ids
                             or attempt >= max_attempts - 1
                         ):
                             event = response_failed_event(
@@ -2332,17 +2340,12 @@ class _StreamingRetryMixin:
                     error_type = error.type if error else None
                     error_param = error.param if error else None
                     if _facade()._is_security_work_authorization_required_error(error_code, error_message):
-                        can_persist_security_lineage = (
-                            not account.security_work_authorized
-                            and not request_contains_input_file_ids
-                        )
+                        can_persist_security_lineage = not request_contains_input_file_ids
+                        can_retry_security_work = can_persist_security_lineage and not account.security_work_authorized
                         if can_persist_security_lineage:
-                            await proxy._mark_security_lineage_requirement(
-                                security_lineage_id,
-                                account_id=account.id,
-                            )
+                            await _mark_security_lineage_requirement_once(account)
                         if (
-                            can_persist_security_lineage
+                            can_retry_security_work
                             and account.id != file_preferred_account_id
                             and not require_preferred_account
                             and attempt < max_attempts - 1

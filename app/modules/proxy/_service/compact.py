@@ -831,6 +831,7 @@ class _CompactMixin:
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
                     security_lineage_id=security_lineage_id,
+                    allow_security_lineage_account_migration=not request_contains_input_file_ids,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -881,6 +882,7 @@ class _CompactMixin:
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=False,
                             security_lineage_id=None,
+                            allow_security_lineage_account_migration=not request_contains_input_file_ids,
                             lease_kind="response_create",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -1375,17 +1377,18 @@ class _CompactMixin:
                             safe_retry_budget -= 1
                             continue
                         if _is_security_work_authorization_required_error(code, error_message):
-                            can_persist_security_lineage = (
-                                not account.security_work_authorized
-                                and not request_contains_input_file_ids
+                            can_persist_security_lineage = not request_contains_input_file_ids
+                            can_retry_security_work = (
+                                can_persist_security_lineage and not account.security_work_authorized
                             )
                             if can_persist_security_lineage:
                                 await proxy._mark_security_lineage_requirement(
                                     security_lineage_id,
                                     account_id=account.id,
+                                    api_key_id=api_key.id if api_key is not None else None,
                                 )
                             if (
-                                can_persist_security_lineage
+                                can_retry_security_work
                                 and account.id != preferred_account_id
                                 and _account_attempt < _compact_max_account_attempts() - 1
                             ):

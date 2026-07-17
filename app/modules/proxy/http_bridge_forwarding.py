@@ -123,6 +123,7 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
         settings = get_settings()
@@ -130,6 +131,8 @@ class HTTPBridgeOwnerClient:
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
             idle_timeout_seconds=settings.stream_idle_timeout_seconds,
         )
+        if on_response_wait is not None:
+            on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             async with session.post(
                 f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",

@@ -755,6 +755,7 @@ class _WebSocketRequestState:
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
+    propagate_http_errors: bool = False
     request_kind: str = "normal"
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
@@ -814,6 +815,7 @@ class _WebSocketRequestState:
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
+    response_create_admission_reacquire_required: bool = False
     account_response_create_lease: AccountLease | None = None
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
@@ -843,9 +845,12 @@ class _WebSocketRequestState:
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     account_capacity_waiting: bool = False
+    account_capacity_wait_suppress_keepalive: bool = False
     account_capacity_wait_reason: str | None = None
     account_capacity_wait_started_at: float | None = None
     account_capacity_wait_retry_after_seconds: float | None = None
+    capacity_startup_wait_event: asyncio.Event | None = None
+    capacity_startup_ready_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)

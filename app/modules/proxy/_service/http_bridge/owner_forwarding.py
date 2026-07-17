@@ -99,6 +99,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _signal_propagated_capacity_startup_ready,
+    _signal_propagated_capacity_startup_wait,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -402,6 +403,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                 headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
+                on_response_wait=_signal_propagated_capacity_startup_wait,
                 on_response_ready=_signal_propagated_capacity_startup_ready,
             ):
                 forwarded_any = True

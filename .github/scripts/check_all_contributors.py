@@ -43,12 +43,10 @@ def fetch_contributor_logins(repository: str, token: str | None) -> set[str]:
             detail = exc.read().decode("utf-8", errors="replace")
             raise SystemExit(f"GitHub contributors request failed: HTTP {exc.code}: {detail}") from exc
         except GitHubApiError as exc:
-            print(
-                "warning: GitHub contributors request failed after retries; "
-                f"falling back to local/event contributor evidence: {exc}",
-                file=sys.stderr,
-            )
-            return logins
+            raise SystemExit(
+                "GitHub contributors request failed after retries; "
+                f"cannot validate all-contributors coverage from partial evidence: {exc}"
+            ) from exc
         for contributor in page:
             login = contributor.get("login")
             contributor_type = contributor.get("type")
@@ -132,12 +130,10 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
             detail = exc.read().decode("utf-8", errors="replace")
             raise SystemExit(f"GitHub PR commits request failed: HTTP {exc.code}: {detail}") from exc
         except GitHubApiError as exc:
-            print(
-                "warning: GitHub PR commits request failed after retries; "
-                f"falling back to local/event contributor evidence: {exc}",
-                file=sys.stderr,
-            )
-            return logins
+            raise SystemExit(
+                "GitHub PR commits request failed after retries; "
+                f"cannot validate all-contributors coverage from partial evidence: {exc}"
+            ) from exc
         for commit in page:
             author = commit.get("author")
             if not isinstance(author, dict):

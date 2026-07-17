@@ -51,7 +51,7 @@ The system SHALL enforce both a minimum and a maximum length on dashboard passwo
 
 ### Requirement: Dashboard password sessions use a configurable absolute lifetime
 
-The system SHALL issue dashboard password-authenticated sessions with an absolute lifetime controlled by persisted dashboard settings. The default persisted lifetime SHALL be 1 year. Configured lifetimes at or below 30 days SHALL apply to newly issued dashboard password sessions by setting both the encrypted session expiry payload and the cookie `Max-Age` to the same value. Configured lifetimes above 30 days SHALL apply only in standard dashboard auth mode when the request is socket-level local, or when an explicit loopback-host-header override is enabled and the request uses a loopback dashboard URL with no forwarded-client headers. Non-loopback, proxy-aware, trusted-header, or bridge-without-override requests MUST receive a 12-hour effective lifetime without rewriting the persisted setting.
+The system SHALL issue dashboard password-authenticated sessions with an absolute lifetime controlled by persisted dashboard settings. The default persisted lifetime SHALL be 1 year. Configured lifetimes at or below 30 days SHALL apply to newly issued dashboard password sessions by setting both the encrypted session expiry payload and the cookie `Max-Age` to the same value. Configured lifetimes above 30 days SHALL apply only in standard dashboard auth mode when the request is socket-level local, or when an explicit loopback-host-header override is enabled, the request uses a loopback dashboard URL, and every field value of every forwarded client-IP header is empty. Non-loopback, proxy-aware, trusted-header, or bridge-without-override requests MUST receive a 12-hour effective lifetime without rewriting the persisted setting.
 
 #### Scenario: Newly issued dashboard password session honors configured lifetime
 
@@ -69,8 +69,15 @@ The system SHALL issue dashboard password-authenticated sessions with an absolut
 
 - **WHEN** an admin configures a dashboard session lifetime greater than 30 days and successfully completes password authentication through a loopback dashboard URL whose socket peer is not loopback
 - **AND** the explicit loopback-host-header override is enabled
-- **AND** no forwarded-client headers are present
+- **AND** every field value of every forwarded client-IP header is empty
 - **THEN** the newly issued dashboard session expires after the configured absolute lifetime
+
+#### Scenario: Later duplicate forwarded client identity disables the long session override
+
+- **WHEN** a non-loopback socket peer authenticates through a loopback dashboard URL with the explicit loopback-host-header override enabled
+- **AND** a forwarded client-IP header contains an empty first field followed by a non-empty field
+- **THEN** the newly issued dashboard session expires after 12 hours
+- **AND** the cookie `Max-Age` is `43200`
 
 #### Scenario: Long dashboard password session falls back for non-loopback access
 
@@ -235,3 +242,34 @@ When proxy-header trust is enabled and the socket peer belongs to a configured t
 - **WHEN** a trusted socket request contains more than one field for `X-Real-IP`, `True-Client-IP`, or `CF-Connecting-IP`
 - **THEN** trusted proxy client resolution returns no client IP
 - **AND** the request is not classified as local
+
+### Requirement: Trusted-proxy locality requires trusted socket provenance
+
+When proxy-header trust is enabled, the system MUST classify a forwarded loopback client as local only when the raw socket peer belongs to a configured trusted-proxy CIDR and forwarded client resolution succeeds. The mere presence of a forwarded client-IP header from an untrusted socket peer MUST NOT establish locality or bypass remote dashboard bootstrap requirements.
+
+#### Scenario: Untrusted loopback proxy cannot bypass remote bootstrap
+
+- **WHEN** proxy-header trust is enabled
+- **AND** the raw loopback socket peer is outside every configured trusted-proxy CIDR
+- **AND** the request supplies a local Host header and a forwarded client-IP header
+- **THEN** the request is classified as remote
+- **AND** first-run password setup requires the configured bootstrap token
+
+#### Scenario: Trusted proxy may forward a loopback client
+
+- **WHEN** proxy-header trust is enabled
+- **AND** the raw socket peer belongs to a configured trusted-proxy CIDR
+- **AND** valid forwarded client resolution yields a loopback address
+- **AND** the Host header is local
+- **THEN** the request is classified as local
+
+### Requirement: Direct locality inspects every forwarded client hint field
+
+When proxy-header trust is disabled, the system MUST classify a loopback socket peer with a local Host as local only when no non-empty forwarded client-IP field value is present. When such a header occurs more than once, the system MUST inspect every field value rather than only the first.
+
+#### Scenario: Later duplicate forwarded hint prevents local bootstrap
+
+- **WHEN** proxy-header trust is disabled
+- **AND** a loopback request with a local Host contains an empty `X-Forwarded-For` field followed by a non-empty `X-Forwarded-For` field
+- **THEN** the request is classified as remote
+- **AND** first-run password setup requires the configured bootstrap token

@@ -120,6 +120,7 @@ class RuntimeState:
     last_selected_at: float | None = None
     error_count: int = 0
     version: int = 0
+    health_version: int = 0
     blocked_at: float | None = None
     health_tier: int = 0
     drain_entered_at: float | None = None
@@ -503,6 +504,8 @@ class LoadBalancer:
             attempt = 0
             while True:
                 attempt += 1
+                probe_reservation: _ProbeReservation | None = None
+                probe_reservation_invalidated = False
                 async with self._runtime_lock:
                     self._reclaim_stale_account_leases_locked()
                     self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -556,21 +559,51 @@ class LoadBalancer:
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
                         )
+                        if result.account is not None and result.account.health_tier == HEALTH_TIER_PROBING:
+                            # Unbound recovery admissions have the same
+                            # externally-visible probe quiet interval as sticky
+                            # ones, but account-state persistence happens after
+                            # the runtime lock is released. Hold a reversible
+                            # reservation until DB persistence and the final CAS
+                            # both succeed; otherwise the failed request can
+                            # consume minutes of recovery capacity.
+                            probe_reservation = self._reserve_due_probe_locked(
+                                selection_states,
+                                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                                routing_strategy=routing_strategy,
+                                relative_availability_power=relative_availability_power,
+                                relative_availability_top_k=relative_availability_top_k,
+                                traffic_class=traffic_class,
+                                routing_costs_by_account_id=effective_routing_costs,
+                            )
+                            if probe_reservation is None or probe_reservation.account_id != result.account.account_id:
+                                self._release_due_probe_reservation_locked(probe_reservation)
+                                probe_reservation = None
+                                probe_reservation_invalidated = True
 
                     selected_account_map = account_map
                     selected_states = []
-                    for state in states:
-                        account = account_map.get(state.account_id)
-                        if account is None:
-                            continue
-                        self._sync_runtime_state(
-                            account,
-                            state,
-                            selected=result.account is not None and state.account_id == result.account.account_id,
-                        )
-                        selected_states.append(state)
+                    if not probe_reservation_invalidated:
+                        for state in states:
+                            account = account_map.get(state.account_id)
+                            if account is None:
+                                continue
+                            selected_reserved_probe = bool(
+                                probe_reservation is not None and state.account_id == probe_reservation.account_id
+                            )
+                            self._sync_runtime_state(
+                                account,
+                                state,
+                                selected=(
+                                    result.account is not None
+                                    and state.account_id == result.account.account_id
+                                    and not selected_reserved_probe
+                                ),
+                            )
+                            selected_states.append(state)
 
-                    if result.account is not None:
+                    if result.account is not None and not probe_reservation_invalidated:
                         selected = account_map.get(result.account.account_id)
                         if selected is None:
                             error_message = result.error_message
@@ -592,8 +625,25 @@ class LoadBalancer:
                             selected_snapshot.status = result.account.status
                             selected_snapshot.deactivation_reason = result.account.deactivation_reason
                             selected_snapshot.reset_at = selected_reset_at
-                    else:
+                    elif result.account is None:
                         error_message = result.error_message
+
+                if probe_reservation_invalidated:
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
+                    if attempt >= _MAX_SELECTION_ATTEMPTS:
+                        break
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
+                        )
+                    await asyncio.sleep(0)
+                    continue
 
                 pre_persist_runtime_state = {
                     aid: (
@@ -616,11 +666,15 @@ class LoadBalancer:
                 except BaseException:
                     await self.release_account_lease(selected_lease)
                     selected_lease = None
+                    async with self._runtime_lock:
+                        self._release_due_probe_reservation_locked(probe_reservation)
                     raise
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
                     await self.release_account_lease(selected_lease)
                     selected_lease = None
+                    async with self._runtime_lock:
+                        self._release_due_probe_reservation_locked(probe_reservation)
                     if attempt >= _MAX_SELECTION_ATTEMPTS:
                         selected_snapshot = None
                         error_message = None
@@ -645,6 +699,8 @@ class LoadBalancer:
                 ):
                     await self.release_account_lease(selected_lease)
                     selected_lease = None
+                    async with self._runtime_lock:
+                        self._release_due_probe_reservation_locked(probe_reservation)
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -678,6 +734,31 @@ class LoadBalancer:
                         error_message = None
                         selected_states = []
                         selected_account_map = {}
+                        await asyncio.sleep(0)
+                        continue
+
+                if selected_snapshot is not None and probe_reservation is not None:
+                    reservation_committed = False
+                    async with self._runtime_lock:
+                        reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                        if not reservation_committed:
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                    if not reservation_committed:
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        selected_snapshot = None
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        if attempt >= _MAX_SELECTION_ATTEMPTS:
+                            break
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
                         await asyncio.sleep(0)
                         continue
 
@@ -767,19 +848,7 @@ class LoadBalancer:
                         ]
                     else:
                         selection_states = cap_eligible_states
-                    # Sticky persistence happens outside the runtime lock. A
-                    # reversible reservation covers both unbound requests and
-                    # fallback from an unavailable owner during that DB work.
-                    probe_reservation = self._reserve_due_probe_locked(
-                        selection_states,
-                        prefer_earlier_reset=prefer_earlier_reset_accounts,
-                        prefer_earlier_reset_window=prefer_earlier_reset_window,
-                        routing_strategy=routing_strategy,
-                        relative_availability_power=relative_availability_power,
-                        relative_availability_top_k=relative_availability_top_k,
-                        traffic_class=traffic_class,
-                        routing_costs_by_account_id=effective_routing_costs,
-                    )
+                    probe_reservation: _ProbeReservation | None = None
                 sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
                 if not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
@@ -851,8 +920,52 @@ class LoadBalancer:
                     selected: Account | None = None
                     selection_admitted = False
                     selected_reserved_probe = False
+                    should_reserve_probe = bool(
+                        result.account is not None
+                        and (
+                            not isinstance(sticky_existing_account_id, str)
+                            or result.account.account_id != sticky_existing_account_id
+                            or reallocate_sticky
+                        )
+                    )
+                    if should_reserve_probe:
+                        # Sticky persistence happens outside the runtime lock.
+                        # Delay the reversible reservation until after sticky
+                        # selection proves we are not simply retaining a
+                        # selectable owner; otherwise an owner-retaining request
+                        # can temporarily consume the only due probing slot and
+                        # make concurrent unbound traffic miss recovery.
+                        probe_reservation = self._reserve_due_probe_locked(
+                            selection_states,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            prefer_earlier_reset_window=prefer_earlier_reset_window,
+                            routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            traffic_class=traffic_class,
+                            routing_costs_by_account_id=effective_routing_costs,
+                        )
+                        if (
+                            probe_reservation is not None
+                            and result.account is not None
+                            and probe_reservation.account_id != result.account.account_id
+                        ):
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                            probe_reservation = None
+                        if (
+                            probe_reservation is None
+                            and result.account is not None
+                            and result.account.health_tier == HEALTH_TIER_PROBING
+                        ):
+                            # The result came from a pre-DB snapshot, but the
+                            # current runtime no longer admits that probing
+                            # candidate. Rebuild from fresh state instead of
+                            # returning or persisting stale recovery affinity.
+                            probe_reservation_invalidated = True
                     if result.account is None:
                         error_message = result.error_message
+                    elif probe_reservation_invalidated:
+                        selected = None
                     else:
                         selected = account_map.get(result.account.account_id)
                         selected_reserved_probe = bool(
@@ -1123,6 +1236,10 @@ class LoadBalancer:
         runtime = self._runtime.get(result.account.account_id)
         if runtime is None:
             return None
+        if runtime.health_tier != result.account.health_tier:
+            return None
+        if runtime.last_selected_at != result.account.last_selected_at:
+            return None
         # Keep the current state snapshot due for this request while making a
         # concurrent snapshot observe the reservation before sticky DB I/O.
         # This is not a health observation, so it must not advance ``version``
@@ -1169,6 +1286,7 @@ class LoadBalancer:
         # committed observation must invalidate older Force Probe settlement.
         runtime.last_selected_at = time.time()
         runtime.version += 1
+        runtime.health_version += 1
         return True
 
     async def _load_selection_inputs(
@@ -1985,7 +2103,10 @@ class LoadBalancer:
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
-                runtime.probe_success_streak = 0
+                if runtime.probe_success_streak != 0:
+                    runtime.probe_success_streak = 0
+                    runtime.version += 1
+                    runtime.health_version += 1
             async with self._repo_factory() as repos:
                 await self._persist_state_if_current(repos.accounts, account_snapshot, state)
 
@@ -1998,9 +2119,11 @@ class LoadBalancer:
                 runtime.error_count = 0
                 runtime.last_error_at = None
                 runtime.version += 1
+                runtime.health_version += 1
             if runtime and runtime.health_tier == HEALTH_TIER_PROBING:
                 runtime.probe_success_streak += 1
                 runtime.version += 1
+                runtime.health_version += 1
 
     async def record_probe_result(
         self,
@@ -2016,13 +2139,15 @@ class LoadBalancer:
                 if runtime.probe_success_streak > 0:
                     runtime.probe_success_streak = 0
                 runtime.version += 1
+                runtime.health_version += 1
             return
 
         # Usage reads intentionally run without the per-account lock. Capture a
-        # version first so an older successful probe cannot clear a failure (or
-        # other health observation) recorded while those reads are in flight.
+        # health-observation token first so an older successful probe cannot
+        # clear a failure or health-tier change recorded while those reads are
+        # in flight, while lease-only pressure changes remain harmless.
         async with lock:
-            expected_runtime_version = self._runtime.setdefault(account_id, RuntimeState()).version
+            expected_health_version = self._runtime.setdefault(account_id, RuntimeState()).health_version
 
         async with self._repo_factory() as repos:
             account = await repos.accounts.get_by_id(account_id)
@@ -2053,14 +2178,16 @@ class LoadBalancer:
 
         async with lock:
             runtime = self._runtime.setdefault(account_id, RuntimeState())
-            # Treat settlement as a local CAS: the newer runtime observation
-            # wins, and a later probe can retry with a fresh usage snapshot.
-            if runtime.version != expected_runtime_version:
+            # Treat settlement as a local CAS: the newer runtime health
+            # observation wins, and a later probe can retry with a fresh usage
+            # snapshot. Lease-only version bumps must not drop Force Probe.
+            if runtime.health_version != expected_health_version:
                 return
             if runtime.error_count > 0 or runtime.last_error_at is not None:
                 runtime.error_count = 0
                 runtime.last_error_at = None
                 runtime.version += 1
+                runtime.health_version += 1
 
             if account_status != AccountStatus.ACTIVE:
                 return
@@ -2082,6 +2209,7 @@ class LoadBalancer:
 
             runtime.probe_success_streak += 1
             runtime.version += 1
+            runtime.health_version += 1
             _sync_runtime_health_tier(
                 account_id=account_id,
                 status=account_status,
@@ -2151,11 +2279,14 @@ class LoadBalancer:
             dirty = True
         if account.deactivation_reason != state.deactivation_reason:
             dirty = True
+        health_dirty = dirty
         if selected:
             runtime.last_selected_at = time.time()
             dirty = True
         if dirty:
             runtime.version += 1
+        if health_dirty:
+            runtime.health_version += 1
         return True
 
     async def _persist_selection_state(
@@ -2936,6 +3067,7 @@ def _sync_runtime_health_tier(
     )
     if after != before:
         runtime.version += 1
+        runtime.health_version += 1
     return runtime.health_tier
 
 

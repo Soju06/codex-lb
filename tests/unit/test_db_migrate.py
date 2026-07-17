@@ -1908,3 +1908,104 @@ def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path
             assert connection.execute(text("SELECT COUNT(*) FROM dashboard_settings")).scalar_one() == 1
     finally:
         engine.dispose()
+
+
+def test_check_schema_drift_detects_missing_dashboard_hot_path_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-hot-path-indexes.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(text("DROP INDEX idx_logs_dash_usage_covering"))
+        connection.execute(text("DROP INDEX ix_additional_usage_distinct_labels"))
+        connection.commit()
+
+    drift = check_schema_drift(url)
+    assert any("idx_logs_dash_usage_covering" in diff for diff in drift)
+    assert any("ix_additional_usage_distinct_labels" in diff for diff in drift)
+
+
+def test_dashboard_hot_path_index_migration_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "hot-path-indexes.db"
+    url = _db_url(db_path)
+    pre_revision = "20260716_010000_add_dashboard_retention_settings"
+    target_revision = "20260717_000000_optimize_dashboard_hot_path_indexes"
+
+    run_upgrade(url, pre_revision, bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE INDEX idx_logs_dash_usage_covering
+                ON request_logs (requested_at)
+                WHERE deleted_at IS NULL
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX ix_additional_usage_distinct_labels
+                ON additional_usage_history (account_id, quota_key, limit_name, metered_feature)
+                """
+            )
+        )
+        connection.commit()
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        log_indexes = {str(row[1]) for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()}
+        usage_indexes = {
+            str(row[1]) for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
+        }
+
+    assert "idx_logs_dash_usage_covering" in log_indexes
+    assert "ix_additional_usage_distinct_labels" in usage_indexes
+
+
+def test_dashboard_hot_path_postgresql_indexes_build_concurrently() -> None:
+    revision_path = (
+        Path(__file__).resolve().parents[2]
+        / "app/db/alembic/versions/20260717_000000_optimize_dashboard_hot_path_indexes.py"
+    )
+    source = revision_path.read_text(encoding="utf-8")
+
+    assert "autocommit_block" in source
+    assert source.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 2
+    assert "_COVERING_INDEX_NAME" in source
+    assert "_LABELS_INDEX_NAME" in source
+    # Redundant indexes are dropped without blocking writers, and leftover
+    # invalid indexes from an interrupted concurrent build are rebuilt instead
+    # of being silently accepted by IF NOT EXISTS.
+    assert source.count("DROP INDEX CONCURRENTLY IF EXISTS") >= 2
+    assert "indisvalid" in source
+
+
+def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Path) -> None:
+    db_path = tmp_path / "hot-path-redundant-indexes.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        log_indexes = {str(row[1]) for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()}
+        usage_indexes = {
+            str(row[1]) for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
+        }
+
+    assert "idx_logs_requested_at" not in log_indexes
+    assert "idx_logs_api_key_time_account" not in log_indexes
+    assert "ix_additional_usage_history_account_id" not in usage_indexes
+    # Kept: the sessionless response-owner fallback needs its ordered retrieval.
+    assert "idx_logs_request_status_api_key_time" in log_indexes
+    assert "idx_logs_dash_usage_covering" in log_indexes
+    assert "ix_additional_usage_distinct_labels" in usage_indexes
+
+    assert check_schema_drift(url) == ()

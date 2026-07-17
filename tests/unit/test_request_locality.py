@@ -81,7 +81,10 @@ def test_trusted_proxy_mode_accepts_loopback_with_forwarded_hint(monkeypatch: py
     monkeypatch.setattr(
         request_locality,
         "get_settings",
-        lambda: SimpleNamespace(firewall_trust_proxy_headers=True, firewall_trusted_proxy_cidrs=[]),
+        lambda: SimpleNamespace(
+            firewall_trust_proxy_headers=True,
+            firewall_trusted_proxy_cidrs=["127.0.0.1/32"],
+        ),
     )
     scope = {
         "type": "http",
@@ -237,3 +240,59 @@ def test_connection_resolver_rejects_repeated_singleton_before_valid_xff() -> No
     )
 
     assert resolved is None
+
+
+@pytest.mark.parametrize("trusted_cidrs", [[], ["10.0.0.0/8"]], ids=["empty", "nonmatching"])
+def test_trusted_proxy_mode_rejects_forwarded_hint_from_untrusted_loopback_peer(
+    monkeypatch: pytest.MonkeyPatch,
+    trusted_cidrs: list[str],
+) -> None:
+    monkeypatch.setattr(
+        request_locality,
+        "get_settings",
+        lambda: SimpleNamespace(
+            firewall_trust_proxy_headers=True,
+            firewall_trusted_proxy_cidrs=trusted_cidrs,
+        ),
+    )
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(b"host", b"localhost"), (b"x-forwarded-for", b"203.0.113.24")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("localhost", 80),
+        "scheme": "http",
+        "query_string": b"",
+    }
+
+    assert is_local_request(Request(scope)) is False
+
+
+def test_direct_locality_checks_every_duplicate_forwarded_header_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        request_locality,
+        "get_settings",
+        lambda: SimpleNamespace(
+            firewall_trust_proxy_headers=False,
+            firewall_trusted_proxy_cidrs=[],
+        ),
+    )
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [
+            (b"host", b"localhost"),
+            (b"x-forwarded-for", b""),
+            (b"x-forwarded-for", b"203.0.113.24"),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("localhost", 80),
+        "scheme": "http",
+        "query_string": b"",
+    }
+
+    assert is_local_request(Request(scope)) is False

@@ -134,6 +134,39 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_probe_active_account_returns_snapshot_when_advisory_settlement_fails(async_client, monkeypatch):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
+        del access_token
+        del chatgpt_account_id
+        del model
+        return 200
+
+    record_probe_result = AsyncMock(side_effect=RuntimeError("local settlement unavailable"))
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
+    monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-settlement-fails@example.com",
+        account_id="acc_probe_settlement_fails",
+    )
+
+    response = await async_client.post(f"/api/accounts/{account_id}/probe")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "probed"
+    assert body["accountId"] == account_id
+    assert body["probeStatusCode"] == 200
+    record_probe_result.assert_awaited_once_with(
+        account_id=account_id,
+        http_status=200,
+    )
+
+
+@pytest.mark.asyncio
 async def test_force_probe_persists_free_to_plus_plan_upgrade(async_client, monkeypatch):
     async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
         return 200

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 
 from app.core.audit.service import AuditService
@@ -50,6 +52,8 @@ from app.modules.accounts.service import (
     AccountUsageResetCreditsUnavailableError,
     InvalidAuthJsonError,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -292,10 +296,17 @@ async def probe_account(
         ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
-    await get_proxy_service_for_app(request.app).record_account_probe_result(
-        account_id=result.account_id,
-        http_status=result.probe_status_code,
-    )
+    try:
+        await get_proxy_service_for_app(request.app).record_account_probe_result(
+            account_id=result.account_id,
+            http_status=result.probe_status_code,
+        )
+    except Exception:
+        logger.exception(
+            "Force Probe advisory settlement failed account_id=%s probe_status_code=%s",
+            result.account_id,
+            result.probe_status_code,
+        )
     AuditService.log_async(
         "account_probed",
         actor_ip=request.client.host if request.client else None,

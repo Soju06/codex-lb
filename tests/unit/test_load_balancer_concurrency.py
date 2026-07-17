@@ -21,6 +21,7 @@ from app.core.balancer.logic import (
     DRAIN_SECONDARY_THRESHOLD_PCT,
     PROBE_QUIET_SECONDS,
     PROBE_SUCCESS_STREAK_REQUIRED,
+    AccountState,
 )
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
@@ -974,6 +975,97 @@ async def test_probing_recovery_selection_updates_timestamp_and_restores_healthy
     assert normal.account.id == healthy.id
 
 
+def test_probe_reservation_rejects_stale_last_selected_snapshot() -> None:
+    healthy = _make_account("acc-stale-probe-healthy")
+    probing = _make_account("acc-stale-probe-snapshot")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(_StubAccountsRepository([healthy, probing]), _StubUsageRepository({}, {}))
+    )
+    current_last_selected_at = time.time()
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=current_last_selected_at,
+        version=5,
+    )
+    stale_state = AccountState(
+        account_id=probing.id,
+        status=AccountStatus.ACTIVE,
+        used_percent=10.0,
+        reset_at=current_last_selected_at + 300,
+        last_selected_at=0.0,
+        health_tier=HEALTH_TIER_PROBING,
+    )
+
+    reservation = balancer._reserve_due_probe_locked(
+        [
+            AccountState(
+                account_id=healthy.id,
+                status=AccountStatus.ACTIVE,
+                used_percent=30.0,
+                reset_at=current_last_selected_at + 300,
+                health_tier=HEALTH_TIER_HEALTHY,
+            ),
+            stale_state,
+        ],
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        relative_availability_power=2.0,
+        relative_availability_top_k=5,
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        routing_costs_by_account_id=None,
+    )
+
+    assert reservation is None
+    assert balancer._runtime[probing.id].last_selected_at == current_last_selected_at
+    assert balancer._runtime[probing.id].version == 5
+
+
+@pytest.mark.asyncio
+async def test_unbound_probe_reservation_rolls_back_when_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-unbound-persist-fail-healthy")
+    probing = _make_account("acc-unbound-persist-fail-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                140,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                141,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=17,
+    )
+
+    async def fail_persist(*args: Any, **kwargs: Any) -> set[str]:
+        del args, kwargs
+        raise RuntimeError("account state persistence unavailable")
+
+    monkeypatch.setattr(balancer, "_persist_selection_state", fail_persist)
+
+    with pytest.raises(RuntimeError, match="persistence unavailable"):
+        await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert balancer._runtime[probing.id].last_selected_at == 0.0
+    assert balancer._runtime[probing.id].version == 17
+
+
 @pytest.mark.asyncio
 async def test_concurrent_unbound_stickies_reserve_one_due_probe() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
@@ -1301,12 +1393,12 @@ async def test_sticky_probe_reservation_retries_when_health_changes_during_stick
     await sticky_selection_ready.wait()
     async with balancer._runtime_lock:
         runtime = balancer._runtime[probing.id]
-        assert runtime.last_selected_at not in (None, 0.0)
         # Model a newer health observation while the reservation owner is doing
-        # sticky I/O. Its version is the CAS boundary; the stale PROBING state
-        # must neither be returned nor published as affinity.
+        # sticky I/O. Its health version is the CAS boundary; the stale PROBING
+        # state must neither be returned nor published as affinity.
         runtime.health_tier = HEALTH_TIER_DRAINING
         runtime.version += 1
+        runtime.health_version += 1
     release_sticky_selection.set()
 
     selected = await selection_task
@@ -1380,6 +1472,7 @@ async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
         assert runtime.inflight_streams == 1
         runtime.health_tier = HEALTH_TIER_DRAINING
         runtime.version += 1
+        runtime.health_version += 1
     release_persist.set()
 
     selected = await selection_task
@@ -1662,6 +1755,99 @@ async def test_force_probe_success_does_not_clear_newer_runtime_error() -> None:
     assert runtime.last_error_at is not None
     assert runtime.last_error_at > prior_error_at
     assert runtime.probe_success_streak == 0
+
+
+@pytest.mark.asyncio
+async def test_force_probe_success_survives_lease_only_version_bumps() -> None:
+    account = _make_account("acc-force-probe-lease-version")
+    accounts_repo = _BlockingProbeAccountsRepository([account])
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, _StubUsageRepository({}, {})))
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        probe_success_streak=0,
+        version=40,
+        health_version=7,
+    )
+
+    probe_task = asyncio.create_task(
+        balancer.record_probe_result(
+            account_id=account.id,
+            http_status=200,
+        )
+    )
+    await accounts_repo.probe_snapshot_started.wait()
+    lease = await balancer.acquire_account_lease(account.id, kind="stream")
+    await balancer.release_account_lease(lease)
+    accounts_repo.release_probe_snapshot.set()
+    await probe_task
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.probe_success_streak == 1
+    assert runtime.version == 43
+    assert runtime.health_version == 8
+
+
+@pytest.mark.asyncio
+async def test_force_probe_success_loses_to_committed_probe_admission() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-force-probe-routing-healthy")
+    account = _make_account("acc-force-probe-routing-admission")
+    accounts_repo = _BlockingProbeAccountsRepository([account])
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, _StubUsageRepository({}, {})))
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        probe_success_streak=0,
+        version=50,
+        health_version=12,
+    )
+
+    probe_task = asyncio.create_task(
+        balancer.record_probe_result(
+            account_id=account.id,
+            http_status=200,
+        )
+    )
+    await accounts_repo.probe_snapshot_started.wait()
+
+    reservation = balancer._reserve_due_probe_locked(
+        [
+            AccountState(
+                account_id=healthy.id,
+                status=AccountStatus.ACTIVE,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+                health_tier=HEALTH_TIER_HEALTHY,
+            ),
+            AccountState(
+                account_id=account.id,
+                status=AccountStatus.ACTIVE,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                last_selected_at=0.0,
+                health_tier=HEALTH_TIER_PROBING,
+            ),
+        ],
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        relative_availability_power=2.0,
+        relative_availability_top_k=5,
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        routing_costs_by_account_id=None,
+    )
+
+    assert reservation is not None
+    assert balancer._commit_due_probe_reservation_locked(reservation)
+    assert balancer._runtime[account.id].health_version == 13
+
+    accounts_repo.release_probe_snapshot.set()
+    await probe_task
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.probe_success_streak == 0
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    assert runtime.health_version == 13
 
 
 def test_effective_account_concurrency_caps_partitions_across_replicas(

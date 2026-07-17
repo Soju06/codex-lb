@@ -1685,7 +1685,6 @@ Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
-Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
     "idx_logs_account_kind_deleted_latest",
@@ -1702,7 +1701,6 @@ Index(
     RequestLog.requested_at,
     RequestLog.id,
 )
-Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
@@ -1710,6 +1708,31 @@ Index(
     RequestLog.deleted_at,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+# Covering partial index for the dashboard usage aggregation hot path. On
+# PostgreSQL the INCLUDE payload lets the aggregation run as an index-only
+# scan without touching the heap; on SQLite it degrades to a partial index on
+# requested_at. Enforced via the manual drift index requirements because
+# partial-index reflection is not consistent across dialects.
+Index(
+    "idx_logs_dash_usage_covering",
+    RequestLog.requested_at,
+    postgresql_include=[
+        "account_id",
+        "api_key_id",
+        "model",
+        "reasoning_effort",
+        "request_kind",
+        "status",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cost_usd",
+        "id",
+    ],
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
 )
 Index(
     "idx_logs_requested_at_model_tier",
@@ -1812,8 +1835,14 @@ Index(
     HttpBridgeSessionAlias.alias_hash,
     HttpBridgeSessionAlias.api_key_scope,
 )
-Index("ix_additional_usage_history_account_id", AdditionalUsageHistory.account_id)
 Index("ix_additional_usage_history_recorded_at", AdditionalUsageHistory.recorded_at)
+Index(
+    "ix_additional_usage_distinct_labels",
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.quota_key,
+    AdditionalUsageHistory.limit_name,
+    AdditionalUsageHistory.metered_feature,
+)
 Index(
     "ix_rate_limit_attempts_type_key_attempted_at",
     RateLimitAttempt.type,

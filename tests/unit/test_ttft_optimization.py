@@ -366,6 +366,9 @@ async def test_stream_responses_ttft_flushes_visible_reasoning_at_eof(monkeypatc
         yield ('data: {"type":"response.output_item.added","item":{"type":"function_call","arguments":""}}\n\n')
         yield 'data: {"type":"response.output_tool_call.delta","call_id":"call_1","name":"shell"}\n\n'
         yield 'data: {"type":"response.output_tool_call.delta","call_id":"call_1","delta":""}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":""}\n\n'
+        yield 'data: {"type":"response.refusal.delta","delta":""}\n\n'
+        yield 'data: {"type":"response.reasoning_text.delta","delta":""}\n\n'
         yield (
             'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1",'
             '"output_index":0,"summary_index":0,"delta":"<!"}\n\n'
@@ -388,5 +391,5 @@ async def test_stream_responses_ttft_flushes_visible_reasoning_at_eof(monkeypatc
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
-    assert len(chunks) == 8
+    assert len(chunks) == 11
     assert latency_first_token_ms >= 20

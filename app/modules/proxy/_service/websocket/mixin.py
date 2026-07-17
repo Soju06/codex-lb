@@ -317,6 +317,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _event_type_from_payload,
+    _finalize_ttft_reasoning_deltas,
     _PreparedWebSocketRequest,
     _record_response_event,
     _record_websocket_route_metadata,
@@ -4186,7 +4187,7 @@ class _WebSocketMixin:
             request_state.api_key_reservation = None
             return
 
-        if request_state.latency_first_token_ms is None and _facade()._finalize_ttft_reasoning_deltas(
+        if request_state.latency_first_token_ms is None and _finalize_ttft_reasoning_deltas(
             request_state.ttft_reasoning_deltas
         ):
             request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
@@ -4603,7 +4604,7 @@ class _WebSocketMixin:
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
-            if request_state.latency_first_token_ms is None and _facade()._finalize_ttft_reasoning_deltas(
+            if request_state.latency_first_token_ms is None and _finalize_ttft_reasoning_deltas(
                 request_state.ttft_reasoning_deltas
             ):
                 request_state.latency_first_token_ms = latency_ms

@@ -161,7 +161,8 @@ def _is_ttft_event(
             return False
         return any(isinstance(payload.get(key), str) and bool(payload[key]) for key in ("delta", "arguments"))
     if event_type in _TTFT_EVENT_TYPES:
-        return True
+        delta = payload.get("delta") if payload is not None else None
+        return isinstance(delta, str) and bool(delta)
     if event_type != "response.output_item.added" or not isinstance(payload, dict):
         return False
     item = payload.get("item")

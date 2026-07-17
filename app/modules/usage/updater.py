@@ -473,8 +473,7 @@ class UsageUpdater:
             return False
         if (
             latest is not None
-            and (newest.recorded_at - latest.recorded_at).total_seconds()
-            <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
+            and (newest.recorded_at - latest.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
         ):
             return False
         if not _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds):

@@ -308,34 +308,40 @@ def _is_no_data_placeholder(row: UsageWindowRow) -> bool:
 
 
 def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:
-    # Data-aware tiebreak first: a row carrying real quota metadata MUST win
-    # over a no-data placeholder regardless of recorded_at ordering. A
-    # placeholder is the absence of a measurement, not 0% used, so it must
-    # never displace a real weekly sample (otherwise the dashboard jumps to
-    # 100% remaining every refresh).
-    primary_has_real = _has_real_quota_metadata(primary_row)
-    secondary_has_real = _has_real_quota_metadata(secondary_row)
-    if primary_has_real and _is_no_data_placeholder(secondary_row):
-        return True
-    if secondary_has_real and _is_no_data_placeholder(primary_row):
-        return False
-
     primary_recorded_at = _normalize_recorded_at(primary_row.recorded_at)
     secondary_recorded_at = _normalize_recorded_at(secondary_row.recorded_at)
+
+    # Fetch ordering decides first when both timestamps are present. A
+    # genuinely later fetch (beyond the sibling margin) is more authoritative
+    # about what upstream currently reports, so the newer row wins — this
+    # preserves the pre-fix cross-fetch behavior and avoids freezing a stale
+    # real weekly primary over a fresh placeholder from a later fetch. When
+    # only one timestamp is present, that row is treated as newer.
     if primary_recorded_at is not None and secondary_recorded_at is not None:
         if primary_recorded_at != secondary_recorded_at:
-            # Only a genuinely different fetch (beyond the sibling margin)
-            # decides on recorded_at. Same-fetch rows (sub-second write skew)
-            # fall through to reset-at precedence so the winner is not a coin
-            # flip per refresh.
             delta_seconds = abs((primary_recorded_at - secondary_recorded_at).total_seconds())
             if delta_seconds > SIBLING_FETCH_MARGIN_SECONDS:
                 return primary_recorded_at > secondary_recorded_at
+            # Within the sibling margin: same fetch, fall through to the
+            # data-aware tiebreak below so sub-second write skew cannot flip
+            # the winner per refresh.
     elif primary_recorded_at is not None:
         return True
     elif secondary_recorded_at is not None:
         return False
 
+    # Same-fetch (or timestamps unavailable): a row carrying real quota
+    # metadata MUST win over a no-data placeholder regardless of sub-second
+    # recorded_at ordering. A placeholder is the absence of a measurement, not
+    # 0% used, so it must never displace a real weekly sample (otherwise the
+    # dashboard jumps to 100% remaining every refresh).
+    primary_has_real = _has_real_quota_metadata(primary_row)
+    if primary_has_real and _is_no_data_placeholder(secondary_row):
+        return True
+    if _has_real_quota_metadata(secondary_row) and _is_no_data_placeholder(primary_row):
+        return False
+
+    # Both real or both placeholder (same fetch): reset-at precedence.
     if primary_row.reset_at is not None and secondary_row.reset_at is not None:
         if primary_row.reset_at != secondary_row.reset_at:
             return primary_row.reset_at > secondary_row.reset_at

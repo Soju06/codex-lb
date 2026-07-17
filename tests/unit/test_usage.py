@@ -254,28 +254,117 @@ def test_two_real_same_fetch_weekly_rows_resolve_by_reset_at_not_subsecond_timin
     )
 
     # Sanity: the two rows are within the same-fetch margin.
-    recorded_delta = abs(
-        (primary_with_later_reset.recorded_at - secondary_with_earlier_reset.recorded_at).total_seconds()
-    )
+    primary_recorded = primary_with_later_reset.recorded_at
+    secondary_recorded = secondary_with_earlier_reset.recorded_at
+    assert primary_recorded is not None and secondary_recorded is not None
+    recorded_delta = abs((primary_recorded - secondary_recorded).total_seconds())
     assert recorded_delta < SIBLING_FETCH_MARGIN_SECONDS
 
     # Later reset_at wins (primary here), independent of the sub-second ordering.
     assert should_use_weekly_primary(primary_with_later_reset, secondary_with_earlier_reset) is True
 
     # Swapping the write order must not flip the winner.
-    assert should_use_weekly_primary(
-        UsageWindowRow(
-            account_id="acc_weekly",
-            used_percent=50.0,
-            window_minutes=10080,
-            reset_at=400,
-            recorded_at=now + timedelta(milliseconds=8),
-        ),
-        UsageWindowRow(
-            account_id="acc_weekly",
-            used_percent=50.0,
-            window_minutes=10080,
-            reset_at=300,
-            recorded_at=now,
-        ),
-    ) is True
+    assert (
+        should_use_weekly_primary(
+            UsageWindowRow(
+                account_id="acc_weekly",
+                used_percent=50.0,
+                window_minutes=10080,
+                reset_at=400,
+                recorded_at=now + timedelta(milliseconds=8),
+            ),
+            UsageWindowRow(
+                account_id="acc_weekly",
+                used_percent=50.0,
+                window_minutes=10080,
+                reset_at=300,
+                recorded_at=now,
+            ),
+        )
+        is True
+    )
+
+
+def test_cross_fetch_newer_placeholder_beats_stale_real_primary():
+    # The regression the gpt-5.6-sol review caught: an older real weekly
+    # primary must NOT permanently beat a newer no-data placeholder from a
+    # genuinely later fetch (beyond the sibling margin). A later fetch is more
+    # authoritative about what upstream currently reports, so the newer row
+    # wins even though the older one carries real metadata. (Representing the
+    # newer placeholder as "unavailable" rather than 0% is a separate follow-up;
+    # the key here is the stale real row no longer freezes the weekly value.)
+    now = utcnow()
+    stale_real_primary = _real_weekly_primary(
+        now - timedelta(days=1),
+        used_percent=90.0,
+        reset_at=int((now + timedelta(days=6)).timestamp()),
+    )
+    fresh_placeholder = _no_data_secondary_placeholder(now)
+
+    assert should_use_weekly_primary(stale_real_primary, fresh_placeholder) is False
+
+
+def test_cross_fetch_newer_real_secondary_beats_stale_real_primary():
+    # A genuinely newer real secondary (beyond the margin) still supersedes a
+    # stale real weekly primary — restated here to pin the cross-fetch boundary
+    # explicitly alongside the placeholder case above.
+    now = utcnow()
+    stale_real_primary = _real_weekly_primary(now - timedelta(seconds=10), used_percent=65.0, reset_at=100)
+    newer_real_secondary = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=15.0,
+        window_minutes=10080,
+        reset_at=300,
+        recorded_at=now,
+    )
+
+    assert should_use_weekly_primary(stale_real_primary, newer_real_secondary) is False
+
+
+def test_same_fetch_boundary_at_exactly_sibling_margin_is_same_fetch():
+    # Rows exactly SIBLING_FETCH_MARGIN_SECONDS apart are treated as same-fetch
+    # (the impl uses delta > margin for "different fetch", so <= margin is
+    # same-fetch). At the boundary the data-aware tiebreak applies, so the real
+    # weekly primary beats the placeholder instead of the timestamp deciding.
+    now = utcnow()
+    real_weekly = _real_weekly_primary(now)
+    placeholder_at_boundary = _no_data_secondary_placeholder(now + timedelta(seconds=SIBLING_FETCH_MARGIN_SECONDS))
+
+    assert should_use_weekly_primary(real_weekly, placeholder_at_boundary) is True
+
+
+def test_both_non_real_same_fetch_rows_fall_back_to_stable_primary_default():
+    # Neither row carries real metadata (primary is a weekly window whose
+    # reset elapsed: window_minutes=10080, reset_at=None; secondary is a
+    # no-data placeholder), and they are in the same fetch. The data-aware
+    # tiebreak does not fire, and reset-at precedence finds no deadline on
+    # either side, so the stable weekly-primary default wins (returns True).
+    now = utcnow()
+    elapsed_weekly_primary = UsageWindowRow(
+        account_id="acc_weekly",
+        used_percent=0.0,
+        window_minutes=10080,
+        reset_at=None,
+        recorded_at=now,
+    )
+    no_data_secondary = _no_data_secondary_placeholder(now + timedelta(milliseconds=3))
+
+    assert should_use_weekly_primary(elapsed_weekly_primary, no_data_secondary) is True
+
+
+def test_5h_primary_window_never_enters_weekly_tiebreak():
+    # A 5h primary (window_minutes=300) is not a weekly window, so
+    # should_use_weekly_primary must return False immediately — the weekly
+    # remap tiebreak (and thus this fix's data-aware precedence) never applies
+    # to the 5h path.
+    now = utcnow()
+    five_hour_primary = UsageWindowRow(
+        account_id="acc_5h",
+        used_percent=40.0,
+        window_minutes=300,
+        reset_at=int((now + timedelta(hours=3)).timestamp()),
+        recorded_at=now,
+    )
+    no_data_secondary = _no_data_secondary_placeholder(now + timedelta(milliseconds=5))
+
+    assert should_use_weekly_primary(five_hour_primary, no_data_secondary) is False

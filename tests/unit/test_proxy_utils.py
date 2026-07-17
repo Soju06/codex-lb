@@ -36373,13 +36373,147 @@ async def test_http_bridge_session_events_keepalive_backstop(monkeypatch):
     finally:
         await events.aclose()
 
-    assert len(collected) == 3, f"Expected 3 events (2 keepalives + stream_idle_timeout), got {len(collected)}"
+    assert len(collected) == 2, f"Expected 2 events (1 keepalive + stream_idle_timeout), got {len(collected)}"
     assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
-    assert collected[1] == proxy_service.CODEX_KEEPALIVE_FRAME
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[2]))
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_session_events_retries_silent_pre_response_once(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.sse_keepalive_interval_seconds = 0.001
+    settings.stream_idle_timeout_seconds = 7200.0
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_idle_retry",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-idle-retry", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_idle_retry"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    retry_precreated = AsyncMock(side_effect=[True, False])
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    collected: list[str] = []
+    try:
+        async for event in events:
+            collected.append(event)
+    finally:
+        await events.aclose()
+
+    assert len(collected) == 3
+    assert collected[:2] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 2
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
+    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+    assert retry_precreated.await_count == 2
+    assert all(attempt.kwargs == {"restart_reader": True} for attempt in retry_precreated.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_session_events_keeps_alive_during_retry_circuit_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+    settings.sse_keepalive_interval_seconds = 0.001
+    settings.stream_idle_timeout_seconds = 1.0
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_circuit_keepalive",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-circuit-keepalive", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_circuit_keepalive"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    retry_precreated = AsyncMock(side_effect=[False, True, False])
+    retry_cooldown = AsyncMock(side_effect=[0.1, 0.1, 0.0, 0.0])
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", retry_cooldown)
+
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    collected: list[str] = []
+    try:
+        async for event in events:
+            collected.append(event)
+    finally:
+        await events.aclose()
+
+    assert len(collected) == 3
+    assert collected[:2] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 2
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
+    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+    assert retry_precreated.await_count == 3
+    assert retry_cooldown.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -36440,9 +36574,9 @@ async def test_http_bridge_session_events_keepalive_backstop_respects_idle_timeo
     finally:
         await events.aclose()
 
-    assert len(collected) == 6
-    assert collected[:5] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 5
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[5]))
+    assert len(collected) == 2
+    assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
 
@@ -36503,16 +36637,14 @@ async def test_http_bridge_session_events_keepalive_backstop_with_response_id(mo
     finally:
         await events.aclose()
 
-    assert len(collected) == 3, (
-        f"Expected 3 events (2 response.in_progress + stream_idle_timeout), got {len(collected)}"
+    assert len(collected) == 5, (
+        f"Expected 5 events (4 response.in_progress + stream_idle_timeout), got {len(collected)}"
     )
-    first = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[0]))
-    assert first["type"] == "response.in_progress"
-    assert cast(dict[str, object], first["response"])["id"] == "resp_bridge_backstop_codex"
-    second = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
-    assert second["type"] == "response.in_progress"
-    assert cast(dict[str, object], second["response"])["id"] == "resp_bridge_backstop_codex"
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[2]))
+    for event_block in collected[:4]:
+        event = cast(dict[str, object], proxy_service.parse_sse_data_json(event_block))
+        assert event["type"] == "response.in_progress"
+        assert cast(dict[str, object], event["response"])["id"] == "resp_bridge_backstop_codex"
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[4]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
@@ -36570,14 +36702,15 @@ async def test_http_bridge_session_events_keepalive_backstop_uses_replay_downstr
     try:
         async for event in events:
             collected.append(event)
-            if len(collected) >= 3:
+            if len(collected) >= 5:
                 break
     finally:
         await events.aclose()
 
+    assert len(collected) == 5
     first = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[0]))
     assert cast(dict[str, object], first["response"])["id"] == "resp_created_then_closed"
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[2]))
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[4]))
     assert cast(dict[str, object], last["response"])["id"] == "resp_created_then_closed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
 

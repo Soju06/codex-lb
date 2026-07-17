@@ -21,6 +21,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
+from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 
@@ -476,6 +477,48 @@ async def test_stream_serialized_body_read_disconnect_with_response_id_surfaces_
     assert len(failed) == 1
     assert failed[0]["response"]["error"]["code"] == "upstream_unavailable"
     assert seen_account_ids == ["acc_serialized_disconnect_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_serialized_body_read_disconnect_with_request_id_surfaces_without_replay(
+    async_client, monkeypatch
+):
+    """A response.failed using the proxy request id still represents an unsafe post-dispatch failure."""
+    await _import_account(async_client, "acc_serialized_request_id_disconnect_a", "serialized-request-a@example.com")
+    await _import_account(async_client, "acc_serialized_request_id_disconnect_b", "serialized-request-b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        request_id = get_request_id()
+        assert request_id is not None
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": request_id,
+                    "error": {
+                        "code": "upstream_unavailable",
+                        "message": "Server disconnected",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_account_ids == ["acc_serialized_request_id_disconnect_a"]
 
 
 @pytest.mark.asyncio

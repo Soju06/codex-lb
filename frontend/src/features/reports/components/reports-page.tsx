@@ -17,7 +17,12 @@ import type { QueueWaitChartProps } from "./queue-wait-chart";
 import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
-import { daysAgoLocalISO, getBrowserReportsTimeZone, localDateISO } from "../date";
+import {
+  daysAgoLocalISO,
+  getBrowserReportsTimeZone,
+  isReportDateRangeValid,
+  localDateISO,
+} from "../date";
 
 const CostPerDayChart = lazy(() =>
   import("./cost-per-day-chart").then((module) => ({
@@ -164,6 +169,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   );
 
   const handleRetry = async () => {
+    if (!isReportDateRangeValid(filters.startDate, filters.endDate)) {
+      await refetchAccounts();
+      return;
+    }
+
     await Promise.allSettled([
       reportsQuery.refetch(),
       filterCatalogQuery.refetch(),

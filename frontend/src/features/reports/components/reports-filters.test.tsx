@@ -121,7 +121,7 @@ describe("ReportsFilters", () => {
     expect(onPresetSelect).toHaveBeenCalledWith(90);
   });
 
-  it("limits both date inputs to the current browser-local day", () => {
+  it("applies reciprocal bounds while keeping today as the end-date ceiling", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-12T12:00:00"));
 
@@ -139,7 +139,53 @@ describe("ReportsFilters", () => {
 
     const dateInputs = container.querySelectorAll<HTMLInputElement>('input[type="date"]');
     expect(dateInputs).toHaveLength(2);
-    expect(dateInputs[0]).toHaveAttribute("max", "2026-06-12");
+    expect(dateInputs[0]).toHaveAttribute("max", FILTERS.endDate);
+    expect(dateInputs[1]).toHaveAttribute("min", FILTERS.startDate);
     expect(dateInputs[1]).toHaveAttribute("max", "2026-06-12");
+  });
+
+  it("keeps today as the start-date ceiling when the end date is later", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T12:00:00"));
+
+    const { container } = render(
+      <ReportsFilters
+        filters={{ ...FILTERS, endDate: "2026-06-13" }}
+        selectedPresetDays={null}
+        accountOptions={[]}
+        modelOptions={[]}
+        useragentOptions={[]}
+        onPresetSelect={vi.fn()}
+        onFiltersChange={vi.fn()}
+      />,
+    );
+
+    const dateInputs = container.querySelectorAll<HTMLInputElement>('input[type="date"]');
+    expect(dateInputs[0]).toHaveAttribute("max", "2026-06-12");
+  });
+
+  it("links both invalid date inputs to one corrective message", () => {
+    const { container } = render(
+      <ReportsFilters
+        filters={{ ...FILTERS, startDate: "2026-06-08" }}
+        selectedPresetDays={null}
+        accountOptions={[]}
+        modelOptions={[]}
+        useragentOptions={[]}
+        onPresetSelect={vi.fn()}
+        onFiltersChange={vi.fn()}
+      />,
+    );
+
+    const dateInputs = container.querySelectorAll<HTMLInputElement>('input[type="date"]');
+    const message = screen.getByText("Start date must be on or before end date.");
+    const descriptionId = message.getAttribute("id");
+
+    expect(descriptionId).toBeTruthy();
+    expect(dateInputs[0]).toHaveAttribute("aria-invalid", "true");
+    expect(dateInputs[1]).toHaveAttribute("aria-invalid", "true");
+    expect(dateInputs[0]).toHaveAttribute("aria-describedby", descriptionId);
+    expect(dateInputs[1]).toHaveAttribute("aria-describedby", descriptionId);
+    expect(message).toHaveAttribute("aria-live", "polite");
   });
 });

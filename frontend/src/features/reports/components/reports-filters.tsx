@@ -1,10 +1,11 @@
+import { useId } from "react";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "react-i18next";
 import {
   MultiSelectFilter,
   type MultiSelectOption,
 } from "@/features/dashboard/components/filters/multi-select-filter";
-import { localDateISO } from "../date";
+import { isReportDateRangeValid, localDateISO } from "../date";
 
 export type ReportsFiltersState = {
   startDate: string;
@@ -41,6 +42,13 @@ export function ReportsFilters({
 }: ReportsFiltersProps) {
   const { t } = useTranslation();
   const maxDate = localDateISO();
+  const dateRangeErrorId = useId();
+  const isDateRangeInvalid = !isReportDateRangeValid(
+    filters.startDate,
+    filters.endDate,
+  );
+  const startDateMax =
+    filters.endDate && filters.endDate < maxDate ? filters.endDate : maxDate;
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
@@ -83,24 +91,50 @@ export function ReportsFilters({
         }
       />
 
-      <div className="ml-auto flex items-center gap-2">
-        <input
-          type="date"
-          aria-label={t("reports.filters.startDate")}
-          max={maxDate}
-          value={filters.startDate}
-          onChange={(e) => onFiltersChange({ ...filters, startDate: e.target.value })}
-          className="h-8 rounded-md border bg-transparent px-2 text-xs text-foreground"
-        />
-        <span className="text-xs text-muted-foreground">—</span>
-        <input
-          type="date"
-          aria-label={t("reports.filters.endDate")}
-          max={maxDate}
-          value={filters.endDate}
-          onChange={(e) => onFiltersChange({ ...filters, endDate: e.target.value })}
-          className="h-8 rounded-md border bg-transparent px-2 text-xs text-foreground"
-        />
+      <div className="ml-auto flex flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            name="report-start-date"
+            autoComplete="off"
+            aria-label={t("reports.filters.startDate")}
+            aria-invalid={isDateRangeInvalid || undefined}
+            aria-describedby={isDateRangeInvalid ? dateRangeErrorId : undefined}
+            max={startDateMax}
+            value={filters.startDate}
+            onChange={(e) =>
+              onFiltersChange({ ...filters, startDate: e.target.value })
+            }
+            className="h-8 rounded-md border bg-transparent px-2 text-xs text-foreground aria-invalid:border-destructive aria-invalid:ring-destructive/20"
+          />
+          <span aria-hidden="true" className="text-xs text-muted-foreground">
+            —
+          </span>
+          <input
+            type="date"
+            name="report-end-date"
+            autoComplete="off"
+            aria-label={t("reports.filters.endDate")}
+            aria-invalid={isDateRangeInvalid || undefined}
+            aria-describedby={isDateRangeInvalid ? dateRangeErrorId : undefined}
+            min={filters.startDate || undefined}
+            max={maxDate}
+            value={filters.endDate}
+            onChange={(e) =>
+              onFiltersChange({ ...filters, endDate: e.target.value })
+            }
+            className="h-8 rounded-md border bg-transparent px-2 text-xs text-foreground aria-invalid:border-destructive aria-invalid:ring-destructive/20"
+          />
+        </div>
+        {isDateRangeInvalid ? (
+          <p
+            id={dateRangeErrorId}
+            aria-live="polite"
+            className="text-xs text-destructive"
+          >
+            {t("reports.filters.invalidDateRange")}
+          </p>
+        ) : null}
       </div>
     </div>
   );

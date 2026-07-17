@@ -99,11 +99,24 @@ def _response_create_dump_max_pairs() -> int:
 
 
 def _existing_response_create_dump(dump_dir: Path, sha_slug: str) -> Path | None:
-    """Return an existing dump for the same payload fingerprint, if any."""
+    """Return an existing *complete* dump for the same payload fingerprint.
+
+    A dump only counts as existing when both the payload and its ``.meta.json``
+    sibling are present. A lone payload file (e.g. a crash or disk-full failure
+    between the two writes) is treated as absent so a retry can recreate the
+    missing meta instead of permanently suppressing the capture operators are
+    trying to diagnose.
+    """
     try:
-        return next(iter(dump_dir.glob(f"*-{sha_slug}{_RESPONSE_CREATE_DUMP_SUFFIX}")), None)
+        matches = sorted(dump_dir.glob(f"*-{sha_slug}{_RESPONSE_CREATE_DUMP_SUFFIX}"))
     except OSError:
         return None
+    for dump_path in matches:
+        dump_id = dump_path.name[: -len(_RESPONSE_CREATE_DUMP_SUFFIX)]
+        meta_path = dump_dir / f"{dump_id}{_RESPONSE_CREATE_META_SUFFIX}"
+        if meta_path.exists():
+            return dump_path
+    return None
 
 
 def _prune_response_create_dumps(dump_dir: Path, *, max_pairs: int) -> None:
@@ -728,6 +741,13 @@ def _write_response_create_dump(
         else:
             meta["summary"] = {"payload_type": type(parsed_payload).__name__}
 
+    max_pairs = _response_create_dump_max_pairs()
+    # Trim any pre-existing over-cap backlog before the new write. If the volume
+    # is already full, the write below raises and returns without pruning, so a
+    # directory left above the bound (e.g. after an upgrade that lowers the cap)
+    # would otherwise stay full on the exact failure the cap is meant to bound.
+    _prune_response_create_dumps(dump_dir, max_pairs=max_pairs)
+
     try:
         dump_dir.mkdir(parents=True, exist_ok=True)
         with gzip.open(dump_path, "wt", encoding="utf-8") as handle:
@@ -745,7 +765,7 @@ def _write_response_create_dump(
         )
         return False
 
-    _prune_response_create_dumps(dump_dir, max_pairs=_response_create_dump_max_pairs())
+    _prune_response_create_dumps(dump_dir, max_pairs=max_pairs)
 
     logger.warning(
         "Saved %s response.create dump request_id=%s request_log_id=%s dump_path=%s meta_path=%s bytes=%s",

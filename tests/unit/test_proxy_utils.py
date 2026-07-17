@@ -31443,6 +31443,98 @@ def test_response_create_dump_prunes_oldest_beyond_cap(monkeypatch, tmp_path):
     assert sha_slug('{"input":"payload-2"}') in dump_names[1]
 
 
+def test_response_create_dump_rewrites_when_meta_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    payload = '{"type":"response.create","input":"orphaned pair"}'
+
+    assert _write_dump_for_payload(payload, request_id="req_orphan_first")
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    meta_files = list(dump_dir.glob("*.meta.json"))
+    assert len(meta_files) == 1
+    # Simulate a crash / disk-full failure between the payload and meta writes:
+    # the payload survives but its meta sibling is missing.
+    meta_files[0].unlink()
+
+    # A retry of the same payload must recreate the missing meta instead of
+    # treating the lone payload file as a complete existing capture.
+    assert _write_dump_for_payload(payload, request_id="req_orphan_retry")
+    assert len(list(dump_dir.glob("*.meta.json"))) >= 1
+    # At least one payload now has a matching meta sibling (a complete pair).
+    complete = [
+        dump_path
+        for dump_path in dump_dir.glob("*.response-create.json.gz")
+        if (dump_dir / f"{dump_path.name[: -len('.response-create.json.gz')]}.meta.json").exists()
+    ]
+    assert complete
+
+
+def test_response_create_dump_trims_preexisting_over_cap_when_write_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(proxy_service, "_RESPONSE_CREATE_DUMP_MAX_PAIRS", 2)
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    # Seed a directory already well above the cap, as an upgrade lowering the
+    # cap (or a prior unbounded build) would leave behind.
+    for index in range(6):
+        stamp = f"2026010100000{index}"
+        (dump_dir / f"{stamp}-seed{index}.response-create.json.gz").write_text("x")
+        (dump_dir / f"{stamp}-seed{index}.meta.json").write_text("{}")
+
+    # Simulate a full volume: the payload write raises, mirroring the exact
+    # incident where the cap must still be applied. Without a pre-write prune the
+    # post-write prune never runs and the over-cap backlog stays on disk.
+    from app.modules.proxy._service import response_create as proxy_response_create
+
+    def _boom(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(proxy_response_create, "gzip", SimpleNamespace(open=_boom))
+
+    assert not _write_dump_for_payload('{"input":"over-cap-write"}', request_id="req_over_cap")
+
+    # The pre-write prune must have bounded the pre-existing backlog even though
+    # the new write failed.
+    assert len(list(dump_dir.glob("*.response-create.json.gz"))) == 2
+    assert len(list(dump_dir.glob("*.meta.json"))) == 2
+
+
+def test_maybe_dump_oversized_response_create_dedups_via_product_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+
+    def make_state(request_id: str) -> "proxy_service._WebSocketRequestState":
+        return proxy_service._WebSocketRequestState(
+            request_id=request_id,
+            model="gpt-5.5",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=0.0,
+            awaiting_response_created=True,
+            request_text='{"type":"response.create","input":"product path retry"}',
+        )
+
+    # Drive the same oversized payload twice through the public entry the
+    # websocket terminal-error path calls, with a gate-passing 1009 error.
+    proxy_service._maybe_dump_oversized_response_create_request(
+        make_state("req_product_first"),
+        account_id_value="acc-product",
+        error_code="stream_incomplete",
+        error_message="websocket close 1009 (message too big)",
+    )
+    proxy_service._maybe_dump_oversized_response_create_request(
+        make_state("req_product_retry"),
+        account_id_value="acc-product",
+        error_code="stream_incomplete",
+        error_message="websocket close 1009 (message too big)",
+    )
+
+    dump_dir = tmp_path / "debug" / "response-create-dumps"
+    assert len(list(dump_dir.glob("*.response-create.json.gz"))) == 1
+    assert len(list(dump_dir.glob("*.meta.json"))) == 1
+
+
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)

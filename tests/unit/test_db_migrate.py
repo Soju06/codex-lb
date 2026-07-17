@@ -1960,17 +1960,26 @@ def test_dashboard_hot_path_index_migration_is_idempotent(tmp_path: Path) -> Non
     assert result.current_revision == target_revision
 
     with create_engine(sync_url, future=True).connect() as connection:
-        log_indexes = {
-            str(row[1])
-            for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()
-        }
+        log_indexes = {str(row[1]) for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()}
         usage_indexes = {
-            str(row[1])
-            for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
+            str(row[1]) for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
         }
 
     assert "idx_logs_dash_usage_covering" in log_indexes
     assert "ix_additional_usage_distinct_labels" in usage_indexes
+
+
+def test_dashboard_hot_path_postgresql_indexes_build_concurrently() -> None:
+    revision_path = (
+        Path(__file__).resolve().parents[2]
+        / "app/db/alembic/versions/20260717_000000_optimize_dashboard_hot_path_indexes.py"
+    )
+    source = revision_path.read_text(encoding="utf-8")
+
+    assert "autocommit_block" in source
+    assert source.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 2
+    assert "_COVERING_INDEX_NAME" in source
+    assert "_LABELS_INDEX_NAME" in source
 
 
 def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Path) -> None:
@@ -1981,13 +1990,9 @@ def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Pa
 
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).connect() as connection:
-        log_indexes = {
-            str(row[1])
-            for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()
-        }
+        log_indexes = {str(row[1]) for row in connection.execute(text('PRAGMA index_list("request_logs")')).fetchall()}
         usage_indexes = {
-            str(row[1])
-            for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
+            str(row[1]) for row in connection.execute(text('PRAGMA index_list("additional_usage_history")')).fetchall()
         }
 
     assert "idx_logs_requested_at" not in log_indexes

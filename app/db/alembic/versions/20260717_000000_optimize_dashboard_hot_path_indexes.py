@@ -34,9 +34,7 @@ _POSTGRES_AUTOVACUUM_SETTINGS = (
     "autovacuum_analyze_scale_factor = 0.02"
 )
 _POSTGRES_AUTOVACUUM_RESET = (
-    "autovacuum_vacuum_insert_scale_factor, "
-    "autovacuum_vacuum_insert_threshold, "
-    "autovacuum_analyze_scale_factor"
+    "autovacuum_vacuum_insert_scale_factor, autovacuum_vacuum_insert_threshold, autovacuum_analyze_scale_factor"
 )
 _AUTOVACUUM_TABLES = ("request_logs", "additional_usage_history")
 
@@ -45,20 +43,29 @@ def upgrade() -> None:
     bind = op.get_bind()
 
     if bind.dialect.name == "postgresql":
-        op.execute(
-            sa.text(
-                f"""
-                CREATE INDEX IF NOT EXISTS {_COVERING_INDEX_NAME}
-                ON request_logs (requested_at)
-                INCLUDE (
-                    account_id, api_key_id, model, reasoning_effort, request_kind,
-                    status, input_tokens, cached_input_tokens, output_tokens,
-                    reasoning_tokens, cost_usd, id
+        with op.get_context().autocommit_block():
+            op.execute(
+                sa.text(
+                    f"""
+                    CREATE INDEX CONCURRENTLY IF NOT EXISTS {_COVERING_INDEX_NAME}
+                    ON request_logs (requested_at)
+                    INCLUDE (
+                        account_id, api_key_id, model, reasoning_effort, request_kind,
+                        status, input_tokens, cached_input_tokens, output_tokens,
+                        reasoning_tokens, cost_usd, id
+                    )
+                    WHERE deleted_at IS NULL
+                    """
                 )
-                WHERE deleted_at IS NULL
-                """
             )
-        )
+            op.execute(
+                sa.text(
+                    f"""
+                    CREATE INDEX CONCURRENTLY IF NOT EXISTS {_LABELS_INDEX_NAME}
+                    ON additional_usage_history (account_id, quota_key, limit_name, metered_feature)
+                    """
+                )
+            )
     else:
         op.execute(
             sa.text(
@@ -69,14 +76,13 @@ def upgrade() -> None:
                 """
             )
         )
-
-    op.create_index(
-        _LABELS_INDEX_NAME,
-        "additional_usage_history",
-        ["account_id", "quota_key", "limit_name", "metered_feature"],
-        unique=False,
-        if_not_exists=True,
-    )
+        op.create_index(
+            _LABELS_INDEX_NAME,
+            "additional_usage_history",
+            ["account_id", "quota_key", "limit_name", "metered_feature"],
+            unique=False,
+            if_not_exists=True,
+        )
 
     op.drop_index("idx_logs_requested_at", table_name="request_logs", if_exists=True)
     op.drop_index("idx_logs_request_status_api_key_time", table_name="request_logs", if_exists=True)

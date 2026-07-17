@@ -265,6 +265,59 @@ def test_ttft_reasoning_finalizer_uses_visible_prefix_arrival_time() -> None:
     assert int((visible_at - started_at) * 1000) < 20
 
 
+def test_ttft_reasoning_ignores_split_blank_placeholder() -> None:
+    pending: dict[
+        tuple[str | None, int | None, int | None],
+        proxy_service._TTFTReasoningDeltaState,
+    ] = {}
+
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.reasoning_summary_text.delta",
+            {"type": "response.reasoning_summary_text.delta", "delta": "<!"},
+            pending,
+        )
+        is None
+    )
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.reasoning_summary_text.delta",
+            {"type": "response.reasoning_summary_text.delta", "delta": "-- -->"},
+            pending,
+        )
+        is None
+    )
+    assert pending == {}
+
+
+def test_ttft_reasoning_uses_visible_prefix_when_candidate_becomes_text() -> None:
+    pending: dict[
+        tuple[str | None, int | None, int | None],
+        proxy_service._TTFTReasoningDeltaState,
+    ] = {}
+    started_at = time.monotonic()
+
+    assert (
+        proxy_service._ttft_event_visible_at(
+            "response.reasoning_summary_text.delta",
+            {"type": "response.reasoning_summary_text.delta", "delta": "Plan\n\n<!"},
+            pending,
+        )
+        is None
+    )
+    time.sleep(0.03)
+
+    visible_at = proxy_service._ttft_event_visible_at(
+        "response.reasoning_summary_text.delta",
+        {"type": "response.reasoning_summary_text.delta", "delta": "not-a-comment"},
+        pending,
+    )
+
+    assert visible_at is not None
+    assert int((visible_at - started_at) * 1000) < 20
+    assert pending == {}
+
+
 @pytest.mark.asyncio
 async def test_stream_responses_pre_attempt_wait_lands_in_queue_not_ttft(monkeypatch) -> None:
     settings = _make_proxy_settings()

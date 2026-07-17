@@ -186,6 +186,8 @@ def _ttft_event_visible_at(
         combined = (previous.text if previous is not None else "") + delta
         cleaned = _strip_blank_html_comment_lines(combined)
         if cleaned != combined:
+            if not cleaned:
+                return None
             return previous.visible_at if previous is not None and previous.visible_at is not None else now
         if _could_be_blank_html_comment_line(combined):
             visible_at = None if previous is None else previous.visible_at
@@ -193,7 +195,9 @@ def _ttft_event_visible_at(
                 visible_at = now
             pending[event_key] = _TTFTReasoningDeltaState(combined, visible_at=visible_at)
             return None
-        return now if combined else None
+        if not combined:
+            return None
+        return previous.visible_at if previous is not None and previous.visible_at is not None else now
     if event_type == "response.reasoning_summary_text.done" and event_key in pending:
         visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)})
         return visible_at

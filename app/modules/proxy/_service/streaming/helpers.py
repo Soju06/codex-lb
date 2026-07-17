@@ -452,6 +452,8 @@ def _should_retry_transient_stream_error(
         if code in _MODEL_CAPACITY_LIMIT_CODES or response_id is not None:
             return False
         return True
+    if response_id is not None:
+        return False
     if code != "upstream_unavailable" or not message:
         return False
     normalized_message = message.lower()

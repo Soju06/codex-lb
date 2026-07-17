@@ -464,6 +464,7 @@ class _StreamingRetryMixin:
             tool_call_dedupe: _WebSocketUpstreamControl,
         ) -> AsyncIterator[str]:
             nonlocal last_transient_exc
+            transient_retries = 0
             while True:
                 settlement.reset()
                 stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
@@ -477,6 +478,7 @@ class _StreamingRetryMixin:
                         request_id,
                         False,
                         request_started_at=start,
+                        allow_transient_retry=True,
                         api_key=api_key,
                         api_key_reservation=api_key_reservation,
                         settlement=settlement,
@@ -498,6 +500,56 @@ class _StreamingRetryMixin:
                     # `_stream_once()` has already yielded the terminal event.
                     # Returning preserves fail-closed delivery: replaying here
                     # could duplicate a request that reached the upstream.
+                    return
+                except _TransientStreamError as exc:
+                    recovery_decision = await _wait_for_process_network_recovery(
+                        account,
+                        error_code=exc.code,
+                        retryable_same_contract=False,
+                        failed_session=None,
+                    )
+                    if recovery_decision == "retry":
+                        continue
+                    if recovery_decision == "exhausted":
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+                        ) from exc
+                    transient_retries += 1
+                    if (
+                        transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
+                        and _facade()._remaining_budget_seconds(deadline) > 0
+                        and not settlement.downstream_visible
+                    ):
+                        delay = backoff_seconds(transient_retries)
+                        _facade().logger.info(
+                            "Transient post-refresh stream error, retrying same account "
+                            "request_id=%s account_id=%s retry=%s/%s delay=%.2fs code=%s",
+                            request_id,
+                            account.id,
+                            transient_retries,
+                            _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES,
+                            delay,
+                            exc.code,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    await proxy._handle_stream_error(account, exc.error, exc.code)
+                    if transient_retries > 1:
+                        await proxy._load_balancer.record_errors(account, transient_retries - 1)
+                    error_message = str(exc.error.get("message") or "Upstream error")
+                    yield format_sse_event(
+                        response_failed_event(
+                            exc.code,
+                            error_message,
+                            response_id=settlement.response_id or request_id,
+                        )
+                    )
+                    settlement.record_success = False
+                    settlement.error_code = exc.code
+                    settlement.error_message = error_message
+                    settlement.error = exc.error
+                    settlement.account_health_error = _facade()._should_penalize_stream_error(exc.code)
                     return
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)

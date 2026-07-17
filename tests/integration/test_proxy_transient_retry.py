@@ -298,6 +298,42 @@ async def test_stream_model_capacity_without_response_id_sleeps_and_retries_same
 
 
 @pytest.mark.asyncio
+async def test_stream_model_capacity_top_level_response_id_surfaces_without_replay(async_client, monkeypatch):
+    """A top-level upstream response_id proves dispatch, so capacity errors must not be replayed."""
+    await _import_account(async_client, "acc_model_capacity_accepted", "model-capacity-accepted@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response_id": "resp_model_capacity_accepted",
+                "response": {
+                    "error": {
+                        "code": "invalid_request_error",
+                        "message": "Selected model is at capacity. Please try a different model.",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "invalid_request_error"
+    assert seen_account_ids == ["acc_model_capacity_accepted"]
+
+
+@pytest.mark.asyncio
 async def test_stream_previsible_upstream_close_sleeps_and_retries_same_account(async_client, monkeypatch):
     """A websocket EOF before the first upstream event is retried instead of surfacing to the client."""
     await _import_account(async_client, "acc_previsible_close_retry", "previsible-close@example.com")
@@ -366,6 +402,45 @@ async def test_stream_body_read_client_error_surfaces_without_replay(async_clien
     assert error_codes[-1] == "upstream_unavailable"
     assert "no_accounts" not in error_codes
     assert seen_account_ids == ["acc_previsible_disconnect_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_serialized_body_read_disconnect_with_response_id_surfaces_without_replay(
+    async_client, monkeypatch
+):
+    """Serialized post-dispatch body-read failures with response_id are not safe to replay."""
+    await _import_account(async_client, "acc_serialized_disconnect_a", "serialized-disconnect-a@example.com")
+    await _import_account(async_client, "acc_serialized_disconnect_b", "serialized-disconnect-b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response_id": "resp_serialized_disconnect",
+                "response": {
+                    "error": {
+                        "code": "upstream_unavailable",
+                        "message": "Server disconnected",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_account_ids == ["acc_serialized_disconnect_a"]
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,8 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRY_STATUS_CODES = {500, 502, 503, 504}
+RATE_LIMIT_STATUS_CODES = {403, 429}
 DEFAULT_ATTEMPTS = 5
 DEFAULT_BASE_DELAY_SECONDS = 2.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -24,6 +25,32 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 
 class GitHubApiError(RuntimeError):
     """Raised when a GitHub API request fails after retries."""
+
+
+class TransientGitHubApiError(GitHubApiError):
+    """Raised when a retryable GitHub API failure persists through all attempts."""
+
+
+def _is_rate_limit_http_error(exc: urllib.error.HTTPError, detail: str) -> bool:
+    if exc.code not in RATE_LIMIT_STATUS_CODES:
+        return False
+    if exc.code == 429:
+        return True
+    headers = exc.headers
+    retry_after = headers.get("Retry-After")
+    rate_remaining = headers.get("X-RateLimit-Remaining")
+    rate_reset = headers.get("X-RateLimit-Reset")
+    if retry_after or (rate_remaining == "0" and rate_reset):
+        return True
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        payload = {}
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if not isinstance(message, str):
+        return False
+    message = message.lower()
+    return "rate limit" in message or "abuse detection" in message
 
 
 def _retry_delay(attempt_index: int, base_delay_seconds: float) -> float:
@@ -57,12 +84,14 @@ def request_json(
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             last_error = f"HTTP {exc.code}: {detail[:500]}"
-            if exc.code not in RETRY_STATUS_CODES or attempt_index + 1 >= attempts:
+            if exc.code not in RETRY_STATUS_CODES and not _is_rate_limit_http_error(exc, detail):
                 raise GitHubApiError(last_error) from exc
+            if attempt_index + 1 >= attempts:
+                raise TransientGitHubApiError(last_error) from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = str(exc)
             if attempt_index + 1 >= attempts:
-                raise GitHubApiError(last_error) from exc
+                raise TransientGitHubApiError(last_error) from exc
 
         delay = _retry_delay(attempt_index, base_delay_seconds)
         print(

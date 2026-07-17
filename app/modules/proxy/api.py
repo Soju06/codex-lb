@@ -582,30 +582,76 @@ async def codex_safety_arc(
 
 
 _CODEX_ALPHA_SEARCH_ALLOWED_METHODS = "GET, POST, OPTIONS"
+_CODEX_ALPHA_SEARCH_ALLOWED_ORIGINS = frozenset({"https://chatgpt.com"})
+
+
+def _codex_alpha_search_cors_headers(request: Request) -> dict[str, str]:
+    origin = request.headers.get("origin")
+    if origin not in _CODEX_ALPHA_SEARCH_ALLOWED_ORIGINS:
+        return {}
+    return {
+        "access-control-allow-origin": origin,
+        "vary": "Origin",
+    }
 
 
 @codex_preflight_router.options("/alpha/search")
 async def codex_alpha_search_options(request: Request) -> Response:
     requested_headers = request.headers.get("access-control-request-headers")
     allow_headers = requested_headers or "authorization, content-type, session_id"
+    cors_headers = _codex_alpha_search_cors_headers(request)
+    headers = {
+        "allow": _CODEX_ALPHA_SEARCH_ALLOWED_METHODS,
+        "access-control-allow-methods": _CODEX_ALPHA_SEARCH_ALLOWED_METHODS,
+        "access-control-allow-headers": allow_headers,
+        "access-control-max-age": "600",
+    }
+    if cors_headers and request.headers.get("access-control-request-private-network", "").lower() == "true":
+        headers["access-control-allow-private-network"] = "true"
+    headers.update(cors_headers)
     return Response(
         status_code=204,
+        headers=headers,
+    )
+
+
+@codex_preflight_router.api_route(
+    "/alpha/search",
+    methods=["DELETE", "HEAD", "PATCH", "PUT", "TRACE"],
+    include_in_schema=False,
+)
+async def codex_alpha_search_method_not_allowed(request: Request) -> Response:
+    return Response(
+        status_code=405,
         headers={
             "allow": _CODEX_ALPHA_SEARCH_ALLOWED_METHODS,
-            "access-control-allow-methods": _CODEX_ALPHA_SEARCH_ALLOWED_METHODS,
-            "access-control-allow-headers": allow_headers,
-            "access-control-max-age": "600",
+            **_codex_alpha_search_cors_headers(request),
         },
     )
 
 
-@router.api_route("/alpha/search", methods=["GET", "POST"])
+async def _codex_alpha_search(request: Request, context: ProxyContext, api_key: ApiKeyData | None) -> Response:
+    response = await _codex_control_proxy(request, "alpha/search", context, api_key)
+    response.headers.update(_codex_alpha_search_cors_headers(request))
+    return response
+
+
+@router.get("/alpha/search", operation_id="codex_alpha_search_get")
 async def codex_alpha_search(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _codex_control_proxy(request, "alpha/search", context, api_key)
+    return await _codex_alpha_search(request, context, api_key)
+
+
+@router.post("/alpha/search", operation_id="codex_alpha_search_post")
+async def codex_alpha_search_post(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_alpha_search(request, context, api_key)
 
 
 @router.get("/agent-identities/jwks")

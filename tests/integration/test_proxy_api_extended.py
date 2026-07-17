@@ -634,11 +634,17 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     response = await async_client.post(
         "/backend-api/codex/alpha/search?result_count=10",
         content=payload,
-        headers={"content-type": "application/json", "session_id": "search-session"},
+        headers={
+            "content-type": "application/json",
+            "origin": "https://chatgpt.com",
+            "session_id": "search-session",
+        },
     )
 
     assert response.status_code == 200
     assert response.content == upstream_body
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
     assert response.headers["x-request-id"] == "search-request"
     assert "set-cookie" not in response.headers
     assert calls == [
@@ -740,6 +746,45 @@ async def test_codex_alpha_search_options_returns_local_preflight(async_client, 
     assert response.headers["allow"] == "GET, POST, OPTIONS"
     assert response.headers["access-control-allow-methods"] == "GET, POST, OPTIONS"
     assert response.headers["access-control-allow-headers"] == "authorization, session_id"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_options_allows_private_network_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization, content-type, session_id",
+            "access-control-request-private-network": "true",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["access-control-allow-private-network"] == "true"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_unsupported_method_returns_full_allow_set(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.put(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={"origin": "https://chatgpt.com"},
+    )
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
     codex_control_request.assert_not_called()
 
 

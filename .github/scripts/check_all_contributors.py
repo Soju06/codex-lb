@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import cast
 
 try:
-    from github_api import GitHubApiError, next_link, request_json
+    from github_api import GitHubApiError, TransientGitHubApiError, next_link, request_json
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from github_api import GitHubApiError, next_link, request_json
+    from github_api import GitHubApiError, TransientGitHubApiError, next_link, request_json
 
 NOREPLY_RE = re.compile(r"^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$")
 
@@ -42,13 +42,15 @@ def fetch_contributor_logins(repository: str, token: str | None) -> set[str]:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise SystemExit(f"GitHub contributors request failed: HTTP {exc.code}: {detail}") from exc
-        except GitHubApiError as exc:
+        except TransientGitHubApiError as exc:
             print(
                 "warning: GitHub contributors request failed after retries; "
                 f"falling back to local/event contributor evidence: {exc}",
                 file=sys.stderr,
             )
             return logins
+        except GitHubApiError as exc:
+            raise SystemExit(f"GitHub contributors request failed: {exc}") from exc
         for contributor in page:
             login = contributor.get("login")
             contributor_type = contributor.get("type")
@@ -131,13 +133,10 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise SystemExit(f"GitHub PR commits request failed: HTTP {exc.code}: {detail}") from exc
+        except TransientGitHubApiError as exc:
+            raise SystemExit(f"GitHub PR commits request failed after retries: {exc}") from exc
         except GitHubApiError as exc:
-            print(
-                "warning: GitHub PR commits request failed after retries; "
-                f"falling back to local/event contributor evidence: {exc}",
-                file=sys.stderr,
-            )
-            return logins
+            raise SystemExit(f"GitHub PR commits request failed: {exc}") from exc
         for commit in page:
             author = commit.get("author")
             if not isinstance(author, dict):

@@ -941,7 +941,10 @@ async def test_startup_purges_owned_bridge_rows(
         allow_takeover=True,
     )
 
-    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+    deleted = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="instance-a",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
 
     assert deleted == 1
     assert (
@@ -990,7 +993,10 @@ async def test_startup_purges_ownerless_stale_rows(
         )
         await session.commit()
 
-    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+    deleted = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="instance-a",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
 
     assert deleted == 1
     assert (
@@ -1004,6 +1010,89 @@ async def test_startup_purges_ownerless_stale_rows(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_startup_preserves_ownerless_rows_without_retention_cutoff(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    stale_time = utcnow() - timedelta(hours=12)
+
+    async with async_session_factory() as session:
+        session.add(
+            HttpBridgeSessionRecord(
+                session_key_kind="session_header",
+                session_key_value="sid-ownerless-default",
+                session_key_hash="hash-ownerless-default",
+                api_key_scope="__anonymous__",
+                owner_instance_id=None,
+                owner_epoch=1,
+                lease_expires_at=stale_time,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id="acc-1",
+                model="gpt-5.4",
+                last_seen_at=stale_time,
+                closed_at=None,
+            )
+        )
+        await session.commit()
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+
+    assert deleted == 0
+    async with async_session_factory() as session:
+        row = await session.scalar(
+            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.session_key_value == "sid-ownerless-default")
+        )
+    assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_purge_batches_owned_rows(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    old_time = utcnow() - timedelta(minutes=5)
+
+    async with async_session_factory() as session:
+        for index in range(3):
+            session_id = f"sid-owned-batch-{index}"
+            session.add(
+                HttpBridgeSessionRecord(
+                    id=session_id,
+                    session_key_kind="session_header",
+                    session_key_value=session_id,
+                    session_key_hash=f"hash-owned-batch-{index}",
+                    api_key_scope="__anonymous__",
+                    owner_instance_id="instance-a",
+                    owner_epoch=1,
+                    lease_expires_at=old_time,
+                    state=HttpBridgeSessionState.ACTIVE,
+                    account_id="acc-1",
+                    model="gpt-5.4",
+                    last_seen_at=old_time,
+                    closed_at=None,
+                )
+            )
+            session.add(
+                HttpBridgeSessionAlias(
+                    session_id=session_id,
+                    alias_kind="session_header",
+                    alias_value=session_id,
+                    alias_hash=f"alias-owned-batch-{index}",
+                    api_key_scope="__anonymous__",
+                )
+            )
+        await session.commit()
+
+        repo = DurableBridgeRepository(session)
+        deleted = await repo.purge_owned_sessions_on_startup(instance_id="instance-a", batch_size=2)
+
+        assert deleted == 3
+        remaining = await session.execute(select(HttpBridgeSessionRecord.id))
+        assert remaining.scalars().all() == []
+        remaining_aliases = await session.execute(select(HttpBridgeSessionAlias.session_id))
+        assert remaining_aliases.scalars().all() == []
 
 
 @pytest.mark.asyncio

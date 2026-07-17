@@ -126,6 +126,17 @@ class TestClassifyUpstreamFailure:
         )
         assert result["failure_class"] == "retryable_transient"
 
+    def test_generic_capacity_message_is_not_model_capacity_retry(self) -> None:
+        result = classify_upstream_failure(
+            error_code="invalid_request_error",
+            error=UpstreamError(
+                message=("This model has a fixed context capacity; reduce input size or try a different model."),
+            ),
+            http_status=400,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "non_retryable"
+
     def test_rate_limit_code_takes_precedence_over_capacity_message(self) -> None:
         result = classify_upstream_failure(
             error_code="rate_limit_exceeded",

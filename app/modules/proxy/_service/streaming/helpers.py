@@ -423,7 +423,21 @@ def _should_penalize_stream_error(code: str | None) -> bool:
     return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
 
 
-def _should_retry_transient_stream_error(code: str | None, message: str | None) -> bool:
+_MODEL_CAPACITY_LIMIT_CODES = {
+    "rate_limit_exceeded",
+    "usage_limit_reached",
+    "insufficient_quota",
+    "usage_not_included",
+    "quota_exceeded",
+}
+
+
+def _should_retry_transient_stream_error(
+    code: str | None,
+    message: str | None,
+    *,
+    response_id: str | None = None,
+) -> bool:
     if code is None or code == "stream_idle_timeout":
         return False
     if code == PROCESS_NETWORK_UNAVAILABLE_CODE:
@@ -434,6 +448,8 @@ def _should_retry_transient_stream_error(code: str | None, message: str | None) 
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if is_upstream_model_capacity_error(message):
+        if code in _MODEL_CAPACITY_LIMIT_CODES or response_id is not None:
+            return False
         return True
     if code != "upstream_unavailable" or not message:
         return False

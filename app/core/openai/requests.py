@@ -817,11 +817,10 @@ class ResponsesRequest(BaseModel):
         return payload
 
     def enable_shared_instruction_cache(self) -> bool:
-        if (
-            self.previous_response_id is not None
-            or self._shared_instruction_cache_disabled
-            or _has_explicit_prompt_cache_breakpoint(self.input)
-        ):
+        if self.previous_response_id is not None:
+            self.disable_shared_instruction_cache()
+            return False
+        if self._shared_instruction_cache_disabled or _has_explicit_prompt_cache_breakpoint(self.input):
             return False
         boundary = _shared_instruction_cache_boundary(self.input)
         if boundary is None:

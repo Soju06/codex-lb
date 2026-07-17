@@ -5,7 +5,6 @@ import hashlib
 import pytest
 
 from app.core.openai.requests import ResponsesRequest
-from app.modules.proxy import affinity
 from app.modules.proxy import http_bridge_forwarding as bridge
 
 # Covers rolling-upgrade compatibility and tamper-downgrade regressions together.
@@ -55,14 +54,7 @@ def test_shared_instruction_cache_clears_state_for_anchored_model_copy() -> None
     assert request.enable_shared_instruction_cache() is True
 
     anchored = request.model_copy(update={"previous_response_id": "resp_previous"})
-    affinity._sticky_key_for_responses_request(
-        anchored,
-        {},
-        codex_session_affinity=True,
-        openai_cache_affinity=False,
-        openai_cache_affinity_max_age_seconds=0,
-        sticky_threads_enabled=False,
-    )
+    assert anchored.enable_shared_instruction_cache() is False
 
     payload = anchored.to_payload()
     assert payload["prompt_cache_key"] == "client-cache-key"

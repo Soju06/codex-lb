@@ -711,7 +711,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                     transient_response_id = tool_call_response_id_from_payload(first_payload)
-                    if transient_response_id == request_id:
+                    if event_type == "error" and transient_response_id == request_id:
                         # Normalized raw upstream `error` events use the
                         # proxy request id as the synthetic response id. That
                         # is not proof that upstream accepted the request.

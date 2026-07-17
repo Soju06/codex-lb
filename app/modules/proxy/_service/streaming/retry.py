@@ -90,6 +90,7 @@ def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mappi
 
 
 _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhausted"
+_POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR = "_codex_lb_post_refresh_transient_retry_count"
 
 
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
@@ -531,6 +532,7 @@ class _StreamingRetryMixin:
                     if can_try_other_account:
                         retry_exc = ProxyResponseError(502, openai_error(exc.code, error_message))
                         setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
+                        setattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, transient_retries)
                         raise retry_exc from exc
                     yield format_sse_event(
                         response_failed_event(
@@ -2224,6 +2226,11 @@ class _StreamingRetryMixin:
                                         settlement.error_code or "upstream_error",
                                         http_status=retry_exc.status_code,
                                     )
+                                    transient_retry_count = int(
+                                        getattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, 1)
+                                    )
+                                    if transient_retry_count > 1:
+                                        await proxy._load_balancer.record_errors(account, transient_retry_count - 1)
                                 last_transient_exc = retry_exc
                                 last_retryable_stream_error = _RetryableStreamError(
                                     settlement.error_code or error_code or "upstream_error",

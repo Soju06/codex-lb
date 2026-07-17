@@ -12,7 +12,8 @@ Recovery uses the existing fixed 60-second quiet interval and `last_selected_at`
 
 - Persistent account eligibility and cooldown gates still run before health-tier choice.
 - A selectable sticky owner remains on its account; recovery traffic comes from unbound or fallback selection.
-- Sticky fallback candidates remain subject to local account caps, concurrent fallbacks share the same reversible recovery reservation as unbound sticky requests, and saturated-only fallback reports local cap pressure rather than global upstream degradation.
+- Sticky fallback candidates remain subject to local account caps, concurrent fallbacks share the same reversible recovery reservation as unbound sticky requests, and saturated otherwise-available fallback reports local cap pressure even when a separate under-cap fallback is unavailable.
+- Sticky probe reservations remain provisional through the final lease gate and selection-state persistence. Rollback restores the prior timestamp without advancing the Force Probe health-observation version; only a committed selection consumes the quiet interval.
 - Only HTTP 2xx Force Probe responses count as successes. A 400 such as a stale/unsupported probe model cannot make an account healthy.
 - Successful settlement reloads and normalizes primary, weekly, monthly, and zero-capacity-plan usage exactly like ordinary selection; raw dashboard response slots are not routing inputs.
 - A Force Probe success is discarded when newer replica-local runtime activity occurs during snapshot loading, preserving later failures.

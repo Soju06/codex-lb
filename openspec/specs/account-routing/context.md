@@ -20,8 +20,11 @@ opportunity when healthy accounts would otherwise mask it. The existing
 selection timestamp supplies the cadence and fair ordering. Unbound and fallback
 sticky selection reversibly reserve that timestamp under the runtime lock before
 sticky database work, preventing concurrent requests from consuming the same
-interval. Recovery therefore needs no scheduler, random sampling, or operator
-setting.
+interval. The timestamp remains provisional through the final local lease gate
+and selection-state persistence, and is committed only when selection returns
+the probe. Reserve/release is deliberately separate from the health-observation
+version used by Force Probe settlement. Recovery therefore needs no scheduler,
+random sampling, or operator setting.
 
 ## Constraints and failure modes
 
@@ -30,11 +33,12 @@ setting.
 - A selectable sticky owner is retained; probing recovery uses unbound or
   fallback selection rather than moving an established owner.
 - Hard-sticky fail-closed ownership does not let saturated fallback accounts
-  bypass local concurrency caps, and saturated-only fallback returns the stable
-  local cap reason instead of declaring all upstream accounts unavailable.
-- Selecting a probe updates its timestamp even if the request later stops
-  before upstream. This conservatively delays another attempt by one quiet
-  interval but cannot starve the account permanently.
+  bypass local concurrency caps. Saturated otherwise-available fallbacks return
+  the stable local cap reason even when another under-cap fallback is unusable.
+- A lease race, stale persistence snapshot, or other local selection failure
+  releases the provisional timestamp. After selection successfully returns a
+  probe, a later caller cancellation may still postpone the next attempt by one
+  quiet interval; that conservative bound cannot starve the account permanently.
 - A failed real request can drain the account again through the ordinary error
   path. Recovery never permits replay after downstream output is visible.
 - Restarting a replica clears advisory health as before; persisted account

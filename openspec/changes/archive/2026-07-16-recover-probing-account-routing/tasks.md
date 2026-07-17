@@ -5,6 +5,7 @@
 - [x] 1.3 Add load-balancer coverage proving a selectable existing sticky owner is not displaced by a due probing account.
 - [x] 1.4 Preserve hard-sticky fail-closed ownership while cap-filtering fallback candidates, and atomically reserve concurrent fallback probes.
 - [x] 1.5 Preserve the stable local cap error when an unavailable hard-sticky owner has only saturated fallbacks.
+- [x] 1.6 Keep sticky probe reservations provisional through final lease and persistence gates, and classify cap exhaustion using only otherwise-available fallbacks.
 
 ## 2. Force Probe health settlement
 
@@ -14,6 +15,7 @@
 - [x] 2.4 Add unit and integration regressions for successful rehabilitation, rejected probes, usage pressure, and endpoint orchestration.
 - [x] 2.5 Reject stale successful probe settlement when newer replica-local runtime activity was recorded during snapshot loading.
 - [x] 2.6 Share zero-primary-capacity health normalization between ordinary routing and Force Probe settlement.
+- [x] 2.7 Keep provisional probe reserve/release outside the runtime health-observation version used by Force Probe settlement.
 
 ## 3. Verification
 

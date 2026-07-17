@@ -256,6 +256,7 @@ class LoadBalancer:
         *,
         kind: AccountLeaseKind,
         estimated_tokens: float,
+        record_selection: bool = True,
     ) -> AccountLease:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
         lease = AccountLease(
@@ -273,8 +274,9 @@ class LoadBalancer:
         else:
             runtime.inflight_streams += 1
         runtime.leased_tokens += lease.estimated_tokens
-        runtime.last_selected_at = time.time()
-        runtime.version += 1
+        if record_selection:
+            runtime.last_selected_at = time.time()
+            runtime.version += 1
         _record_account_lease_acquired(kind)
         _record_account_inflight_leases(account_id, runtime)
         return lease
@@ -687,13 +689,17 @@ class LoadBalancer:
                         # Every fallback must remain cap-eligible.
                         cap_eligible_ids = {state.account_id for state in cap_eligible_states}
                         fallback_states = [state for state in states if state.account_id != sticky_existing_account_id]
-                        # The owner exception makes selection_states non-empty
-                        # even when every real fallback was cap-filtered. Keep a
-                        # separate classification for the post-owner fallback.
+                        available_fallback_ids = _available_account_ids_without_backoff(
+                            fallback_states,
+                            traffic_class=traffic_class,
+                        )
+                        # Cap eligibility alone is not route eligibility: a
+                        # rate-limited under-cap fallback must not hide that all
+                        # otherwise usable fallbacks were removed by local caps.
                         hard_sticky_fallback_cap_exhausted = (
                             lease_kind is not None
-                            and bool(fallback_states)
-                            and not any(state.account_id in cap_eligible_ids for state in fallback_states)
+                            and bool(available_fallback_ids)
+                            and not available_fallback_ids.intersection(cap_eligible_ids)
                         )
                         selection_states = [
                             state
@@ -769,9 +775,42 @@ class LoadBalancer:
                 selected_account_map = account_map
                 selected_states = []
                 async with self._runtime_lock:
-                    if result.account is None or (
-                        probe_reservation is not None and result.account.account_id != probe_reservation.account_id
-                    ):
+                    selected: Account | None = None
+                    selection_admitted = False
+                    selected_reserved_probe = False
+                    if result.account is None:
+                        error_message = result.error_message
+                    else:
+                        selected = account_map.get(result.account.account_id)
+                        selected_reserved_probe = bool(
+                            selected is not None
+                            and probe_reservation is not None
+                            and selected.id == probe_reservation.account_id
+                        )
+                        if selected is None:
+                            error_message = result.error_message
+                        elif lease_kind is not None and not self._account_lease_allowed_locked(
+                            selected.id,
+                            kind=lease_kind,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                        ):
+                            selection_error_code = _account_cap_error_code(lease_kind)
+                            error_message = _account_cap_error_message(lease_kind, caps)
+                        else:
+                            selection_admitted = True
+                            if lease_kind is not None:
+                                selected_lease = self._acquire_account_lease_locked(
+                                    selected.id,
+                                    kind=lease_kind,
+                                    estimated_tokens=estimated_lease_tokens,
+                                    # Keep the reservation token intact until
+                                    # persistence commits the recovery admission.
+                                    record_selection=not selected_reserved_probe,
+                                )
+
+                    reserved_probe_admitted = selection_admitted and selected_reserved_probe
+                    if not reserved_probe_admitted:
                         self._release_due_probe_reservation_locked(probe_reservation)
                     for state in states:
                         account = account_map.get(state.account_id)
@@ -780,43 +819,30 @@ class LoadBalancer:
                         self._sync_runtime_state(
                             account,
                             state,
-                            selected=result.account is not None and state.account_id == result.account.account_id,
+                            # A selected probe remains provisional through DB
+                            # persistence. Its reservation is committed below;
+                            # advancing last_selected_at here would make later
+                            # admission failures impossible to roll back.
+                            selected=(
+                                selection_admitted
+                                and result.account is not None
+                                and state.account_id == result.account.account_id
+                                and not reserved_probe_admitted
+                            ),
                         )
                         selected_states.append(state)
-                    if result.account is not None:
-                        selected = account_map.get(result.account.account_id)
-                        if selected is None:
-                            error_message = result.error_message
-                        else:
-                            selected_reset_at = selected.reset_at
-                            for state in selected_states:
-                                if state.account_id == result.account.account_id:
-                                    state.status = result.account.status
-                                    state.deactivation_reason = result.account.deactivation_reason
-                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
-                                    break
-                            selected_snapshot = _clone_account(selected)
-                            selected_snapshot.status = result.account.status
-                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
-                            selected_snapshot.reset_at = selected_reset_at
-                            if lease_kind is not None:
-                                if not self._account_lease_allowed_locked(
-                                    selected.id,
-                                    kind=lease_kind,
-                                    caps=caps,
-                                    stream_reserve_slots=stream_reserve_slots,
-                                ):
-                                    selected_snapshot = None
-                                    selection_error_code = _account_cap_error_code(lease_kind)
-                                    error_message = _account_cap_error_message(lease_kind, caps)
-                                else:
-                                    selected_lease = self._acquire_account_lease_locked(
-                                        selected.id,
-                                        kind=lease_kind,
-                                        estimated_tokens=estimated_lease_tokens,
-                                    )
-                    else:
-                        error_message = result.error_message
+                    if selection_admitted and selected is not None and result.account is not None:
+                        selected_reset_at = selected.reset_at
+                        for state in selected_states:
+                            if state.account_id == result.account.account_id:
+                                state.status = result.account.status
+                                state.deactivation_reason = result.account.deactivation_reason
+                                selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                break
+                        selected_snapshot = _clone_account(selected)
+                        selected_snapshot.status = result.account.status
+                        selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                        selected_snapshot.reset_at = selected_reset_at
 
                 try:
                     async with self._repo_factory() as repos:
@@ -828,11 +854,15 @@ class LoadBalancer:
                 except BaseException:
                     await self.release_account_lease(selected_lease)
                     selected_lease = None
+                    async with self._runtime_lock:
+                        self._release_due_probe_reservation_locked(probe_reservation)
                     raise
                 stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
                     await self.release_account_lease(selected_lease)
                     selected_lease = None
+                    async with self._runtime_lock:
+                        self._release_due_probe_reservation_locked(probe_reservation)
                     selected_snapshot = None
                     error_message = None
                     selected_states = []
@@ -866,6 +896,9 @@ class LoadBalancer:
                     selected_account_map = {}
                     await asyncio.sleep(0)
                     continue
+                if selected_snapshot is not None:
+                    async with self._runtime_lock:
+                        self._commit_due_probe_reservation_locked(probe_reservation)
                 break
 
         if selected_snapshot is None:
@@ -929,10 +962,11 @@ class LoadBalancer:
             return None
         # Keep the current state snapshot due for this request while making a
         # concurrent snapshot observe the reservation before sticky DB I/O.
+        # This is not a health observation, so it must not advance ``version``
+        # and invalidate an operator Force Probe that is loading usage.
         previous_last_selected_at = runtime.last_selected_at
         reserved_at = time.time()
         runtime.last_selected_at = reserved_at
-        runtime.version += 1
         return _ProbeReservation(
             account_id=result.account.account_id,
             previous_last_selected_at=previous_last_selected_at,
@@ -949,6 +983,17 @@ class LoadBalancer:
         if runtime is None or runtime.last_selected_at != reservation.reserved_at:
             return
         runtime.last_selected_at = reservation.previous_last_selected_at
+
+    def _commit_due_probe_reservation_locked(self, reservation: _ProbeReservation | None) -> None:
+        if reservation is None:
+            return
+        runtime = self._runtime.get(reservation.account_id)
+        if runtime is None or runtime.last_selected_at != reservation.reserved_at:
+            return
+        # Only a selection that survived sticky persistence and final local
+        # admission consumes the quiet interval. Unlike reserve/release, this
+        # committed observation must invalidate older Force Probe settlement.
+        runtime.last_selected_at = time.time()
         runtime.version += 1
 
     async def _load_selection_inputs(
@@ -2046,6 +2091,30 @@ def _filter_states_for_account_caps(
                 continue
         filtered.append(state)
     return filtered
+
+
+def _available_account_ids_without_backoff(
+    states: Iterable[AccountState],
+    *,
+    traffic_class: TrafficClass,
+) -> set[str]:
+    """Return candidates that pass non-cap routing eligibility on their own."""
+    now = time.time()
+    available_ids: set[str] = set()
+    for state in states:
+        # ``select_account`` normalizes expired quota/cooldown fields in place;
+        # classify on a copy so cap-error reporting cannot mutate the real
+        # selection snapshot before sticky persistence.
+        result = select_account(
+            [replace(state)],
+            now=now,
+            routing_strategy="single_account",
+            allow_backoff_fallback=False,
+            traffic_class=traffic_class,
+        )
+        if result.account is not None:
+            available_ids.add(state.account_id)
+    return available_ids
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:

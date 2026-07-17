@@ -1063,6 +1063,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "shaqman",
+      "name": "Syakur Rahman",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1113851?v=4",
+      "profile": "http://expressthisout.com/",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

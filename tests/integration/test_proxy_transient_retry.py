@@ -117,6 +117,20 @@ def _stream_timeout_sse_event() -> str:
     )
 
 
+def _model_capacity_sse_event() -> str:
+    return _sse_event(
+        {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "server_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+        }
+    )
+
+
 def _success_sse_event(response_id: str = "resp_ok") -> str:
     return _sse_event(
         {
@@ -242,6 +256,83 @@ async def test_stream_timeout_succeeds_on_second_try_same_account(async_client, 
     assert failed == []
     assert len(seen_account_ids) == 2
     assert seen_account_ids[0] == seen_account_ids[1]
+
+
+@pytest.mark.asyncio
+async def test_stream_model_capacity_without_response_id_sleeps_and_retries_same_account(async_client, monkeypatch):
+    """Model capacity errors without a real upstream response id are safe pre-visible retries."""
+    await _import_account(async_client, "acc_model_capacity_retry", "model-capacity@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+    sleeps: list[float] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            yield _model_capacity_sse_event()
+            return
+        yield _success_sse_event("resp_model_capacity_retry_ok")
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [event["response"]["id"] for event in events if event.get("type") == "response.completed"] == [
+        "resp_model_capacity_retry_ok"
+    ]
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert seen_account_ids == ["acc_model_capacity_retry", "acc_model_capacity_retry"]
+    assert sleeps
+
+
+@pytest.mark.asyncio
+async def test_stream_previsible_upstream_close_sleeps_and_retries_same_account(async_client, monkeypatch):
+    """A websocket EOF before the first upstream event is retried instead of surfacing to the client."""
+    await _import_account(async_client, "acc_previsible_close_retry", "previsible-close@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+    sleeps: list[float] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            if False:
+                yield ""
+            return
+        yield _success_sse_event("resp_previsible_close_retry_ok")
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [event["response"]["id"] for event in events if event.get("type") == "response.completed"] == [
+        "resp_previsible_close_retry_ok"
+    ]
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert seen_account_ids == ["acc_previsible_close_retry", "acc_previsible_close_retry"]
+    assert sleeps
 
 
 @pytest.mark.asyncio

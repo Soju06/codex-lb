@@ -358,6 +358,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         default=0,
                     )
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
+                session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
                 # A process-network receive failure follows a successful send;

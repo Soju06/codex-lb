@@ -166,6 +166,8 @@ class DurableBridgeSessionCoordinator:
         cooldown_until_epoch: float,
         last_detail: str | None,
         updated_at_epoch: float,
+        failure_threshold: int = 1,
+        conflict_cooldown_until_epoch: float | None = None,
     ) -> None:
         async with self._session() as session:
             await DurableBridgeRepository(session).upsert_retry_circuit(
@@ -176,6 +178,8 @@ class DurableBridgeSessionCoordinator:
                 cooldown_until_epoch=cooldown_until_epoch,
                 last_detail=last_detail,
                 updated_at_epoch=updated_at_epoch,
+                failure_threshold=failure_threshold,
+                conflict_cooldown_until_epoch=conflict_cooldown_until_epoch,
             )
 
     async def clear_retry_circuit(

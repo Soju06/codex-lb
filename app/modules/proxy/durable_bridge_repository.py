@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 
-from sqlalchemy import Row, and_, case, delete, or_, select, text, update
+from sqlalchemy import Row, and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -124,6 +124,8 @@ class DurableBridgeRepository:
         cooldown_until_epoch: float,
         last_detail: str | None,
         updated_at_epoch: float,
+        failure_threshold: int = 1,
+        conflict_cooldown_until_epoch: float | None = None,
     ) -> None:
         values = {
             "session_key_kind": session_key_kind,
@@ -134,40 +136,66 @@ class DurableBridgeRepository:
             "last_detail": last_detail,
             "updated_at_epoch": updated_at_epoch,
         }
+        threshold = max(1, failure_threshold)
+        cooldown_floor = (
+            max(0.0, conflict_cooldown_until_epoch)
+            if conflict_cooldown_until_epoch is not None
+            else max(0.0, cooldown_until_epoch)
+        )
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
-            statement = (
-                pg_insert(HttpBridgeRetryCircuit)
-                .values(**values)
-                .on_conflict_do_update(
-                    index_elements=[
-                        HttpBridgeRetryCircuit.session_key_kind,
-                        HttpBridgeRetryCircuit.session_key_hash,
-                        HttpBridgeRetryCircuit.api_key_scope,
-                    ],
-                    set_={
-                        key: values[key]
-                        for key in values
-                        if key not in {"session_key_kind", "session_key_hash", "api_key_scope"}
-                    },
-                )
+            insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
+            excluded = insert_statement.excluded
+            conflict_failures = func.greatest(
+                HttpBridgeRetryCircuit.consecutive_failures + 1,
+                excluded.consecutive_failures,
+            )
+            statement = insert_statement.on_conflict_do_update(
+                index_elements=[
+                    HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope,
+                ],
+                set_={
+                    "consecutive_failures": conflict_failures,
+                    "cooldown_until_epoch": func.greatest(
+                        HttpBridgeRetryCircuit.cooldown_until_epoch,
+                        excluded.cooldown_until_epoch,
+                        case((conflict_failures >= threshold, cooldown_floor), else_=0.0),
+                    ),
+                    "last_detail": excluded.last_detail,
+                    "updated_at_epoch": func.greatest(
+                        HttpBridgeRetryCircuit.updated_at_epoch,
+                        excluded.updated_at_epoch,
+                    ),
+                },
             )
         elif dialect == "sqlite":
-            statement = (
-                sqlite_insert(HttpBridgeRetryCircuit)
-                .values(**values)
-                .on_conflict_do_update(
-                    index_elements=[
-                        HttpBridgeRetryCircuit.session_key_kind,
-                        HttpBridgeRetryCircuit.session_key_hash,
-                        HttpBridgeRetryCircuit.api_key_scope,
-                    ],
-                    set_={
-                        key: values[key]
-                        for key in values
-                        if key not in {"session_key_kind", "session_key_hash", "api_key_scope"}
-                    },
-                )
+            insert_statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values)
+            excluded = insert_statement.excluded
+            conflict_failures = func.max(
+                HttpBridgeRetryCircuit.consecutive_failures + 1,
+                excluded.consecutive_failures,
+            )
+            statement = insert_statement.on_conflict_do_update(
+                index_elements=[
+                    HttpBridgeRetryCircuit.session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash,
+                    HttpBridgeRetryCircuit.api_key_scope,
+                ],
+                set_={
+                    "consecutive_failures": conflict_failures,
+                    "cooldown_until_epoch": func.max(
+                        HttpBridgeRetryCircuit.cooldown_until_epoch,
+                        excluded.cooldown_until_epoch,
+                        case((conflict_failures >= threshold, cooldown_floor), else_=0.0),
+                    ),
+                    "last_detail": excluded.last_detail,
+                    "updated_at_epoch": func.max(
+                        HttpBridgeRetryCircuit.updated_at_epoch,
+                        excluded.updated_at_epoch,
+                    ),
+                },
             )
         else:
             raise RuntimeError(f"DurableBridgeRepository retry circuit upsert unsupported for dialect={dialect!r}")

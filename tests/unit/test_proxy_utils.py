@@ -34065,6 +34065,7 @@ async def test_retry_http_bridge_clean_close_allows_one_additional_retry(monkeyp
     assert await service._retry_http_bridge_precreated_request(session) is True
     assert request_state.replay_count == 1
     session.last_upstream_close_code = 1000
+    session.last_upstream_close_generation += 1
 
     assert await service._retry_http_bridge_precreated_request(session) is True
     assert request_state.replay_count == 2

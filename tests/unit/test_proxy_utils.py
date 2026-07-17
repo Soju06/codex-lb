@@ -4497,6 +4497,7 @@ async def test_http_downstream_sticky_smart_auto_mode_keeps_websocket_handshake_
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
 
     async def fake_open_upstream_websocket(**kwargs: object) -> None:
         del kwargs
@@ -6574,6 +6575,7 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
         proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
@@ -6964,6 +6966,80 @@ async def test_stream_responses_websocket_slims_historical_inline_artifacts_and_
     assistant_item = request_input[2]
     assert assistant_item["content"] == [
         {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+    ]
+    assert request_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]}
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_slims_images_nested_in_tool_output_and_succeeds(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64, raising=False)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 640, raising=False)
+
+    messages = [
+        SimpleNamespace(
+            type=proxy_module.aiohttp.WSMsgType.TEXT,
+            data='{"type":"response.created","response":{"id":"resp_ws_tool_img","service_tier":"auto"}}',
+        ),
+        SimpleNamespace(
+            type=proxy_module.aiohttp.WSMsgType.TEXT,
+            data='{"type":"response.completed","response":{"id":"resp_ws_tool_img","service_tier":"default"}}',
+        ),
+    ]
+    websocket = _WsResponse(messages)
+    session = _WsSession(websocket)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "old turn"}]},
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type": "input_text", "text": "screenshot taken"},
+                        {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1200)},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]},
+            ],
+        }
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert len(events) == 2
+    assert len(session.ws_calls) == 1
+    request_payload = websocket.sent_json[0]
+    request_input = cast(list[dict[str, object]], request_payload["input"])
+    tool_output_item = request_input[1]
+    assert tool_output_item["output"] == [
+        {"type": "input_text", "text": "screenshot taken"},
+        {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE},
     ]
     assert request_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]}
 
@@ -18129,6 +18205,103 @@ def test_slim_response_create_handles_object_valued_content_image():
     first_content = first_item["content"]
     assert isinstance(first_content, dict)
     assert first_content["type"] == "input_text"
+
+
+def test_slim_response_create_rewrites_images_nested_in_tool_output_parts():
+    image_part = {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)}
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_1",
+                "output": [{"type": "input_text", "text": "screenshot taken"}, dict(image_part)],
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": [dict(image_part)],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_images_slimmed"] == 2
+    first_item = slimmed_input[0]
+    assert isinstance(first_item, dict)
+    assert first_item["output"] == [
+        {"type": "input_text", "text": "screenshot taken"},
+        {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE},
+    ]
+    second_item = slimmed_input[1]
+    assert isinstance(second_item, dict)
+    assert second_item["output"] == [
+        {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+    ]
+    assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]}
+
+
+def test_slim_response_create_slims_oversized_custom_and_apply_patch_string_outputs():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "custom_tool_call_output", "call_id": "call_1", "output": "A" * (33 * 1024)},
+            {
+                "type": "apply_patch_call_output",
+                "call_id": "call_2",
+                "status": "completed",
+                "output": "B" * (33 * 1024),
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_tool_outputs_slimmed"] == 2
+    for index in (0, 1):
+        item = slimmed_input[index]
+        assert isinstance(item, dict)
+        assert item["output"] == proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(bytes=33 * 1024)
+    second_item = slimmed_input[1]
+    assert isinstance(second_item, dict)
+    assert second_item["status"] == "completed"
+
+
+def test_slim_response_create_ignores_malformed_unhashable_item_type():
+    malformed_type: list[JsonValue] = []
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "type": malformed_type,
+                "call_id": "call_1",
+                "content": [{"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "latest turn"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_images_slimmed"] == 1
+    first_item = slimmed_input[0]
+    assert isinstance(first_item, dict)
+    assert first_item["type"] == []
+    assert first_item["content"] == [
+        {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
+    ]
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

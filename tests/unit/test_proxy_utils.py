@@ -33355,10 +33355,9 @@ async def test_http_bridge_session_events_keepalive_backstop(monkeypatch):
     finally:
         await events.aclose()
 
-    assert len(collected) == 3, f"Expected 3 events (2 keepalives + stream_idle_timeout), got {len(collected)}"
+    assert len(collected) == 2, f"Expected 2 events (1 keepalive + stream_idle_timeout), got {len(collected)}"
     assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
-    assert collected[1] == proxy_service.CODEX_KEEPALIVE_FRAME
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[2]))
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
@@ -33422,8 +33421,8 @@ async def test_http_bridge_session_events_retries_silent_pre_response_once(monke
     finally:
         await events.aclose()
 
-    assert len(collected) == 5
-    assert collected[:4] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 4
+    assert len(collected) == 3
+    assert collected[:2] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 2
     last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
     assert retry_precreated.await_count == 2
@@ -33439,13 +33438,14 @@ async def test_http_bridge_session_events_keeps_alive_during_retry_circuit_coold
     settings = _make_proxy_settings()
     monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
     settings.sse_keepalive_interval_seconds = 0.001
+    settings.stream_idle_timeout_seconds = 1.0
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_circuit_keepalive",
         model="gpt-5.1",
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=0.0,
+        started_at=time.monotonic(),
         response_id=None,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create"}',
@@ -33490,8 +33490,8 @@ async def test_http_bridge_session_events_keeps_alive_during_retry_circuit_coold
     finally:
         await events.aclose()
 
-    assert len(collected) == 7
-    assert collected[:6] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 6
+    assert len(collected) == 3
+    assert collected[:2] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 2
     last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
     assert retry_precreated.await_count == 3
@@ -33557,9 +33557,9 @@ async def test_http_bridge_session_events_keepalive_backstop_respects_idle_timeo
     finally:
         await events.aclose()
 
-    assert len(collected) == 3
-    assert collected[:2] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 2
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[2]))
+    assert len(collected) == 2
+    assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
 
@@ -33622,14 +33622,14 @@ async def test_http_bridge_session_events_keepalive_backstop_with_response_id(mo
     finally:
         await events.aclose()
 
-    assert len(collected) == 6, (
-        f"Expected 6 events (5 response.in_progress + stream_idle_timeout), got {len(collected)}"
+    assert len(collected) == 5, (
+        f"Expected 5 events (4 response.in_progress + stream_idle_timeout), got {len(collected)}"
     )
-    for event_block in collected[:5]:
+    for event_block in collected[:4]:
         event = cast(dict[str, object], proxy_service.parse_sse_data_json(event_block))
         assert event["type"] == "response.in_progress"
         assert cast(dict[str, object], event["response"])["id"] == "resp_bridge_backstop_codex"
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[5]))
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[4]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
@@ -33689,15 +33689,15 @@ async def test_http_bridge_session_events_keepalive_backstop_uses_replay_downstr
     try:
         async for event in events:
             collected.append(event)
-            if len(collected) >= 6:
+            if len(collected) >= 5:
                 break
     finally:
         await events.aclose()
 
-    assert len(collected) == 6
+    assert len(collected) == 5
     first = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[0]))
     assert cast(dict[str, object], first["response"])["id"] == "resp_created_then_closed"
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[5]))
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[4]))
     assert cast(dict[str, object], last["response"])["id"] == "resp_created_then_closed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
 

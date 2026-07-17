@@ -2211,7 +2211,7 @@ class _HTTPBridgeStreamingMixin:
                             continue
                         keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
-                        if keepalive_count > max_keepalive_count:
+                        if keepalive_count >= max_keepalive_count:
                             if not response_started:
                                 retried = False
                                 if not circuit_keepalive_waiting:
@@ -2232,6 +2232,31 @@ class _HTTPBridgeStreamingMixin:
                                     session
                                 )
                                 if retry_cooldown_seconds > 0:
+                                    retry_cooldown_remaining_budget = max(
+                                        0.0,
+                                        request_deadline - _service_time().monotonic(),
+                                    )
+                                    if retry_cooldown_seconds >= retry_cooldown_remaining_budget:
+                                        if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                        logger.info(
+                                            "HTTP bridge stream idle timeout during retry circuit cooldown "
+                                            "request_id=%s retry_after_seconds=%.1f remaining_budget_seconds=%.1f",
+                                            request_state.request_id,
+                                            retry_cooldown_seconds,
+                                            retry_cooldown_remaining_budget,
+                                        )
+                                        yield format_sse_event(
+                                            cast(
+                                                Mapping[str, JsonValue],
+                                                response_failed_event(
+                                                    "stream_idle_timeout",
+                                                    "Upstream retry circuit cooldown exceeds the request budget",
+                                                    response_id=downstream_response_id,
+                                                ),
+                                            )
+                                        )
+                                        break
                                     circuit_keepalive_waiting = True
                                     keepalive_count = 0
                                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:

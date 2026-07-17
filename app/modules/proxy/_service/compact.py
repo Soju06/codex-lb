@@ -69,6 +69,15 @@ _CompactResponses = Callable[
 ]
 
 
+def _compact_turn_state_session_identity(session_key: object | None, session: object | None) -> str | None:
+    durable_session_id = getattr(session, "durable_session_id", None)
+    if isinstance(durable_session_id, str) and durable_session_id.strip():
+        return f"durable:{durable_session_id.strip()}"
+    if session_key is None:
+        return None
+    return f"live:{session_key!r}"
+
+
 class _CompactServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
@@ -481,14 +490,20 @@ class _CompactMixin:
                 ),
             )
         api_key_id = api_key.id if api_key is not None else None
-        owner_account_ids: set[str] = set()
+        owner_refs: list[tuple[str, str, str | None]] = []
         async with proxy._http_bridge_lock:
             session_key = proxy._http_bridge_turn_state_index.get((normalized_turn_state, api_key_id))
             session = proxy._http_bridge_sessions.get(session_key) if session_key is not None else None
             account = getattr(session, "account", None)
             account_id = getattr(account, "id", None)
             if isinstance(account_id, str) and account_id.strip():
-                owner_account_ids.add(account_id)
+                owner_refs.append(
+                    (
+                        "turn-state live index",
+                        account_id,
+                        _compact_turn_state_session_identity(session_key, session),
+                    )
+                )
 
         try:
             durable_lookup = await proxy._durable_bridge.lookup_turn_state_target(
@@ -506,11 +521,35 @@ class _CompactMixin:
             ) from exc
         account_id = getattr(durable_lookup, "account_id", None)
         if isinstance(account_id, str) and account_id.strip():
-            owner_account_ids.add(account_id)
+            durable_session_id = getattr(durable_lookup, "session_id", None)
+            owner_refs.append(
+                (
+                    "turn-state durable alias",
+                    account_id,
+                    f"durable:{durable_session_id.strip()}"
+                    if isinstance(durable_session_id, str) and durable_session_id.strip()
+                    else None,
+                )
+            )
         resolved_owner = resolve_required_account_id(
-            *(("turn-state index", owner_account_id) for owner_account_id in sorted(owner_account_ids))
+            *((source, owner_account_id) for source, owner_account_id, _session_id in owner_refs)
         )
         if resolved_owner is not None:
+            session_identities = {
+                session_identity
+                for _source, owner_account_id, session_identity in owner_refs
+                if owner_account_id == resolved_owner and session_identity is not None
+            }
+            if len(session_identities) > 1:
+                sources = ", ".join(source for source, _account_id, _session_id in owner_refs)
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "continuity_owner_conflict",
+                        f"Account-owned continuity sources conflict ({sources}); retry the logical turn.",
+                        error_type="server_error",
+                    ),
+                )
             return resolved_owner
         if not fail_on_missing:
             return None

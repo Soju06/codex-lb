@@ -773,6 +773,7 @@ class _WebSocketMixin:
         account: Account | None = None
         account_lease: AccountLease | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
+        client_turn_state_header: str | None = _sticky_key_from_turn_state_header(filtered_headers)
         upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity()
         replay_request_state: _WebSocketRequestState | None = None
@@ -1294,11 +1295,17 @@ class _WebSocketMixin:
                         # below must select the resolved owner or fail closed.
                         await retire_current_upstream()
                         # Turn-state is learned from the retired account's
-                        # socket and must never cross the account boundary.
+                        # socket and must never cross the account boundary. A
+                        # client-provided turn-state header is the continuity
+                        # anchor that forced this owner switch and must still
+                        # reach the resolved owner.
                         upstream_turn_state = None
-                        filtered_headers = {
-                            key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
-                        }
+                        if client_turn_state_header is None:
+                            filtered_headers = {
+                                key: value
+                                for key, value in filtered_headers.items()
+                                if key.lower() != "x-codex-turn-state"
+                            }
 
                 if upstream is None:
                     if text_data is not None and payload is None:
@@ -1993,9 +2000,15 @@ class _WebSocketMixin:
             is_retry = attempt > 0
             forced_refresh_account_id = request_state.force_refresh_account_id
             preferred_account_id = forced_refresh_account_id or request_state.preferred_account_id
+            turn_state_owner_required = (
+                request_state.affinity_policy.codex_session_source == "turn_state"
+                and request_state.preferred_account_id is not None
+            )
             require_preferred_account = (
-                request_state.previous_response_id is not None and request_state.preferred_account_id is not None
-            ) or request_state.file_required_preferred_account
+                (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
+                or request_state.file_required_preferred_account
+                or turn_state_owner_required
+            )
             try:
                 account = await proxy._select_websocket_connect_account(
                     deadline,

@@ -1787,13 +1787,13 @@ class ProxyService(
                             error_message="Selected single account is outside the API key account scope",
                             error_code="single_account_scope_mismatch",
                         )
-                    # Single-account routing must not narrow the ownership pool.
                     single_account_routing_id = selected_account_id
                     routing_strategy = "single_account"
                 preferred_eligible = (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
                     and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
+                    and (single_account_routing_id is None or preferred_account_id == single_account_routing_id)
                 )
                 if preferred_account_id is not None and not preferred_eligible:
                     logger.warning(

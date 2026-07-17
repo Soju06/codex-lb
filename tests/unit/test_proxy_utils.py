@@ -3280,6 +3280,29 @@ async def test_compact_turn_state_owner_lookup_is_api_key_scoped_and_fails_close
 
 
 @pytest.mark.asyncio
+async def test_compact_turn_state_owner_fails_closed_when_same_account_sessions_conflict() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = SimpleNamespace(id="account-owner")
+    turn_state = "turn-owner-session-conflict"
+    owner_key = proxy_service._http_bridge_turn_state_alias_key(turn_state, None)
+    service._http_bridge_turn_state_index[owner_key] = "bridge-live"  # type: ignore[assignment]
+    service._http_bridge_sessions["bridge-live"] = SimpleNamespace(  # type: ignore[index]
+        account=owner,
+        durable_session_id="durable-live-session",
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_turn_state_target=AsyncMock(
+            return_value=SimpleNamespace(account_id=owner.id, session_id="durable-other-session")
+        )
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._resolve_compact_turn_state_owner(turn_state=turn_state, api_key=None)
+
+    assert _proxy_error_code(exc_info.value) == "continuity_owner_conflict"
+
+
+@pytest.mark.asyncio
 async def test_compact_turn_state_owner_never_falls_back_to_unscoped_sticky_sessions() -> None:
     def fail_repo_factory():
         raise AssertionError("turn-state owner resolution must not query unscoped sticky sessions")
@@ -3335,6 +3358,7 @@ async def test_compact_registered_synthesized_turn_state_is_a_strict_selection_c
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _make_proxy_settings()
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     owner = _make_account("acc_compact_http_turn_owner")
     turn_state = "http_turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -3425,6 +3449,7 @@ async def test_compact_file_pin_overrides_session_and_prompt_cache_locality(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _make_proxy_settings()
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_compact_file_owner_soft_locality")
     seen_selection: dict[str, object] = {}
@@ -22947,6 +22972,49 @@ async def test_direct_websocket_resolves_http_bridge_turn_state_owner(
 
 
 @pytest.mark.asyncio
+async def test_direct_websocket_turn_state_owner_is_hard_connect_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc-ws-turn-state-hard-owner")
+    turn_state = "http_turn_ws_bridge_hard_owner"
+    service._http_bridge_turn_state_index[(turn_state, None)] = "bridge-ws-hard-owner"  # type: ignore[assignment]
+    service._http_bridge_sessions["bridge-ws-hard-owner"] = SimpleNamespace(account=owner)  # type: ignore[index]
+    service._durable_bridge = SimpleNamespace(lookup_turn_state_target=AsyncMock(return_value=None))
+    require_preferred: list[bool] = []
+
+    async def capture_connect_account(*args: object, **kwargs: object) -> None:
+        del args
+        require_preferred.append(cast(bool, kwargs["require_preferred_account"]))
+        return None
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_websocket_connect_account", capture_connect_account)
+
+    payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": "continue"}],
+        "stream": True,
+    }
+    downstream = _ScriptedDownstreamWebSocket(json.dumps(payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"x-codex-turn-state": turn_state},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert require_preferred == [True]
+
+
+@pytest.mark.asyncio
 async def test_direct_websocket_drops_retired_socket_turn_state_before_bare_session_spill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -23126,6 +23194,189 @@ async def test_direct_websocket_drops_retired_socket_turn_state_before_bare_sess
     assert connect_accounts == [capped_owner.id, spill_account.id]
     assert spill_flags == [True, True]
     assert "x-codex-turn-state" not in {key.lower(): value for key, value in connect_headers[1].items()}
+
+
+@pytest.mark.asyncio
+async def test_direct_websocket_preserves_client_turn_state_when_switching_to_resolved_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    first_account = _make_account("acc-ws-first-owner")
+    resolved_owner = _make_account("acc-ws-client-turn-owner")
+    client_turn_state = "client-turn-state-owner-switch"
+
+    def upstream_text(payload: dict[str, object]) -> SimpleNamespace:
+        return SimpleNamespace(
+            kind="text",
+            text=json.dumps(payload, separators=(",", ":")),
+            data=None,
+            close_code=None,
+            error=None,
+            error_code=None,
+        )
+
+    first_upstream = _QueuedTestUpstreamWebSocket(
+        [
+            upstream_text(
+                {"type": "response.created", "response": {"id": "resp-before-switch", "status": "in_progress"}}
+            ),
+            upstream_text(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-before-switch",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                    },
+                }
+            ),
+        ],
+        turn_state="turn-state-from-first-socket",
+    )
+    second_upstream = _QueuedTestUpstreamWebSocket(
+        [
+            upstream_text(
+                {"type": "response.created", "response": {"id": "resp-after-switch", "status": "in_progress"}}
+            ),
+            upstream_text(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-after-switch",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                    },
+                }
+            ),
+        ],
+        turn_state="turn-state-from-resolved-owner",
+    )
+    first_completed = asyncio.Event()
+    second_completed = asyncio.Event()
+
+    class _OwnerSwitchDownstream:
+        def __init__(self, first_text: str, second_text: str) -> None:
+            self._texts = (first_text, second_text)
+            self._step = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if self._step == 0:
+                self._step = 1
+                return {"type": "websocket.receive", "text": self._texts[0]}
+            if self._step == 1:
+                await first_completed.wait()
+                self._step = 2
+                return {"type": "websocket.receive", "text": self._texts[1]}
+            await second_completed.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            event = json.loads(text)
+            if event.get("type") != "response.completed":
+                return
+            if not first_completed.is_set():
+                first_completed.set()
+            else:
+                second_completed.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            second_completed.set()
+
+    connect_headers: list[dict[str, str]] = []
+    connect_accounts: list[str] = []
+
+    async def connect(headers: Mapping[str, str], **_kwargs: object):
+        connect_headers.append(dict(headers))
+        if not connect_accounts:
+            connect_accounts.append(first_account.id)
+            return first_account, first_upstream
+        connect_accounts.append(resolved_owner.id)
+        return resolved_owner, second_upstream
+
+    prepared_count = 0
+
+    async def prepare(payload: dict[str, JsonValue], **_kwargs: object) -> proxy_service._PreparedWebSocketRequest:
+        nonlocal prepared_count
+        prepared_count += 1
+        request_text = json.dumps(payload, separators=(",", ":"))
+        if prepared_count == 1:
+            affinity = proxy_service._AffinityPolicy(
+                key="initial-session",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+                codex_session_source="session_header",
+            )
+        else:
+            affinity = proxy_service._AffinityPolicy(
+                key=client_turn_state,
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+                codex_session_source="turn_state",
+            )
+        request_state = proxy_service._WebSocketRequestState(
+            request_id=f"req-owner-switch-{prepared_count}",
+            model="gpt-5.1",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            request_text=request_text,
+            awaiting_response_created=True,
+            affinity_policy=affinity,
+        )
+        return proxy_service._PreparedWebSocketRequest(
+            text_data=request_text,
+            request_state=request_state,
+            affinity_policy=affinity,
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_prepare_websocket_response_create_request", prepare)
+    monkeypatch.setattr(service, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=resolved_owner.id))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+
+    first_request = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [{"role": "user", "content": "first"}],
+            "stream": True,
+        },
+        separators=(",", ":"),
+    )
+    second_request = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [{"role": "user", "content": "second"}],
+            "stream": True,
+        },
+        separators=(",", ":"),
+    )
+    downstream = _OwnerSwitchDownstream(first_request, second_request)
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"x-codex-turn-state": client_turn_state},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert connect_accounts == [first_account.id, resolved_owner.id]
+    assert connect_headers[1]["x-codex-turn-state"] == client_turn_state
+    assert first_upstream.close_seen.is_set()
 
 
 @pytest.mark.asyncio
@@ -28886,6 +29137,36 @@ async def test_single_account_routing_does_not_narrow_conversation_ownership_sco
     assert select_account.await_args.kwargs["account_ids"] is None
     assert select_account.await_args.kwargs["required_account_id"] == "acc-single-route"
     assert select_account.await_args.kwargs["require_unambiguous_account"] is True
+
+
+@pytest.mark.asyncio
+async def test_single_account_routing_skips_soft_preferred_account_outside_single_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.routing_strategy = "single_account"
+    settings.single_account_id = "acc-single-route"
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    selected_account = _make_account("acc-single-route")
+    select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+
+    selection = await service._select_account_with_budget(
+        deadline=123.0,
+        request_id="req-soft-preferred-single-route",
+        kind="stream",
+        preferred_account_id="acc-soft-preferred",
+        fallback_on_preferred_account_unavailable=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account == selected_account
+    select_account.assert_awaited_once()
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["required_account_id"] == "acc-single-route"
 
 
 @pytest.mark.asyncio

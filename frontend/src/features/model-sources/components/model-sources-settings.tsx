@@ -1,4 +1,5 @@
 import { Database, Pencil, Plus, Trash2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -39,6 +40,7 @@ function protocolBadges(source: ModelSource) {
 }
 
 export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsProps) {
+  const { t } = useTranslation();
   const {
     modelSourcesQuery,
     createMutation,
@@ -77,8 +79,8 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
             <Database className="h-4 w-4 text-primary" aria-hidden="true" />
           </div>
           <div>
-            <h3 className="text-sm font-semibold">Model sources</h3>
-            <p className="text-xs text-muted-foreground">OpenAI-compatible endpoints for external models.</p>
+	            <h3 className="text-sm font-semibold">{t("modelSources.title")}</h3>
+	            <p className="text-xs text-muted-foreground">{t("modelSources.description")}</p>
           </div>
         </div>
         <Button
@@ -89,7 +91,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
           onClick={() => createDialog.show()}
         >
           <Plus className="h-3.5 w-3.5" />
-          Add source
+	          {t("modelSources.actions.addSource")}
         </Button>
       </div>
 
@@ -104,7 +106,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{source.name}</span>
                     <Badge variant={source.isEnabled ? "default" : "secondary"}>
-                      {source.isEnabled ? "Enabled" : "Disabled"}
+	                      {source.isEnabled ? t("common.states.enabled") : t("common.states.disabled")}
                     </Badge>
                     {protocolBadges(source).map((protocol) => (
                       <Badge key={protocol} variant="secondary">
@@ -126,7 +128,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Switch
-                    aria-label={`Toggle ${source.name}`}
+	                    aria-label={t("modelSources.actions.toggleAria", { name: source.name })}
                     checked={source.isEnabled}
                     disabled={busy}
                     onCheckedChange={(checked) =>
@@ -144,7 +146,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     onClick={() => editDialog.show(source)}
                   >
                     <Pencil className="size-4" />
-                    <span className="sr-only">Edit {source.name}</span>
+	                    <span className="sr-only">{t("modelSources.actions.editAria", { name: source.name })}</span>
                   </Button>
                   <Button
                     type="button"
@@ -154,7 +156,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     onClick={() => deleteDialog.show(source)}
                   >
                     <Trash2 className="size-4" />
-                    <span className="sr-only">Delete {source.name}</span>
+	                    <span className="sr-only">{t("modelSources.actions.deleteAria", { name: source.name })}</span>
                   </Button>
                 </div>
               </div>
@@ -162,7 +164,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
           ))
         ) : (
           <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-            No model sources configured.
+	            {t("modelSources.empty")}
           </div>
         )}
       </div>
@@ -184,9 +186,9 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
 
       <ConfirmDialog
         open={deleteDialog.open}
-        title="Delete model source"
-        description="Assigned API keys will stop using this source."
-        confirmLabel="Delete"
+	        title={t("modelSources.deleteDialog.title")}
+	        description={t("modelSources.deleteDialog.description")}
+	        confirmLabel={t("common.actions.delete")}
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {
           if (!deleteDialog.data) return;

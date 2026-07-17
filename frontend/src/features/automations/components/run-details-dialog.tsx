@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -96,13 +98,14 @@ export function RunDetailsDialog({
   accountDisplayIndex,
   accountBlurIndex,
 }: RunDetailsDialogProps) {
+  const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-hidden sm:max-w-5xl">
         <DialogHeader>
-          <DialogTitle>Run details</DialogTitle>
+          <DialogTitle>{t("automations.runs.detailsTitle")}</DialogTitle>
           <DialogDescription>
-            Inspect per-account execution state for this automation run cycle.
+            {t("automations.runs.detailsDescription")}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 space-y-4 overflow-y-auto">
@@ -122,24 +125,28 @@ export function RunDetailsDialog({
                     <div className="grid gap-3 sm:grid-cols-[minmax(0,1.25fr)_repeat(4,minmax(0,1fr))]">
                       <div className="rounded-md border bg-background/60 p-3">
                         <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Run status
+	                          {t("automations.runs.runStatus")}
                         </div>
                         <div className="mt-2">
                           <Badge variant={runStatusVariant(effectiveStatus)}>
-                            {formatRunStatusLabel(
-                              effectiveStatus,
-                              data.pendingAccounts,
-                            )}
+	                            {formatRunStatusLabel(
+	                              effectiveStatus,
+	                              data.pendingAccounts,
+	                              t,
+	                            )}
                           </Badge>
                         </div>
                         <div className="mt-2 text-xs text-muted-foreground">
-                          Completed {breakdown.completed} of {breakdown.total}
+	                          {t("automations.runs.completedOfTotal", {
+	                            completed: breakdown.completed,
+	                            total: breakdown.total,
+	                          })}
                         </div>
                       </div>
 
                       <div className="rounded-md border bg-background/40 p-3">
                         <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Total
+	                          {t("automations.runs.total")}
                         </div>
                         <div className="mt-1 text-2xl font-semibold tabular-nums">
                           {breakdown.total}
@@ -148,7 +155,7 @@ export function RunDetailsDialog({
 
                       <div className="rounded-md border bg-background/40 p-3">
                         <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Success
+	                          {t("automations.statuses.success")}
                         </div>
                         <div className="mt-1 text-2xl font-semibold tabular-nums">
                           {breakdown.success}
@@ -157,28 +164,28 @@ export function RunDetailsDialog({
 
                       <div className="rounded-md border bg-background/40 p-3">
                         <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Failed
+	                          {t("automations.statuses.failed")}
                         </div>
                         <div className="mt-1 text-2xl font-semibold tabular-nums">
                           {failedTotal}
                         </div>
                         {breakdown.partial > 0 ? (
                           <div className="text-xs text-muted-foreground">
-                            Includes {breakdown.partial} partial
+	                            {t("automations.runs.includesPartial", { count: breakdown.partial })}
                           </div>
                         ) : null}
                       </div>
 
                       <div className="rounded-md border bg-background/40 p-3">
                         <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Pending
+	                          {t("automations.statuses.pending")}
                         </div>
                         <div className="mt-1 text-2xl font-semibold tabular-nums">
                           {pendingTotal}
                         </div>
                         {breakdown.running > 0 ? (
                           <div className="text-xs text-muted-foreground">
-                            {breakdown.running} running
+	                            {t("automations.runs.runningCount", { count: breakdown.running })}
                           </div>
                         ) : null}
                       </div>
@@ -193,28 +200,28 @@ export function RunDetailsDialog({
                     <TableHeader>
                       <TableRow className="hover:bg-transparent [&>th]:sticky [&>th]:top-0 [&>th]:z-10 [&>th]:bg-card">
                         <TableHead className="w-52 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Account
+	                          {t("dashboard.requests.columns.account")}
                         </TableHead>
                         <TableHead className="w-28 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Status
+	                          {t("dashboard.requests.columns.status")}
                         </TableHead>
                         <TableHead
                           className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80"
-                          title="Cycle trigger time for this grouped run"
+	                          title={t("automations.runs.cycleStartTitle")}
                         >
-                          Cycle start
+	                          {t("automations.runs.columns.cycleStart")}
                         </TableHead>
                         <TableHead
                           className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80"
-                          title="Planned per-account dispatch time (threshold offset)"
+	                          title={t("automations.runs.dispatchAtTitle")}
                         >
-                          Dispatch at
+	                          {t("automations.runs.columns.dispatchAt")}
                         </TableHead>
                         <TableHead className="w-32 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Finished
+	                          {t("automations.runs.columns.finishedAtShort")}
                         </TableHead>
                         <TableHead className="w-56 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                          Error
+	                          {t("automations.runs.columns.error")}
                         </TableHead>
                       </TableRow>
                     </TableHeader>
@@ -277,9 +284,9 @@ export function RunDetailsDialog({
                             </TableCell>
                             <TableCell className="align-middle text-xs">
                               <Badge variant={accountStateBadgeVariant(state)}>
-                                {state === "pending"
-                                  ? "pending"
-                                  : formatRunStatusLabel(state)}
+	                                {state === "pending"
+	                                  ? t("automations.statuses.pending")
+	                                  : formatRunStatusLabel(state, null, t)}
                               </Badge>
                             </TableCell>
                             <TableCell className="align-middle text-xs">
@@ -344,7 +351,7 @@ export function RunDetailsDialog({
                                 </div>
                               ) : (
                                 <span className="text-muted-foreground">
-                                  No error
+	                                  {t("automations.runs.noError")}
                                 </span>
                               )}
                             </TableCell>
@@ -358,7 +365,7 @@ export function RunDetailsDialog({
             </>
           ) : (
             <p className="text-sm text-muted-foreground">
-              Run details unavailable.
+	              {t("automations.runs.detailsUnavailable")}
             </p>
           )}
         </div>
@@ -366,4 +373,3 @@ export function RunDetailsDialog({
     </Dialog>
   );
 }
-

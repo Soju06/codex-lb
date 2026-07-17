@@ -10,6 +10,8 @@ metadata:
   annotations:
     grafana_folder: {{ .Values.metrics.grafanaDashboard.folder | quote }}
 data:
-  codex-lb.json: |-
-    {{ .Files.Get "dashboards/codex-lb.json" | nindent 4 }}
+  {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |-
+    {{ $.Files.Get $path | nindent 4 }}
+  {{- end }}
 {{- end }}

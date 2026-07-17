@@ -55,6 +55,7 @@ class RequestLogEntry(DashboardModel):
     cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)
     latency_ms: int | None = None
     latency_first_token_ms: int | None = None
+    latency_queue_ms: int | None = None
 
 
 class RequestLogsResponse(DashboardModel):

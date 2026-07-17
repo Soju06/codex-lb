@@ -1706,7 +1706,7 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
     assert usage_repo.entries == []
     assert additional_repo.deleted_account_ids == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.status == AccountStatus.ACTIVE
     assert account.plan_type == "business"
     assert account.workspace_id == "ws_team"
@@ -1761,7 +1761,7 @@ async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> 
     assert account.workspace_label is None
     assert account.seat_type is None
     assert account.plan_type == original_plan_type
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
 
 
 @pytest.mark.asyncio
@@ -1840,7 +1840,7 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
     assert usage_repo.entries == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.workspace_id == "ws_team"
     assert account.plan_type == "business"
 
@@ -1883,7 +1883,7 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
     assert usage_repo.entries == []
     assert accounts_repo.status_updates == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.workspace_id == "ws_team"
     assert account.plan_type == "business"
 
@@ -2007,7 +2007,7 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
     await updater.refresh_accounts([account], latest_usage={})
 
     assert usage_repo.entries == []
-    assert accounts_repo.token_updates == []
+    assert accounts_repo.metadata_updates == []
     assert account.plan_type == "unknown"
     assert account.workspace_id is None
 
@@ -2015,11 +2015,14 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
 class StubAccountsRepository:
     def __init__(self) -> None:
         self.status_updates: list[dict[str, Any]] = []
-        self.token_updates: list[dict[str, Any]] = []
+        self.metadata_updates: list[dict[str, Any]] = []
         self.accounts_by_id: dict[str, Account] = {}
         self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
 
     async def get_by_id(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
     async def update_status(
@@ -2059,6 +2062,7 @@ class StubAccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self.accounts_by_id.get(account_id)
         if (
@@ -2071,16 +2075,34 @@ class StubAccountsRepository:
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)
 
-    async def update_tokens(self, *args: Any, **kwargs: Any) -> bool:
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        # The usage updater never rotates token material through its accounts
+        # repo (that path lives in AuthManager). Present only to satisfy the
+        # AccountsRepositoryPort protocol.
+        return True
+
+    async def update_account_metadata(self, *args: Any, **kwargs: Any) -> bool:
         account_id = args[0] if args else kwargs.get("account_id")
         if not isinstance(account_id, str):
             return True
         account = self.accounts_by_id.get(account_id)
         if account is not None:
-            account.access_token_encrypted = kwargs["access_token_encrypted"]
-            account.refresh_token_encrypted = kwargs["refresh_token_encrypted"]
-            account.id_token_encrypted = kwargs["id_token_encrypted"]
-            account.last_refresh = kwargs["last_refresh"]
             plan_type = kwargs.get("plan_type")
             email = kwargs.get("email")
             chatgpt_account_id = kwargs.get("chatgpt_account_id")
@@ -2099,7 +2121,7 @@ class StubAccountsRepository:
                 account.workspace_label = workspace_label
             if isinstance(seat_type, str):
                 account.seat_type = seat_type
-        self.token_updates.append({"account_id": account_id, **kwargs})
+        self.metadata_updates.append({"account_id": account_id, **kwargs})
         return True
 
     async def workspace_slot_taken(
@@ -2518,7 +2540,7 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
 
     assert usage_written is False
     assert acc.plan_type == "plus"
-    assert accounts_repo.token_updates[0]["plan_type"] == "plus"
+    assert accounts_repo.metadata_updates[0]["plan_type"] == "plus"
     assert usage_repo.entries == []
 
 

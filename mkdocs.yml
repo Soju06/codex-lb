@@ -1,0 +1,71 @@
+site_name: codex-lb
+site_description: Codex load balancer and proxy for ChatGPT accounts with usage dashboard
+site_url: https://soju06.github.io/codex-lb/
+repo_url: https://github.com/Soju06/codex-lb
+repo_name: Soju06/codex-lb
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+# Fail the --strict build on bad internal links / orphaned pages.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Client Setup: client-setup.md
+  - Configuration: configuration.md
+  - Authentication: authentication.md
+  - API Keys: api-keys.md
+  - Routing: routing.md
+  - Database: database.md
+  - Deployment:
+      - Docker: deployment/docker.md
+      - Kubernetes: deployment/kubernetes.md
+      - Remote Access: deployment/remote.md
+  - Reference:
+      - Settings: reference/settings.md
+  - Troubleshooting: troubleshooting.md

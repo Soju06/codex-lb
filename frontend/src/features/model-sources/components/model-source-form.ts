@@ -1,9 +1,19 @@
 import { z } from "zod";
+import type { TFunction } from "i18next";
 
 import type {
   ModelSource,
   ModelSourceModelInput,
 } from "@/features/model-sources/schemas";
+
+export function createModelSourceFormSchema(t: TFunction) {
+  return z.object({
+    name: z.string().min(1, t("modelSources.validation.nameRequired")),
+    baseUrl: z.string().min(1, t("modelSources.validation.baseUrlRequired")),
+    apiKey: z.string(),
+    models: z.string().min(1, t("modelSources.validation.modelsRequired")),
+  });
+}
 
 export const modelSourceFormSchema = z.object({
   name: z.string().min(1, "Name is required"),

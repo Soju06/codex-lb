@@ -20,6 +20,7 @@ from app.core.balancer import (
     handle_rate_limit,
     select_account,
 )
+from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.load_balancer import (
@@ -611,6 +612,110 @@ def test_select_account_round_robin_prefers_never_selected():
     result = select_account(states, now=now, routing_strategy="round_robin")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def _round_robin_tie_pool() -> list[AccountState]:
+    # Five accounts that are exactly tied on the round-robin primary keys:
+    # no planner cost and never-selected (last_selected_at is None -> 0.0). The
+    # only differentiator is the final tie-break.
+    return [AccountState(f"acct-{i}", AccountStatus.ACTIVE, used_percent=10.0) for i in range(1, 6)]
+
+
+def _round_robin_winner(salt: str, *, now: float) -> str:
+    result = select_account(_round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt=salt)
+    assert result.account is not None
+    return result.account.account_id
+
+
+def test_round_robin_distinct_salts_decorrelate_exact_tie():
+    now = 1_700_000_000.0
+
+    winner_a = select_account(
+        _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-a"
+    ).account
+    winner_b = select_account(
+        _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-b"
+    ).account
+
+    assert winner_a is not None and winner_b is not None
+    # Two replicas with distinct salts break the exact tie toward different
+    # accounts instead of both herding onto the lexicographically-first account.
+    assert winner_a.account_id != winner_b.account_id
+    # Pre-change the final tie-break was ``account_id`` alone, so every replica
+    # (any salt) selected "acct-1"; this asserts the second replica no longer
+    # herds onto that account.
+    assert winner_b.account_id == "acct-2"
+    assert {winner_a.account_id, winner_b.account_id} <= {f"acct-{i}" for i in range(1, 6)}
+
+
+def test_round_robin_many_salts_spread_across_pool():
+    now = 1_700_000_000.0
+    winners = {_round_robin_winner(f"replica-{i}", now=now) for i in range(12)}
+    # A herd (pre-change behavior) would collapse to a single account; the salt
+    # spreads exact-tie winners across multiple equally-good accounts.
+    assert len(winners) > 1
+
+
+def test_round_robin_salt_does_not_change_primary_ordering():
+    now = 1_700_000_000.0
+    for salt in ("replica-a", "replica-b", "replica-c"):
+        states = [
+            AccountState("a", AccountStatus.ACTIVE, used_percent=90.0, last_selected_at=now - 2),
+            AccountState("b", AccountStatus.ACTIVE, used_percent=10.0, last_selected_at=now - 30),
+            AccountState("c", AccountStatus.ACTIVE, used_percent=5.0, last_selected_at=now - 5),
+        ]
+        result = select_account(states, now=now, routing_strategy="round_robin", replica_salt=salt)
+        assert result.account is not None
+        # Least-recently-selected wins regardless of salt: primary ordering is
+        # untouched, only genuine ties are decorrelated.
+        assert result.account.account_id == "b"
+
+
+def test_round_robin_salt_respects_planner_cost_before_tie_break():
+    now = 1_700_000_000.0
+    states = _round_robin_tie_pool()
+    # Give one otherwise-tied account the lowest planner cost; it must win under
+    # any salt because planner cost precedes the decorrelated tie-break.
+    for salt in ("replica-a", "replica-b", "replica-z"):
+        result = select_account(
+            states,
+            now=now,
+            routing_strategy="round_robin",
+            replica_salt=salt,
+            routing_costs={"acct-4": RoutingCost(total=-1.0, reason="cheapest")},
+        )
+        assert result.account is not None
+        assert result.account.account_id == "acct-4"
+
+
+def test_round_robin_single_replica_deterministic():
+    now = 1_700_000_000.0
+    winners = {_round_robin_winner("replica-fixed", now=now) for _ in range(20)}
+    # A fixed salt is stable per call, so a single replica selects the same
+    # account every time (no random per-call jitter).
+    assert len(winners) == 1
+
+
+def test_round_robin_salt_precedence_explicit_over_configured():
+    from app.core.balancer import configure_replica_salt
+
+    now = 1_700_000_000.0
+    try:
+        configure_replica_salt("replica-a")
+        # No explicit salt -> configured process salt is used (== replica-a).
+        configured = select_account(_round_robin_tie_pool(), now=now, routing_strategy="round_robin").account
+        explicit_same = select_account(
+            _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-a"
+        ).account
+        # Explicit salt wins over the configured process salt.
+        explicit_other = select_account(
+            _round_robin_tie_pool(), now=now, routing_strategy="round_robin", replica_salt="replica-b"
+        ).account
+        assert configured is not None and explicit_same is not None and explicit_other is not None
+        assert configured.account_id == explicit_same.account_id == "acct-1"
+        assert explicit_other.account_id == "acct-2"
+    finally:
+        configure_replica_salt(None)
 
 
 def test_select_account_single_account_returns_selected_candidate():
@@ -3186,27 +3291,23 @@ def test_background_recovery_state_keeps_rate_limited_without_persisted_reset(mo
     assert state.blocked_at == pytest.approx(blocked)
 
 
-def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch):
+def test_state_from_account_drains_at_fixed_primary_threshold(monkeypatch):
+    """Drain thresholds are the fixed constants in ``app.core.balancer.logic``
+    (85% primary by default); ``_state_from_account`` applies them without any
+    settings plumbing.
+    """
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings",
-        lambda: SimpleNamespace(
-            soft_drain_enabled=True,
-            drain_primary_threshold_pct=75.0,
-            drain_secondary_threshold_pct=90.0,
-            drain_error_window_seconds=60.0,
-            drain_error_count_threshold=2,
-            probe_quiet_seconds=60.0,
-            probe_success_streak_required=3,
-        ),
+        lambda: SimpleNamespace(soft_drain_enabled=True),
     )
 
     account = _make_test_account(status=AccountStatus.ACTIVE)
     primary = _make_test_usage(
         window="primary",
-        used_percent=80.0,
+        used_percent=DRAIN_PRIMARY_THRESHOLD_PCT + 1.0,
         reset_at=int(now + 3600),
         recorded_at=_epoch_to_naive_utc(now - 10),
     )
@@ -3221,27 +3322,19 @@ def test_state_from_account_uses_configured_drain_primary_threshold(monkeypatch)
     assert state.health_tier == 1
 
 
-def test_state_from_account_uses_configured_probe_quiet_seconds(monkeypatch):
+def test_state_from_account_promotes_to_probing_after_fixed_quiet_window(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings",
-        lambda: SimpleNamespace(
-            soft_drain_enabled=True,
-            drain_primary_threshold_pct=85.0,
-            drain_secondary_threshold_pct=90.0,
-            drain_error_window_seconds=60.0,
-            drain_error_count_threshold=2,
-            probe_quiet_seconds=10.0,
-            probe_success_streak_required=3,
-        ),
+        lambda: SimpleNamespace(soft_drain_enabled=True),
     )
 
     account = _make_test_account(status=AccountStatus.ACTIVE)
     runtime = RuntimeState(
         health_tier=1,
-        drain_entered_at=now - 11.0,
+        drain_entered_at=now - (PROBE_QUIET_SECONDS + 1.0),
         probe_success_streak=0,
     )
     primary = _make_test_usage(

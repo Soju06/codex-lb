@@ -34,6 +34,11 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
+# Registry refresh cadence (fixed; issue #1340 / PRINCIPLES.md P2). The
+# scheduler keeps ``interval_seconds`` as a constructor field so tests can
+# exercise the loop with a short interval.
+_REFRESH_INTERVAL_SECONDS = 300
+
 
 _T = TypeVar("_T")
 
@@ -410,6 +415,6 @@ async def _refresh_http_client_after_transport_error(account: Account, transport
 def build_model_refresh_scheduler() -> ModelRefreshScheduler:
     settings = get_settings()
     return ModelRefreshScheduler(
-        interval_seconds=settings.model_registry_refresh_interval_seconds,
+        interval_seconds=_REFRESH_INTERVAL_SECONDS,
         enabled=settings.model_registry_enabled,
     )

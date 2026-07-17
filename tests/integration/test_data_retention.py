@@ -504,3 +504,83 @@ async def test_fold_start_covers_key_only_soft_deleted_history(db_setup):
         summary = await ApiKeysRepository(session).get_usage_summary_by_key_id("key_only")
     assert summary.request_count == 1
     assert summary.total_tokens == 150
+
+
+async def _set_dashboard_retention(*, request_logs: int | None = None, usage_history: int | None = None) -> None:
+    from app.core.config.settings_cache import get_settings_cache
+    from app.modules.settings.repository import SettingsRepository
+
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.request_log_retention_days = request_logs
+        row.usage_history_retention_days = usage_history
+        await session.commit()
+    await get_settings_cache().invalidate()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_retention_overrides_env_alias(async_client, db_setup, monkeypatch):
+    """A non-NULL dashboard value wins over the deprecated env alias."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_dash", "dash@example.com"))
+        await _add_log(logs_repo, account_id="acc_dash", request_id="req_40d", requested_at=now - timedelta(days=40))
+        await _add_log(logs_repo, account_id="acc_dash", request_id="req_1d", requested_at=now - timedelta(days=1))
+
+    await run_fold_pass(now=now)
+
+    # Env alias alone (90 days) would keep the 40-day-old row...
+    _set_retention(monkeypatch, request_logs=90)
+    deleted = await run_retention_pass(now=now)
+    assert deleted["request_logs"] == 0
+
+    # ...but a 30-day dashboard override prunes it without touching env.
+    await _set_dashboard_retention(request_logs=30)
+    deleted = await run_retention_pass(now=now)
+    assert deleted["request_logs"] == 1
+    async with SessionLocal() as session:
+        remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
+    assert sorted(remaining) == ["req_1d"]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_zero_disables_retention_despite_env_alias(db_setup, monkeypatch):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_zero", "zero@example.com"))
+        session.add(UsageHistory(account_id="acc_zero", used_percent=10.0, recorded_at=now - timedelta(days=400)))
+        session.add(UsageHistory(account_id="acc_zero", used_percent=20.0, recorded_at=now - timedelta(days=390)))
+        await session.commit()
+
+    _set_retention(monkeypatch, usage_history=45)
+    await _set_dashboard_retention(usage_history=0)
+
+    deleted = await run_retention_pass(now=now)
+    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    async with SessionLocal() as session:
+        assert len((await session.execute(select(UsageHistory.id))).scalars().all()) == 2
+
+
+@pytest.mark.asyncio
+async def test_env_alias_applies_while_dashboard_value_unset(db_setup, monkeypatch):
+    """NULL dashboard values inherit the deprecated env alias unchanged."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_env", "env@example.com"))
+        session.add(UsageHistory(account_id="acc_env", used_percent=10.0, recorded_at=now - timedelta(days=400)))
+        session.add(UsageHistory(account_id="acc_env", used_percent=20.0, recorded_at=now - timedelta(days=1)))
+        await session.commit()
+
+    # Force row creation so the dashboard columns exist and stay NULL.
+    await _set_dashboard_retention(request_logs=None, usage_history=None)
+
+    _set_retention(monkeypatch, usage_history=45)
+    deleted = await run_retention_pass(now=now)
+    assert deleted["usage_history"] == 1
+    async with SessionLocal() as session:
+        remaining = (await session.execute(select(UsageHistory.used_percent))).scalars().all()
+    assert remaining == [20.0]

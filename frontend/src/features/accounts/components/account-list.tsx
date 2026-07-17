@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,6 +47,7 @@ export function AccountList({
   onSortModeChange,
   readOnly = false,
 }: AccountListProps) {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -78,7 +80,7 @@ export function AccountList({
         <div className="relative min-w-0 sm:col-span-2">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
           <Input
-            placeholder="Search accounts..."
+            placeholder={t("accounts.list.searchPlaceholder")}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             className="h-8 pl-8"
@@ -88,14 +90,14 @@ export function AccountList({
           <SelectTrigger
             size="sm"
             className="w-full min-w-0"
-            aria-label="Filter accounts by status"
+            aria-label={t("accounts.list.statusFilterAria")}
           >
-            <SelectValue placeholder="Status" />
+            <SelectValue placeholder={t("accounts.list.statusPlaceholder")} />
           </SelectTrigger>
           <SelectContent>
             {STATUS_FILTER_OPTIONS.map((option) => (
               <SelectItem key={option} value={option}>
-                {option === "all" ? "All statuses" : formatSlug(option)}
+                {option === "all" ? t("accounts.list.allStatuses") : t(`accounts.statusFilters.${option}`, { defaultValue: formatSlug(option) })}
               </SelectItem>
             ))}
           </SelectContent>
@@ -107,14 +109,14 @@ export function AccountList({
           <SelectTrigger
             size="sm"
             className="w-full min-w-0"
-            aria-label="Sort accounts"
+            aria-label={t("accounts.list.sortAria")}
           >
-            <SelectValue placeholder="Sort accounts" />
+            <SelectValue placeholder={t("accounts.list.sortPlaceholder")} />
           </SelectTrigger>
           <SelectContent>
             {ACCOUNT_SORT_OPTIONS.map((option) => (
               <SelectItem key={option.value} value={option.value}>
-                {option.label}
+                {t(`accounts.sort.${option.value}`, { defaultValue: option.label })}
               </SelectItem>
             ))}
           </SelectContent>
@@ -129,7 +131,7 @@ export function AccountList({
           className="h-auto px-0 text-xs"
           onClick={() => setHelpOpen((current) => !current)}
         >
-          Need help?
+          {t("accounts.list.needHelp")}
           {helpOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
         </Button>
         <Button
@@ -140,7 +142,7 @@ export function AccountList({
           onClick={() => setChooserOpen(true)}
         >
           <Plus className="h-3.5 w-3.5" />
-          Add account
+          {t("accounts.list.addAccount")}
         </Button>
       </div>
 
@@ -152,8 +154,8 @@ export function AccountList({
       >
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center">
-            <p className="text-sm font-medium text-muted-foreground">No matching accounts</p>
-            <p className="text-xs text-muted-foreground/70">Try adjusting your filters.</p>
+            <p className="text-sm font-medium text-muted-foreground">{t("accounts.list.noMatches")}</p>
+            <p className="text-xs text-muted-foreground/70">{t("accounts.list.adjustFilters")}</p>
           </div>
         ) : (
           filtered.map((account) => (

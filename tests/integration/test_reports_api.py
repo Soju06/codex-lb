@@ -84,6 +84,7 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "outputTokens": 5,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
     assert payload["byAccount"] == [
@@ -171,6 +172,7 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "outputTokens": 7,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
     assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
@@ -312,6 +314,7 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
             "outputTokens": 2,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
 
@@ -560,6 +563,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
         {
             "activeAccounts": 1,
@@ -572,6 +576,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
     ]
 
@@ -659,6 +664,7 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
             "outputTokens": 2,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         }
     ]
 
@@ -1428,6 +1434,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
         {
             "activeAccounts": 1,
@@ -1440,6 +1447,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
         {
             "activeAccounts": 1,
@@ -1452,5 +1460,6 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "medianQueueMs": 0.0,
         },
     ]

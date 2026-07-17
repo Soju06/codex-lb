@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
+import socket
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 
 import app.core.auth.refresh as refresh_module
 import app.core.clients.model_fetcher as model_fetcher_module
@@ -113,9 +116,6 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
         refresh_module,
         "get_settings",
         lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
             token_refresh_timeout_seconds=15.0,
         ),
     )
@@ -128,6 +128,100 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
     assert exc.is_permanent is False
     assert exc.transport_error is True
     assert "dns failed" in exc.message
+
+
+@pytest.mark.asyncio
+async def test_refresh_access_token_preserves_transient_dns_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = MagicMock()
+    session.post.side_effect = socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+    monkeypatch.setattr(
+        refresh_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auth_base_url="https://auth.example.test",
+            oauth_client_id="client-id",
+            oauth_scope="openid profile",
+            token_refresh_timeout_seconds=15.0,
+        ),
+    )
+
+    with pytest.raises(refresh_module.RefreshError) as exc_info:
+        await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
+
+    assert exc_info.value.transport_error is True
+    assert exc_info.value.transport_error_code == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failed_session is session
+
+
+@pytest.mark.asyncio
+async def test_refresh_access_token_marks_typed_connector_dns_failure_replay_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = MagicMock()
+    key = ConnectionKey("auth.example.test", 443, True, True, None, None, None)
+    session.post.side_effect = aiohttp.ClientConnectorError(
+        key,
+        socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
+    )
+    monkeypatch.setattr(
+        refresh_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auth_base_url="https://auth.example.test",
+            oauth_client_id="client-id",
+            oauth_scope="openid profile",
+            token_refresh_timeout_seconds=15.0,
+        ),
+    )
+
+    with pytest.raises(refresh_module.RefreshError) as exc_info:
+        await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
+
+    assert exc_info.value.transport_error_code == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failed_session is session
+
+
+@pytest.mark.asyncio
+async def test_refresh_access_token_network_body_read_failure_is_not_replay_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BodyReadFailureResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def json(self, *, content_type=None):
+            del content_type
+            raise ValueError("invalid partial JSON")
+
+        async def text(self):
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    session = MagicMock()
+    session.post.return_value = _BodyReadFailureResponse()
+    monkeypatch.setattr(
+        refresh_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auth_base_url="https://auth.example.test",
+            oauth_client_id="client-id",
+            oauth_scope="openid profile",
+            token_refresh_timeout_seconds=15.0,
+        ),
+    )
+
+    with pytest.raises(refresh_module.RefreshError) as exc_info:
+        await refresh_module.refresh_access_token("refresh-token", session=session, allow_direct_egress=True)
+
+    assert exc_info.value.transport_error_code == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failed_session is session
 
 
 @pytest.mark.asyncio

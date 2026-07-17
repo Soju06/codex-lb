@@ -153,6 +153,21 @@ When the service retires an HTTP bridge session because pending precreated repla
 - **THEN** the console log includes a HTTP bridge event with `event=retire_stale_pending`
 - **AND** the event includes only hashed bridge identity and low-cardinality metadata
 
+### Requirement: Process-wide network recovery is observable without sensitive resolver data
+
+The service MUST emit low-cardinality structured diagnostics when it detects a process-wide DNS or route failure, rotates shared transport state, retries a safe request, recovers, or exhausts the request budget. Diagnostics MUST NOT contain DNS server addresses, request payloads, API keys, access tokens, raw continuity keys, or account email addresses.
+
+#### Scenario: Recovery diagnostics are emitted
+
+- **WHEN** a safe Responses request enters and later exits process-wide network recovery
+- **THEN** logs identify the recovery stage, request id, transport, attempt count, and internal account id when known
+- **AND** logs do not expose resolver configuration or request content
+
+#### Scenario: Concurrent rotation is coalesced visibly
+
+- **WHEN** several callers report a network failure from the same shared client generation
+- **THEN** diagnostics distinguish the caller that rotated the client from callers that reused the already-rotated replacement
+
 ### Requirement: Request-log metadata keeps local routing failures unbound from upstream status
 
 When request routing fails before contacting upstream, `upstream_status_code` MUST be
@@ -272,20 +287,46 @@ The proxy MUST persist nullable low-cardinality request-log fields for TTFT phas
 - **THEN** the request log can record first upstream event latency separately from first downstream token latency
 
 ### Requirement: Codex prewarm canary outcomes are observable
-The proxy MUST record visible-request prewarm status, latency, canary bucket, and eligibility cohort using stable strings, and MUST emit a prewarm outcome counter labelled only by outcome, cohort, and bucket.
 
-#### Scenario: Canary miss is visible without raw identifiers
-- **WHEN** Codex prewarm is enabled but deterministic canary sampling excludes an otherwise eligible request
-- **THEN** the visible request log records `prewarm_status=canary_miss`
-- **AND** metrics increment the prewarm counter for the stable cohort and bucket
-- **AND** logs and metrics do not include raw API keys, raw session ids, prompt text, or affinity key values
+The proxy MUST record visible-request prewarm status and latency using
+stable strings, and MUST emit a prewarm outcome counter labelled only by
+outcome. Prewarm eligibility is the prewarm enabled flag alone: no
+deterministic canary sampling or allow/deny cohort exists, so no canary
+bucket or eligibility cohort dimension is recorded and the
+`prewarm_status=canary_miss` value MUST NOT occur.
+
+#### Scenario: Prewarm outcome is visible without raw identifiers
+
+- **WHEN** Codex prewarm is enabled and a visible request triggers or skips
+  a session prewarm
+- **THEN** the visible request log records `prewarm_status` (and prewarm
+  latency when a prewarm was attempted)
+- **AND** metrics increment the outcome-labelled prewarm counter
+- **AND** logs and metrics do not include raw API keys, raw session ids,
+  prompt text, or affinity key values
+
+#### Scenario: Canary sampling no longer excludes eligible requests
+
+- **WHEN** Codex prewarm is enabled
+- **THEN** no request is excluded by deterministic canary sampling
+- **AND** `prewarm_status=canary_miss` is never recorded
+- **AND** the prewarm counter and request log carry no canary bucket or
+  eligibility cohort dimension (the legacy request-log columns remain
+  unwritten for one release for rolling-upgrade safety, then are dropped)
 
 ### Requirement: 24-hour TTFT breakdown queries are available
-Operators MUST have an OpenSpec context runbook or dashboard artifact with 24-hour TTFT breakdown queries by user agent group, upstream transport, model/cache ratio, session gap cohort, prompt size cohort, and prewarm bucket/outcome/cohort.
+
+Operators MUST have an OpenSpec context runbook or dashboard artifact with
+24-hour TTFT breakdown queries by user agent group, upstream transport,
+model/cache ratio, session gap cohort, prompt size cohort, and prewarm
+status/outcome.
 
 #### Scenario: Operator investigates TTFT regression
-- **WHEN** an operator needs to inspect the last 24 hours of request-log latency
-- **THEN** the repository provides SQL that reports p50, p90, p95 TTFT and total latency for the requested breakdowns
+
+- **WHEN** an operator needs to inspect the last 24 hours of request-log
+  latency
+- **THEN** the repository provides SQL that reports p50, p90, p95 TTFT and
+  total latency for the requested breakdowns
 
 ### Requirement: Dashboard request logs show generation speed
 
@@ -306,7 +347,7 @@ The dashboard request-log table MUST show time to first token and output-token g
 
 ### Requirement: Reports show daily median generation speed trends
 
-The Reports dashboard MUST expose daily median TTFT and daily median TPS trends when request-log latency fields are available. Empty days and rows with no valid timing/speed inputs MUST render as zero in those trend charts. Daily TPS MUST median per-request output-token TPS after TTFT rather than use input tokens or include TTFT wait time.
+The Reports dashboard MUST expose daily median TTFT, daily median TPS, and daily median queue-wait trends when request-log latency fields are available. Empty days and rows with no valid timing/speed inputs MUST render as zero in those trend charts. Daily TPS MUST median per-request output-token TPS after TTFT rather than use input tokens or include TTFT wait time. Daily queue wait MUST median per-request `latency_queue_ms` over rows where it is non-null.
 
 #### Scenario: Daily speed charts use median valid request values
 
@@ -320,6 +361,13 @@ The Reports dashboard MUST expose daily median TTFT and daily median TPS trends 
 - **GIVEN** a selected report range includes a day with no request logs or no valid timing data
 - **WHEN** the dashboard renders Reports
 - **THEN** the TTFT and TPS charts include that day with value zero
+
+#### Scenario: Daily queue-wait trend surfaces load-balancer wait
+
+- **GIVEN** a report day has request logs with non-null `latency_queue_ms`
+- **WHEN** the dashboard renders Reports
+- **THEN** it shows a queue-wait trend using the day's median `latency_queue_ms`
+- **AND** days without queue samples render as zero
 
 ### Requirement: Websocket responses capture request-log latency timings
 
@@ -392,4 +440,54 @@ Request-log rows MUST be persisted by tracked background tasks that the response
 
 - **WHEN** the service shuts down gracefully with log writes in flight
 - **THEN** shutdown waits for them up to the configured drain timeout and reports tasks that failed to drain
+
+### Requirement: Request speed timings share one anchor and expose queue wait
+
+For a single request-log row, `latency_ms` and `latency_first_token_ms` MUST be
+measured from the same anchor: the start of the attempt that produced the row.
+Time spent before that attempt — account selection, admission waits, and failed
+failover attempts — MUST NOT inflate `latency_first_token_ms`; the HTTP
+streaming path MUST record it instead in a nullable `latency_queue_ms`
+request-log column. First-token detection MUST treat the first output delta of
+any kind — visible text, refusal, or reasoning deltas — as the first token, so
+TTFT means time to first model output and the generation window
+(`latency_ms - latency_first_token_ms`) covers reasoning generation, matching
+the reasoning-inclusive `output_tokens` numerator used for TPS.
+
+#### Scenario: Failover no longer inflates TTFT
+
+- **GIVEN** a streaming request fails over from one account and succeeds on the
+  next attempt
+- **WHEN** the request log is persisted
+- **THEN** `latency_first_token_ms` reflects only the successful attempt
+- **AND** `latency_queue_ms` records the pre-attempt time (selection plus the
+  failed attempt)
+- **AND** `latency_ms` is greater than or equal to `latency_first_token_ms`
+
+#### Scenario: Reasoning delta counts as the first token
+
+- **GIVEN** an upstream stream emits a reasoning summary delta before the first
+  visible text delta
+- **WHEN** first-token latency is captured
+- **THEN** `latency_first_token_ms` anchors to the reasoning delta rather than
+  waiting for visible text
+
+#### Scenario: Single-anchor rows on websocket and bridge paths
+
+- **WHEN** a websocket or HTTP bridge request records latency timings
+- **THEN** `latency_ms` and `latency_first_token_ms` derive from the same
+  request-state anchor
+- **AND** `latency_queue_ms` MAY be null on paths whose queue waits are already
+  recorded in dedicated phase columns
+
+### Requirement: Cap partition replica count is observable
+
+The service MUST expose a Prometheus gauge named `codex_lb_cap_partition_replicas` whose value equals the live replica count currently used for account cap partitioning, and it MUST log adopted partition rebalances at info level with the old count, the new count, and this replica's rank. The gauge and log MUST NOT include account ids, instance secrets, or request payload content.
+
+#### Scenario: Partition rebalance updates the gauge
+
+- **GIVEN** a replica whose adopted partition has replica count 1
+- **WHEN** a partition refresh observes and adopts two active members
+- **THEN** `codex_lb_cap_partition_replicas` reports 2
+- **AND** an info-level log records the rebalance from count 1 to count 2 with the replica's rank
 

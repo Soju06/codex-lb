@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.core.config.settings import get_settings
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
 from app.core.utils.request_id import ensure_request_id
@@ -31,8 +30,9 @@ class _RequestLogFilters:
 # whole filtered set on PostgreSQL; the dashboard re-runs it on every 30s
 # poll and every pagination click even though the displayed total is
 # tolerant of short staleness. Cache it per filter signature for a small
-# TTL (configurable; 0 disables, which the test suite uses so totals stay
-# exact within a test).
+# fixed TTL (issue #1340 / PRINCIPLES.md P2; the test suite patches the
+# TTL to 0 so totals stay exact within a test).
+_COUNT_CACHE_TTL_SECONDS = 30.0
 _COUNT_CACHE_MAX_ENTRIES = 256
 _recent_count_cache: dict[tuple, tuple[int, float]] = {}
 
@@ -340,14 +340,13 @@ class RequestLogsRepository:
         status: str,
         error_code: str | None,
         latency_first_token_ms: int | None = None,
+        latency_queue_ms: int | None = None,
         latency_response_created_ms: int | None = None,
         latency_first_upstream_event_ms: int | None = None,
         latency_response_create_gate_wait_ms: int | None = None,
         latency_bridge_queue_wait_ms: int | None = None,
         prewarm_status: str | None = None,
         prewarm_latency_ms: int | None = None,
-        prewarm_canary_bucket: str | None = None,
-        prewarm_eligible_reason: str | None = None,
         session_previous_gap_ms: int | None = None,
         error_message: str | None = None,
         requested_at: datetime | None = None,
@@ -422,14 +421,13 @@ class RequestLogsRepository:
                 reasoning_effort=reasoning_effort,
                 latency_ms=latency_ms,
                 latency_first_token_ms=latency_first_token_ms,
+                latency_queue_ms=latency_queue_ms,
                 latency_response_created_ms=latency_response_created_ms,
                 latency_first_upstream_event_ms=latency_first_upstream_event_ms,
                 latency_response_create_gate_wait_ms=latency_response_create_gate_wait_ms,
                 latency_bridge_queue_wait_ms=latency_bridge_queue_wait_ms,
                 prewarm_status=prewarm_status,
                 prewarm_latency_ms=prewarm_latency_ms,
-                prewarm_canary_bucket=prewarm_canary_bucket,
-                prewarm_eligible_reason=prewarm_eligible_reason,
                 session_previous_gap_ms=session_previous_gap_ms,
                 status=status,
                 error_code=error_code,
@@ -546,7 +544,7 @@ class RequestLogsRepository:
         result = await self._session.execute(stmt)
         logs = list(result.scalars().all())
 
-        ttl_seconds = get_settings().request_log_count_cache_ttl_seconds
+        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
             return logs, await self._count_recent(filters)
         cache_key = (

@@ -252,6 +252,68 @@ async def test_backend_transcribe_repeated_401_after_refresh_fails_over(async_cl
 
 
 @pytest.mark.asyncio
+async def test_backend_transcribe_post_401_forced_refresh_claim_timeout_reports_upstream_unavailable(
+    async_client, monkeypatch
+):
+    """Regression (P2 forced-refresh surfaces): when the transcription post-401
+    forced refresh on the failover account hits a transient cross-replica
+    refresh-CLAIM-CONTENTION timeout, the surface routes through
+    ``_ensure_fresh_with_budget_or_auth_error``, which MUST surface a retryable
+    ``upstream_unavailable`` (502) rather than a bogus 401 ``invalid_api_key``."""
+    await _import_account(async_client, "acc_transcribe_claim_a", "transcribe-claim-a@example.com")
+    await _import_account(async_client, "acc_transcribe_claim_b", "transcribe-claim-b@example.com")
+    invalidated_account_id: str | None = None
+
+    async def fake_transcribe(
+        audio_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers,
+        access_token: str,
+        account_id: str | None,
+        base_url=None,
+        session=None,
+    ):
+        del audio_bytes, filename, content_type, prompt, headers, access_token, base_url, session
+        nonlocal invalidated_account_id
+        if invalidated_account_id is None:
+            invalidated_account_id = account_id
+        # The initial account keeps returning 401 so the surface fails over to
+        # the second account and forces a refresh on it.
+        raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token invalidated"))
+
+    first_fresh_account: dict[str, str | None] = {"id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_fresh_account["id"] is None:
+            first_fresh_account["id"] = account.id
+        if account.id != first_fresh_account["id"]:
+            # The failover account's post-401 forced refresh loses to a peer
+            # replica holding its refresh claim.
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    response = await async_client.post(
+        "/backend-api/transcribe",
+        files={"file": ("sample.wav", b"\x03\x04", "audio/wav")},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_backend_transcribe_initial_refresh_failure_returns_handled_error(async_client, monkeypatch):
     await _import_account(async_client, "acc_transcribe_refresh_fail", "refresh-fail-transcribe@example.com")
     transcribe_calls = 0

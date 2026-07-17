@@ -9,12 +9,15 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn, Protocol
 
 import anyio
 
+from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
+from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.errors import openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
 from app.core.plan_types import account_plan_matches_allowed
@@ -40,6 +43,7 @@ _TTFT_EVENT_TYPES = frozenset(
     {
         "response.output_text.delta",
         "response.refusal.delta",
+        "response.reasoning_text.delta",
     }
 )
 _TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
@@ -65,6 +69,7 @@ _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
     default=None,
@@ -375,6 +380,148 @@ class _WebSocketConnectFailureEmitted(Exception):
     pass
 
 
+class _WebSocketTransientRefreshFailover(Exception):
+    """Signals the WebSocket connect loop to fail over after a transient refresh.
+
+    Raised from the connect attempt when a non-permanent, transport-level
+    ``RefreshError`` (for example ``refresh_claim_timeout`` when another replica
+    holds the account's refresh claim) reaches the connect path and the request
+    is not bound to a preferred/required account. The loop releases the skipped
+    account's stream lease, excludes it, and reselects a healthy account instead
+    of surfacing a bogus 401 ``invalid_api_key``.
+    """
+
+    def __init__(self, account_id: str) -> None:
+        super().__init__(account_id)
+        self.account_id = account_id
+
+
+# ---- Refresh-claim contention failover helpers -----------------------------
+#
+# A transient cross-replica refresh contention (``is_transient_refresh_contention``:
+# ONLY the benign ``refresh_claim_timeout`` claim-contention code and the
+# post-exchange ``token_persist_conflict`` / ``status_downgrade_conflict`` CAS
+# codes, NOT the broad ``transport_error`` flag) means the account's credentials
+# are healthy and only its refresh claim/persist lost to a peer replica. These
+# helpers let the proxy previsible-unary failover surface a retryable
+# ``upstream_unavailable`` WITHOUT recording an account-health penalty, while a
+# genuine OAuth transport failure keeps its normal health accounting.
+
+_FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
+_CLAIM_CONTENTION_UNPENALIZED_ATTR = "_codex_lb_claim_contention_unpenalized"
+
+
+class _RefreshFailoverProxy(Protocol):
+    async def _handle_stream_error(
+        self, account: Account, error: Any, code: str, http_status: int | None = None
+    ) -> Any: ...
+
+
+def is_claim_contention_unpenalized(exc: object) -> bool:
+    """True when ``exc`` is a retryable ``upstream_unavailable`` from claim contention.
+
+    The account is healthy (a peer replica held its refresh claim), so callers
+    MUST NOT record an account-health penalty for it.
+    """
+    return bool(getattr(exc, _CLAIM_CONTENTION_UNPENALIZED_ATTR, False))
+
+
+def raise_proxy_unavailable_for_claim_contention(message: str, account: Account) -> NoReturn:
+    """Raise a retryable ``upstream_unavailable`` marked as (unpenalized) claim contention."""
+    exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+    setattr(exc, _FAILED_ACCOUNT_ATTR, account)
+    setattr(exc, _CLAIM_CONTENTION_UNPENALIZED_ATTR, True)
+    raise exc
+
+
+def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoReturn:
+    exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+    setattr(exc, _FAILED_ACCOUNT_ATTR, account)
+    raise exc
+
+
+async def failover_after_previsible_refresh_error(
+    proxy: _RefreshFailoverProxy,
+    exc: Exception,
+    current: Account,
+    *,
+    attempt: int,
+    max_account_attempts: int,
+    strict_account_id: str | None,
+    excluded_account_ids: set[str],
+    select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+    request_id: str,
+    kind: str,
+) -> Account:
+    """Pick the next account after a previsible-unary freshness/connect failure.
+
+    Consolidates the transient ``RefreshError`` claim-contention and transport
+    paths plus raw aiohttp/connect errors into one decision:
+
+    * Transient refresh contention (``is_transient_refresh_contention``) is ALWAYS
+      retryable and NEVER penalizes the skipped account (its credentials are
+      healthy; only its refresh claim/persist lost to a peer). This covers BOTH
+      benign claim contention and a post-exchange persist/status CAS conflict; the
+      latter is logged distinctly (a rarer, more-serious internal race). On
+      strict-pin / attempt exhaustion or an empty selection it raises a
+      claim-contention-marked ``upstream_unavailable`` that the caller's terminal
+      ``_handle_proxy_error`` skips penalizing.
+    * A genuine OAuth ``transport_error`` refresh failure or a raw aiohttp/connect
+      failure keeps its health accounting: failover is gated on the message text
+      and the skipped account is penalized via ``_handle_stream_error`` so a
+      persistently broken account backs off.
+
+    Returns the next account to try; raises otherwise.
+    """
+    from app.modules.proxy._service.streaming.helpers import _should_retry_transient_stream_error
+
+    claim = isinstance(exc, RefreshError) and is_transient_refresh_contention(exc)
+    contention_kind = refresh_contention_kind(exc) if isinstance(exc, RefreshError) else None
+    message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
+    if contention_kind == "persist_conflict":
+        # Post-exchange guarded-write CAS conflict: rarer/more-serious than benign
+        # claim contention, so surface it distinctly (it still fails over with no
+        # penalty, identically to benign contention).
+        logger.warning(
+            "%s refresh post-exchange persist conflict code=%s request_id=%s account_id=%s",
+            kind,
+            getattr(exc, "code", None),
+            request_id,
+            current.id,
+            exc_info=True,
+        )
+    else:
+        logger.warning(
+            "%s refresh %s request_id=%s account_id=%s",
+            kind,
+            "claim contention" if claim else "failed",
+            request_id,
+            current.id,
+            exc_info=True,
+        )
+    if not claim and not _should_retry_transient_stream_error("upstream_unavailable", message):
+        _raise_proxy_unavailable_for_account(message, current)
+
+    def _give_up() -> NoReturn:
+        if claim:
+            raise_proxy_unavailable_for_claim_contention(message, current)
+        _raise_proxy_unavailable_for_account(message, current)
+
+    if (strict_account_id is not None and current.id == strict_account_id) or attempt >= max_account_attempts:
+        _give_up()
+    excluded_account_ids.add(current.id)
+    selection = await select_next_account(excluded_account_ids)
+    selected_account = selection.account
+    if selected_account is None:
+        _give_up()
+    assert selected_account is not None
+    if not claim:
+        # Genuine transport / connect failure: penalize the skipped account so a
+        # persistently broken account backs off. Claim contention never penalizes.
+        await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
+    return selected_account
+
+
 class _TransientStreamError(Exception):
     """Transient upstream error (e.g. 500 server_error) - retry on same account first."""
 
@@ -480,8 +627,6 @@ class _WebSocketRequestState:
     bridge_request_deadline: float | None = None
     prewarm_status: str | None = None
     prewarm_latency_ms: int | None = None
-    prewarm_canary_bucket: str | None = None
-    prewarm_eligible_reason: str | None = None
     session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
     archive_request_id: str | None = None
@@ -494,6 +639,7 @@ class _WebSocketRequestState:
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
     request_kind: str = "normal"
+    generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -502,6 +648,12 @@ class _WebSocketRequestState:
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
+    # A narrowly classified pre-acceptance account/model rejection may move
+    # once to another account. Keep the original upstream error until that
+    # replacement connection is established so an empty replacement pool does
+    # not turn the upstream 400 into a proxy-generated 5xx/no-accounts error.
+    precreated_replay_reason: str | None = None
+    precreated_replay_account_id: str | None = None
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
@@ -747,6 +899,14 @@ def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestSta
     request_state.error_http_status_override = None
 
 
+def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequestState) -> None:
+    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        return
+    request_state.precreated_replay_reason = None
+    request_state.precreated_replay_account_id = None
+    _clear_websocket_request_error_overrides(request_state)
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
@@ -760,7 +920,15 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         return False
     if request_state.replay_count >= 1:
         return False
-    if request_state.last_downstream_sequence_number is not None:
+    sequenced_created_only_prewarm = (
+        request_state.generate_false_prewarm
+        and request_state.last_downstream_sequence_number == 0
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.response_event_count == 1
+        and not request_state.downstream_visible
+    )
+    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:
         return False

@@ -22,7 +22,7 @@ When the Helm chart deploys with `postgresql.enabled=false`, it MUST provide a n
 
 ### Requirement: PostgreSQL engines validate and recycle pooled connections
 
-When `database_url` resolves to a PostgreSQL backend, the application MUST configure each async engine — both the request-path `engine` and the optional background-task `_background_engine` — with `pool_pre_ping=True` and a finite `pool_recycle` window. This is required so the application detects connections that the PostgreSQL server has silently closed (idle timeout, restart, network reset) before the first real query is dispatched on them, and so connections are cycled before they reach any reasonable upstream keep-alive boundary.
+When `database_url` resolves to a PostgreSQL backend, the application MUST configure each async engine — both the request-path `engine` and the optional background-task `_background_engine` — with `pool_pre_ping=True` and a finite `pool_recycle` window. This is required so the application detects connections that the PostgreSQL server has silently closed (idle timeout, restart, network reset) before the first real query is dispatched on them, and so connections are cycled before they reach any reasonable upstream keep-alive boundary. The recycle window is the fixed 1800-second application constant in `app/db/session.py`.
 
 #### Scenario: Stale connections are rejected before checkout
 
@@ -33,10 +33,9 @@ When `database_url` resolves to a PostgreSQL backend, the application MUST confi
 
 #### Scenario: Pool recycle bounds connection age
 
-- **WHEN** a pooled connection has been open longer than `database_pool_recycle_seconds`
+- **WHEN** a pooled connection has been open longer than the fixed 1800-second recycle window
 - **AND** that connection is the next one a session tries to use
 - **THEN** SQLAlchemy discards and replaces the connection before the next query
-- **AND** the default `database_pool_recycle_seconds` is `1800` seconds
 
 #### Scenario: SQLite backends are not affected
 
@@ -45,18 +44,18 @@ When `database_url` resolves to a PostgreSQL backend, the application MUST confi
 - **AND** existing SQLite-specific tuning (PRAGMAs, `busy_timeout`) is unchanged
 
 ### Requirement: Database pool controls cover request-adjacent background sessions
-The service SHALL expose database pool settings for both the main request pool
-and the background/request-adjacent session pool. The background pool SHALL
-default to the main pool size and overflow settings, and operators MAY override
-the background pool size and overflow separately.
+
+The service SHALL size both the main request pool and the
+background/request-adjacent session pool from `database_pool_size` and
+`database_max_overflow`. The background pool SHALL always derive from those
+two settings; it exists to isolate background-task checkouts from the
+request pool, not to be sized independently.
 
 #### Scenario: Background pool inherits main pool capacity
-- **WHEN** `database_background_pool_size` and `database_background_max_overflow` are unset
-- **THEN** the background/request-adjacent DB pool uses `database_pool_size` and `database_max_overflow`
 
-#### Scenario: Background pool has explicit lower capacity
-- **WHEN** `database_background_pool_size` and `database_background_max_overflow` are configured
-- **THEN** the background/request-adjacent DB pool uses those explicit values
+- **WHEN** the application creates the background/request-adjacent DB engine for a pooled backend
+- **THEN** the background pool uses `database_pool_size` and `database_max_overflow`
+- **AND** no separate background pool sizing setting exists
 
 ### Requirement: Detached background tasks own their database session lifetime
 
@@ -99,7 +98,7 @@ sessions only for required database writes.
 - **GIVEN** repeated client disconnects during token refreshes over an extended period
 - **WHEN** each disconnect-during-refresh occurs
 - **THEN** each refresh task releases its connection back to the background pool
-- **AND** the background engine pool (`database_background_pool_size` + `database_background_max_overflow`) is not driven to exhaustion by stranded refresh connections
+- **AND** the background engine pool (sized from `database_pool_size` + `database_max_overflow`) is not driven to exhaustion by stranded refresh connections
 - **AND** `/backend-api/codex/*` requests do not begin returning `500` from `QueuePool limit ... connection timed out` as a result of this path
 
 #### Scenario: Usage refresh fetch runs after the read session closes
@@ -159,10 +158,9 @@ File-backed SQLite main and background async engines MUST use non-pooled connect
 SQLite `:memory:` databases MUST preserve the existing shared-engine behavior
 for background sessions so schema state remains visible to background tasks.
 
-Pool controls (`database_pool_size`, `database_max_overflow`,
-`database_background_pool_size`, `database_background_max_overflow`, and
-`database_pool_timeout_seconds`) SHALL constrain pooled backends only. They
-SHALL NOT be passed to file-backed SQLite engines.
+Pool sizing (`database_pool_size`, `database_max_overflow`) and the fixed
+pool checkout timeout SHALL constrain pooled backends only. They SHALL NOT
+be passed to file-backed SQLite engines.
 
 #### Scenario: File SQLite uses NullPool
 

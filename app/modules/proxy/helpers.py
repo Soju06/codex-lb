@@ -36,7 +36,23 @@ PLAN_TYPE_PRIORITY = (
 
 _RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
 _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
-_TRANSIENT_CODES = frozenset({"server_error", "upstream_error", "stream_incomplete", "overloaded_error"})
+_TRANSIENT_CODES = frozenset(
+    {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
+)
+
+
+def _is_account_model_unsupported_error(
+    *,
+    code: str | None,
+    message: str | None,
+    model: str | None,
+) -> bool:
+    """Match only the account-entitlement rejection for the requested model."""
+    if code != "invalid_request_error" or message is None or model is None:
+        return False
+    normalized_message = " ".join(message.split())
+    expected_message = f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+    return normalized_message == expected_message
 
 
 def classify_upstream_failure(

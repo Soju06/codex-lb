@@ -108,6 +108,15 @@ class TestClassifyUpstreamFailure:
         )
         assert result["failure_class"] == "retryable_transient"
 
+    def test_server_is_overloaded(self) -> None:
+        result = classify_upstream_failure(
+            error_code="server_is_overloaded",
+            error=UpstreamError(message="Our servers are currently overloaded. Please try again later"),
+            http_status=None,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "retryable_transient"
+
     def test_non_retryable_bad_request(self) -> None:
         result = classify_upstream_failure(
             error_code="invalid_request",

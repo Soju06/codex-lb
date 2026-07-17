@@ -270,6 +270,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
@@ -325,6 +326,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
 from app.modules.proxy.helpers import (
+    _is_account_model_unsupported_error,
     _normalize_error_code,
     _parse_openai_error,
 )
@@ -654,6 +656,8 @@ def _websocket_precreated_retry_error_code(
         return None
     if request_state.last_downstream_sequence_number is not None:
         return None
+    if request_state.downstream_visible:
+        return None
     if has_other_pending_requests:
         return None
     if request_state.response_id is not None:
@@ -687,9 +691,41 @@ def _websocket_precreated_retry_error_code(
         message=error_message,
     ):
         return None
+    if _is_account_model_unsupported_error(
+        code=error_code,
+        message=error_message,
+        model=request_state.model,
+    ):
+        # Any recognized response id means upstream has accepted this request,
+        # even when response.created was not observed on this socket.  Do not
+        # account-switch an error event that carries either response.id or a
+        # top-level response_id as though it were still pre-created.
+        if _websocket_response_id(None, payload) is not None:
+            return None
+        return _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
     if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
         return None
     return error_code
+
+
+def _websocket_precreated_replay_fallback_error(
+    request_state: _WebSocketRequestState,
+) -> tuple[int, OpenAIErrorEnvelope, str, str, str | None] | None:
+    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        return None
+    error_code = request_state.error_code_override or "invalid_request_error"
+    error_message = request_state.error_message_override or "Upstream rejected the requested model for this account"
+    error_type = request_state.error_type_override or "invalid_request_error"
+    payload = openai_error(error_code, error_message, error_type=error_type)
+    if request_state.error_param_override is not None:
+        payload["error"]["param"] = request_state.error_param_override
+    return (
+        request_state.error_http_status_override or 400,
+        payload,
+        error_code,
+        error_message,
+        request_state.precreated_replay_account_id,
+    )
 
 
 def _websocket_precreated_auth_error_code(
@@ -716,6 +752,8 @@ def _websocket_precreated_auth_error_code(
     if request_state.downstream_visible:
         return None
     if event_type not in {"error", "response.failed"}:
+        return None
+    if _websocket_response_id(None, payload) is not None:
         return None
 
     error_code = _normalize_error_code(

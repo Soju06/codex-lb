@@ -1521,16 +1521,56 @@ class LoadBalancer:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
 
-    async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
+    async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
+        """Downgrade *account* to its permanent-failure status and, when that
+        downgrade actually lands, exclude it from local routing.
+
+        Returns whether the permanent downgrade applied (or was already in
+        effect). When the guarded status write MISSES because a peer replica
+        concurrently re-authed/imported and rotated ``refresh_token_encrypted``
+        (the DB row was repaired and left ACTIVE), the account is NOT marked
+        routing-unavailable in this replica's local overlay -- excluding a
+        freshly repaired healthy account would be a self-inflicted routing loss
+        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
+        write needed because the primary refresh authority already CAS-wrote it)
+        both persists the failure status and applies the local exclusion.
+        """
         lock = await self._get_account_lock(account.id)
         async with lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
-                await self._persist_state(repos.accounts, account, state)
-            mark_account_routing_unavailable(account.id)
+                # Guard the DB permanent-status downgrade on the refresh-token
+                # ciphertext this replica currently holds so a concurrent peer
+                # re-auth/import rotation (which changes the ciphertext) is never
+                # clobbered back to a permanent-failure status. On the refresh
+                # path AuthManager._handle_permanent_refresh_failure is the
+                # PRIMARY guarded authority: it has already CAS-written the
+                # downgrade and, in the single-caller case, mutated THIS object's
+                # status to the failure status, so the predicate inside
+                # _persist_state_if_current sees no status change and issues no
+                # redundant write (exactly one guarded downgrade total). This
+                # guarded write covers only the callers whose in-memory object
+                # did not go through that CAS -- an intra-process singleflight
+                # joiner sharing the winner's permanent error, and non-refresh
+                # permanent failures -- without reintroducing the unguarded
+                # update_status that would clobber a peer's ACTIVE/rotated repair
+                # and tear down its live sticky/bridge sessions.
+                downgraded = await self._persist_state_if_current(
+                    repos.accounts,
+                    account,
+                    state,
+                    expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                )
+            # Honor the guarded-CAS result: only exclude the account from local
+            # routing when the permanent downgrade actually applied. A CAS miss
+            # means a peer replica repaired/rotated the row (still ACTIVE), so
+            # keep the healthy account selectable here.
+            if downgraded:
+                mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
+            return downgraded
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
@@ -1678,6 +1718,8 @@ class LoadBalancer:
         accounts_repo: AccountsRepository,
         account: Account,
         state: AccountState,
+        *,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         reset_at_int = int(state.reset_at) if state.reset_at else None
         blocked_at_int = int(state.blocked_at) if state.blocked_at else None
@@ -1697,6 +1739,7 @@ class LoadBalancer:
                 expected_deactivation_reason=account.deactivation_reason,
                 expected_reset_at=account.reset_at,
                 expected_blocked_at=account.blocked_at,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
             )
             if updated:
                 account.status = state.status
@@ -2189,12 +2232,8 @@ def _state_from_account(
             now=time.time(),
             drain_entered_at=runtime.drain_entered_at,
             probe_success_streak=runtime.probe_success_streak,
-            drain_primary_threshold_pct=getattr(settings, "drain_primary_threshold_pct", 85.0),
-            drain_secondary_threshold_pct=getattr(settings, "drain_secondary_threshold_pct", 90.0),
-            drain_error_window_seconds=getattr(settings, "drain_error_window_seconds", 60.0),
-            drain_error_count_threshold=getattr(settings, "drain_error_count_threshold", 2),
-            probe_quiet_seconds=getattr(settings, "probe_quiet_seconds", 60.0),
-            probe_success_streak_required=getattr(settings, "probe_success_streak_required", 3),
+            # Drain/probe thresholds are the fixed constants in
+            # ``app/core/balancer/logic.py`` (evaluate_health_tier defaults).
         )
         if new_tier == HEALTH_TIER_DRAINING and runtime.health_tier != HEALTH_TIER_DRAINING:
             runtime.drain_entered_at = time.time()

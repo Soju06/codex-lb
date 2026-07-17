@@ -12741,7 +12741,7 @@ async def test_stream_websocket_network_drop_rotates_generation_for_next_request
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_first_event_upstream_unavailable_fails_over(monkeypatch):
+async def test_stream_responses_visible_upstream_unavailable_with_response_id_does_not_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -12788,13 +12788,14 @@ async def test_stream_responses_first_event_upstream_unavailable_fails_over(monk
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
-    assert event["response"]["id"] == "resp_reset_event_ok"
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
-    record_error.assert_awaited_once_with(account_a)
-    record_errors.assert_awaited_once_with(account_a, 2)
-    record_success.assert_awaited_once_with(account_b)
+    assert event["type"] == "response.failed"
+    assert event["response"]["id"] == "resp_reset_event"
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_excluded_account_ids == [set()]
+    assert request_logs.calls == []
+    record_error.assert_not_awaited()
+    record_errors.assert_not_awaited()
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio

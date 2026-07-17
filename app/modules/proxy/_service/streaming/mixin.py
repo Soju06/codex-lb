@@ -712,7 +712,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                    transient_response_id = event.response.id if event.response and event.response.id else None
+                    transient_response_id = tool_call_response_id_from_payload(first_payload)
                     if allow_transient_retry and _facade()._should_retry_transient_stream_error(
                         code, error_message, response_id=transient_response_id
                     ):

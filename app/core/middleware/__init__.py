@@ -4,6 +4,7 @@ from app.core.middleware.dashboard_auth_proxy import add_dashboard_auth_proxy_mi
 from app.core.middleware.path_rewrite import add_backend_api_codex_v1_alias_middleware
 from app.core.middleware.request_decompression import add_request_decompression_middleware
 from app.core.middleware.request_id import add_request_id_middleware
+from app.core.middleware.trusted_proxy_headers import add_trusted_proxy_headers_middleware
 
 __all__ = [
     "add_app_version_middleware",
@@ -12,4 +13,5 @@ __all__ = [
     "add_dashboard_auth_proxy_middleware",
     "add_request_decompression_middleware",
     "add_request_id_middleware",
+    "add_trusted_proxy_headers_middleware",
 ]

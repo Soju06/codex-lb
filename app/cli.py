@@ -108,6 +108,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
         ws_max_size=ws_max_size,
+        proxy_headers=False,
         log_config=_build_log_config(),
     )
 

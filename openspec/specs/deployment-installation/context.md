@@ -10,6 +10,17 @@ fixed, and how removed settings are retired.
 See `openspec/specs/deployment-installation/spec.md` for normative
 requirements.
 
+## Raw socket peer preservation and proxy projection
+
+codex-lb captures the incoming ASGI client before delegating once to Uvicorn's
+proxy projection. Shipped launchers disable the outer server middleware so raw
+transport policy can use the original peer while downstream handlers still see
+the projected client and scheme. `FORWARDED_ALLOW_IPS` remains the sole trust
+input and is passed through unchanged.
+
+For example, a TCP peer at `10.0.0.8` may project client `192.168.65.1` and
+scheme `https`; raw-peer authorization still evaluates `10.0.0.8`.
+
 ## NEXT-RELEASE QUEUE (do not lose)
 
 Work queued for the release after the one that shipped the

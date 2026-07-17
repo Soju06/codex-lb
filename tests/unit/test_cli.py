@@ -36,6 +36,7 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
+    assert kwargs["proxy_headers"] is False
 
 
 def test_main_passes_custom_keep_alive_timeout(monkeypatch):

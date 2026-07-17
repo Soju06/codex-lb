@@ -47,6 +47,7 @@ def _request(
             "query_string": b"",
             "headers": [(b"host", host.encode()), *(headers or [])],
             "client": (client_host, 12345),
+            "_codex_lb_raw_socket_peer": (client_host, 12345),
             "server": (host.split(":", 1)[0], 2455),
         }
     )

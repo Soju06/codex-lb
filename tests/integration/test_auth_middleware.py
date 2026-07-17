@@ -62,6 +62,21 @@ async def _set_migration_inconsistent_totp_only_mode() -> None:
     await get_settings_cache().invalidate()
 
 
+async def _set_api_key_auth_enabled(enabled: bool) -> None:
+    settings_cache = get_settings_cache()
+    await settings_cache.get()
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.api_key_auth_enabled = enabled
+        await session.commit()
+
+    await settings_cache.invalidate()
+    refreshed_settings = await settings_cache.get()
+    assert refreshed_settings.api_key_auth_enabled is enabled
+
+
 def _set_dashboard_auth_env(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -244,6 +259,49 @@ async def test_untrusted_loopback_proxy_hint_does_not_bypass_proxy_auth(app_inst
     assert response.json()["error"]["code"] == "invalid_api_key"
 
 
+@pytest.mark.parametrize(
+    ("forwarded_value", "expected_status"),
+    [("for=127.0.0.1", 200), ("for=203.0.113.24", 401)],
+    ids=["agreement", "conflict"],
+)
+@pytest.mark.asyncio
+async def test_proxy_family_consensus_controls_local_proxy_and_dashboard_access(
+    app_instance,
+    monkeypatch,
+    forwarded_value: str,
+    expected_status: int,
+) -> None:
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.2")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        await _set_api_key_auth_enabled(False)
+        transport = ASGITransport(app=app_instance, client=("10.0.0.2", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as client:
+            headers = [
+                ("X-Forwarded-For", "127.0.0.1"),
+                ("Forwarded", forwarded_value),
+            ]
+            proxy_response = await client.get("/v1/models", headers=headers)
+            dashboard_response = await client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=headers,
+                json={"password": "password123"},
+            )
+
+    assert proxy_response.status_code == expected_status
+    assert dashboard_response.status_code == expected_status
+    if expected_status == 401:
+        assert proxy_response.json()["error"]["code"] == "invalid_api_key"
+        assert dashboard_response.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
 @pytest.mark.asyncio
 async def test_proxy_unauthenticated_client_cidr_allows_explicit_remote_proxy_peer(app_instance, monkeypatch):
     _set_proxy_unauthenticated_client_cidrs_env(
@@ -279,6 +337,32 @@ async def test_proxy_unauthenticated_client_cidr_does_not_allow_other_remote_pee
             spoofed = await remote_client.get("/v1/models", headers={"Host": "localhost"})
             assert spoofed.status_code == 401
             assert spoofed.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_proxy_unauthenticated_client_cidr_rejects_projected_client_when_raw_peer_is_not_allowlisted(
+    app_instance,
+    monkeypatch,
+):
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    _set_proxy_unauthenticated_client_cidrs_env(
+        monkeypatch,
+        cidrs="192.168.65.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        await _set_api_key_auth_enabled(False)
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://lb.example") as proxied_client:
+            response = await proxied_client.get(
+                "/v1/models",
+                headers={"X-Forwarded-For": "192.168.65.1"},
+            )
+
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_api_key"
+    assert payload["error"]["message"] == "Proxy authentication must be configured before remote access is allowed"
 
 
 @pytest.mark.asyncio

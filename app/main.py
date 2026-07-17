@@ -41,6 +41,7 @@ from app.core.middleware import (
     add_dashboard_auth_proxy_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
+    add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
 from app.core.middleware.inflight import InFlightMiddleware
@@ -585,6 +586,7 @@ def create_app() -> FastAPI:
     add_backend_api_codex_v1_alias_middleware(app)
     add_app_version_middleware(app)
     add_exception_handlers(app)
+    add_trusted_proxy_headers_middleware(app)
 
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)

@@ -2,13 +2,13 @@
 
 - [x] 1.1 Define the standalone Codex search forwarding requirement under
   `responses-api-compat`.
-- [x] 1.2 Record authentication, account-routing, wire-fidelity, and response
-  header constraints.
+- [x] 1.2 Record authentication, account-routing, wire-fidelity, preflight, and
+  response header constraints.
 
 ## 2. Implementation
 
-- [x] 2.1 Register the POST-only Codex search route through the existing control
-  proxy.
+- [x] 2.1 Register the GET/POST Codex search routes through the existing control
+  proxy and keep browser OPTIONS preflight local.
 - [x] 2.2 Add unit route-contract and integration forwarding regressions.
 
 ## 3. Verification

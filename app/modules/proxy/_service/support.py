@@ -445,10 +445,17 @@ async def failover_after_previsible_refresh_error(
 class _TransientStreamError(Exception):
     """Transient upstream error (e.g. 500 server_error) - retry on same account first."""
 
-    def __init__(self, code: str, error: UpstreamError) -> None:
+    def __init__(
+        self,
+        code: str,
+        error: UpstreamError,
+        *,
+        preserve_on_selection_exhausted: bool = False,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.error = error
+        self.preserve_on_selection_exhausted = preserve_on_selection_exhausted
 
 
 class _TerminalStreamError(Exception):

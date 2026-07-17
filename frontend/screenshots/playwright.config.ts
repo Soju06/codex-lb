@@ -1,5 +1,10 @@
 import { defineConfig } from "@playwright/test";
 
+const screenshotPort = Number(process.env.SCREENSHOT_PORT ?? "4173");
+const screenshotWebServerCommand =
+  process.env.SCREENSHOT_WEBSERVER_COMMAND ??
+  `bun run build && bun run preview --port ${screenshotPort}`;
+
 export default defineConfig({
   testDir: ".",
   testMatch: "capture.spec.ts",
@@ -13,8 +18,8 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: "bun run build && bun run preview --port 4173",
-    port: 4173,
+    command: screenshotWebServerCommand,
+    port: screenshotPort,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

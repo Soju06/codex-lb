@@ -736,6 +736,38 @@ async def test_recover_keeps_rate_limited_account_during_persisted_retry_after_c
 
 
 @pytest.mark.asyncio
+async def test_recover_restores_rate_limited_account_with_implausible_deadline() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_implausible_deadline", "workspace_implausible_deadline")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    account.blocked_at = now - 60
+    account.reset_at = 15_023_672_358
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": account.id,
+            "status": AccountStatus.ACTIVE,
+            "deactivation_reason": None,
+            "reset_at": None,
+            "blocked_at": None,
+        },
+    ]
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
 async def test_recover_keeps_rate_limited_account_during_legacy_blocked_at_floor() -> None:
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(StubUsageRepository(), accounts_repo)

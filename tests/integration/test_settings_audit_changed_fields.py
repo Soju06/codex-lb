@@ -41,6 +41,13 @@ def _default_put_body() -> dict[str, Any]:
         ("upstreamStreamTransport", "websocket", "upstream_stream_transport"),
         ("prohibitFastMode", True, "prohibit_fast_mode"),
         ("preferEarlierResetAccounts", False, "prefer_earlier_reset_accounts"),
+        ("showResetCreditBadges", False, "show_reset_credit_badges"),
+        (
+            "autoRedeemResetCreditsBeforeExpiry",
+            True,
+            "auto_redeem_reset_credits_before_expiry",
+        ),
+        ("showResetCreditExpiryBadge", False, "show_reset_credit_expiry_badge"),
         ("routingStrategy", "round_robin", "routing_strategy"),
         (
             "openaiCacheAffinityMaxAgeSeconds",

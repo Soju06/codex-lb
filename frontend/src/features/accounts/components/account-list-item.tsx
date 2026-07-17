@@ -25,6 +25,7 @@ export type AccountListItemProps = {
   account: AccountSummary;
   selected: boolean;
   showAccountId?: boolean;
+  showResetCreditBadge?: boolean;
   onSelect: (accountId: string) => void;
 };
 
@@ -32,6 +33,7 @@ export function AccountListItem({
   account,
   selected,
   showAccountId = false,
+  showResetCreditBadge = true,
   onSelect,
 }: AccountListItemProps) {
   const { t } = useTranslation();
@@ -86,7 +88,7 @@ export function AccountListItem({
         selected ? "bg-primary/8 ring-1 ring-primary/25" : "hover:bg-muted/50",
       )}
     >
-      {availableResetCredits > 0 ? (
+      {showResetCreditBadge && availableResetCredits > 0 ? (
         <span className="absolute -top-1 -right-1 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
           {resetBadgeLabel}
         </span>

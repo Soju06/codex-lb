@@ -505,9 +505,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         # queue time, then re-anchor after this attempt's admission wait.
         attempt_started_at = start
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
-        status = "success"
-        error_code = None
-        error_message = None
+        status, error_code, error_message = "success", None, None
         failure_metadata = _RequestLogFailureMetadata()
         response_id = request_id
         usage = None
@@ -691,8 +689,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_code = rewritten_code
                     error_message = rewritten_message
                     upstream_error = cast(
-                        UpstreamError,
-                        {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code},
+                        UpstreamError, {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code}
                     )
                     settlement.error = upstream_error
                     settlement.account_health_error = False
@@ -701,8 +698,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_message = raw_error_message
                     if error_code == "stream_incomplete":
                         failure_metadata = _RequestLogFailureMetadata(
-                            failure_phase="upstream",
-                            failure_detail="upstream_eof_before_terminal_event",
+                            failure_phase="upstream", failure_detail="upstream_eof_before_terminal_event"
                         )
                     settlement.account_health_error = _facade()._should_penalize_stream_error(code)
                     if allow_retry and code == "stream_idle_timeout":
@@ -715,7 +711,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                    if allow_transient_retry and _facade()._should_retry_transient_stream_error(code, error_message):
+                    if allow_transient_retry and _facade()._should_retry_transient_stream_error(
+                        code,
+                        error_message,
+                        response_id=response_id if event.type == "response.failed" else None,
+                    ):
                         raise _TransientStreamError(code, upstream_error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,

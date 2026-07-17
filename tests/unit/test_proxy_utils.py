@@ -12262,16 +12262,17 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     stream_account_ids: list[str] = []
     excluded_snapshots: list[set[str]] = []
     handle_stream_error = AsyncMock()
+    record_errors = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
-    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
     monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
-    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
@@ -12286,7 +12287,9 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
                 401,
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
-        if stream_account_ids == [account_a.id, account_a.id]:
+        if stream_account_ids[:1] == [account_a.id] and all(
+            account_id == account_a.id for account_id in stream_account_ids[1:]
+        ):
             raise proxy_service._TransientStreamError(
                 "server_error",
                 cast(
@@ -12322,12 +12325,12 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
 
     completed = json.loads(chunks[-1].split("data: ", 1)[1])
     assert completed["response"]["id"] == "resp_post_refresh_transient_b_ok"
-    assert stream_account_ids == [account_a.id, account_a.id, account_b.id]
+    assert stream_account_ids == [account_a.id, account_a.id, account_a.id, account_a.id, account_b.id]
     assert excluded_snapshots == [set(), {account_a.id}]
     transient_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] == "server_error"]
     assert len(transient_penalties) == 1
     assert transient_penalties[0].args[0] is account_a
-    service._load_balancer.record_errors.assert_not_awaited()
+    record_errors.assert_awaited_once_with(account_a, 2)
 
 
 @pytest.mark.asyncio

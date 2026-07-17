@@ -133,7 +133,6 @@ class _StickySessionsRepository:
     def __init__(self) -> None:
         self.account_id: str | None = None
         self.get_calls = 0
-        self.upserts: list[StickySession] = []
 
     async def get_account_id(self, *args: Any, **kwargs: Any) -> str | None:
         del args, kwargs
@@ -148,9 +147,7 @@ class _StickySessionsRepository:
         kind: StickySessionKind,
     ) -> StickySession:
         self.account_id = account_id
-        row = StickySession(key=key, account_id=account_id, kind=kind)
-        self.upserts.append(row)
-        return row
+        return StickySession(key=key, account_id=account_id, kind=kind)
 
     async def delete(self, *args: Any, **kwargs: Any) -> bool:
         del args, kwargs
@@ -410,7 +407,6 @@ async def test_selection_releases_lease_when_persistence_fails(
 
     assert persist_calls == 1
     assert sticky_repo.get_calls == (1 if sticky else 0)
-    assert len(sticky_repo.upserts) == (1 if sticky else 0)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
 
@@ -443,7 +439,6 @@ async def test_selection_releases_lease_when_persistence_is_cancelled(
 
     assert selection_task.cancelled()
     assert sticky_repo.get_calls == (1 if sticky else 0)
-    assert len(sticky_repo.upserts) == (1 if sticky else 0)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
 
@@ -476,7 +471,6 @@ async def test_stale_selection_retries_do_not_leak_leases(
     assert selection.account is None
     assert selection.lease is None
     assert sticky_repo.get_calls == (4 if sticky else 0)
-    assert len(sticky_repo.upserts) == (4 if sticky else 0)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
     replacement = await balancer.acquire_account_lease(

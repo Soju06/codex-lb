@@ -89,7 +89,9 @@ def test_pull_request_commit_authors_fail_when_github_endpoint_is_capped(tmp_pat
         raise AssertionError("expected capped PR commit list to fail closed")
 
 
-def test_pull_request_commit_authors_fail_closed_when_github_retries_exhaust(tmp_path, monkeypatch):
+def test_pull_request_commit_authors_fail_closed_when_retries_exhaust(tmp_path, monkeypatch):
+    import pytest
+
     checker = _load_checker_module()
     event_path = tmp_path / "event.json"
     event_path.write_text(
@@ -97,20 +99,31 @@ def test_pull_request_commit_authors_fail_closed_when_github_retries_exhaust(tmp
             {
                 "pull_request": {
                     "commits_url": "https://api.github.test/repos/example/codex-lb/pulls/1/commits",
+                    "user": {"login": "opener", "type": "User"},
                 }
             }
         ),
         encoding="utf-8",
     )
 
-    def fake_request_json(_url, _token):
-        raise checker.TransientGitHubApiError("temporary outage")
+    def failing_request_json(url, token):
+        raise checker.GitHubApiError("503 after retries")
 
-    monkeypatch.setattr(checker, "_request_json", fake_request_json)
+    monkeypatch.setattr(checker, "_request_json", failing_request_json)
 
-    try:
+    with pytest.raises(SystemExit, match="cannot validate all-contributors coverage"):
         checker.pull_request_commit_author_logins(str(event_path), "token")
-    except SystemExit as exc:
-        assert "GitHub PR commits request failed after retries" in str(exc)
-    else:
-        raise AssertionError("expected exhausted PR commits lookup to fail closed")
+
+
+def test_fetch_contributor_logins_fail_closed_when_retries_exhaust(monkeypatch):
+    import pytest
+
+    checker = _load_checker_module()
+
+    def failing_request_json(url, token):
+        raise checker.GitHubApiError("503 after retries")
+
+    monkeypatch.setattr(checker, "_request_json", failing_request_json)
+
+    with pytest.raises(SystemExit, match="cannot validate all-contributors coverage"):
+        checker.fetch_contributor_logins("example/codex-lb", "token")

@@ -334,3 +334,30 @@ async def test_legacy_rate_limited_row_recovers_after_floor_elapses(db_setup):
 
     row = await _fetch_account(limited.id)
     assert row.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_implausible_persisted_reset_does_not_pin_account_after_floor(db_setup):
+    """A wrong-unit reset timestamp must not keep an available account blocked."""
+    now_epoch = int(time.time())
+    limited = _make_account(
+        "implausible_reset",
+        status=AccountStatus.RATE_LIMITED,
+        blocked_at=now_epoch - 3600,
+        reset_at=15_023_672_358,
+    )
+    healthy = _make_account("implausible_reset_healthy")
+    # fill_first chooses the formerly-limited row once it recovers, proving
+    # the selection path did not merely hide the bad dashboard status.
+    await _seed_accounts_with_usage((limited, 50.0, 40.0), (healthy, 20.0, 10.0))
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(routing_strategy="fill_first")
+
+    assert selection.account is not None
+    assert selection.account.id == limited.id
+
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.ACTIVE
+    assert row.reset_at is None
+    assert row.blocked_at is None

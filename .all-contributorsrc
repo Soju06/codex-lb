@@ -1044,6 +1044,25 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "yshishenya",
+      "name": "yshishenya",
+      "avatar_url": "https://avatars.githubusercontent.com/u/22071972?v=4",
+      "profile": "https://github.com/yshishenya",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "alchemistkiv",
+      "name": "alchemistkiv",
+      "avatar_url": "https://avatars.githubusercontent.com/u/93935225?v=4",
+      "profile": "https://github.com/alchemistkiv",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

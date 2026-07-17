@@ -1,4 +1,5 @@
 import { Clock, ExternalLink, Play, RotateCcw, Zap } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { Button } from "@/components/ui/button";
@@ -77,6 +78,7 @@ function QuotaBar({
 }
 
 export function AccountCard({ account, showAccountId = false, readOnly = false, onAction }: AccountCardProps) {
+  const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
@@ -94,7 +96,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
         ? account.remainingCreditsSecondary
         : (account.remainingCreditsSecondary ?? account.remainingCreditsPrimary)
   );
-  const creditsLabel = account.creditsUnlimited ? "Unlimited" : (
+  const creditsLabel = account.creditsUnlimited ? t("common.states.unlimited") : (
     displayCredits === null || displayCredits === undefined ? "-" : displayCredits.toFixed(2)
   );
 
@@ -110,11 +112,13 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
       ? account.email
       : null;
   const idSuffix = showAccountId ? ` | ID ${compactId}` : "";
-  const warmupStatus = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
-  const warmupToggleLabel = `${account.limitWarmupEnabled ? "Disable" : "Enable"} limit warm-up for ${title}`;
+  const warmupStatus = account.limitWarmupEnabled ? t("accounts.listItem.warmupOn") : t("accounts.listItem.warmupOff");
+  const warmupToggleLabel = account.limitWarmupEnabled
+    ? t("dashboard.accounts.disableWarmupFor", { account: title })
+    : t("dashboard.accounts.enableWarmupFor", { account: title });
   const warmupDetail = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
-    : "No attempts";
+    : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const hasResetCredits = availableResetCredits > 0;
   const resetCreditDisabled =
@@ -124,13 +128,13 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
     : null;
   const resetButtonTitle = resetCreditDisabled
     ? status === "paused"
-      ? "Resume account to redeem reset credits"
+      ? t("dashboard.accounts.resetCreditTitles.resumeRequired")
       : status === "reauth" || status === "deactivated"
-        ? "Re-authenticate account to redeem reset credits"
-        : "Reset credits unavailable"
+        ? t("dashboard.accounts.resetCreditTitles.reauthRequired")
+        : t("dashboard.accounts.resetCreditTitles.unavailable")
     : resetCountdown
-      ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
-      : `Reset (${availableResetCredits})`;
+      ? t("dashboard.accounts.resetCreditTitles.withCountdown", { count: availableResetCredits, countdown: resetCountdown.label })
+      : t("dashboard.accounts.resetWithCount", { count: availableResetCredits });
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
@@ -147,7 +151,10 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             {!emailSubtitle ? idSuffix : ""}
           </p>
           {emailSubtitle ? (
-            <p className="mt-0.5 truncate text-xs text-muted-foreground" title={showAccountId ? `Account ID ${account.accountId}` : undefined}>
+            <p
+              className="mt-0.5 truncate text-xs text-muted-foreground"
+              title={showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined}
+            >
               <span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{showAccountId ? ` | ID ${compactId}` : ""}
             </p>
           ) : null}
@@ -158,11 +165,11 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
       {/* Quota bars */}
       <div className={cn("mt-3.5 grid gap-3", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaBar label="Monthly" percent={monthlyRemaining} resetLabel={monthlyReset} />
+          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} resetLabel={monthlyReset} />
         ) : (
           <>
             {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
-            <QuotaBar label="Weekly" percent={secondaryRemaining} resetLabel={secondaryReset} />
+            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} resetLabel={secondaryReset} />
           </>
         )}
       </div>
@@ -187,12 +194,12 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           onClick={() => onAction?.(account, "warmup-toggle")}
         >
           <Zap className="h-3 w-3" aria-hidden="true" />
-          {account.limitWarmupEnabled ? "On" : "Off"}
+          {account.limitWarmupEnabled ? t("common.states.on") : t("common.states.off")}
         </Button>
       </div>
 
       <div className="mt-3 text-xs text-muted-foreground">
-        Credits:{" "}
+        {t("components.donut.credits")}:{" "}
         <span className="font-medium tabular-nums text-foreground">
           {creditsLabel}
         </span>
@@ -208,7 +215,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           onClick={() => onAction?.(account, "details")}
         >
           <ExternalLink className="h-3 w-3" />
-          Details
+          {t("common.actions.details")}
         </Button>
         {hasResetCredits ? (
           <Button
@@ -221,7 +228,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             onClick={() => onAction?.(account, "reset-credit")}
           >
             <RotateCcw className="h-3 w-3" />
-            {`Reset (${availableResetCredits})`}
+            {t("dashboard.accounts.resetWithCount", { count: availableResetCredits })}
             {resetCountdown ? (
               <span
                 aria-hidden="true"
@@ -245,7 +252,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             onClick={() => onAction?.(account, "resume")}
           >
             <Play className="h-3 w-3" />
-            Resume
+            {t("common.actions.resume")}
           </Button>
         )}
         {(status === "reauth" || status === "deactivated") && (
@@ -258,7 +265,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             onClick={() => onAction?.(account, "reauth")}
           >
             <RotateCcw className="h-3 w-3" />
-            Re-auth
+            {t("common.actions.reauthenticateShort")}
           </Button>
         )}
       </div>

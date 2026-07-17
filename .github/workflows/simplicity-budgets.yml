@@ -59,7 +59,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           # per_page=100 covers the full set: GitHub caps labels per issue at 100.
-          labels="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --jq '[.[].name]' | tr -d '\n')"
+          labels="$(python3 .github/scripts/fetch_pr_labels.py)"
           echo "PR_LABELS=${labels}" >> "$GITHUB_ENV"
 
       - name: Check simplicity budgets

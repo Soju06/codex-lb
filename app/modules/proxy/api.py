@@ -73,7 +73,6 @@ from app.core.exceptions import (
     ProxyUpstreamError,
 )
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
-from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import (
     ChatCompletion,
@@ -103,7 +102,12 @@ from app.core.openai.requests import (
     normalize_tool_type,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
-from app.core.request_locality import resolve_request_client_host
+from app.core.request_locality import (
+    FORWARDED_CHAIN_HEADER_NAMES,
+    parse_trusted_proxy_networks,
+    resolve_connection_client_ip,
+    resolve_request_client_host,
+)
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
@@ -4784,25 +4788,32 @@ def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, 
             if item is None:
                 continue
             item_type = item.get("type")
-            encrypted_content = item.get("encrypted_content")
             if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
-                if isinstance(encrypted_content, str):
-                    return {
-                        "type": "compaction",
-                        "encrypted_content": encrypted_content,
-                    }
+                normalized_item = _normalize_compaction_output_item(item)
+                if normalized_item is not None:
+                    return normalized_item
     summary = getattr(payload, "compaction_summary", None)
     if summary is None:
         summary = extra.get("compaction_summary")
     summary_mapping = _json_mapping_from_model_or_mapping(summary)
     if summary_mapping is not None:
-        encrypted_content = summary_mapping.get("encrypted_content")
-        if isinstance(encrypted_content, str):
-            return {
-                "type": "compaction",
-                "encrypted_content": encrypted_content,
-            }
+        return _normalize_compaction_output_item(summary_mapping)
     return None
+
+
+def _normalize_compaction_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    encrypted_content = item.get("encrypted_content")
+    if not isinstance(encrypted_content, str):
+        return None
+
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": encrypted_content,
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id.strip():
+        normalized["id"] = item_id
+    return normalized
 
 
 def _json_mapping_from_model_or_mapping(value: object) -> Mapping[str, JsonValue] | None:
@@ -5758,7 +5769,8 @@ async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONRespo
         websocket.headers,
         websocket.client.host if websocket.client else None,
         trust_proxy_headers=settings.firewall_trust_proxy_headers,
-        trusted_proxy_networks=_parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
+        trusted_proxy_networks=parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs),
+        allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,
     )
     async with get_background_session() as session:
         repository = cast(FirewallRepositoryPort, FirewallRepository(session))

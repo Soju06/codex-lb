@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { CheckCircle2, Loader2, Network, XCircle } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -28,6 +29,7 @@ export function AccountProxyBinding({
   onSave,
   onTestEndpoint,
 }: AccountProxyBindingProps) {
+  const { t } = useTranslation();
   const binding = admin?.bindings.find((item) => item.accountId === account.accountId) ?? null;
   const initialPoolId = binding?.poolId ?? admin?.pools[0]?.id ?? "";
   const [selectedPoolId, setSelectedPoolId] = useState(initialPoolId);
@@ -68,7 +70,7 @@ export function AccountProxyBinding({
           ok: false,
           statusCode: null,
           elapsedMs: null,
-          error: error instanceof Error ? error.message : "Proxy test failed",
+          error: error instanceof Error ? error.message : t("accounts.proxyBinding.testFailed"),
         },
       });
     } finally {
@@ -84,14 +86,14 @@ export function AccountProxyBinding({
             <Network className="h-4 w-4 text-primary" aria-hidden="true" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold">Account proxy binding</h3>
+            <h3 className="text-sm font-semibold">{t("accounts.proxyBinding.title")}</h3>
             <p className="text-xs text-muted-foreground">
-              Route this account's ChatGPT upstream traffic through a specific proxy pool.
+              {t("accounts.proxyBinding.description")}
             </p>
           </div>
         </div>
         <Switch
-          aria-label="Enable account proxy binding"
+          aria-label={t("accounts.proxyBinding.enableAria")}
           className="shrink-0"
           checked={active}
           disabled={busy || readOnly || !binding}
@@ -111,8 +113,8 @@ export function AccountProxyBinding({
           }}
           disabled={busy || readOnly || admin.pools.length === 0}
         >
-          <SelectTrigger className="h-8 w-full min-w-0 text-xs sm:w-auto sm:flex-1" aria-label="Account proxy pool">
-            <SelectValue placeholder="Select proxy pool" />
+          <SelectTrigger className="h-8 w-full min-w-0 text-xs sm:w-auto sm:flex-1" aria-label={t("accounts.proxyBinding.poolAria")}>
+            <SelectValue placeholder={t("accounts.proxyBinding.poolPlaceholder")} />
           </SelectTrigger>
           <SelectContent>
             {admin.pools.map((pool) => (
@@ -128,7 +130,7 @@ export function AccountProxyBinding({
           disabled={busy || readOnly || !currentPoolId}
           onClick={() => void onSave(account.accountId, { poolId: currentPoolId, isActive: true })}
         >
-          Save binding
+          {t("accounts.proxyBinding.save")}
         </Button>
         {onTestEndpoint ? (
           <Button
@@ -142,16 +144,19 @@ export function AccountProxyBinding({
             {testingEndpointId === selectedPoolEndpointId ? (
               <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden="true" />
             ) : null}
-            Test pool
+            {t("accounts.proxyBinding.testPool")}
           </Button>
         ) : null}
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
         {binding
-          ? `Current binding: ${poolsById.get(binding.poolId)?.name ?? binding.poolId} (${binding.isActive ? "active" : "disabled"}).`
-          : "No account-specific proxy pool binding is configured."}
-        {selectedPool ? ` Selected pool has ${selectedPool.endpointIds.length} endpoint(s).` : ""}
-        {selectedPoolEndpoint ? ` First endpoint: ${selectedPoolEndpoint.name}.` : ""}
+          ? t("accounts.proxyBinding.currentBinding", {
+              pool: poolsById.get(binding.poolId)?.name ?? binding.poolId,
+              state: binding.isActive ? t("common.states.active") : t("common.states.disabled"),
+            })
+          : t("accounts.proxyBinding.noBinding")}
+        {selectedPool ? ` ${t("accounts.proxyBinding.selectedPoolEndpoints", { count: selectedPool.endpointIds.length })}` : ""}
+        {selectedPoolEndpoint ? ` ${t("accounts.proxyBinding.firstEndpoint", { name: selectedPoolEndpoint.name })}` : ""}
       </p>
       {testResult && testResult.endpointId === selectedPoolEndpointId ? (
         <div
@@ -167,7 +172,7 @@ export function AccountProxyBinding({
             <XCircle className="h-3 w-3" aria-hidden="true" />
           )}
           <span>
-            {testResult.result.ok ? "Connection ok" : "Connection failed"}
+            {testResult.result.ok ? t("accounts.proxyBinding.connectionOk") : t("accounts.proxyBinding.connectionFailed")}
             {testResult.result.statusCode ? ` · HTTP ${testResult.result.statusCode}` : ""}
             {testResult.result.elapsedMs !== null && testResult.result.elapsedMs !== undefined
               ? ` · ${testResult.result.elapsedMs}ms`

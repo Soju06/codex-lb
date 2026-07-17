@@ -1,5 +1,6 @@
 import { Check, Pencil, User, X } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { isEmailLabel } from "@/components/blur-email";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ export type AccountDetailProps = {
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
   onResetCredit: (accountId: string) => void;
+  showResetCreditExpiryBadge?: boolean;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   onRoutingPolicyChange: (
     accountId: string,
@@ -66,6 +68,7 @@ export function AccountDetail({
   onReauth,
   onExportAuth,
   onResetCredit,
+  showResetCreditExpiryBadge = true,
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
@@ -76,6 +79,7 @@ export function AccountDetail({
   resetCreditsLoading = false,
   resetCreditsUnavailable = false,
 }: AccountDetailProps) {
+  const { t } = useTranslation();
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
 
@@ -86,10 +90,10 @@ export function AccountDetail({
           <User className="h-5 w-5 text-muted-foreground" />
         </div>
         <p className="mt-3 text-sm font-medium text-muted-foreground">
-          Select an account
+          {t("accounts.detail.emptyTitle")}
         </p>
         <p className="mt-1 text-xs text-muted-foreground/70">
-          Choose an account from the list to view details.
+          {t("accounts.detail.emptyDescription")}
         </p>
       </div>
     );
@@ -104,7 +108,7 @@ export function AccountDetail({
       ? account.email
       : null;
   const idSuffix = showAccountId ? ` (${compactId})` : "";
-  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || t("accounts.detail.unknownWorkspace");
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
   const operatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
@@ -134,7 +138,7 @@ export function AccountDetail({
           <p
             className="mt-0.5 text-xs text-muted-foreground"
             title={
-              showAccountId ? `Account ID ${account.accountId}` : undefined
+              showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined
             }
           >
             <span className={blurred ? "privacy-blur" : ""}>
@@ -179,6 +183,7 @@ export function AccountDetail({
         onReauth={onReauth}
         onExportAuth={onExportAuth}
         onResetCredit={onResetCredit}
+        showResetCreditExpiryBadge={showResetCreditExpiryBadge}
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
@@ -210,6 +215,7 @@ function AccountNameField({
   readOnly,
   onSetAlias,
 }: AccountNameFieldProps) {
+  const { t } = useTranslation();
   const [isEditing, setIsEditing] = useState(false);
   const [aliasDraft, setAliasDraft] = useState(alias ?? "");
 
@@ -230,10 +236,10 @@ function AccountNameField({
         <div className="flex items-center gap-1.5">
           <Input
             id="account-alias"
-            aria-label="Account alias"
+            aria-label={t("accounts.detail.aliasLabel")}
             className="h-8 text-sm"
             maxLength={255}
-            placeholder="Personal Plus"
+            placeholder={t("accounts.detail.aliasPlaceholder")}
             value={aliasDraft}
             autoFocus
             disabled={busy || readOnly}
@@ -252,7 +258,7 @@ function AccountNameField({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Save alias"
+            aria-label={t("accounts.detail.saveAlias")}
             disabled={busy || readOnly}
             onClick={() => void handleSave()}
           >
@@ -262,14 +268,14 @@ function AccountNameField({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Cancel"
+            aria-label={t("common.cancel")}
             onClick={handleCancel}
           >
             <X className="size-4" />
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          Use a local label to distinguish accounts that share the same email.
+          {t("accounts.detail.aliasHelp")}
         </p>
       </div>
     );
@@ -294,8 +300,8 @@ function AccountNameField({
         type="button"
         variant="ghost"
         size="icon-xs"
-        aria-label="Edit alias"
-        title="Use a local label to distinguish accounts that share the same email."
+        aria-label={t("accounts.detail.editAlias")}
+        title={t("accounts.detail.aliasHelp")}
         disabled={busy || readOnly}
         onClick={() => {
           setAliasDraft(alias ?? "");

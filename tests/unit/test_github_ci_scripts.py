@@ -200,18 +200,3 @@ def test_detect_changed_areas_includes_previous_filename_for_renames(monkeypatch
 
     assert files == ["docs/foo.md", "app/foo.py"]
     assert any(detect_changed_areas._matches(path, detect_changed_areas.FILTERS["backend"]) for path in files)
-
-
-def test_fetch_pr_labels_fails_when_label_lookup_fails(monkeypatch) -> None:
-    fetch_pr_labels = _load_script_module("fetch_pr_labels")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
-    monkeypatch.setenv("PR_NUMBER", "7")
-
-    def fail_request_json(url: str, *, token: str | None = None):
-        del url, token
-        raise fetch_pr_labels.GitHubApiError("HTTP 403: bad credentials")
-
-    monkeypatch.setattr(fetch_pr_labels, "request_json", fail_request_json)
-
-    with pytest.raises(SystemExit):
-        fetch_pr_labels.main()

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
@@ -108,6 +109,7 @@ function formatUsedPercent(percent: number): string {
 }
 
 export function DonutChart({ items, total, centerValue, title, subtitle, safeLine, centerLayout = "remaining" }: DonutChartProps) {
+  const { t } = useTranslation();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
@@ -226,7 +228,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
              <div>
                {centerLayout === "credits" ? (
                  <>
-                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Credits</p>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("components.donut.credits")}</p>
                    <p
                      className="text-sm font-semibold tabular-nums leading-tight"
                      data-testid="donut-center-remaining"
@@ -243,7 +245,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                  </>
                ) : (
                  <>
-                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Remaining</p>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("components.donut.remaining")}</p>
                    <p className="text-base font-semibold tabular-nums">{formatCompactNumber(displayTotal)}</p>
                  </>
                )}
@@ -251,7 +253,10 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
           </div>
           </div>
           <p className="text-[11px] tabular-nums text-muted-foreground" data-testid="donut-caption">
-            Total {formatCompactNumber(safeCapacity)} · {formatUsedPercent(usedPercent)} used
+            {t("components.donut.caption", {
+              total: formatCompactNumber(safeCapacity),
+              used: formatUsedPercent(usedPercent),
+            })}
           </p>
         </div>
 
@@ -318,7 +323,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                 className="h-2.5 w-2.5 shrink-0 rounded-full"
                 style={{ backgroundColor: consumedColor }}
               />
-              <span className="truncate font-medium">Used</span>
+              <span className="truncate font-medium">{t("components.donut.used")}</span>
             </div>
             <span className="tabular-nums text-muted-foreground" data-testid="donut-used-value">
               {formatCompactNumber(consumed)}

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
@@ -20,11 +21,9 @@ import type {
   UpstreamProxyPoolCreateRequest,
 } from "@/features/settings/schemas";
 
-const formSchema = z.object({
-  name: z.string().trim().min(1, "Name is required"),
-});
-
-type FormValues = z.infer<typeof formSchema>;
+type FormValues = {
+  name: string;
+};
 
 export type ProxyPoolCreateDialogProps = {
   open: boolean;
@@ -42,6 +41,10 @@ type ProxyPoolCreateFormProps = {
 };
 
 function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCreateFormProps) {
+  const { t } = useTranslation();
+  const formSchema = z.object({
+    name: z.string().trim().min(1, t("upstreamProxy.validation.nameRequired")),
+  });
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: { name: "" },
@@ -84,9 +87,9 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Pool name</FormLabel>
-              <FormControl>
-                <Input {...field} autoComplete="off" placeholder="Codex pool" />
+	              <FormLabel>{t("upstreamProxy.poolDialog.poolName")}</FormLabel>
+	              <FormControl>
+	                <Input {...field} autoComplete="off" placeholder={t("upstreamProxy.poolDialog.placeholders.name")} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -94,13 +97,13 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
         />
 
         <div className="space-y-1.5">
-          <p className="text-sm font-medium">Endpoints</p>
-          <p className="text-xs text-muted-foreground">
-            Select the endpoints this pool routes through. You can add more later.
-          </p>
+	          <p className="text-sm font-medium">{t("upstreamProxy.endpoints.title")}</p>
+	          <p className="text-xs text-muted-foreground">
+	            {t("upstreamProxy.poolDialog.endpointsDescription")}
+	          </p>
           <div className="max-h-48 space-y-2 overflow-y-auto overscroll-contain rounded-md border p-2">
             {endpoints.length === 0 ? (
-              <p className="text-xs text-muted-foreground">Create an endpoint first.</p>
+	              <p className="text-xs text-muted-foreground">{t("upstreamProxy.poolDialog.createEndpointFirst")}</p>
             ) : (
               endpoints.map((endpoint) => (
                 <label
@@ -127,7 +130,7 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
 
         <DialogFooter className="mt-2">
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
-            Create pool
+	            {t("upstreamProxy.actions.createPool")}
           </Button>
         </DialogFooter>
       </form>
@@ -136,15 +139,16 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
 }
 
 export function ProxyPoolCreateDialog({ open, busy, endpoints, onOpenChange, onSubmit }: ProxyPoolCreateDialogProps) {
+  const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Create proxy pool</DialogTitle>
-            <DialogDescription>
-              Group endpoints into a pool that accounts and the default route can bind to.
-            </DialogDescription>
+	            <DialogTitle>{t("upstreamProxy.poolDialog.title")}</DialogTitle>
+	            <DialogDescription>
+	              {t("upstreamProxy.poolDialog.description")}
+	            </DialogDescription>
           </DialogHeader>
           <ProxyPoolCreateForm
             busy={busy}

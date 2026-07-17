@@ -73,6 +73,7 @@ from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
+    CatalogOmissionQuotaAdmission,
     RuntimeState,
     SelectionInputs,
     _filter_accounts_for_model,
@@ -29628,6 +29629,11 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
     account = _make_account("acc_bridge_reconnect_reuse_lease")
     old_upstream = AsyncMock()
     new_upstream = SimpleNamespace(response_header=lambda _name: None)
+    quota_admission = CatalogOmissionQuotaAdmission(
+        normalized_model="gpt-5.3-codex-spark",
+        canonical_quota_key="codex_spark",
+        normalized_effective_service_tier=None,
+    )
     old_lease = proxy_service.AccountLease(
         lease_id="lease_existing_stream",
         account_id=account.id,
@@ -29642,7 +29648,11 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
     async def select_account(**kwargs: object) -> AccountSelection:
         seen_lease_kinds.append(kwargs.get("lease_kind"))
-        return AccountSelection(account=account, error_message=None)
+        return AccountSelection(
+            account=account,
+            error_message=None,
+            catalog_omission_quota_admission=quota_admission,
+        )
 
     release_account_lease = AsyncMock()
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
@@ -29656,7 +29666,7 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_reuse_lease",
-        model="gpt-5.5",
+        model="gpt-5.3-codex-spark",
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
@@ -29666,7 +29676,7 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
         key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
         headers={},
         affinity=proxy_service._AffinityPolicy(key="bridge-key"),
-        request_model="gpt-5.5",
+        request_model="gpt-5.3-codex-spark",
         account=account,
         upstream=old_upstream,
         upstream_control=proxy_service._WebSocketUpstreamControl(),
@@ -29685,6 +29695,7 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
     assert session.account_lease is old_lease
     assert session.account == account
     assert session.upstream is new_upstream
+    assert session.catalog_omission_quota_admission is quota_admission
     release_account_lease.assert_not_awaited()
 
 
@@ -31185,7 +31196,10 @@ def test_suppressed_catalog_model_remains_an_account_selection_blocker(monkeypat
 def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_wrong_model")),
+        SimpleNamespace(
+            account=_make_account("acc_bridge_wrong_model"),
+            catalog_omission_quota_admission=None,
+        ),
     )
 
     class Registry:
@@ -31205,10 +31219,172 @@ def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch
     )
 
 
+@pytest.mark.parametrize(
+    (
+        "canonical_quota_key",
+        "normalized_effective_service_tier",
+        "request_model",
+        "request_service_tier",
+        "catalog_supports_account",
+        "expected",
+    ),
+    [
+        pytest.param("codex_spark", None, "gpt-5.3-codex-spark", None, False, True, id="exact"),
+        pytest.param(
+            "codex_spark",
+            None,
+            " GPT-5.3-CODEX-SPARK ",
+            " Default ",
+            False,
+            True,
+            id="normalized-model-and-default-tier",
+        ),
+        pytest.param(
+            "codex_spark",
+            "priority",
+            "gpt-5.3-codex-spark",
+            " Priority ",
+            False,
+            True,
+            id="normalized-specific-tier",
+        ),
+        pytest.param("codex_spark", None, "gpt-5.2", None, False, False, id="different-model"),
+        pytest.param(
+            "codex_spark",
+            None,
+            "gpt-5.3-codex-spark",
+            "priority",
+            False,
+            False,
+            id="different-tier",
+        ),
+        pytest.param(
+            "unrelated_quota",
+            None,
+            "gpt-5.3-codex-spark",
+            None,
+            False,
+            False,
+            id="different-quota-key",
+        ),
+        pytest.param(
+            "codex_spark",
+            "priority",
+            "gpt-5.3-codex-spark",
+            "priority",
+            True,
+            False,
+            id="catalog-supported-tier-exclusion",
+        ),
+    ],
+)
+def test_http_bridge_session_only_honors_exact_catalog_omission_quota_admission(
+    monkeypatch,
+    canonical_quota_key,
+    normalized_effective_service_tier,
+    request_model,
+    request_service_tier,
+    catalog_supports_account,
+    expected,
+):
+    account = _make_account("acc_bridge_quota_admission")
+    account.plan_type = "pro"
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(
+            account=account,
+            catalog_omission_quota_admission=CatalogOmissionQuotaAdmission(
+                normalized_model="gpt-5.3-codex-spark",
+                canonical_quota_key=canonical_quota_key,
+                normalized_effective_service_tier=normalized_effective_service_tier,
+            ),
+        ),
+    )
+
+    class Registry:
+        def get_snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(account_plans={account.id: "pro"})
+
+        def plan_types_for_model(self, slug: str) -> frozenset[str]:
+            del slug
+            return frozenset({"pro"})
+
+        def account_ids_for_model(self, slug: str) -> frozenset[str]:
+            del slug
+            return frozenset({account.id}) if catalog_supports_account else frozenset()
+
+        def account_ids_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
+            del slug, service_tier
+            return frozenset()
+
+        def plan_types_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
+            del slug, service_tier
+            return frozenset({"pro"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model=request_model,
+            request_service_tier=request_service_tier,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("current_plan", ["plus", None], ids=["ineligible", "unavailable"])
+def test_http_bridge_session_rechecks_registry_plan_tier_for_catalog_omission_admission(monkeypatch, current_plan):
+    account = _make_account("acc_bridge_quota_plan_changed")
+    account.plan_type = "pro"
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(
+            account=account,
+            catalog_omission_quota_admission=CatalogOmissionQuotaAdmission(
+                normalized_model="gpt-5.3-codex-spark",
+                canonical_quota_key="codex_spark",
+                normalized_effective_service_tier="priority",
+            ),
+        ),
+    )
+
+    class Registry:
+        def get_snapshot(self) -> SimpleNamespace:
+            account_plans = {} if current_plan is None else {account.id: current_plan}
+            return SimpleNamespace(account_plans=account_plans)
+
+        def account_ids_for_model(self, slug: str) -> frozenset[str]:
+            assert slug == "gpt-5.3-codex-spark"
+            return frozenset()
+
+        def account_ids_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
+            assert (slug, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return frozenset()
+
+        def plan_types_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
+            assert (slug, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return frozenset({"pro"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.3-codex-spark",
+            request_service_tier="priority",
+        )
+        is False
+    )
+
+
 def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_new_owner")),
+        SimpleNamespace(
+            account=_make_account("acc_bridge_new_owner"),
+            catalog_omission_quota_admission=None,
+        ),
     )
 
     class Registry:
@@ -31245,7 +31421,10 @@ def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
 def test_http_bridge_session_treats_omit_equivalent_service_tiers_as_unfiltered(monkeypatch, service_tier):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_omit_equivalent_tier")),
+        SimpleNamespace(
+            account=_make_account("acc_bridge_omit_equivalent_tier"),
+            catalog_omission_quota_admission=None,
+        ),
     )
 
     class Registry:
@@ -31279,7 +31458,10 @@ def test_http_bridge_session_treats_omit_equivalent_service_tiers_as_unfiltered(
 def test_http_bridge_session_preserves_model_plan_gate_for_omit_equivalent_tiers(monkeypatch, service_tier):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_bootstrap_plan_gate")),
+        SimpleNamespace(
+            account=_make_account("acc_bridge_bootstrap_plan_gate"),
+            catalog_omission_quota_admission=None,
+        ),
     )
 
     class Registry:
@@ -31322,7 +31504,10 @@ def test_http_bridge_session_preserves_model_plan_gate_for_omit_equivalent_tiers
 def test_http_bridge_session_rejects_suppressed_catalog_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_suppressed_catalog")),
+        SimpleNamespace(
+            account=_make_account("acc_bridge_suppressed_catalog"),
+            catalog_omission_quota_admission=None,
+        ),
     )
 
     class Registry:
@@ -31348,7 +31533,10 @@ def test_http_bridge_session_rejects_suppressed_catalog_model(monkeypatch):
 def test_http_bridge_session_allows_operator_mapped_unadvertised_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_unadvertised")),
+        SimpleNamespace(
+            account=_make_account("acc_bridge_unadvertised"),
+            catalog_omission_quota_admission=None,
+        ),
     )
 
     class Registry:

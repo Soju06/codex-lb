@@ -47,7 +47,7 @@ from app.core.metrics.prometheus import (
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
 )
-from app.core.openai.model_registry import get_model_registry
+from app.core.openai.model_registry import canonical_service_tier_value, get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
@@ -139,12 +139,27 @@ class AccountLease:
     estimated_tokens: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogOmissionQuotaAdmission:
+    normalized_model: str
+    canonical_quota_key: str
+    normalized_effective_service_tier: str | None
+
+    def matches(self, *, requested_model: str, service_tier: str | None) -> bool:
+        return (
+            self.normalized_model == _normalize_model_id(requested_model)
+            and self.canonical_quota_key == _gated_limit_name_for_model(requested_model)
+            and self.normalized_effective_service_tier == _effective_model_service_tier(service_tier)
+        )
+
+
 @dataclass
 class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
     lease: AccountLease | None = None
+    catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +169,12 @@ class AccountConcurrencyCaps:
     configured_response_create_limit: int | None = None
     configured_stream_limit: int | None = None
     replica_count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class _ModelAccountFilterResult:
+    accounts: list[Account]
+    general_model_account_ids: frozenset[str] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +200,7 @@ class _SelectionInputs:
     ignore_standard_quota_status: bool = False
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
+    quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
 
 
 SelectionInputs = _SelectionInputs
@@ -383,6 +405,9 @@ class LoadBalancer:
                     ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
                     persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
                     routing_policy_override=selection_inputs.routing_policy_override,
+                    quota_admitted_catalog_omission_account_ids=(
+                        selection_inputs.quota_admitted_catalog_omission_account_ids
+                    ),
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
@@ -410,6 +435,9 @@ class LoadBalancer:
                     ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
                     persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
                     routing_policy_override=selection_inputs.routing_policy_override,
+                    quota_admitted_catalog_omission_account_ids=(
+                        selection_inputs.quota_admitted_catalog_omission_account_ids
+                    ),
                 )
             return selection_inputs
 
@@ -824,7 +852,21 @@ class LoadBalancer:
             bool(sticky_key),
             model,
         )
-        return AccountSelection(account=selected_snapshot, error_message=None, error_code=None, lease=selected_lease)
+        return AccountSelection(
+            account=selected_snapshot,
+            error_message=None,
+            error_code=None,
+            lease=selected_lease,
+            catalog_omission_quota_admission=_catalog_omission_quota_admission(
+                account_id=selected_snapshot.id,
+                model=model,
+                service_tier=service_tier,
+                additional_limit_name=additional_limit_name,
+                quota_admitted_catalog_omission_account_ids=(
+                    selection_inputs.quota_admitted_catalog_omission_account_ids
+                ),
+            ),
+        )
 
     async def _load_selection_inputs(
         self,
@@ -834,7 +876,8 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
-        effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
+        mapped_limit_name = _gated_limit_name_for_model(model)
+        effective_limit_name = additional_limit_name or mapped_limit_name
         additional_quota_routing_policies: dict[str, str] = {}
         if effective_limit_name is not None:
             additional_quota_routing_policies = await _load_dashboard_additional_quota_routing_overrides()
@@ -883,8 +926,23 @@ class LoadBalancer:
                 allowed_account_ids = set(account_ids)
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
             pre_model_filter_accounts = accounts
+            model_catalog_omitted_account_ids: frozenset[str] = frozenset()
             if model and _mapped_model_has_registry_entry(model):
-                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model, service_tier=service_tier)
+                canonical_quota_can_override_account_catalog = (
+                    additional_limit_name is None and mapped_limit_name is not None
+                )
+                model_filter = _filter_accounts_for_model_with_catalog_evidence(
+                    pre_model_filter_accounts,
+                    model,
+                    service_tier=service_tier,
+                    additional_quota_can_override_account_catalog=canonical_quota_can_override_account_catalog,
+                )
+                accounts = model_filter.accounts
+                general_model_account_ids = model_filter.general_model_account_ids
+                if canonical_quota_can_override_account_catalog and general_model_account_ids is not None:
+                    model_catalog_omitted_account_ids = frozenset(
+                        account.id for account in accounts if account.id not in general_model_account_ids
+                    )
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
@@ -934,6 +992,7 @@ class LoadBalancer:
                     limit_name=effective_limit_name,
                     explicit_limit=additional_limit_name is not None,
                     repos=repos,
+                    require_fresh_evidence_account_ids=model_catalog_omitted_account_ids,
                 )
                 accounts = additional_filter.accounts
                 if not accounts:
@@ -1002,6 +1061,9 @@ class LoadBalancer:
                 latest_primary = standard_latest_primary
                 latest_secondary = standard_latest_secondary
                 ignore_standard_quota_account_ids = frozenset()
+            quota_admitted_catalog_omission_account_ids = frozenset(
+                account.id for account in accounts if account.id in model_catalog_omitted_account_ids
+            )
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary={
@@ -1019,6 +1081,7 @@ class LoadBalancer:
                 ignore_standard_quota_status=ignore_standard_quota_status,
                 persist_standard_quota_status=True,
                 routing_policy_override=routing_policy_override,
+                quota_admitted_catalog_omission_account_ids=quota_admitted_catalog_omission_account_ids,
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
@@ -1116,6 +1179,7 @@ class LoadBalancer:
         limit_name: str,
         explicit_limit: bool = False,
         repos: ProxyRepositories,
+        require_fresh_evidence_account_ids: frozenset[str] = frozenset(),
     ) -> _AdditionalLimitFilterResult:
         if not accounts:
             return _AdditionalLimitFilterResult(accounts=[], latest_primary={}, latest_secondary={})
@@ -1160,6 +1224,7 @@ class LoadBalancer:
                 account_plan_type=account.plan_type,
                 quota_key=limit_name,
                 explicit_limit=explicit_limit,
+                require_fresh_evidence=account.id in require_fresh_evidence_account_ids,
                 latest_primary=latest_primary,
                 latest_secondary=latest_secondary,
                 fresh_primary=fresh_primary,
@@ -2500,27 +2565,30 @@ def _usage_refresh_interval_seconds() -> int:
     return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
-def _filter_accounts_for_model(
+def _filter_accounts_for_model_with_catalog_evidence(
     accounts: list[Account],
     model: str,
     *,
     service_tier: str | None = None,
-) -> list[Account]:
+    additional_quota_can_override_account_catalog: bool = False,
+) -> _ModelAccountFilterResult:
     registry = get_model_registry()
     account_indexes_cover_selection = True
     get_snapshot = getattr(registry, "get_snapshot", None)
     if callable(get_snapshot):
         snapshot = get_snapshot()
-        account_indexes_cover_selection = snapshot is not None and {account.id for account in accounts}.issubset(
-            snapshot.account_plans
+        account_indexes_cover_selection = snapshot is not None and all(
+            account.id in snapshot.account_plans for account in accounts
         )
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
-    model_account_ids = (
+    general_model_account_ids = (
         account_ids_for_model(model) if callable(account_ids_for_model) and account_indexes_cover_selection else None
     )
-    model_accounts = (
-        accounts if model_account_ids is None else [account for account in accounts if account.id in model_account_ids]
-    )
+    if general_model_account_ids is None or additional_quota_can_override_account_catalog:
+        model_accounts = accounts
+    else:
+        model_accounts = [account for account in accounts if account.id in general_model_account_ids]
+
     normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
     effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
     if effective_service_tier is not None:
@@ -2530,13 +2598,46 @@ def _filter_accounts_for_model(
             else None
         )
         if allowed_account_ids is not None:
-            return [account for account in model_accounts if account.id in allowed_account_ids]
+            if additional_quota_can_override_account_catalog and general_model_account_ids is not None:
+                allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
+                tier_filtered_accounts: list[Account] = []
+                for account in accounts:
+                    if account.id in general_model_account_ids:
+                        if account.id in allowed_account_ids:
+                            tier_filtered_accounts.append(account)
+                    elif allowed_plans is None or account_plan_matches_allowed(account.plan_type, allowed_plans):
+                        tier_filtered_accounts.append(account)
+                model_accounts = tier_filtered_accounts
+            else:
+                model_accounts = [account for account in model_accounts if account.id in allowed_account_ids]
+            return _ModelAccountFilterResult(
+                accounts=model_accounts,
+                general_model_account_ids=general_model_account_ids,
+            )
         allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
     else:
         allowed_plans = registry.plan_types_for_model(model)
-    if allowed_plans is None:
-        return model_accounts
-    return [a for a in model_accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]
+    if allowed_plans is not None:
+        model_accounts = [
+            account for account in model_accounts if account_plan_matches_allowed(account.plan_type, allowed_plans)
+        ]
+    return _ModelAccountFilterResult(
+        accounts=model_accounts,
+        general_model_account_ids=general_model_account_ids,
+    )
+
+
+def _filter_accounts_for_model(
+    accounts: list[Account],
+    model: str,
+    *,
+    service_tier: str | None = None,
+) -> list[Account]:
+    return _filter_accounts_for_model_with_catalog_evidence(
+        accounts,
+        model,
+        service_tier=service_tier,
+    ).accounts
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
@@ -2549,6 +2650,41 @@ def _selectable_accounts(accounts: list[Account]) -> list[Account]:
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:
     return get_additional_quota_key_for_model_id(model)
+
+
+def _normalize_model_id(model: str) -> str:
+    return model.strip().lower()
+
+
+def _effective_model_service_tier(service_tier: str | None) -> str | None:
+    if service_tier is None:
+        return None
+    normalized_service_tier = canonical_service_tier_value(service_tier)
+    return None if normalized_service_tier in {"", "auto", "default"} else normalized_service_tier
+
+
+def _catalog_omission_quota_admission(
+    *,
+    account_id: str,
+    model: str | None,
+    service_tier: str | None,
+    additional_limit_name: str | None,
+    quota_admitted_catalog_omission_account_ids: frozenset[str],
+) -> CatalogOmissionQuotaAdmission | None:
+    if (
+        model is None
+        or additional_limit_name is not None
+        or account_id not in quota_admitted_catalog_omission_account_ids
+    ):
+        return None
+    quota_key = _gated_limit_name_for_model(model)
+    if quota_key is None:
+        return None
+    return CatalogOmissionQuotaAdmission(
+        normalized_model=_normalize_model_id(model),
+        canonical_quota_key=quota_key,
+        normalized_effective_service_tier=_effective_model_service_tier(service_tier),
+    )
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:
@@ -2621,6 +2757,9 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
         persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
         routing_policy_override=selection_inputs.routing_policy_override,
+        quota_admitted_catalog_omission_account_ids=frozenset(
+            selection_inputs.quota_admitted_catalog_omission_account_ids
+        ),
     )
 
 
@@ -2658,6 +2797,7 @@ def _additional_quota_eligibility(
     account_plan_type: str | None,
     quota_key: str | None,
     explicit_limit: bool = False,
+    require_fresh_evidence: bool = False,
     latest_primary: dict[str, AdditionalUsageHistory],
     latest_secondary: dict[str, AdditionalUsageHistory],
     fresh_primary: dict[str, AdditionalUsageHistory],
@@ -2668,7 +2808,11 @@ def _additional_quota_eligibility(
     primary_entry = fresh_primary.get(account_id)
     secondary_entry = fresh_secondary.get(account_id)
 
-    if not explicit_limit and not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type):
+    if (
+        not require_fresh_evidence
+        and not explicit_limit
+        and not _additional_quota_applies_to_plan(quota_key=quota_key, plan_type=account_plan_type)
+    ):
         return "eligible"
 
     if latest_primary_entry is None and latest_secondary_entry is None:

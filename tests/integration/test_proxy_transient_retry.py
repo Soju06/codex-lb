@@ -337,8 +337,8 @@ async def test_stream_previsible_upstream_close_sleeps_and_retries_same_account(
 
 
 @pytest.mark.asyncio
-async def test_stream_previsible_client_error_exhaustion_surfaces_upstream_unavailable(async_client, monkeypatch):
-    """If every account disconnects before first output, surface the upstream failure, not no_accounts."""
+async def test_stream_body_read_client_error_surfaces_without_replay(async_client, monkeypatch):
+    """Post-connect body-read errors are not replayed because upstream delivery is uncertain."""
     await _import_account(async_client, "acc_previsible_disconnect_a", "previsible-disconnect-a@example.com")
     await _import_account(async_client, "acc_previsible_disconnect_b", "previsible-disconnect-b@example.com")
 
@@ -365,7 +365,7 @@ async def test_stream_previsible_client_error_exhaustion_surfaces_upstream_unava
     error_codes = [event["response"]["error"]["code"] for event in events if event.get("type") == "response.failed"]
     assert error_codes[-1] == "upstream_unavailable"
     assert "no_accounts" not in error_codes
-    assert len(set(seen_account_ids)) == 2
+    assert seen_account_ids == ["acc_previsible_disconnect_a"]
 
 
 @pytest.mark.asyncio

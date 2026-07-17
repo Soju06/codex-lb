@@ -499,11 +499,8 @@ class _StreamingMixin(_StreamingRetryMixin):
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
         start = time.monotonic()
-        # Pre-attempt wait: selection, admission waits, and failed failover
-        # attempts. Kept out of latency_ms/TTFT so both share this attempt's
-        # anchor; recorded separately for the queue-wait dashboard trend.
-        # Re-anchored below once this attempt's own admission waits resolve;
-        # admission-failure rows keep this entry-time fallback.
+        # Keep selection/failover waits out of latency and TTFT, record them as
+        # queue time, then re-anchor after this attempt's admission wait.
         attempt_started_at = start
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status = "success"
@@ -1041,6 +1038,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
+            if latency_first_token_ms is None and _facade()._finalize_ttft_reasoning_deltas(ttft_reasoning_deltas):
+                latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier

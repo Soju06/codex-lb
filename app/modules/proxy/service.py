@@ -564,6 +564,7 @@ from app.modules.proxy._service.support import (
     _DownstreamWebSocketActivity,  # noqa: F401
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
+    _finalize_ttft_reasoning_deltas,  # noqa: F401
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_ttft_event,  # noqa: F401

@@ -120,6 +120,14 @@ def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> b
     return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
 
 
+def _finalize_ttft_reasoning_deltas(
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str],
+) -> bool:
+    visible = any(_strip_blank_html_comment_lines(text) for text in pending_reasoning_deltas.values())
+    pending_reasoning_deltas.clear()
+    return visible
+
+
 def _is_ttft_event(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
@@ -132,9 +140,7 @@ def _is_ttft_event(
         and not _is_reasoning_summary_interleavable_event(event_type)
         and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
     ):
-        pending_visible = any(_strip_blank_html_comment_lines(text) for text in pending.values())
-        pending.clear()
-        if pending_visible:
+        if _finalize_ttft_reasoning_deltas(pending):
             return True
     if event_type == "response.reasoning_summary_text.delta":
         delta = payload.get("delta") if payload is not None else None

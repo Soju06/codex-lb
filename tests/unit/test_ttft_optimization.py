@@ -340,7 +340,7 @@ async def test_stream_responses_admission_wait_lands_in_queue_not_ttft(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monkeypatch) -> None:
+async def test_stream_responses_ttft_flushes_visible_reasoning_at_eof(monkeypatch) -> None:
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = ProxyService(_repo_factory(request_logs))
@@ -355,6 +355,7 @@ async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monke
     )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         del payload, headers, access_token, account_id, base_url, raise_for_status
@@ -378,14 +379,6 @@ async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monke
             '"output_index":0,"summary_index":0,"delta":"Plan\\n\\n<!"}\n\n'
         )
         await asyncio.sleep(0.03)
-        yield (
-            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1",'
-            '"output_index":0,"summary_index":0,"delta":"-- -->"}\n\n'
-        )
-        yield (
-            'data: {"type":"response.completed","response":{"id":"resp_ttft","usage":'
-            '{"input_tokens":1,"output_tokens":1}}}\n\n'
-        )
 
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
 
@@ -395,5 +388,5 @@ async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monke
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
-    assert len(chunks) == 10
+    assert len(chunks) == 8
     assert latency_first_token_ms >= 20

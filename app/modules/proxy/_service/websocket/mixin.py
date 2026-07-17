@@ -4186,6 +4186,11 @@ class _WebSocketMixin:
             request_state.api_key_reservation = None
             return
 
+        if request_state.latency_first_token_ms is None and _facade()._finalize_ttft_reasoning_deltas(
+            request_state.ttft_reasoning_deltas
+        ):
+            request_state.latency_first_token_ms = int((time.monotonic() - request_state.started_at) * 1000)
+
         if event_type == "error":
             error = event.error if event else None
             status = "error"
@@ -4598,6 +4603,10 @@ class _WebSocketMixin:
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
+            if request_state.latency_first_token_ms is None and _facade()._finalize_ttft_reasoning_deltas(
+                request_state.ttft_reasoning_deltas
+            ):
+                request_state.latency_first_token_ms = latency_ms
             await proxy._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,

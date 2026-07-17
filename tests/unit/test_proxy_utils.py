@@ -33928,7 +33928,7 @@ async def test_retry_http_bridge_precreated_request_recovers_from_clean_close(mo
 
     assert retried is True
     reconnect.assert_awaited_once_with(session, request_state=request_state)
-    session.upstream.send_text.assert_awaited_once_with(request_state.request_text)
+    cast(AsyncMock, session.upstream.send_text).assert_awaited_once_with(request_state.request_text)
     assert request_state.replay_count == 1
 
 
@@ -33970,7 +33970,7 @@ async def test_retry_http_bridge_precreated_request_propagates_reader_restart(mo
         request_state=request_state,
         restart_reader=True,
     )
-    session.upstream.send_text.assert_awaited_once_with(request_state.request_text)
+    cast(AsyncMock, session.upstream.send_text).assert_awaited_once_with(request_state.request_text)
 
 
 @pytest.mark.asyncio
@@ -34022,7 +34022,7 @@ async def test_retry_http_bridge_clean_close_keeps_hard_continuation_on_same_acc
     assert await service._retry_http_bridge_precreated_request(session) is True
 
     reconnect.assert_awaited_once_with(session, request_state=request_state, require_same_account=True)
-    session.upstream.send_text.assert_awaited_once_with(request_state.request_text)
+    cast(AsyncMock, session.upstream.send_text).assert_awaited_once_with(request_state.request_text)
 
 
 @pytest.mark.asyncio

@@ -224,6 +224,19 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
+def _apply_http_bridge_downstream_turn_state(
+    request_state: _WebSocketRequestState,
+    *,
+    downstream_turn_state: str | None,
+    incoming_turn_state_header: str | None,
+) -> None:
+    if downstream_turn_state is None:
+        return
+    request_state.session_id = _normalize_session_id(downstream_turn_state)
+    if incoming_turn_state_header is not None or request_state.previous_response_id is not None:
+        request_state.hard_continuity_anchor = True
+
+
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
     error = exc.payload.get("error") if isinstance(exc.payload, dict) else None
     if not isinstance(error, dict):
@@ -914,9 +927,11 @@ class _HTTPBridgeStreamingMixin:
         request_state, text_data = prepare_bridge_request(effective_payload)
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
-        if downstream_turn_state is not None:
-            request_state.session_id = _normalize_session_id(downstream_turn_state)
-            request_state.hard_continuity_anchor = True
+        _apply_http_bridge_downstream_turn_state(
+            request_state,
+            downstream_turn_state=downstream_turn_state,
+            incoming_turn_state_header=incoming_turn_state_header,
+        )
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -1082,9 +1097,11 @@ class _HTTPBridgeStreamingMixin:
                 )
                 request_state, text_data = prepare_bridge_request(payload)
                 request_state.affinity_policy = affinity
-                if downstream_turn_state is not None:
-                    request_state.session_id = _normalize_session_id(downstream_turn_state)
-                    request_state.hard_continuity_anchor = True
+                _apply_http_bridge_downstream_turn_state(
+                    request_state,
+                    downstream_turn_state=downstream_turn_state,
+                    incoming_turn_state_header=incoming_turn_state_header,
+                )
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
                 request_state.request_stage = _http_bridge_request_stage(
                     headers=headers,
@@ -1335,9 +1352,11 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
-                    if downstream_turn_state is not None:
-                        retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
-                        retry_request_state.hard_continuity_anchor = True
+                    _apply_http_bridge_downstream_turn_state(
+                        retry_request_state,
+                        downstream_turn_state=downstream_turn_state,
+                        incoming_turn_state_header=incoming_turn_state_header,
+                    )
                     retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                     retry_request_state.request_stage = "reattach"
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
@@ -1502,9 +1521,11 @@ class _HTTPBridgeStreamingMixin:
             request_state, text_data = prepare_bridge_request(submit_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
-            if downstream_turn_state is not None:
-                request_state.session_id = _normalize_session_id(downstream_turn_state)
-                request_state.hard_continuity_anchor = True
+            _apply_http_bridge_downstream_turn_state(
+                request_state,
+                downstream_turn_state=downstream_turn_state,
+                incoming_turn_state_header=incoming_turn_state_header,
+            )
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -1966,9 +1987,11 @@ class _HTTPBridgeStreamingMixin:
                     reservation=retry_api_key_reservation,
                 )
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
-                if downstream_turn_state is not None:
-                    retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
-                    retry_request_state.hard_continuity_anchor = True
+                _apply_http_bridge_downstream_turn_state(
+                    retry_request_state,
+                    downstream_turn_state=downstream_turn_state,
+                    incoming_turn_state_header=incoming_turn_state_header,
+                )
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                 retry_request_state.request_stage = retry_request_stage
                 retry_request_state.preferred_account_id = retry_preferred_account_id

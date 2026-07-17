@@ -16,6 +16,7 @@ import { DataRetentionSettings } from "@/features/settings/components/data-reten
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
+import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
@@ -104,6 +105,7 @@ export function SettingsPage() {
           <div className="space-y-4">
             <AppearanceSettings />
             <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+            <ResetCreditSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             {canWrite ? (
               <GuestAccessSettings
                 settings={settings}

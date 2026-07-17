@@ -58,6 +58,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is True
     assert payload["preferEarlierResetWindow"] == "secondary"
+    assert payload["showResetCreditBadges"] is True
+    assert payload["autoRedeemResetCreditsBeforeExpiry"] is False
+    assert payload["showResetCreditExpiryBadge"] is True
     assert payload["routingStrategy"] == "capacity_weighted"
     assert payload["relativeAvailabilityPower"] == 2.0
     assert payload["relativeAvailabilityTopK"] == 5
@@ -103,6 +106,9 @@ async def test_settings_api_get_and_update(async_client):
             "relativeAvailabilityPower": 1.5,
             "relativeAvailabilityTopK": 7,
             "preferEarlierResetWindow": "secondary",
+            "showResetCreditBadges": False,
+            "autoRedeemResetCreditsBeforeExpiry": True,
+            "showResetCreditExpiryBadge": False,
             "singleAccountId": None,
             "openaiCacheAffinityMaxAgeSeconds": 180,
             "dashboardSessionTtlSeconds": 31536000,
@@ -144,6 +150,9 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["relativeAvailabilityPower"] == 1.5
     assert updated["relativeAvailabilityTopK"] == 7
     assert updated["preferEarlierResetWindow"] == "secondary"
+    assert updated["showResetCreditBadges"] is False
+    assert updated["autoRedeemResetCreditsBeforeExpiry"] is True
+    assert updated["showResetCreditExpiryBadge"] is False
     assert updated["singleAccountId"] is None
     assert updated["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert updated["dashboardSessionTtlSeconds"] == 31536000
@@ -186,6 +195,9 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityPower"] == 1.5
     assert payload["relativeAvailabilityTopK"] == 7
     assert payload["preferEarlierResetWindow"] == "secondary"
+    assert payload["showResetCreditBadges"] is False
+    assert payload["autoRedeemResetCreditsBeforeExpiry"] is True
+    assert payload["showResetCreditExpiryBadge"] is False
     assert payload["singleAccountId"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 180
     assert payload["dashboardSessionTtlSeconds"] == 31536000

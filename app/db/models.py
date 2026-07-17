@@ -644,6 +644,24 @@ class DashboardSettings(Base):
         server_default=text("'secondary'"),
         nullable=False,
     )
+    show_reset_credit_badges: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
+    auto_redeem_reset_credits_before_expiry: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    show_reset_credit_expiry_badge: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
     routing_strategy: Mapped[str] = mapped_column(
         String,
         default="capacity_weighted",

@@ -41,6 +41,9 @@ from app.core.errors import (
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_durable_recover_total,
+    http_bridge_retry_circuit_total,
+    stream_idle_timeout_total,
+    stream_keepalive_sent_total,
 )
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -988,6 +991,7 @@ class _HTTPBridgeStreamingMixin:
         request_state.affinity_policy = affinity
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
+            request_state.hard_continuity_anchor = True
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -1290,7 +1294,39 @@ class _HTTPBridgeStreamingMixin:
                             raise
                         continue
                     raise
-                switch_to_account_neutral_replay()
+                _log_http_bridge_event(
+                    "owner_unavailable_fresh_resend",
+                    bridge_session_key,
+                    account_id=request_state.preferred_account_id,
+                    model=payload.model,
+                    detail="outcome=fresh_full_resend_without_anchor",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
+                request_state, text_data = prepare_bridge_request(payload)
+                request_state.affinity_policy = affinity
+                if downstream_turn_state is not None:
+                    request_state.session_id = _normalize_session_id(downstream_turn_state)
+                    request_state.hard_continuity_anchor = True
+                request_state.transport = _REQUEST_TRANSPORT_HTTP
+                request_state.request_stage = _http_bridge_request_stage(
+                    headers=headers,
+                    payload=payload,
+                    durable_lookup=None,
+                )
+                request_state.preferred_account_id = resolve_required_account_id(
+                    ("replay owner", request_state.preferred_account_id),
+                    ("input file", rewritten_file_account_id),
+                )
+                file_required_preferred_account = rewritten_file_account_id is not None
+                effective_payload = payload
+                untrimmed_effective_payload = payload
+                proxy_injected_previous_response_id = False
+                previous_response_trimmed_input_count = None
+                previous_response_trimmed_input_fingerprint = None
+                durable_full_resend_anchor_count = None
+                durable_full_resend_anchor_fingerprint = None
+                durable_lookup = None
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
@@ -1559,6 +1595,7 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.affinity_policy = affinity
                     if downstream_turn_state is not None:
                         retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
+                        retry_request_state.hard_continuity_anchor = True
                     retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                     retry_request_state.request_stage = (
                         request_state.request_stage if owner_forward_fresh_replay else "reattach"
@@ -1733,6 +1770,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.affinity_policy = affinity
             if downstream_turn_state is not None:
                 request_state.session_id = _normalize_session_id(downstream_turn_state)
+                request_state.hard_continuity_anchor = True
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -2202,6 +2240,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:
                     retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
+                    retry_request_state.hard_continuity_anchor = True
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                 retry_request_state.request_stage = retry_request_stage
                 retry_request_state.preferred_account_id = retry_preferred_account_id
@@ -2371,6 +2410,7 @@ class _HTTPBridgeStreamingMixin:
             yielded_any = False
             keepalive_sent = False
             keepalive_count = 0
+            circuit_keepalive_waiting = False
             while True:
                 keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
@@ -2381,9 +2421,19 @@ class _HTTPBridgeStreamingMixin:
                         "stream_idle_timeout_seconds",
                         keepalive_interval * stream_keepalive_max_count,
                     )
-                    max_keepalive_count = max(
-                        stream_keepalive_max_count,
-                        math.ceil(max(0.001, stream_idle_timeout_seconds) / keepalive_interval),
+                    response_started = bool(
+                        request_state.response_id
+                        or request_state.replay_downstream_response_id
+                        or request_state.response_event_count > 0
+                        or request_state.latency_response_created_ms is not None
+                    )
+                    max_keepalive_count = (
+                        max(
+                            stream_keepalive_max_count,
+                            math.ceil(max(0.001, stream_idle_timeout_seconds) / keepalive_interval),
+                        )
+                        if response_started
+                        else stream_keepalive_max_count
                     )
                     wait_timeout = keepalive_interval
                     if not yielded_any and not keepalive_sent:
@@ -2424,28 +2474,106 @@ class _HTTPBridgeStreamingMixin:
                         keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
                         if keepalive_count > max_keepalive_count:
-                            logger.info(
-                                "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
-                                "max_keepalive_count=%s",
-                                request_state.request_id,
-                                keepalive_count,
-                                max_keepalive_count,
-                            )
-                            yield format_sse_event(
-                                cast(
-                                    Mapping[str, JsonValue],
-                                    response_failed_event(
-                                        "stream_idle_timeout",
-                                        "Upstream did not respond within the keepalive window",
-                                        response_id=downstream_response_id,
-                                    ),
+                            if not response_started:
+                                retried = False
+                                if not circuit_keepalive_waiting:
+                                    retried = await self._retry_http_bridge_precreated_request(
+                                        session,
+                                        restart_reader=True,
+                                    )
+                                    if retried:
+                                        logger.info(
+                                            "HTTP bridge stream idle recovery retried pre-response request_id=%s",
+                                            request_state.request_id,
+                                        )
+                                        keepalive_count = 0
+                                        keepalive_sent = False
+                                        yielded_any = False
+                                        continue
+                                retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(
+                                    session
                                 )
-                            )
-                            break
-                        if propagate_http_errors and request_state.response_id is None:
+                                if retry_cooldown_seconds > 0:
+                                    circuit_keepalive_waiting = True
+                                    keepalive_count = 0
+                                    if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+                                        http_bridge_retry_circuit_total.labels(outcome="keepalive").inc()
+                                    logger.info(
+                                        "HTTP bridge stream waiting during retry circuit cooldown "
+                                        "request_id=%s retry_after_seconds=%.1f",
+                                        request_state.request_id,
+                                        retry_cooldown_seconds,
+                                    )
+                                else:
+                                    was_circuit_keepalive_waiting = circuit_keepalive_waiting
+                                    circuit_keepalive_waiting = False
+                                    if was_circuit_keepalive_waiting and not retried:
+                                        retried = await self._retry_http_bridge_precreated_request(
+                                            session,
+                                            restart_reader=True,
+                                        )
+                                    if retried:
+                                        logger.info(
+                                            "HTTP bridge stream idle recovery retried after circuit cooldown "
+                                            "request_id=%s",
+                                            request_state.request_id,
+                                        )
+                                        keepalive_count = 0
+                                        keepalive_sent = False
+                                        yielded_any = False
+                                        continue
+                                    if not retried:
+                                        if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                        logger.info(
+                                            "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
+                                            "max_keepalive_count=%s",
+                                            request_state.request_id,
+                                            keepalive_count,
+                                            max_keepalive_count,
+                                        )
+                                        yield format_sse_event(
+                                            cast(
+                                                Mapping[str, JsonValue],
+                                                response_failed_event(
+                                                    "stream_idle_timeout",
+                                                    "Upstream did not respond within the keepalive window",
+                                                    response_id=downstream_response_id,
+                                                ),
+                                            )
+                                        )
+                                        break
+                            elif response_started:
+                                if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                                    stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                logger.info(
+                                    "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
+                                    "max_keepalive_count=%s",
+                                    request_state.request_id,
+                                    keepalive_count,
+                                    max_keepalive_count,
+                                )
+                                yield format_sse_event(
+                                    cast(
+                                        Mapping[str, JsonValue],
+                                        response_failed_event(
+                                            "stream_idle_timeout",
+                                            "Upstream did not respond within the keepalive window",
+                                            response_id=downstream_response_id,
+                                        ),
+                                    )
+                                )
+                                break
+                        if (
+                            propagate_http_errors
+                            and request_state.response_id is None
+                            and not circuit_keepalive_waiting
+                        ):
                             continue
                         keepalive_sent = True
                         yielded_any = True
+                        if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
+                            stream_keepalive_sent_total.labels(surface="http_bridge").inc()
                         if request_state.response_id or request_state.replay_downstream_response_id:
                             yield format_sse_event(
                                 cast(

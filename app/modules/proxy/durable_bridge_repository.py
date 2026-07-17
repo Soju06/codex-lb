@@ -13,7 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
+from app.db.models import (
+    HttpBridgeRetryCircuit,
+    HttpBridgeSessionAlias,
+    HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
+)
 from app.db.session import sqlite_writer_section
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
@@ -86,6 +91,17 @@ class DurableBridgeSessionSnapshot:
     closed_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class DurableBridgeRetryCircuitSnapshot:
+    session_key_kind: str
+    session_key_hash: str
+    api_key_scope: str
+    consecutive_failures: int
+    cooldown_until_epoch: float
+    last_detail: str | None
+    updated_at_epoch: float
+
+
 class DurableBridgeRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -109,6 +125,100 @@ class DurableBridgeRepository:
         result = await self._session.execute(statement)
         row = result.scalar_one_or_none()
         return _to_snapshot(row)
+
+    async def get_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        result = await self._session.execute(
+            select(HttpBridgeRetryCircuit).where(
+                HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+            )
+        )
+        return _to_retry_circuit_snapshot(result.scalar_one_or_none())
+
+    async def upsert_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        consecutive_failures: int,
+        cooldown_until_epoch: float,
+        last_detail: str | None,
+        updated_at_epoch: float,
+    ) -> None:
+        values = {
+            "session_key_kind": session_key_kind,
+            "session_key_hash": durable_bridge_hash(session_key_value),
+            "api_key_scope": api_key_scope,
+            "consecutive_failures": consecutive_failures,
+            "cooldown_until_epoch": cooldown_until_epoch,
+            "last_detail": last_detail,
+            "updated_at_epoch": updated_at_epoch,
+        }
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            statement = (
+                pg_insert(HttpBridgeRetryCircuit)
+                .values(**values)
+                .on_conflict_do_update(
+                    index_elements=[
+                        HttpBridgeRetryCircuit.session_key_kind,
+                        HttpBridgeRetryCircuit.session_key_hash,
+                        HttpBridgeRetryCircuit.api_key_scope,
+                    ],
+                    set_={
+                        key: values[key]
+                        for key in values
+                        if key not in {"session_key_kind", "session_key_hash", "api_key_scope"}
+                    },
+                )
+            )
+        elif dialect == "sqlite":
+            statement = (
+                sqlite_insert(HttpBridgeRetryCircuit)
+                .values(**values)
+                .on_conflict_do_update(
+                    index_elements=[
+                        HttpBridgeRetryCircuit.session_key_kind,
+                        HttpBridgeRetryCircuit.session_key_hash,
+                        HttpBridgeRetryCircuit.api_key_scope,
+                    ],
+                    set_={
+                        key: values[key]
+                        for key in values
+                        if key not in {"session_key_kind", "session_key_hash", "api_key_scope"}
+                    },
+                )
+            )
+        else:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit upsert unsupported for dialect={dialect!r}")
+        async with sqlite_writer_section():
+            await self._session.execute(statement)
+            await self._session.commit()
+
+    async def delete_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+    ) -> None:
+        async with sqlite_writer_section():
+            await self._session.execute(
+                delete(HttpBridgeRetryCircuit).where(
+                    HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                    HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                )
+            )
+            await self._session.commit()
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -1116,3 +1226,17 @@ def _to_snapshot_required(row: HttpBridgeSessionRecord) -> DurableBridgeSessionS
     if snapshot is None:
         raise RuntimeError("Expected durable bridge session snapshot")
     return snapshot
+
+
+def _to_retry_circuit_snapshot(row: HttpBridgeRetryCircuit | None) -> DurableBridgeRetryCircuitSnapshot | None:
+    if row is None:
+        return None
+    return DurableBridgeRetryCircuitSnapshot(
+        session_key_kind=row.session_key_kind,
+        session_key_hash=row.session_key_hash,
+        api_key_scope=row.api_key_scope,
+        consecutive_failures=row.consecutive_failures,
+        cooldown_until_epoch=row.cooldown_until_epoch,
+        last_detail=row.last_detail,
+        updated_at_epoch=row.updated_at_epoch,
+    )

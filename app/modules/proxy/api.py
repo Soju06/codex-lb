@@ -68,22 +68,10 @@ from app.core.exceptions import (
     ProxyRateLimitError,
     ProxyUpstreamError,
 )
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
-from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
-from app.core.multipart import (
-    IMAGE_EDITS_MULTIPART_POLICY,
-    TRANSCRIPTION_MULTIPART_POLICY,
-    bounded_multipart_form,
-    read_bounded_upload,
-)
-from app.core.multipart_fields import (
-    optional_text,
-    optional_upload,
-    ordered_text_items,
-    ordered_uploads,
-    required_text,
-    required_upload,
-    uploaded_file_items,
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    bridge_public_contract_error_total,
+    stream_keepalive_sent_total,
 )
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import (
@@ -3595,6 +3583,7 @@ async def v1_chat_completions(
             inject_sse_keepalives(
                 chat_stream,
                 get_settings().sse_keepalive_interval_seconds,
+                on_keepalive=lambda: _record_stream_keepalive("chat_completions"),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
@@ -4758,6 +4747,7 @@ async def _stream_responses(
             stream,
             get_settings().sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
+            on_keepalive=lambda: _record_stream_keepalive("responses"),
         ),
         media_type="text/event-stream",
         headers={
@@ -5809,6 +5799,11 @@ async def _prepend_initial_sse_heartbeat(
     yield keepalive_frame
     async for line in stream:
         yield line
+
+
+def _record_stream_keepalive(surface: str) -> None:
+    if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
+        stream_keepalive_sent_total.labels(surface=surface).inc()
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:

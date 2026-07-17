@@ -48,8 +48,10 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_drain_recovery_allowed_total,
     bridge_first_turn_timeout_total,
+    bridge_handoff_compatibility_rejection_total,
     bridge_instance_mismatch_total,
     bridge_reattach_total,
+    bridge_unanchored_handoff_recovery_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -120,6 +122,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeSession,
@@ -617,6 +620,30 @@ def _normalize_http_bridge_error_event(
     normalized_payload = parse_sse_data_json(normalized_event_block)
     parsed_event = parse_sse_event(normalized_event_block)
     return normalized_event_block, normalized_payload, parsed_event, "response.failed"
+
+
+def _http_bridge_pending_state_is_stale(
+    request_state: _WebSocketRequestState,
+    *,
+    now: float,
+    threshold_seconds: float,
+    session_closed: bool = False,
+) -> bool:
+    """Identify pre-created bridge requests that never received upstream activity."""
+    if request_state.transport != _REQUEST_TRANSPORT_HTTP or request_state.skip_request_log:
+        return False
+    # Previous-response and turn-state identifiers preserve hard continuity
+    # while the socket is live. Once it closes, that continuity is already lost.
+    if not session_closed and (request_state.previous_response_id is not None or request_state.hard_continuity_anchor):
+        return False
+    if not request_state.response_create_gate_acquired or not request_state.awaiting_response_created:
+        return False
+    if request_state.response_id is not None or request_state.response_event_count > 0:
+        return False
+    if request_state.latency_response_created_ms is not None:
+        return False
+    wait_started_at = request_state.response_create_gate_wait_started_at or request_state.started_at
+    return max(0.0, now - wait_started_at) >= threshold_seconds
 
 
 def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestState) -> bool:
@@ -1161,7 +1188,86 @@ def _require_http_bridge_bound_account_not_excluded(
         )
 
 
-def _raise_http_bridge_incompatible_admission_handoff() -> None:
+def _record_http_bridge_handoff_compatibility_rejection(
+    *,
+    session: "_HTTPBridgeSession",
+    key: "_HTTPBridgeSessionKey",
+    api_key: ApiKeyData | None,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    request_service_tier: str | None,
+    service_tier_supported: bool,
+) -> None:
+    continuity_anchor = (
+        "previous_response_id"
+        if previous_response_id is not None
+        else "turn_state"
+        if incoming_turn_state is not None
+        else "none"
+    )
+    preferred_account = (
+        "required" if require_preferred_account else "preferred" if preferred_account_id is not None else "none"
+    )
+    service_tier = (
+        "not_requested" if request_service_tier is None else "supported" if service_tier_supported else "unsupported"
+    )
+    api_key_scope = "scoped" if api_key is not None and api_key.id is not None else "unscoped"
+    if PROMETHEUS_AVAILABLE and bridge_handoff_compatibility_rejection_total is not None:
+        bridge_handoff_compatibility_rejection_total.labels(
+            continuity_anchor=continuity_anchor,
+            preferred_account=preferred_account,
+            service_tier=service_tier,
+            api_key_scope=api_key_scope,
+        ).inc()
+    logger.warning(
+        "http_bridge_handoff_compatibility_rejected bridge_kind=%s bridge_key=%s key_strength=%s "
+        "continuity_anchor=%s preferred_account=%s preferred_account_id=%s require_preferred=%s "
+        "service_tier=%s api_key_scope=%s existing_closed=%s admission_waiters=%s pending_count=%s",
+        key.affinity_kind,
+        _hash_identifier(key.affinity_key),
+        _http_bridge_key_strength(key),
+        continuity_anchor,
+        preferred_account,
+        _hash_identifier_or_none(preferred_account_id),
+        require_preferred_account,
+        service_tier,
+        api_key_scope,
+        session.closed,
+        getattr(session, "admission_waiter_count", 0),
+        len(session.pending_requests),
+    )
+
+
+def _record_http_bridge_unanchored_handoff_recovery(*, reason: str) -> None:
+    if PROMETHEUS_AVAILABLE and bridge_unanchored_handoff_recovery_total is not None:
+        bridge_unanchored_handoff_recovery_total.labels(reason=reason).inc()
+
+
+def _raise_http_bridge_incompatible_admission_handoff(
+    *,
+    session: "_HTTPBridgeSession",
+    key: "_HTTPBridgeSessionKey",
+    api_key: ApiKeyData | None,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    request_service_tier: str | None,
+    service_tier_supported: bool,
+) -> None:
+    _record_http_bridge_handoff_compatibility_rejection(
+        session=session,
+        key=key,
+        api_key=api_key,
+        incoming_turn_state=incoming_turn_state,
+        previous_response_id=previous_response_id,
+        preferred_account_id=preferred_account_id,
+        require_preferred_account=require_preferred_account,
+        request_service_tier=request_service_tier,
+        service_tier_supported=service_tier_supported,
+    )
     raise ProxyResponseError(
         503,
         openai_error(
@@ -2226,6 +2332,10 @@ def _log_http_bridge_event(
     cache_key_family: str | None = None,
     model_class: str | None = None,
     owner_check_applied: bool | None = None,
+    error_message: str | None = None,
+    upstream_close_code: int | None = None,
+    response_events_seen: int | None = None,
+    transport_classification: str | None = None,
 ) -> None:
     level = logging.INFO
     if event in {
@@ -2234,6 +2344,7 @@ def _log_http_bridge_event(
         "send_failure",
         "retry_fresh_upstream",
         "retry_precreated",
+        "retry_precreated_clean_close",
         "reconnect",
         "terminal_error",
         "capacity_exhausted_active_sessions",
@@ -2242,14 +2353,15 @@ def _log_http_bridge_event(
         "prompt_cache_locality_miss",
         "reallocation_orphan",
         "context_overflow_rollover",
-        "missing_response_created_timeout",
+        "reader_failure",
     }:
         level = logging.WARNING
     logger.log(
         level,
         "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s"
         " model=%s pending=%s detail=%s cache_key_family=%s model_class=%s"
-        " key_strength=%s owner_check_applied=%s",
+        " key_strength=%s owner_check_applied=%s error_message=%s upstream_close_code=%s"
+        " response_events_seen=%s transport_classification=%s",
         event,
         key.affinity_kind,
         _hash_identifier(key.affinity_key),
@@ -2261,6 +2373,10 @@ def _log_http_bridge_event(
         model_class,
         _http_bridge_key_strength(key),
         owner_check_applied,
+        error_message,
+        upstream_close_code,
+        response_events_seen,
+        transport_classification,
     )
 
 

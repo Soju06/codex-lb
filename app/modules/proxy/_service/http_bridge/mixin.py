@@ -69,7 +69,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
-    _close_http_bridge_session_bounded,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
@@ -109,7 +108,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _preferred_http_bridge_reconnect_turn_state,
-    _raise_http_bridge_incompatible_admission_handoff,
+    _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _refresh_reused_http_bridge_session_with_handoff,
@@ -142,9 +141,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 from app.modules.proxy._service.http_bridge.session_registry import _HTTPBridgeSessionRegistryMixin
 from app.modules.proxy._service.http_bridge.streaming import _HTTPBridgeStreamingMixin
 from app.modules.proxy._service.http_bridge.upstream_events import _HTTPBridgeUpstreamEventsMixin
-from app.modules.proxy._service.observability import (
-    _hash_identifier as _hash_identifier,
-)
+from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
 from app.modules.proxy._service.observability import (
     _hash_identifier_or_none as _hash_identifier_or_none,
 )
@@ -236,14 +233,6 @@ class _HTTPBridgeMixin(
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
-    async def _close_http_bridge_session_bounded(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        reason: str,
-    ) -> None:
-        await _close_http_bridge_session_bounded(self, session, reason=reason)
-
     def _schedule_http_bridge_session_closes(
         self,
         sessions: list["_HTTPBridgeSession"],
@@ -709,7 +698,19 @@ class _HTTPBridgeMixin(
                     )
                     continue
                 if retained_handoff and not reusable:
-                    _raise_http_bridge_incompatible_admission_handoff()
+                    existing, force_durable_takeover = self._recover_http_bridge_incompatible_admission_handoff(
+                        key,
+                        existing,
+                        force_durable_takeover,
+                        original_request_unanchored,
+                        request_model,
+                        api_key,
+                        incoming_turn_state,
+                        previous_response_id,
+                        preferred_account_id,
+                        require_preferred_account,
+                        request_service_tier,
+                    )
                 if reusable:
                     assert existing is not None
                     current_instance = settings.http_responses_session_bridge_instance_id
@@ -2017,6 +2018,7 @@ class _HTTPBridgeMixin(
                             "HTTP responses session bridge reader did not shut down cleanly",
                         ),
                     )
+                session.closed = False  # A downstream reconnect hands the reader to a replacement socket.
         deadline = _websocket_connect_deadline(
             request_state,
             _http_bridge_request_budget_seconds(_service_get_settings()),

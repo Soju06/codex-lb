@@ -131,7 +131,9 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.file_ops import _FileOpsMixin
-from app.modules.proxy._service.http_bridge import _HTTPBridgeMixin
+from app.modules.proxy._service.http_bridge import (
+    _HTTPBridgeMixin,
+)
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -310,9 +312,19 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
-from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
-from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
-from app.modules.proxy._service.observability import _interesting_header_keys as _interesting_header_keys
+from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTPBridgeRetryCircuitMixin,
+    _initialize_http_bridge_retry_circuit,
+)
+from app.modules.proxy._service.observability import (
+    _hash_identifier as _hash_identifier,
+)
+from app.modules.proxy._service.observability import (
+    _hash_identifier_or_none as _hash_identifier_or_none,
+)
+from app.modules.proxy._service.observability import (
+    _interesting_header_keys as _interesting_header_keys,
+)
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )
@@ -805,6 +817,8 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
         *PERMANENT_FAILURE_CODES.keys(),
     }
 )
+
+
 _TRANSIENT_RETRY_CODES = frozenset(
     {
         "overloaded_error",
@@ -914,6 +928,7 @@ class ProxyService(
     _CompactMixin,
     _StreamingMixin,
     _WebSocketMixin,
+    _HTTPBridgeRetryCircuitMixin,
     _HTTPBridgeMixin,
 ):
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
@@ -924,6 +939,7 @@ class ProxyService(
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
+        _initialize_http_bridge_retry_circuit(self)
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
@@ -1308,15 +1324,13 @@ class ProxyService(
                 )
                 # Leading telemetry records latency without assigning a response
                 # or releasing this gate; only response-created proves progress.
-                should_retire_stuck_session = any(
-                    state.transport == _REQUEST_TRANSPORT_HTTP
-                    and not state.skip_request_log
-                    and state.response_create_gate_acquired
-                    and state.awaiting_response_created
-                    and not state.downstream_visible
-                    and state.latency_response_created_ms is None
-                    and state.response_event_count == 0
-                    and max(0.0, now - state.started_at) >= threshold_seconds
+                should_retire_stuck_session = bool(pending_states) and all(
+                    self._http_bridge_pending_state_is_stale(
+                        state,
+                        now=now,
+                        threshold_seconds=threshold_seconds,
+                        session_closed=bridge_session.closed,
+                    )
                     for state in pending_states
                 )
             _log_http_bridge_startup_wait_timeout(

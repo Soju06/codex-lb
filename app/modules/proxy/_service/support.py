@@ -761,6 +761,10 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    # Counts only the one extra replay permitted after the initial recovery
+    # replay when the replacement upstream socket also closes cleanly before
+    # producing any response event.
+    clean_close_replay_count: int = 0
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
@@ -774,6 +778,9 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    # Session headers provide locality, but only a previous response or
+    # explicit turn-state header guarantees continuity for stale recovery.
+    hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
@@ -1068,10 +1075,19 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
     request_state.response_event_count += 1
 
 
-def _websocket_request_can_replay_before_visible_output(request_state: _WebSocketRequestState) -> bool:
+def _websocket_request_can_replay_before_visible_output(
+    request_state: _WebSocketRequestState,
+    *,
+    allow_clean_close_retry: bool = False,
+) -> bool:
     if not request_state.request_text:
         return False
-    if request_state.replay_count >= 1:
+    if request_state.replay_count >= 1 and not (
+        allow_clean_close_retry
+        and request_state.replay_count == 1
+        and request_state.response_event_count == 0
+        and request_state.clean_close_replay_count == 0
+    ):
         return False
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm

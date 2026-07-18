@@ -1225,6 +1225,107 @@ async def test_unbound_probe_lease_preserves_reservation_until_commit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unbound_probe_reservation_survives_status_recovery_before_commit() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-unbound-status-recovery-healthy")
+    probing = _make_account("acc-unbound-status-recovery-probing")
+    probing.status = AccountStatus.RATE_LIMITED
+    probing.reset_at = now_epoch - 1
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                145,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                146,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=17,
+        health_version=5,
+    )
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    assert selected.account.status == AccountStatus.ACTIVE
+    assert selected.lease is not None
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 1
+    assert probing_runtime.last_selected_at is not None
+    assert probing_runtime.last_selected_at > 0.0
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_unbound_probe_reservation_rolls_back_when_commit_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-unbound-cancel-healthy")
+    probing = _make_account("acc-unbound-cancel-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                147,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                148,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=23,
+        health_version=9,
+    )
+
+    def cancel_commit(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", cancel_commit)
+
+    with pytest.raises(asyncio.CancelledError):
+        await balancer.select_account(
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+        )
+
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 0
+    assert probing_runtime.last_selected_at == 0.0
+    assert probing_runtime.health_version == 9
+
+
+@pytest.mark.asyncio
 async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     probing = _make_account("acc-unbound-probe-only")
@@ -1260,6 +1361,55 @@ async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
     assert probing_runtime.inflight_streams == 1
     assert probing_runtime.version == 23
     assert probing_runtime.health_version == 7
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_unbound_recovery_probe_selects_with_only_draining_peer() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    probing = _make_account("acc-unbound-probe-draining-probe")
+    draining = _make_account("acc-unbound-probe-draining-peer")
+    accounts_repo = _StubAccountsRepository([probing, draining])
+    usage_repo = _StubUsageRepository(
+        primary={
+            probing.id: _usage_row_with_percent(
+                149,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+            draining.id: _usage_row_with_percent(
+                150,
+                draining.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=time.time(),
+        version=21,
+        health_version=7,
+    )
+    balancer._runtime[draining.id] = RuntimeState(
+        health_tier=HEALTH_TIER_DRAINING,
+        last_selected_at=0.0,
+        version=3,
+        health_version=1,
+    )
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    assert selected.lease is not None
 
     await balancer.release_account_lease(selected.lease)
 

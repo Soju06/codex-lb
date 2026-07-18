@@ -597,15 +597,14 @@ class LoadBalancer:
                             selected_reserved_probe = bool(
                                 probe_reservation is not None and state.account_id == probe_reservation.account_id
                             )
-                            self._sync_runtime_state(
-                                account,
-                                state,
-                                selected=(
-                                    result.account is not None
-                                    and state.account_id == result.account.account_id
-                                    and not selected_reserved_probe
-                                ),
-                            )
+                            if not selected_reserved_probe:
+                                self._sync_runtime_state(
+                                    account,
+                                    state,
+                                    selected=(
+                                        result.account is not None and state.account_id == result.account.account_id
+                                    ),
+                                )
                             selected_states.append(state)
 
                     if result.account is not None and not probe_reservation_invalidated:
@@ -753,10 +752,23 @@ class LoadBalancer:
 
                 if selected_snapshot is not None and probe_reservation is not None:
                     reservation_committed = False
-                    async with self._runtime_lock:
-                        reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
-                        if not reservation_committed:
+                    try:
+                        async with self._runtime_lock:
+                            reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                            if reservation_committed:
+                                self._sync_committed_probe_state_locked(
+                                    probe_reservation,
+                                    selected_account_map,
+                                    selected_states,
+                                )
+                            else:
+                                self._release_due_probe_reservation_locked(probe_reservation)
+                    except BaseException:
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        async with self._runtime_lock:
                             self._release_due_probe_reservation_locked(probe_reservation)
+                        raise
                     if not reservation_committed:
                         await self.release_account_lease(selected_lease)
                         selected_lease = None
@@ -1025,20 +1037,24 @@ class LoadBalancer:
                             account = account_map.get(state.account_id)
                             if account is None:
                                 continue
-                            self._sync_runtime_state(
-                                account,
-                                state,
-                                # A selected probe remains provisional through DB
-                                # persistence. Its reservation is committed below;
-                                # advancing last_selected_at here would make later
-                                # admission failures impossible to roll back.
-                                selected=(
-                                    selection_admitted
-                                    and result.account is not None
-                                    and state.account_id == result.account.account_id
-                                    and not reserved_probe_admitted
-                                ),
-                            )
+                            state_is_reserved_probe = False
+                            if reserved_probe_admitted:
+                                assert probe_reservation is not None
+                                state_is_reserved_probe = state.account_id == probe_reservation.account_id
+                            if not state_is_reserved_probe:
+                                self._sync_runtime_state(
+                                    account,
+                                    state,
+                                    # A selected probe remains provisional through DB
+                                    # persistence. Its reservation is committed below;
+                                    # advancing last_selected_at here would make later
+                                    # admission failures impossible to roll back.
+                                    selected=(
+                                        selection_admitted
+                                        and result.account is not None
+                                        and state.account_id == result.account.account_id
+                                    ),
+                                )
                             selected_states.append(state)
                         if selection_admitted and selected is not None and result.account is not None:
                             selected_reset_at = selected.reset_at
@@ -1134,6 +1150,7 @@ class LoadBalancer:
                     assert sticky_mutation is not None
                     try:
                         async with self._runtime_lock:
+                            assert probe_reservation is not None
                             if self._probe_reservation_current_locked(probe_reservation):
                                 async with self._repo_factory() as repos:
                                     await self._persist_sticky_mutation(
@@ -1143,6 +1160,12 @@ class LoadBalancer:
                                         mutation=sticky_mutation,
                                     )
                                 reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                                if reservation_committed:
+                                    self._sync_committed_probe_state_locked(
+                                        probe_reservation,
+                                        selected_account_map,
+                                        selected_states,
+                                    )
                             else:
                                 self._release_due_probe_reservation_locked(probe_reservation)
                     except BaseException:
@@ -1178,10 +1201,24 @@ class LoadBalancer:
                         continue
                 elif selected_snapshot is not None and reserved_probe_admitted:
                     reservation_committed = False
-                    async with self._runtime_lock:
-                        reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
-                        if not reservation_committed:
+                    try:
+                        assert probe_reservation is not None
+                        async with self._runtime_lock:
+                            reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                            if reservation_committed:
+                                self._sync_committed_probe_state_locked(
+                                    probe_reservation,
+                                    selected_account_map,
+                                    selected_states,
+                                )
+                            else:
+                                self._release_due_probe_reservation_locked(probe_reservation)
+                    except BaseException:
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        async with self._runtime_lock:
                             self._release_due_probe_reservation_locked(probe_reservation)
+                        raise
                     if not reservation_committed:
                         # Runtime health changed while account-state persistence
                         # was in flight. The lease and provisional affinity must
@@ -1353,6 +1390,20 @@ class LoadBalancer:
         runtime.version += 1
         runtime.health_version += 1
         return True
+
+    def _sync_committed_probe_state_locked(
+        self,
+        reservation: _ProbeReservation,
+        account_map: Mapping[str, Account],
+        states: Collection[AccountState],
+    ) -> None:
+        account = account_map.get(reservation.account_id)
+        if account is None:
+            return
+        for state in states:
+            if state.account_id == reservation.account_id:
+                self._sync_runtime_state(account, state)
+                return
 
     async def _load_selection_inputs(
         self,
@@ -2527,7 +2578,7 @@ def _probing_result_requires_recovery_reservation(
 ) -> bool:
     if result_account is None or result_account.health_tier != HEALTH_TIER_PROBING:
         return False
-    return any(state.health_tier != HEALTH_TIER_PROBING for state in states)
+    return any(state.health_tier == HEALTH_TIER_HEALTHY for state in states)
 
 
 def _pool_has_available_account_without_backoff(

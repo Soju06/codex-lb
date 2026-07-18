@@ -102,20 +102,22 @@ async def _insert_sticky_session(
     account_id: str,
     kind: StickySessionKind,
     updated_at_offset_seconds: int,
+    is_subagent: bool = False,
 ) -> None:
     timestamp = utcnow() - timedelta(seconds=updated_at_offset_seconds)
     async with SessionLocal() as session:
         await session.execute(
             text(
                 """
-                INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
-                VALUES (:key, :account_id, :kind, :timestamp, :timestamp)
+                INSERT INTO sticky_sessions (key, account_id, kind, is_subagent, created_at, updated_at)
+                VALUES (:key, :account_id, :kind, :is_subagent, :timestamp, :timestamp)
                 """
             ),
             {
                 "key": key,
                 "account_id": account_id,
                 "kind": kind.value,
+                "is_subagent": is_subagent,
                 "timestamp": timestamp,
             },
         )
@@ -340,6 +342,50 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
     assert response.status_code == 200
     remaining_keys = {entry["key"] for entry in response.json()["entries"]}
     assert remaining_keys == {"prompt-cache-fresh", "codex-session-old"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_sessions_api_stale_only_uses_subagent_ttl(async_client):
+    accounts = await _create_accounts()
+    async with SessionLocal() as session:
+        settings = await SettingsRepository(session).get_or_create()
+        settings.openai_cache_affinity_max_age_seconds = 600
+        settings.http_responses_session_bridge_subagent_prompt_cache_ttl_seconds = 30
+        await session.commit()
+
+    await _insert_sticky_session(
+        key="parent-cache-fresh",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=60,
+    )
+    await _insert_sticky_session(
+        key="subagent-cache-stale",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=60,
+        is_subagent=True,
+    )
+
+    response = await async_client.get("/api/sticky-sessions", params={"staleOnly": "true"})
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["stalePromptCacheCount"] == 1
+    assert payload["total"] == 1
+    assert [(entry["key"], entry["isSubagent"], entry["isStale"]) for entry in payload["entries"]] == [
+        ("subagent-cache-stale", True, True)
+    ]
+
+    response = await async_client.post("/api/sticky-sessions/delete-filtered", json={"staleOnly": True})
+    assert response.status_code == 200
+    assert response.json()["deletedCount"] == 1
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    remaining = {entry["key"]: entry for entry in response.json()["entries"]}
+    assert set(remaining) == {"parent-cache-fresh"}
+    assert remaining["parent-cache-fresh"]["isStale"] is False
 
 
 @pytest.mark.asyncio

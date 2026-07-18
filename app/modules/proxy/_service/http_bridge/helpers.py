@@ -1869,6 +1869,39 @@ def _detect_subagent_session(
     return is_subagent, ttl
 
 
+def _subagent_prompt_cache_bridge_key(
+    key: _HTTPBridgeSessionKey,
+    affinity: _AffinityPolicy,
+    *,
+    is_subagent: bool,
+    idle_ttl_seconds: float,
+    request_scope_id: str,
+    subagent_prompt_cache_ttl_seconds: int | None,
+) -> tuple[_HTTPBridgeSessionKey, _AffinityPolicy, float]:
+    if not is_subagent or key.affinity_kind != "prompt_cache" or affinity.kind is not StickySessionKind.PROMPT_CACHE:
+        return key, affinity, idle_ttl_seconds
+
+    if subagent_prompt_cache_ttl_seconds is None:
+        subagent_affinity_key = f"subagent:{request_scope_id}:{key.affinity_key}"
+    else:
+        subagent_affinity_key = f"subagent:{key.affinity_key}"
+    return (
+        _HTTPBridgeSessionKey(
+            key.affinity_kind,
+            subagent_affinity_key,
+            key.api_key_id,
+            strength=key.strength,
+        ),
+        _AffinityPolicy(
+            key=subagent_affinity_key,
+            kind=affinity.kind,
+            reallocate_sticky=affinity.reallocate_sticky,
+            max_age_seconds=subagent_prompt_cache_ttl_seconds,
+        ),
+        idle_ttl_seconds if subagent_prompt_cache_ttl_seconds is None else float(subagent_prompt_cache_ttl_seconds),
+    )
+
+
 async def _delete_completed_subagent_sticky_mapping(
     repo_factory: Callable[..., Any],
     session: Any,
@@ -2225,6 +2258,7 @@ for _helper_name in (
     "_http_bridge_continuity_lost_error_envelope",
     "_http_bridge_owner_lookup_unavailable_error_envelope",
     "_detect_subagent_session",
+    "_subagent_prompt_cache_bridge_key",
     "_delete_completed_subagent_sticky_mapping",
     "_http_bridge_should_attempt_local_previous_response_recovery",
     "_http_bridge_is_previous_response_owner_unavailable",

@@ -126,6 +126,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _renew_durable_http_bridge_lease,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
+    _subagent_prompt_cache_bridge_key,
     _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
@@ -367,7 +368,6 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession": ...
-
     @overload
     async def _get_or_create_http_bridge_session(
         self,
@@ -436,11 +436,19 @@ class _HTTPBridgeMixin(
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
         )
+        is_subagent_session, subagent_prompt_cache_ttl_seconds = _detect_subagent_session(headers, dashboard_settings)
+        key, affinity, effective_idle_ttl_seconds = _subagent_prompt_cache_bridge_key(
+            key,
+            affinity,
+            is_subagent=is_subagent_session,
+            idle_ttl_seconds=idle_ttl_seconds,
+            request_scope_id=request_scope_id,
+            subagent_prompt_cache_ttl_seconds=subagent_prompt_cache_ttl_seconds,
+        )
         model_transition_rebind = bool(
             durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, request_model)
         )
-        if model_transition_rebind:
-            durable_lookup = None
+        durable_lookup = None if model_transition_rebind else durable_lookup
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
             async with self._http_bridge_lock:
@@ -467,8 +475,6 @@ class _HTTPBridgeMixin(
                             error_type="server_error",
                         ),
                     )
-        effective_idle_ttl_seconds = idle_ttl_seconds
-        is_subagent_session, subagent_prompt_cache_ttl_seconds = _detect_subagent_session(headers, dashboard_settings)
         forwarded_affinity = (
             _forwarded_http_bridge_session_key(
                 headers,

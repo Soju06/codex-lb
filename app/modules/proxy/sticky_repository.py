@@ -137,6 +137,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        is_subagent: bool | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
     ) -> list[tuple[str, StickySessionKind]]:
@@ -145,6 +146,7 @@ class StickySessionsRepository:
                 select(StickySession.key, StickySession.kind),
                 kind=kind,
                 updated_before=updated_before,
+                is_subagent=is_subagent,
                 account_query=account_query,
                 key_query=key_query,
             )
@@ -163,6 +165,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        is_subagent: bool | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
         sort_by: StickySessionSortBy = "updated_at",
@@ -176,6 +179,7 @@ class StickySessionsRepository:
                 select(StickySession, Account.email),
                 kind=kind,
                 updated_before=updated_before,
+                is_subagent=is_subagent,
                 account_query=account_query,
                 key_query=key_query,
             )
@@ -197,6 +201,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        is_subagent: bool | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
     ) -> int:
@@ -204,6 +209,7 @@ class StickySessionsRepository:
             select(func.count()).select_from(StickySession).join(Account, Account.id == StickySession.account_id),
             kind=kind,
             updated_before=updated_before,
+            is_subagent=is_subagent,
             account_query=account_query,
             key_query=key_query,
         )
@@ -267,6 +273,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None,
         updated_before: datetime | None,
+        is_subagent: bool | None,
         account_query: str | None,
         key_query: str | None,
     ):
@@ -274,6 +281,8 @@ class StickySessionsRepository:
             statement = statement.where(StickySession.kind == kind)
         if updated_before is not None:
             statement = statement.where(StickySession.updated_at < to_utc_naive(updated_before))
+        if is_subagent is not None:
+            statement = statement.where(StickySession.is_subagent == is_subagent)
         if account_query:
             statement = statement.where(func.lower(Account.email).contains(account_query.lower()))
         if key_query:

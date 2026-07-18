@@ -1082,6 +1082,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "glopyglerky",
+      "name": "glopyglerky",
+      "avatar_url": "https://avatars.githubusercontent.com/u/189872235?v=4",
+      "profile": "https://github.com/glopyglerky",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

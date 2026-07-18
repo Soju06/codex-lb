@@ -1864,6 +1864,7 @@ class ProxyService(
                         traffic_class=effective_traffic_class,
                         concurrency_caps=concurrency_caps,
                         redact_sensitive_details=redact_sensitive_details,
+                        allow_usage_exhaustion_error=not required_preferred_account,
                     )
                     if preferred_selection.account is not None:
                         logger.info(

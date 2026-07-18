@@ -14,7 +14,7 @@ from app.core.balancer import (
     SelectionResult,
     TrafficClass,
 )
-from app.db.models import Account
+from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionOwner,
@@ -70,6 +70,7 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    allow_usage_exhaustion_error: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,7 @@ async def run_unbound_selection_path(
     redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
@@ -188,7 +190,24 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     ignore_standard_quota=False,
                     routing_costs_by_account_id=effective_routing_costs,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                    usage_exhaustion_states=states,
                 )
+                if (
+                    result.account is None
+                    and result.error_code is None
+                    and lease_kind is not None
+                    and len(selection_states) < len(states)
+                    and any(
+                        state.status == AccountStatus.ACTIVE for state in states if state not in selection_states
+                    )
+                ):
+                    selection_error_code = _account_cap_error_code(lease_kind)
+                    result = SelectionResult(
+                        None,
+                        _account_cap_error_message(lease_kind, caps),
+                        error_code=selection_error_code,
+                    )
                 probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
                     selection_states,
                     result.account,

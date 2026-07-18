@@ -442,6 +442,7 @@ class LoadBalancer:
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
         redact_sensitive_details: bool = False,
+        allow_usage_exhaustion_error: bool = True,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
@@ -641,6 +642,7 @@ class LoadBalancer:
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 ),
             )
             selection_inputs = unbound_outcome.selection_inputs
@@ -686,6 +688,7 @@ class LoadBalancer:
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 ),
             )
             selection_inputs = sticky_outcome.selection_inputs
@@ -1198,6 +1201,7 @@ class LoadBalancer:
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             ignore_standard_quota=False,
+            usage_exhaustion_states=states,
         )
         if result.account is None:
             if result.error_code == USAGE_LIMIT_REACHED:
@@ -1427,6 +1431,8 @@ class LoadBalancer:
         preserve_existing_mapping_on_fallback: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
+        allow_usage_exhaustion_error: bool = True,
+        usage_exhaustion_states: Iterable[AccountState] | None = None,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
             states=states,
@@ -1448,6 +1454,8 @@ class LoadBalancer:
             preserve_existing_mapping_on_fallback=preserve_existing_mapping_on_fallback,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -2303,6 +2311,8 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=capacity_credits,
         health_tier=new_tier,
+        priority_used_percent=used_percent,
+        priority_secondary_used_percent=secondary_used,
         inflight_response_creates=runtime.inflight_response_creates,
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,

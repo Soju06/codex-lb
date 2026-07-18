@@ -105,6 +105,28 @@ async def test_account_lease_uses_explicit_dashboard_cap_snapshot_not_startup_en
     assert third is None
 
 
+@pytest.mark.asyncio
+async def test_opportunistic_selection_preserves_usage_limit_exhaustion_error() -> None:
+    account = _make_account("acc-opportunistic-usage-exhausted")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    reset_at = int(time.time() + 300)
+    account.reset_at = reset_at
+    usage_repo = _StubUsageRepository(
+        {account.id: _usage_row_with_percent(1, account.id, used_percent=100.0, reset_at=reset_at)},
+        {},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), usage_repo))
+
+    result = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_OPPORTUNISTIC,
+    )
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.resets_at == reset_at
+
+
 class _StubAccountsRepository:
     def __init__(self, accounts: list[Account]) -> None:
         self._accounts = accounts
@@ -440,6 +462,57 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
     assert recovered.account is not None
     assert recovered.account.id == account.id
     assert recovered.lease is not None
+
+
+@pytest.mark.asyncio
+async def test_stream_cap_takes_precedence_over_remaining_quota_exhausted_account() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    capped = _make_account("acc-stream-cap-mixed-capped")
+    exhausted = _make_account("acc-stream-cap-mixed-exhausted")
+    exhausted.status = AccountStatus.QUOTA_EXCEEDED
+    exhausted.reset_at = now_epoch + 3600
+    accounts_repo = _StubAccountsRepository([capped, exhausted])
+    usage_repo = _StubUsageRepository(
+        primary={
+            capped.id: _usage_row_with_percent(
+                203,
+                capped.id,
+                used_percent=50.0,
+                reset_at=now_epoch + 300,
+            ),
+            exhausted.id: _usage_row_with_percent(
+                204,
+                exhausted.id,
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    leases = [
+        (
+            await balancer.select_account(
+                routing_strategy="usage_weighted",
+                lease_kind="stream",
+            )
+        ).lease
+        for _ in range(8)
+    ]
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert selected.error_message is not None
+    assert "Account stream capacity is exhausted" in selected.error_message
+    assert selected.resets_at is None
+
+    for lease in leases:
+        await balancer.release_account_lease(lease)
 
 
 @pytest.mark.asyncio

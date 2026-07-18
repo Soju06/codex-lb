@@ -6199,6 +6199,39 @@ async def test_backend_responses_http_bridge_startup_error_omits_turn_state_head
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_pool_usage_exhaustion_returns_429(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+
+    async def fake_select_account_with_budget(*_args, **_kwargs):
+        return proxy_module.AccountSelection(
+            account=None,
+            error_message="Usage limit reached",
+            error_code="usage_limit_reached",
+        )
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_account_with_budget",
+        fake_select_account_with_budget,
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 429
+    assert response.json()["error"]["type"] == "usage_limit_reached"
+    assert response.json()["error"]["code"] == "usage_limit_reached"
+    assert "x-codex-turn-state" not in response.headers
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_startup_error_omits_turn_state_header(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
 

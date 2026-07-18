@@ -35,6 +35,7 @@ from app.modules.proxy._service.support import _request_log_useragent_fields, _R
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -210,10 +211,8 @@ class _CodexControlMixin:
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(log_error_code, log_error_message),
-                    )
+                    status_code, error_payload = selection_failure_response(selection)
+                    raise ProxyResponseError(status_code, error_payload)
             account_id_value = account.id
 
             async def _call_control(target: Account) -> CodexControlResponse:

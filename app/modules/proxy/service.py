@@ -749,6 +749,7 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import WorkAdmissionController
 
 logger = logging.getLogger(__name__)
@@ -1042,10 +1043,8 @@ class ProxyService(
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(log_error_code, log_error_message),
-                    )
+                    status_code, error_payload = selection_failure_response(selection)
+                    raise ProxyResponseError(status_code, error_payload)
             account_id_value = account.id
 
             async def _call_goal(target: Account) -> dict[str, JsonValue]:
@@ -1829,6 +1828,7 @@ class ProxyService(
                         stream_reserve_slots=stream_reserve_slots,
                         traffic_class=effective_traffic_class,
                         concurrency_caps=concurrency_caps,
+                        allow_usage_exhaustion_error=not required_preferred_account,
                     )
                     if preferred_selection.account is not None:
                         logger.info(

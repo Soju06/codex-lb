@@ -134,7 +134,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
     _estimated_lease_tokens_from_request_usage_budget,
     _headers_with_turn_state,
-    _is_local_account_cap_code,
     _prefer_earlier_reset_window,
     _proxy_admission_wait_timeout_seconds,
     _raise_proxy_unavailable,
@@ -222,6 +221,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
 )
 from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -1895,16 +1895,8 @@ class _HTTPBridgeMixin(
                     preferred_account_id=preferred_account_id,
                     selected_account_id=None,
                 )
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
-                error_type = "rate_limit_error" if status_code == 429 else "server_error"
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type=error_type,
-                    ),
-                )
+                status_code, error_payload = selection_failure_response(selection)
+                raise ProxyResponseError(status_code, error_payload)
             if require_preferred_account and preferred_account_id is not None and account.id != preferred_account_id:
                 message = "Previous response owner account is unavailable; retry later."
                 await self._load_balancer.release_account_lease(selected_account_lease)
@@ -2227,6 +2219,14 @@ class _HTTPBridgeMixin(
                 ):
                     preferred_candidate_id = None
                     continue
+                if selection.error_code == USAGE_LIMIT_REACHED and (
+                    required_preferred_account_id is not None or hard_close_account_bound
+                ):
+                    raise _http_bridge_previous_response_owner_unavailable_error()
+                if selection.error_code == USAGE_LIMIT_REACHED:
+                    record_selected_account_takeover(None)
+                    status_code, error_payload = selection_failure_response(selection)
+                    raise ProxyResponseError(status_code, error_payload)
                 if await _sleep_for_account_selection_recovery(
                     selection,
                     request_id=request_state.request_log_id or request_state.request_id,
@@ -2261,15 +2261,8 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = None
                     continue
                 record_selected_account_takeover(None)
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type="rate_limit_error" if status_code == 429 else "server_error",
-                    ),
-                )
+                status_code, error_payload = selection_failure_response(selection)
+                raise ProxyResponseError(status_code, error_payload)
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
                     await self._load_balancer.release_account_lease(selection.lease)

@@ -220,6 +220,7 @@ from app.modules.proxy.schemas import (
     WarmupSkippedAccount,
     WarmupSubmittedAccount,
 )
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -5757,6 +5758,17 @@ async def _opportunistic_admission_denial(
     )
     if selection.account is not None:
         return None
+    if selection.error_code == USAGE_LIMIT_REACHED:
+        return _logged_error_json_response(
+            request,
+            429,
+            openai_error(
+                USAGE_LIMIT_REACHED,
+                selection.error_message or "Usage limit reached",
+                error_type=USAGE_LIMIT_REACHED,
+                resets_at=selection.resets_at,
+            ),
+        )
     message = selection.error_message or "opportunistic burn window closed"
     if not message.startswith("opportunistic burn window closed"):
         message = f"opportunistic burn window closed: {message}"

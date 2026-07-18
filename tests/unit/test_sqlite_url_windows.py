@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +25,17 @@ from app.modules.usage.repository import UsageRepository
 # the regression test platform-independent.
 ENCODED_WINDOWS_URL = "sqlite:///C%3A%5CUsers%5Cme%5C.codex-lb%5Cstore.db"
 DECODED_WINDOWS_PATH = r"C:\Users\me\.codex-lb\store.db"
+
+
+def _encoded_windows_sqlite_url_for_path(path: Path) -> str:
+    return "sqlite:///" + urllib.parse.quote(str(path), safe="")
+
+
+def _dashboard_fixture_path_and_url(tmp_path: Path) -> tuple[Path, str]:
+    if os.name == "nt":
+        decoded_db_path = tmp_path / "store.db"
+        return decoded_db_path, _encoded_windows_sqlite_url_for_path(decoded_db_path)
+    return Path(DECODED_WINDOWS_PATH), ENCODED_WINDOWS_URL
 
 
 class TestSqlitePathFromUrlWindows:
@@ -60,6 +73,31 @@ class TestSqlitePathFromUrlWindows:
         assert (
             normalize_sqlite_url(f"{ENCODED_WINDOWS_URL}?mode=ro#db") == f"sqlite:///{DECODED_WINDOWS_PATH}?mode=ro#db"
         )
+
+    def test_decodes_encoded_hash_at_filesystem_boundary(self) -> None:
+        url = "sqlite:///C%3A%5CUsers%5Cme%5Cfoo%23bar%5Cstore.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == r"C:\Users\me\foo#bar\store.db"
+
+    def test_normalize_keeps_encoded_hash_in_url_path(self) -> None:
+        url = "sqlite:///C%3A%5CUsers%5Cme%5Cfoo%23bar%5Cstore.db"
+
+        normalized = normalize_sqlite_url(url)
+
+        assert normalized == r"sqlite:///C:\Users\me\foo%23bar\store.db"
+        assert sqlite_db_path_from_url(normalized) == Path(r"C:\Users\me\foo#bar\store.db")
+
+    def test_posix_literal_encoded_drive_segment_is_not_decoded(self) -> None:
+        url = "sqlite+aiosqlite:///c%3A/cache.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == "c%3A/cache.db"
+        assert normalize_sqlite_url(url) == url
 
 
 class TestBuildAlembicConfigWindowsUrl:
@@ -249,8 +287,7 @@ async def test_dashboard_usage_sqlite_fast_path_decodes_percent_encoded_bind_url
     """
 
     monkeypatch.chdir(tmp_path)
-    decoded_db_path = Path(DECODED_WINDOWS_PATH)
-    encoded_url = ENCODED_WINDOWS_URL
+    decoded_db_path, encoded_url = _dashboard_fixture_path_and_url(tmp_path)
 
     with sqlite3.connect(decoded_db_path) as conn:
         conn.execute("create table accounts (id text primary key)")

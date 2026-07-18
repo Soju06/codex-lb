@@ -597,6 +597,27 @@ def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
     assert result.resets_at == int(now + 60)
 
 
+def test_select_account_reports_secondary_usage_exhaustion_reset():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=10.0,
+            secondary_used_percent=100.0,
+            reset_at=int(now + 60),
+            secondary_reset_at=int(now + 3600),
+        )
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+    assert result.resets_at == int(now + 3600)
+
+
 def test_select_account_does_not_treat_generic_rate_limit_as_usage_exhaustion():
     now = 1_700_000_000.0
     states = [

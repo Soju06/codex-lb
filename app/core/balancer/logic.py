@@ -172,6 +172,22 @@ def pool_usage_exhaustion(
         usage_values = (state.used_percent, state.secondary_used_percent)
         return any(value is not None and float(value) >= 100.0 for value in usage_values)
 
+    def _usage_exhausted_reset_candidates(state: AccountState) -> list[float]:
+        if state.status == AccountStatus.QUOTA_EXCEEDED:
+            return [float(state.reset_at)] if state.reset_at is not None else []
+        if state.status != AccountStatus.RATE_LIMITED:
+            return []
+        candidates: list[float] = []
+        if state.used_percent is not None and float(state.used_percent) >= 100.0 and state.reset_at is not None:
+            candidates.append(float(state.reset_at))
+        if (
+            state.secondary_used_percent is not None
+            and float(state.secondary_used_percent) >= 100.0
+            and state.secondary_reset_at is not None
+        ):
+            candidates.append(float(state.secondary_reset_at))
+        return candidates
+
     eligible = [
         state
         for state in states
@@ -187,9 +203,10 @@ def pool_usage_exhaustion(
     if not eligible or any(not _usage_exhausted(state) for state in eligible):
         return None
 
-    # Only usage-proven exhausted accounts reach this branch; surface their
-    # earliest known reset so the structured 429 can satisfy the API contract.
-    reset_candidates = [state.reset_at for state in eligible if state.reset_at is not None]
+    # Only usage-proven exhausted accounts reach this branch; surface the
+    # earliest reset for an actually exhausted window so the structured 429
+    # does not retry a secondary-window exhaustion at the primary reset time.
+    reset_candidates = [reset_at for state in eligible for reset_at in _usage_exhausted_reset_candidates(state)]
     resets_at = int(min(reset_candidates)) if reset_candidates else None
     message = "Usage limit reached"
     if resets_at is not None:

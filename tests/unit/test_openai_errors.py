@@ -29,6 +29,18 @@ def test_response_failed_event_accepts_incomplete_details():
     assert response.get("incomplete_details") == {"reason": "max_output_tokens"}
 
 
+def test_response_failed_event_preserves_reset_hint():
+    event = response_failed_event(
+        "usage_limit_reached",
+        "Rate limit exceeded. Try again in 1h",
+        error_type="usage_limit_reached",
+        response_id="resp_1",
+        resets_at=1_700_003_600,
+    )
+
+    assert event["response"]["error"]["resets_at"] == 1_700_003_600
+
+
 def test_previous_response_not_found_classifier_covers_openai_shapes():
     assert is_previous_response_not_found_error(
         code="previous_response_not_found",

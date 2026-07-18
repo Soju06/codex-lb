@@ -948,6 +948,7 @@ class _StreamingRetryMixin:
                                 no_accounts_msg,
                                 error_type=USAGE_LIMIT_REACHED,
                                 response_id=request_id,
+                                resets_at=selection.resets_at,
                             )
                         )
                         return

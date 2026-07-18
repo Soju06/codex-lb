@@ -6,7 +6,7 @@ import hmac
 import json
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import aiohttp
@@ -21,7 +21,9 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
-from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds,
+)
 
 # HTTP-only and hop-by-hop headers that must not be forwarded through the
 # internal bridge. These headers are either illegal in WebSocket handshakes or
@@ -50,6 +52,8 @@ HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
 HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER = "x-codex-bridge-origin-instance"
 HTTP_BRIDGE_TARGET_INSTANCE_HEADER = "x-codex-bridge-target-instance"
 HTTP_BRIDGE_CODEX_AFFINITY_HEADER = "x-codex-bridge-codex-session-affinity"
+HTTP_BRIDGE_OPENAI_SDK_HEADER = "x-codex-bridge-openai-sdk-request"
+HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER = "x-codex-bridge-openai-sdk-signature"
 HTTP_BRIDGE_RESERVATION_ID_HEADER = "x-codex-bridge-reservation-id"
 HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
@@ -80,6 +84,7 @@ class HTTPBridgeForwardContext:
     target_instance: str
     codex_session_affinity: bool
     downstream_turn_state: str | None
+    openai_sdk_request: bool = False
     original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
@@ -217,6 +222,7 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
+    forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1" if context.openai_sdk_request else "0"
     signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
@@ -250,6 +256,13 @@ def build_owner_forward_headers(
         context=context,
         include_client_ip=False,
         signature_version=signature_version,
+    )
+    forwarded[HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER] = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+        signature_version=signature_version,
+        include_openai_sdk_request=True,
     )
     # Additive tamper-proofing signature bound to the exact posted forwarding
     # body; covers the full authenticated context (including the unanchored /
@@ -291,6 +304,9 @@ def parse_forwarded_request(
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
     signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
     original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    openai_sdk_value = _optional_header(headers.get(HTTP_BRIDGE_OPENAI_SDK_HEADER))
+    if openai_sdk_value not in {None, "0", "1"}:
+        return None, _invalid_bridge_forward_signature_error()
     if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
         if original_unanchored_value not in {"0", "1"}:
             return None, _invalid_bridge_forward_signature_error()
@@ -304,6 +320,7 @@ def parse_forwarded_request(
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
+        openai_sdk_request=openai_sdk_value == "1",
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
@@ -332,6 +349,61 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
+    legacy_tools_bound_valid = (
+        tools_bound_signature is not None
+        and openai_sdk_value is None
+        and hmac.compare_digest(
+            tools_bound_signature,
+            _bridge_forward_tools_bound_signature(
+                payload=payload,
+                context=context,
+                signature_version=signature_version,
+                include_openai_sdk_request=False,
+            ),
+        )
+    )
+    if legacy_tools_bound_valid:
+        return HTTPBridgeForwardedRequest(context=replace(context, openai_sdk_request=True)), None
+    sdk_signature = _optional_header(headers.get(HTTP_BRIDGE_OPENAI_SDK_SIGNATURE_HEADER))
+    sdk_signature_valid = sdk_signature is not None and hmac.compare_digest(
+        sdk_signature,
+        _bridge_forward_signature(
+            payload=payload,
+            context=context,
+            include_client_ip=False,
+            signature_version=signature_version,
+            include_openai_sdk_request=True,
+        ),
+    )
+    sdk_context = replace(context, openai_sdk_request=True)
+    tools_bound_sdk_downgrade_valid = tools_bound_signature is not None and hmac.compare_digest(
+        tools_bound_signature,
+        _bridge_forward_tools_bound_signature(
+            payload=payload,
+            context=sdk_context,
+            signature_version=signature_version,
+        ),
+    )
+    sdk_signature_sdk_valid = sdk_signature is not None and hmac.compare_digest(
+        sdk_signature,
+        _bridge_forward_signature(
+            payload=payload,
+            context=sdk_context,
+            include_client_ip=False,
+            signature_version=signature_version,
+            include_openai_sdk_request=True,
+        ),
+    )
+    if openai_sdk_value != "1" and tools_bound_sdk_downgrade_valid:
+        return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value is None and sdk_signature_sdk_valid:
+        return HTTPBridgeForwardedRequest(context=sdk_context), None
+    if openai_sdk_value == "0" and sdk_signature_sdk_valid:
+        return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value is not None and not sdk_signature_valid:
+        return None, _invalid_bridge_forward_signature_error()
+    if signature_version is not None:
+        return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /
     # legacy scheme) so owners predating the tamper-proofing header — and
@@ -371,6 +443,11 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
+    if openai_sdk_value is None:
+        # Old origins did not send or sign this flag. Preserve the historical
+        # OpenAI-SDK classification so a mixed-version owner cannot enable the
+        # Codex shared instruction cache for an SDK request.
+        context = replace(context, openai_sdk_request=True)
     return HTTPBridgeForwardedRequest(context=context), None
 
 
@@ -385,7 +462,9 @@ def _invalid_bridge_forward_signature_error() -> ProxyResponseError:
     )
 
 
-def _legacy_signature_context_has_ambiguous_delimiter(context: HTTPBridgeForwardContext) -> bool:
+def _legacy_signature_context_has_ambiguous_delimiter(
+    context: HTTPBridgeForwardContext,
+) -> bool:
     """Reject legacy fields whose boundaries cannot be authenticated safely."""
 
     values = [
@@ -415,7 +494,9 @@ def _owner_forward_timeout(*, connect_timeout_seconds: float, idle_timeout_secon
     )
 
 
-def _reservation_from_headers(headers: Mapping[str, str]) -> ApiKeyUsageReservationData | None:
+def _reservation_from_headers(
+    headers: Mapping[str, str],
+) -> ApiKeyUsageReservationData | None:
     reservation_id = _optional_header(headers.get(HTTP_BRIDGE_RESERVATION_ID_HEADER))
     key_id = _optional_header(headers.get(HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER))
     model = _optional_header(headers.get(HTTP_BRIDGE_RESERVATION_MODEL_HEADER))
@@ -447,6 +528,7 @@ def _bridge_forward_signature(
     context: HTTPBridgeForwardContext,
     include_client_ip: bool = True,
     signature_version: str | None = None,
+    include_openai_sdk_request: bool = False,
 ) -> str:
     """Primary forward signature (#1169), computed over a plain ``model_dump``.
 
@@ -476,6 +558,8 @@ def _bridge_forward_signature(
         ]
         if include_client_ip:
             fields.append(context.client_ip or "")
+        if include_openai_sdk_request:
+            fields.append("1" if context.openai_sdk_request else "0")
         fields.extend(
             (
                 context.reservation.reservation_id if context.reservation is not None else "",
@@ -492,6 +576,7 @@ def _bridge_forward_signature(
             include_client_ip=include_client_ip,
             signature_version=signature_version,
             protocol="codex-lb-http-bridge-forward",
+            include_openai_sdk_request=include_openai_sdk_request,
         )
     return _sign_bridge_payload(signing_payload)
 
@@ -501,6 +586,7 @@ def _bridge_forward_tools_bound_signature(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
     signature_version: str | None = None,
+    include_openai_sdk_request: bool = True,
 ) -> str:
     """Tamper-proofing signature bound to the exact posted forwarding body.
 
@@ -523,6 +609,7 @@ def _bridge_forward_tools_bound_signature(
         include_client_ip=True,
         signature_version=signature_version,
         protocol="codex-lb-http-bridge-forward-tools-bound",
+        include_openai_sdk_request=include_openai_sdk_request,
     )
     return _sign_bridge_payload(signing_payload)
 
@@ -539,6 +626,7 @@ def _structured_bridge_signing_payload(
     include_client_ip: bool,
     signature_version: str | None,
     protocol: str,
+    include_openai_sdk_request: bool = True,
 ) -> str:
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
@@ -551,6 +639,7 @@ def _structured_bridge_signing_payload(
             "codex_session_affinity": context.codex_session_affinity,
             "downstream_turn_state": context.downstream_turn_state,
             "include_client_ip": include_client_ip,
+            **({"openai_sdk_request": context.openai_sdk_request} if include_openai_sdk_request else {}),
             "origin_instance": context.origin_instance,
             "original_affinity_key": context.original_affinity_key,
             "original_affinity_kind": context.original_affinity_kind,

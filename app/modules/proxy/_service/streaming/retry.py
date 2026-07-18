@@ -310,6 +310,7 @@ class _StreamingRetryMixin:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            openai_sdk_request=enforce_openai_sdk_contract,
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:

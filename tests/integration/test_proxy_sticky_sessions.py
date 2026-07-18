@@ -1034,6 +1034,76 @@ async def test_backend_codex_session_affinity_also_forwards_prompt_cache_key_whe
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_shared_instruction_cache_keeps_threads_isolated(async_client, monkeypatch):
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    monkeypatch.setattr(
+        "app.modules.proxy.affinity.get_settings",
+        lambda: SimpleNamespace(shared_prompt_cache=True),
+    )
+    acc_id = await _import_account(async_client, "acc_shared_cache_1", "shared_cache_1@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_entry(
+            account_id=acc_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen_keys: list[tuple[str | None, str | None]] = []
+    seen_payloads: list[dict] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        wire_payload = payload.to_payload()
+        seen_keys.append((payload.prompt_cache_key, wire_payload.get("prompt_cache_key")))
+        seen_payloads.append(wire_payload)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_shared_cache"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    for thread, task in (("thread-a", "first task"), ("thread-b", "second task")):
+        response = await async_client.post(
+            "/backend-api/codex/responses",
+            json={
+                "model": "gpt-5.6-sol",
+                "instructions": "base instructions",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "stable project context"}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": task}],
+                    },
+                ],
+                "prompt_cache_key": f"client-{thread}",
+                "stream": True,
+            },
+            headers={"session_id": thread},
+        )
+        assert response.status_code == 200
+
+    assert seen_keys[0][0] == "client-thread-a"
+    assert seen_keys[1][0] == "client-thread-b"
+    assert seen_keys[0][1] == seen_keys[1][1]
+    assert seen_keys[0][1] is not None and seen_keys[0][1].startswith("clb-")
+    assert seen_payloads[0]["input"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    assert "prompt_cache_options" not in seen_payloads[0]
+
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                text("SELECT key FROM sticky_sessions WHERE key IN ('thread-a', 'thread-b') ORDER BY key")
+            )
+        ).fetchall()
+        assert [row[0] for row in rows] == ["thread-a", "thread-b"]
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_forwards_previous_response_id(async_client, monkeypatch):
     _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
     acc_id = await _import_account(async_client, "acc_prev_http_1", "prev_http_1@example.com")

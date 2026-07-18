@@ -1260,6 +1260,9 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     captured: dict[str, object] = {}
 
     async def fake_stream_responses(*args: object, **kwargs: object) -> object:
+        assert args[1] is payload
+        assert payload.enable_shared_instruction_cache() is False
+        assert payload.to_payload()["prompt_cache_key"] == "client-thread-key"
         captured["kwargs"] = kwargs
         return object()  # any non-None response; the handler returns it directly
 
@@ -1272,6 +1275,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         target_instance="owner-b",
         codex_session_affinity=True,
         downstream_turn_state="http_turn_generated",
+        openai_sdk_request=True,
         original_request_unanchored=True,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
@@ -1296,7 +1300,15 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     # Minimal payload + request stubs.
     from app.core.openai.requests import ResponsesRequest
 
-    payload = ResponsesRequest(model="gpt-5.5", input="hi", instructions="")
+    payload = ResponsesRequest(
+        model="gpt-5.6-sol",
+        instructions="",
+        input=[
+            {"role": "user", "content": "stable context"},
+            {"role": "user", "content": "current task"},
+        ],
+        prompt_cache_key="client-thread-key",
+    )
 
     class _StubRequest:
         @property

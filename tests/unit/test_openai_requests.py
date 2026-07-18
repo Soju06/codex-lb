@@ -787,6 +787,138 @@ def test_responses_input_additional_tools_item_is_preserved(request_type):
     assert request.to_payload()["input"] == request.input
 
 
+def _shared_cache_request(
+    model: str,
+    *,
+    context: str = "project context",
+    task: str = "current task",
+    explicit_breakpoint: bool = False,
+) -> ResponsesRequest:
+    first_part: dict[str, object] = {"type": "input_text", "text": "AGENTS instructions"}
+    if explicit_breakpoint:
+        first_part["prompt_cache_breakpoint"] = {"mode": "explicit"}
+    return ResponsesRequest.model_validate(
+        {
+            "model": model,
+            "instructions": "base instructions",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        first_part,
+                        {"type": "input_text", "text": context},
+                    ],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": task}],
+                },
+            ],
+            "prompt_cache_key": "client-thread-key",
+        }
+    )
+
+
+def _payload_content_part(
+    payload: Mapping[str, JsonValue], item_index: int, part_index: int
+) -> Mapping[str, JsonValue]:
+    input_items = cast(list[JsonValue], payload["input"])
+    message = cast(Mapping[str, JsonValue], input_items[item_index])
+    content = cast(list[JsonValue], message["content"])
+    return cast(Mapping[str, JsonValue], content[part_index])
+
+
+def test_shared_instruction_cache_uses_wire_only_model_specific_key():
+    sol = _shared_cache_request("gpt-5.6-sol")
+    terra = _shared_cache_request("gpt-5.6-terra")
+    luna = _shared_cache_request("gpt-5.6-luna")
+
+    assert sol.enable_shared_instruction_cache() is True
+    assert terra.enable_shared_instruction_cache() is True
+    assert luna.enable_shared_instruction_cache() is True
+
+    sol_payload = sol.to_payload()
+    terra_payload = terra.to_payload()
+    luna_payload = luna.to_payload()
+    assert sol.prompt_cache_key == "client-thread-key"
+    assert sol_payload["prompt_cache_key"] != sol.prompt_cache_key
+    assert sol_payload["prompt_cache_key"] != terra_payload["prompt_cache_key"]
+    model_keys = {
+        sol_payload["prompt_cache_key"],
+        terra_payload["prompt_cache_key"],
+        luna_payload["prompt_cache_key"],
+    }
+    assert len(model_keys) == 3
+    assert "prompt_cache_options" not in sol_payload
+    assert _payload_content_part(sol_payload, 0, 1)["prompt_cache_breakpoint"] == {"mode": "explicit"}
+
+
+def test_shared_instruction_cache_reuses_exact_prefix_across_threads():
+    first = _shared_cache_request("gpt-5.6-sol")
+    second = _shared_cache_request("gpt-5.6-sol", task="different current task")
+    second.prompt_cache_key = "another-client-thread"
+
+    assert first.enable_shared_instruction_cache() is True
+    assert second.enable_shared_instruction_cache() is True
+    assert first.to_payload()["prompt_cache_key"] == second.to_payload()["prompt_cache_key"]
+
+
+def test_shared_instruction_cache_changes_key_with_prefix():
+    first = _shared_cache_request("gpt-5.6-sol")
+    second = _shared_cache_request("gpt-5.6-sol", context="different project context")
+
+    assert first.enable_shared_instruction_cache() is True
+    assert second.enable_shared_instruction_cache() is True
+    assert first.to_payload()["prompt_cache_key"] != second.to_payload()["prompt_cache_key"]
+
+
+def test_shared_instruction_cache_uses_automatic_caching_for_older_models():
+    request = _shared_cache_request("gpt-5.5")
+
+    assert request.enable_shared_instruction_cache() is True
+    payload = request.to_payload()
+    assert cast(str, payload["prompt_cache_key"]).startswith("clb-")
+    assert "prompt_cache_breakpoint" not in _payload_content_part(payload, 0, 1)
+
+
+def test_shared_instruction_cache_key_survives_trimmed_model_copy():
+    request = _shared_cache_request("gpt-5.6-sol")
+    assert request.enable_shared_instruction_cache() is True
+    wire_key = request.to_payload()["prompt_cache_key"]
+
+    trimmed = request.model_copy(
+        update={
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done",
+                }
+            ]
+        }
+    )
+
+    assert trimmed.to_payload()["prompt_cache_key"] == wire_key
+    assert trimmed.model_dump_for_forwarding()["prompt_cache_key"] == wire_key
+
+
+def test_shared_instruction_cache_preserves_client_breakpoint_and_unsupported_shapes():
+    existing = _shared_cache_request("gpt-5.6-sol", explicit_breakpoint=True)
+    one_user_message = ResponsesRequest(
+        model="gpt-5.6-luna",
+        instructions="base",
+        input=[{"role": "user", "content": [{"type": "input_text", "text": "only task"}]}],
+        prompt_cache_key="client-key",
+    )
+
+    assert existing.enable_shared_instruction_cache() is False
+    assert one_user_message.enable_shared_instruction_cache() is False
+    assert existing.to_payload()["prompt_cache_key"] == "client-thread-key"
+    assert one_user_message.to_payload()["prompt_cache_key"] == "client-key"
+
+
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
 def test_responses_input_non_message_system_and_developer_items_are_preserved(request_type):
     developer_directive = {

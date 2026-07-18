@@ -4286,6 +4286,7 @@ def _make_proxy_settings(*, trace_channels: frozenset[str] = frozenset()) -> Sim
         upstream_stream_transport="default",
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
+        shared_prompt_cache=False,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
@@ -5574,6 +5575,7 @@ def test_log_proxy_request_shape_reports_derived_key_after_affinity_resolution(m
     class Settings:
         trace_channels = frozenset({"shape"})
         openai_prompt_cache_key_derivation_enabled = True
+        shared_prompt_cache = False
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_affinity, "get_settings", lambda: Settings())
@@ -9218,6 +9220,7 @@ def test_sticky_key_for_compact_request_derives_prompt_cache_before_codex_sessio
 def test_sticky_key_for_responses_request_respects_prompt_cache_derivation_flag(monkeypatch):
     class Settings:
         openai_prompt_cache_key_derivation_enabled = False
+        shared_prompt_cache = False
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_affinity, "get_settings", lambda: Settings())
@@ -9247,6 +9250,7 @@ def test_sticky_key_for_responses_request_respects_prompt_cache_derivation_flag(
 def test_sticky_key_for_responses_request_preserves_client_supplied_prompt_cache_key_when_flag_off(monkeypatch):
     class Settings:
         openai_prompt_cache_key_derivation_enabled = False
+        shared_prompt_cache = False
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_affinity, "get_settings", lambda: Settings())

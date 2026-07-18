@@ -18,6 +18,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER,
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
+    HTTP_BRIDGE_OPENAI_SDK_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
     HTTP_BRIDGE_RESERVATION_ID_HEADER,
@@ -82,6 +83,7 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
         target_instance="instance-b",
         codex_session_affinity=True,
         downstream_turn_state="http_turn_123",
+        openai_sdk_request=True,
         reservation=ApiKeyUsageReservationData(
             reservation_id="res_123",
             key_id="key_123",
@@ -99,8 +101,32 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
     assert error is None
     assert forwarded is not None
     assert forwarded.context == context
+    assert headers[HTTP_BRIDGE_OPENAI_SDK_HEADER] == "1"
     assert forwarded.context.original_affinity_kind is None
     assert forwarded.context.original_affinity_key is None
+
+
+def test_parse_forwarded_request_rejects_stripped_sdk_flag_on_v2_signature() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_123",
+        openai_sdk_request=True,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_OPENAI_SDK_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
 
 
 def test_parse_forwarded_request_accepts_signed_internal_forward_with_client_ip() -> None:
@@ -135,6 +161,7 @@ def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> Non
         downstream_turn_state=None,
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    assert headers[HTTP_BRIDGE_OPENAI_SDK_HEADER] == "0"
     body = payload.model_dump_for_forwarding()
     assert "tools" not in body
 

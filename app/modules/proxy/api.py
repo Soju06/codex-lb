@@ -860,6 +860,8 @@ async def internal_bridge_responses(
         forwarded_headers = {
             key: value for key, value in forwarded_headers.items() if key.lower() != "x-codex-turn-state"
         }
+    if forwarded_request_context.context.openai_sdk_request:
+        payload.disable_shared_instruction_cache()
     return await _stream_responses(
         request,
         payload,

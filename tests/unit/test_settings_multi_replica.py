@@ -41,6 +41,12 @@ def test_settings_multi_replica_defaults():
     assert settings.http_connector_limit == 100
     assert settings.http_connector_limit_per_host == 50
     assert settings.http_downstream_transport_policy == "smart"
+    assert settings.shared_prompt_cache is True
+
+
+def test_settings_shared_prompt_cache_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_SHARED_PROMPT_CACHE", "false")
+    assert Settings().shared_prompt_cache is False
 
 
 @pytest.mark.parametrize("policy", ["smart", "always_http", "always_websocket", "pinned"])

@@ -937,6 +937,8 @@ Before `POST /v1/reset-credit` decrypts and forwards the bearer token for the up
 
 If that self-service credential refresh fails, `POST /v1/reset-credit` SHALL stop before the upstream consume call, return a client-actionable conflict response, and keep using the existing `/v1/*` OpenAI error envelope.
 
+After acquiring the cross-replica redeem claim, `POST /v1/reset-credit` SHALL re-validate the requested `redeem_id` against a live upstream reset-credits fetch performed inside the serialized redeem section using the refreshed account credentials, regardless of whether the replica-local snapshot lists the credit as available. It MUST NOT consume a credit solely on the basis of the replica-local snapshot, because a peer replica may have redeemed that credit while this request waited for the claim and the local snapshot can remain stale until its invalidation poll fires. The upstream fetch response is authoritative: if the credit is available upstream the redemption proceeds; otherwise the endpoint returns 409 and replaces the cached snapshot for that account with the fresh upstream snapshot.
+
 On a successful `POST /v1/reset-credit` redemption, the system SHALL invalidate the redeemed account's cached reset-credit snapshot, force a usage refresh for that account, and invalidate account-selection cache state when that usage refresh writes updated usage. A failed or empty post-redeem usage refresh SHALL NOT roll back the successful credit redemption response.
 
 #### Scenario: Missing API key is rejected
@@ -986,6 +988,32 @@ On a successful `POST /v1/reset-credit` redemption, the system SHALL invalidate 
 - **WHEN** a client calls `POST /v1/reset-credit` for that account
 - **THEN** codex-lb returns a conflict response in the standard `/v1/*` OpenAI error envelope
 - **AND** codex-lb does not call upstream reset-credit consume for that request
+
+#### Scenario: Fresh replica redeems a credit missing from its local snapshot
+
+- **GIVEN** a freshly started replica whose reset-credit snapshot store is empty for the target account
+- **AND** upstream reports the requested `redeem_id` as available
+- **WHEN** a client calls `POST /v1/reset-credit` for that account and `redeem_id`
+- **THEN** the replica fetches the account's reset credits from upstream inside the serialized redeem section
+- **AND** the redemption proceeds and succeeds instead of returning a false 409
+
+#### Scenario: Credit already redeemed elsewhere returns 409 with a fresh snapshot
+
+- **GIVEN** the replica-local snapshot does not list the requested `redeem_id` as available
+- **AND** the authoritative upstream fetch reports that credit as unavailable
+- **WHEN** a client calls `POST /v1/reset-credit` for that account and `redeem_id`
+- **THEN** the endpoint returns 409 without calling upstream consume
+- **AND** the fresh upstream snapshot replaces the replica's cached snapshot for that account
+
+#### Scenario: Stale cached credit is re-validated after winning the claim
+
+- **GIVEN** two replicas both cached the same reset credit as available
+- **AND** replica A redeemed it while replica B waited on the cross-replica redeem claim
+- **AND** replica B's cached snapshot still lists that `redeem_id` as available
+- **WHEN** replica B wins the claim and processes `POST /v1/reset-credit` for that `redeem_id`
+- **THEN** replica B performs the authoritative upstream fetch instead of consuming from its stale cache
+- **AND** because upstream reports the credit unavailable, replica B returns 409 without sending a second upstream consume
+- **AND** replica B replaces its cached snapshot with the fresh upstream snapshot
 
 #### Scenario: Successful self-service redemption refreshes usage for immediate follow-up traffic
 
@@ -1084,3 +1112,32 @@ Settling a stream API-key reservation MUST NOT block the response/stream close, 
 - **WHEN** the service shuts down gracefully with settlements in flight
 - **THEN** shutdown waits for them up to the configured drain timeout
 
+### Requirement: Untrusted forwarded headers do not grant unauthenticated proxy locality
+
+When API-key authentication is disabled and proxy-header trust is enabled, forwarded client-IP headers from a socket peer outside every configured trusted-proxy CIDR MUST NOT cause a protected proxy request to be classified as local. Such a request MUST remain blocked unless its raw socket peer independently matches `proxy_unauthenticated_client_cidrs`.
+
+#### Scenario: Untrusted loopback proxy remains blocked
+
+- **WHEN** API-key authentication is disabled
+- **AND** proxy-header trust is enabled
+- **AND** the raw loopback socket peer is outside every configured trusted-proxy CIDR
+- **AND** a forwarded client-IP header is present
+- **AND** the raw socket peer is outside `proxy_unauthenticated_client_cidrs`
+- **THEN** the protected proxy request is rejected with HTTP 401
+
+#### Scenario: Explicit raw-socket allowlist remains authoritative
+
+- **WHEN** the raw socket peer belongs to `proxy_unauthenticated_client_cidrs`
+- **THEN** the protected proxy request may proceed without API-key authentication
+- **AND** forwarded header contents do not determine that allowlist match
+
+### Requirement: Direct-local proxy access inspects every forwarded client hint field
+
+When API-key authentication and proxy-header trust are disabled, a loopback socket peer MUST qualify for direct-local protected proxy access only when no non-empty forwarded client-IP field value is present. The system MUST inspect every repeated field value; a later non-empty value MUST keep the request blocked unless the raw socket peer independently matches `proxy_unauthenticated_client_cidrs`.
+
+#### Scenario: Later duplicate forwarded hint remains unauthorized
+
+- **WHEN** API-key authentication and proxy-header trust are disabled
+- **AND** a loopback request contains an empty `X-Forwarded-For` field followed by a non-empty `X-Forwarded-For` field
+- **AND** the raw socket peer is outside `proxy_unauthenticated_client_cidrs`
+- **THEN** the protected proxy request is rejected with HTTP 401

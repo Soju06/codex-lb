@@ -30,19 +30,19 @@ describe("ReportsSummaryCards", () => {
       />,
     );
 
-    const costCard = screen.getByTestId("report-summary-card-Total Cost");
+    const costCard = screen.getByTestId("report-summary-card-total-cost");
     expect(within(costCard).getByText("▲ 50%")).toHaveClass(
       "text-emerald-600",
       "dark:text-emerald-400",
     );
 
-    const tokensCard = screen.getByTestId("report-summary-card-Tokens");
+    const tokensCard = screen.getByTestId("report-summary-card-tokens");
     expect(within(tokensCard).getByText("▼ 50%")).toHaveClass(
       "text-red-600",
       "dark:text-red-400",
     );
 
-    const requestsCard = screen.getByTestId("report-summary-card-Requests");
+    const requestsCard = screen.getByTestId("report-summary-card-requests");
     expect(within(requestsCard).getByText("▲ 50%")).toHaveClass(
       "text-emerald-600",
       "dark:text-emerald-400",
@@ -106,13 +106,13 @@ describe("ReportsSummaryCards", () => {
     );
 
     expect(
-      within(screen.getByTestId("report-summary-card-Total Cost")).queryByText(/^[▲▼] \d+%$/),
+      within(screen.getByTestId("report-summary-card-total-cost")).queryByText(/^[▲▼] \d+%$/),
     ).not.toBeInTheDocument();
     expect(
-      within(screen.getByTestId("report-summary-card-Tokens")).queryByText(/^[▲▼] \d+%$/),
+      within(screen.getByTestId("report-summary-card-tokens")).queryByText(/^[▲▼] \d+%$/),
     ).not.toBeInTheDocument();
     expect(
-      within(screen.getByTestId("report-summary-card-Requests")).getByText("▲ 50%"),
+      within(screen.getByTestId("report-summary-card-requests")).getByText("▲ 50%"),
     ).toBeInTheDocument();
   });
 
@@ -169,8 +169,8 @@ describe("ReportsSummaryCards", () => {
       />,
     );
 
-    const tokensCard = screen.getByTestId("report-summary-card-Tokens");
-    const requestsCard = screen.getByTestId("report-summary-card-Requests");
+    const tokensCard = screen.getByTestId("report-summary-card-tokens");
+    const requestsCard = screen.getByTestId("report-summary-card-requests");
 
     expect(within(tokensCard).getByText("100.0B")).toBeInTheDocument();
     expect(within(tokensCard).getByText("Input 100.0B · Cache 0 · Output 0")).toBeInTheDocument();

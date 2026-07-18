@@ -187,6 +187,40 @@ describe("AccountActions", () => {
     expect(onResetCredit).toHaveBeenCalledWith(account.accountId);
   });
 
+  it("hides the reset action expiry label when disabled by settings", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+    try {
+      const account = createAccountSummary({
+        availableResetCredits: 3,
+        resetCreditNearestExpiresAt: "2026-01-01T14:00:00.000Z",
+      });
+
+      render(
+        <AccountActions
+          account={account}
+          busy={false}
+          onPause={vi.fn()}
+          onResume={vi.fn()}
+          onProbe={vi.fn()}
+          onDelete={vi.fn()}
+          onReauth={vi.fn()}
+          onExportAuth={vi.fn()}
+          onResetCredit={vi.fn()}
+          showResetCreditExpiryBadge={false}
+          onSecurityWorkAuthorizedChange={vi.fn()}
+          onLimitWarmupChange={vi.fn()}
+          onRoutingPolicyChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "Reset (3)" })).toBeInTheDocument();
+      expect(screen.queryByText("2h")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["paused", "deactivated", "reauth_required"] as const)(
     "disables reset action for %s accounts",
     async (status) => {

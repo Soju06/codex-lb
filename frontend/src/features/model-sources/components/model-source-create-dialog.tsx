@@ -1,6 +1,7 @@
 import { useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -15,9 +16,9 @@ import { Form } from "@/components/ui/form";
 import { ModelSourceFormFields } from "@/features/model-sources/components/model-source-form-fields";
 import {
   initialModelSourceDraft,
+  createModelSourceFormSchema,
   modelInputsFromForm,
   modelSourceDraftReducer,
-  modelSourceFormSchema,
   type ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
 import type { ModelSourceCreateRequest } from "@/features/model-sources/schemas";
@@ -35,8 +36,9 @@ export function ModelSourceCreateDialog({
   onOpenChange,
   onSubmit,
 }: ModelSourceCreateDialogProps) {
+  const { t } = useTranslation();
   const form = useForm<ModelSourceFormValues>({
-    resolver: zodResolver(modelSourceFormSchema),
+    resolver: zodResolver(createModelSourceFormSchema(t)),
     defaultValues: {
       name: "",
       baseUrl: "",
@@ -64,8 +66,8 @@ export function ModelSourceCreateDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Add model source</DialogTitle>
-          <DialogDescription>Register an OpenAI-compatible endpoint and its model IDs.</DialogDescription>
+	          <DialogTitle>{t("modelSources.createDialog.title")}</DialogTitle>
+	          <DialogDescription>{t("modelSources.createDialog.description")}</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -74,11 +76,11 @@ export function ModelSourceCreateDialog({
               control={form.control}
               draft={draft}
               updateDraft={updateDraft}
-              apiKeyLabel="Upstream API key"
+	              apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
             />
             <DialogFooter>
               <Button type="submit" disabled={busy || form.formState.isSubmitting}>
-                Create
+	                {t("common.actions.create")}
               </Button>
             </DialogFooter>
           </form>

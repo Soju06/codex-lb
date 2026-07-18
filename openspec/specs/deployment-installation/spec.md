@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define installation modes and smoke-test expectations so the Helm chart remains portable across supported deployments.
+Define installation modes, smoke-test expectations, and the operator environment-variable contract at settings-load time, so the Helm chart remains portable across supported deployments and the configuration surface stays minimal (PRINCIPLES.md P2).
 ## Requirements
 ### Requirement: Helm chart is organized around install modes
 
@@ -40,11 +40,19 @@ The project MUST run automated Helm smoke installs for the easy-setup install mo
 - **THEN** the Helm test pod image is overridden to the loaded application image
 - **AND** the chart default test pod image remains equivalent to `docker.io/library/busybox:1.37` for normal installs
 
-#### Scenario: External DB smoke uses a single app replica
+#### Scenario: External DB smoke exercises the default two-replica topology
 
 - **WHEN** CI runs the external DB smoke installation
-- **THEN** the application release is installed with one replica
+- **THEN** the application release is installed with two replicas
+- **AND** both application pods become Ready
+- **AND** `/health/ready` served by an application pod reports a bridge ring of size 2 with the probed pod an active member
+- **AND** the smoke fails when the bridge ring probe emits no confirmation output, so a probe that silently no-ops cannot pass
 - **AND** the smoke still validates external database mode by using an external PostgreSQL release
+
+#### Scenario: Bundled smoke remains single-replica
+
+- **WHEN** CI runs the bundled smoke installation
+- **THEN** the application release is installed with one replica to bound disposable-cluster resource cost
 
 #### Scenario: Helm smoke phases are timestamped
 
@@ -163,3 +171,216 @@ The operator documentation SHALL describe how to stop the old service, back up t
 - **WHEN** the operator starts the normal `postgres` service with runtime PostgreSQL command arguments
 - **THEN** the guard delegates those arguments to the official Postgres entrypoint
 
+### Requirement: Static bridge ring overrides are guarded at render time
+
+WHEN `config.sessionBridgeInstanceRing` is non-empty, chart rendering MUST fail with a helpful error if `autoscaling.enabled=true`, OR if the trimmed ring entries do not exactly match the set of expected StatefulSet pod names (`<workload-name>-0` through `<workload-name>-<replicaCount - 1>`). The guard MUST validate entry values, not merely entry count: a ring with the right number of entries but wrong values (for example FQDN-style entries or a wrong name prefix) MUST be rejected, naming the missing or unexpected entries and the exact expected pod names.
+
+#### Scenario: Static ring with autoscaling fails to render
+
+- **WHEN** the chart is rendered with a non-empty `config.sessionBridgeInstanceRing` and `autoscaling.enabled=true`
+- **THEN** `helm template` fails with an error stating the static ring is incompatible with autoscaling
+
+#### Scenario: Static ring smaller than replicaCount fails to render
+
+- **WHEN** the chart is rendered with `replicaCount=3` and a `config.sessionBridgeInstanceRing` listing 2 of the 3 expected pod names
+- **THEN** `helm template` fails with an error naming the missing pod name
+
+#### Scenario: Static ring with correct count but wrong values fails to render
+
+- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing 2 entries that are not the expected StatefulSet pod names (for example FQDN-style entries or `codex-lb-0,codex-lb-1`)
+- **THEN** `helm template` fails with an error naming the missing expected pod names and the exact ring the chart requires
+
+#### Scenario: Static ring with an unexpected extra entry fails to render
+
+- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing both expected pod names plus an entry that matches no StatefulSet pod
+- **THEN** `helm template` fails with an error naming the unexpected entry
+
+#### Scenario: Static ring covering every replica renders
+
+- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing exactly both expected pod names
+- **THEN** rendering succeeds
+
+### Requirement: Documented bridge ring and advertise URL examples pass application validation
+
+Bridge advertise-base-URL and manual instance-ring examples in the chart README MUST, after kubelet-style `$(POD_NAME)`/`$(POD_IP)` expansion with the chart's pod naming, satisfy the application's Settings validation (instance id literally present in the ring; advertise hostname replica-specific). Shared-service-hostname advertise examples and FQDN ring entries MUST NOT appear as recommended examples.
+
+#### Scenario: README examples construct valid Settings
+
+- **WHEN** the README example values are extracted and applied to Settings with a simulated StatefulSet pod name substituted for `$(POD_NAME)`
+- **THEN** Settings construction succeeds without validation errors
+
+### Requirement: Docker Compose deployments are declared single-replica
+
+The shipped docker-compose files MUST document that they define a single-replica topology, that `docker compose up --scale` is unsupported, and that multi-replica deployments require the Helm chart with PostgreSQL.
+
+#### Scenario: Compose files carry the guardrail statement
+
+- **WHEN** `docker-compose.yml` and `docker-compose.prod.yml` are inspected
+- **THEN** each carries the single-replica guardrail statement referencing the Helm chart path
+
+### Requirement: Removed tunables are fixed constants or derived values
+
+Values that are protocol constants or internal tuning details SHALL NOT be
+operator-configurable. When a previously supported `CODEX_LB_*` setting is
+removed from the configuration surface, its environment variable MUST be
+ignored without failing startup, and for at least one release after removal,
+startup MUST emit a single warning log listing every removed setting name
+found in the process environment (never the values), referencing the
+simplicity principle that motivated the removal. Each subsystem affected by
+a removal MUST retain at most one enable/disable setting, and the Helm chart
+MUST NOT render environment variables for removed settings.
+
+The following values MUST be fixed at their previously documented defaults:
+
+- The OAuth protocol identity values (authorization base URL, client id,
+  originator, scope, redirect URI, and callback port): they identify
+  codex-lb to OpenAI exactly like the Codex CLI, and changing any of them
+  breaks login.
+- Background scheduler cadences (quota planner tick, automations poll,
+  model registry refresh, sticky-session cleanup).
+- The Codex client fingerprint (OS, architecture, terminal).
+- Live-usage write coalescing (minimum write interval and queue size).
+- The request-log count-cache TTL.
+- Circuit-breaker tuning (failure threshold and recovery timeout).
+- The images-route internals (internal host model and partial-images cap).
+- The PostgreSQL pool checkout timeout (30 seconds) and pooled-connection
+  recycle window (1800 seconds).
+- The soft-drain/probe thresholds (primary drain threshold 85%, secondary
+  drain threshold 90%, error window 60 seconds, error count 2, probe quiet
+  window 60 seconds, probe success streak 3), fixed in
+  `app/core/balancer/logic.py`.
+
+The following values MUST be derived rather than configured:
+
+- The memory-pressure warning threshold: 80% of the configurable reject
+  threshold (`CODEX_LB_MEMORY_REJECT_THRESHOLD_MB`), with both disabled
+  when the reject threshold is 0.
+- The background-task database engine's pool size and max overflow: always
+  taken from `database_pool_size` and `database_max_overflow`.
+
+Incident-debugging trace logging SHALL be controlled by the single
+`CODEX_LB_TRACE` comma-separated channel list, whose empty default disables
+all trace channels. The Codex HTTP-bridge prewarm rollout scoping SHALL NOT
+be operator-configurable: prewarm eligibility MUST be the
+`CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` flag alone,
+with no canary sampling percent and no API-key allow/deny cohort lists (the
+removed `..._PREWARM_CANARY_PERCENT`, `..._PREWARM_ALLOW_API_KEY_IDS`, and
+`..._PREWARM_DENY_API_KEY_IDS` variables are covered by the
+removed-settings warning). `database_pool_size` and `database_max_overflow`
+MUST remain operator-configurable settings, and `soft_drain_enabled` and
+`deterministic_failover_enabled` MUST remain the failover subsystem's
+enable switches.
+
+#### Scenario: Removed env vars are ignored with one startup warning
+
+- **GIVEN** a deployment whose environment still sets removed settings such
+  as `CODEX_LB_AUTH_BASE_URL` and `CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS`
+- **WHEN** the application starts
+- **THEN** startup succeeds and the fixed built-in values are used
+- **AND** exactly one warning log lists both removed names without their
+  values
+
+#### Scenario: Clean environment starts without removal warnings
+
+- **GIVEN** a deployment that sets no removed setting names
+- **WHEN** the application starts
+- **THEN** no removed-settings warning is logged
+
+#### Scenario: Trace channels default to off
+
+- **GIVEN** a default install with `CODEX_LB_TRACE` unset
+- **WHEN** the proxy serves requests
+- **THEN** no request-shape, payload, service-tier, or upstream trace logs
+  are emitted
+
+#### Scenario: A trace channel can be enabled for an incident
+
+- **GIVEN** `CODEX_LB_TRACE=shape,upstream_payload`
+- **WHEN** the proxy serves requests
+- **THEN** request-shape and upstream-payload trace logs are emitted while
+  all other trace channels stay off
+
+#### Scenario: Removed scheduler and images env vars are ignored with one startup warning
+
+- **GIVEN** a deployment whose environment still sets removed settings such
+  as `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS` and `CODEX_LB_IMAGES_HOST_MODEL`
+- **WHEN** the application starts
+- **THEN** startup succeeds and the fixed built-in values are used
+- **AND** exactly one warning log lists both removed names without their
+  values
+
+#### Scenario: Memory warning threshold derives from the reject threshold
+
+- **GIVEN** `CODEX_LB_MEMORY_REJECT_THRESHOLD_MB=100`
+- **WHEN** process RSS reaches 80 MiB
+- **THEN** a memory warning is logged while requests continue to be served
+- **AND** requests are rejected with 503 only once RSS reaches 100 MiB
+
+#### Scenario: Memory guard stays fully disabled by default
+
+- **GIVEN** a default install with `CODEX_LB_MEMORY_REJECT_THRESHOLD_MB`
+  unset (0)
+- **WHEN** the proxy serves requests under any memory usage
+- **THEN** no memory warning is logged and no request is rejected for
+  memory pressure
+
+#### Scenario: Helm chart renders no removed settings
+
+- **GIVEN** a Helm install using the chart's default values
+- **WHEN** the config map is rendered
+- **THEN** it contains no `CODEX_LB_CIRCUIT_BREAKER_FAILURE_THRESHOLD`,
+  `CODEX_LB_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_SECONDS`, or
+  `CODEX_LB_STICKY_SESSION_CLEANUP_INTERVAL_SECONDS` entries
+- **AND** startup emits no removed-settings warning
+
+#### Scenario: Removed pool and drain env vars are ignored with one startup warning
+
+- **GIVEN** a deployment whose environment still sets removed settings such
+  as `CODEX_LB_DATABASE_POOL_RECYCLE_SECONDS` and
+  `CODEX_LB_DRAIN_PRIMARY_THRESHOLD_PCT`
+- **WHEN** the application starts
+- **THEN** startup succeeds and the fixed built-in values are used
+- **AND** exactly one warning log lists both removed names without their
+  values
+
+#### Scenario: Background pool sizing derives from the main pool settings
+
+- **GIVEN** `CODEX_LB_DATABASE_POOL_SIZE=12` and
+  `CODEX_LB_DATABASE_MAX_OVERFLOW=4` on a PostgreSQL deployment
+- **WHEN** the application creates the background-task database engine
+- **THEN** the background engine uses pool size 12 and max overflow 4
+- **AND** no separate background pool sizing can be configured
+
+#### Scenario: Drain and probe thresholds are fixed constants
+
+- **GIVEN** a deployment with `soft_drain_enabled` left at its default
+- **WHEN** an account's primary window usage reaches 85%
+- **THEN** the account enters the draining health tier
+- **AND** a drained account enters the probing tier only after the fixed
+  60-second quiet window, regardless of any `CODEX_LB_PROBE_QUIET_SECONDS`
+  value still present in the environment
+
+#### Scenario: Removed prewarm canary env vars are ignored with one startup warning
+
+- **GIVEN** a deployment whose environment still sets
+  `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_CANARY_PERCENT` or
+  the allow/deny list variables
+- **WHEN** the application starts
+- **THEN** startup succeeds and the values are ignored
+- **AND** exactly one warning log lists the removed names without their
+  values
+
+#### Scenario: Prewarm eligibility is the enabled flag alone
+
+- **GIVEN** `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
+- **WHEN** a first-turn Codex bridge request arrives on a session that has
+  not been prewarmed
+- **THEN** the session prewarm is attempted for that request
+- **AND** no request is excluded by canary sampling or an allow/deny cohort
+
+#### Scenario: Prewarm stays off by default
+
+- **GIVEN** a default install with no prewarm variables set
+- **WHEN** Codex bridge requests are served
+- **THEN** no session prewarm is attempted and visible requests record
+  `prewarm_status=not_applicable`

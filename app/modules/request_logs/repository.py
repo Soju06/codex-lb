@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.core.config.settings import get_settings
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
 from app.core.utils.request_id import ensure_request_id
@@ -31,8 +30,9 @@ class _RequestLogFilters:
 # whole filtered set on PostgreSQL; the dashboard re-runs it on every 30s
 # poll and every pagination click even though the displayed total is
 # tolerant of short staleness. Cache it per filter signature for a small
-# TTL (configurable; 0 disables, which the test suite uses so totals stay
-# exact within a test).
+# fixed TTL (issue #1340 / PRINCIPLES.md P2; the test suite patches the
+# TTL to 0 so totals stay exact within a test).
+_COUNT_CACHE_TTL_SECONDS = 30.0
 _COUNT_CACHE_MAX_ENTRIES = 256
 _recent_count_cache: dict[tuple, tuple[int, float]] = {}
 
@@ -59,6 +59,13 @@ def _store_recent_count(key: tuple, total: int, ttl_seconds: float) -> None:
     _recent_count_cache[key] = (total, time.monotonic() + ttl_seconds)
 
 
+@dataclass(frozen=True, slots=True)
+class PreviousResponseOwnerRecord:
+    account_id: str
+    requested_at: datetime | None
+    session_id: str | None
+
+
 class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -76,13 +83,13 @@ class RequestLogsRepository:
         )
         return list(result.scalars().all())
 
-    async def find_latest_account_id_for_response_id(
+    async def find_latest_owner_record_for_response_id(
         self,
         *,
         response_id: str,
         api_key_id: str | None,
         session_id: str | None = None,
-    ) -> str | None:
+    ) -> PreviousResponseOwnerRecord | None:
         response_id_value = response_id.strip()
         if not response_id_value:
             return None
@@ -95,27 +102,55 @@ class RequestLogsRepository:
         if api_key_id is not None:
             base_conditions.append(RequestLog.api_key_id == api_key_id)
 
-        async def _lookup_account_id(conditions: list[ColumnElement[bool]]) -> str | None:
+        async def _lookup_owner_record(
+            conditions: list[ColumnElement[bool]],
+        ) -> PreviousResponseOwnerRecord | None:
             stmt = (
-                select(RequestLog.account_id)
+                select(RequestLog.account_id, RequestLog.requested_at, RequestLog.session_id)
                 .where(and_(*conditions))
                 .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
                 .limit(1)
             )
             result = await self._session.execute(stmt)
-            account_id = result.scalar_one_or_none()
+            row = result.one_or_none()
+            if row is None:
+                return None
+            account_id, requested_at, owner_session_id = row
             if not isinstance(account_id, str):
                 return None
             stripped = account_id.strip()
-            return stripped or None
+            if not stripped:
+                return None
+            normalized_owner_session_id = (
+                owner_session_id.strip() if isinstance(owner_session_id, str) and owner_session_id.strip() else None
+            )
+            return PreviousResponseOwnerRecord(
+                account_id=stripped,
+                requested_at=requested_at if isinstance(requested_at, datetime) else None,
+                session_id=normalized_owner_session_id,
+            )
 
         session_id_value = session_id.strip() if isinstance(session_id, str) else ""
         if session_id_value:
-            scoped_owner = await _lookup_account_id([*base_conditions, RequestLog.session_id == session_id_value])
+            scoped_owner = await _lookup_owner_record([*base_conditions, RequestLog.session_id == session_id_value])
             if scoped_owner is not None:
                 return scoped_owner
 
-        return await _lookup_account_id(base_conditions)
+        return await _lookup_owner_record(base_conditions)
+
+    async def find_latest_account_id_for_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_id: str | None,
+        session_id: str | None = None,
+    ) -> str | None:
+        owner = await self.find_latest_owner_record_for_response_id(
+            response_id=response_id,
+            api_key_id=api_key_id,
+            session_id=session_id,
+        )
+        return owner.account_id if owner is not None else None
 
     async def aggregate_by_bucket(
         self,
@@ -340,14 +375,13 @@ class RequestLogsRepository:
         status: str,
         error_code: str | None,
         latency_first_token_ms: int | None = None,
+        latency_queue_ms: int | None = None,
         latency_response_created_ms: int | None = None,
         latency_first_upstream_event_ms: int | None = None,
         latency_response_create_gate_wait_ms: int | None = None,
         latency_bridge_queue_wait_ms: int | None = None,
         prewarm_status: str | None = None,
         prewarm_latency_ms: int | None = None,
-        prewarm_canary_bucket: str | None = None,
-        prewarm_eligible_reason: str | None = None,
         session_previous_gap_ms: int | None = None,
         error_message: str | None = None,
         requested_at: datetime | None = None,
@@ -422,14 +456,13 @@ class RequestLogsRepository:
                 reasoning_effort=reasoning_effort,
                 latency_ms=latency_ms,
                 latency_first_token_ms=latency_first_token_ms,
+                latency_queue_ms=latency_queue_ms,
                 latency_response_created_ms=latency_response_created_ms,
                 latency_first_upstream_event_ms=latency_first_upstream_event_ms,
                 latency_response_create_gate_wait_ms=latency_response_create_gate_wait_ms,
                 latency_bridge_queue_wait_ms=latency_bridge_queue_wait_ms,
                 prewarm_status=prewarm_status,
                 prewarm_latency_ms=prewarm_latency_ms,
-                prewarm_canary_bucket=prewarm_canary_bucket,
-                prewarm_eligible_reason=prewarm_eligible_reason,
                 session_previous_gap_ms=session_previous_gap_ms,
                 status=status,
                 error_code=error_code,
@@ -546,7 +579,7 @@ class RequestLogsRepository:
         result = await self._session.execute(stmt)
         logs = list(result.scalars().all())
 
-        ttl_seconds = get_settings().request_log_count_cache_ttl_seconds
+        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
             return logs, await self._count_recent(filters)
         cache_key = (

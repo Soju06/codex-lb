@@ -22,6 +22,18 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
 
+# Guardian cadence and backoff tuning (fixed; issue #1340 / PRINCIPLES.md P2).
+# The guardian is an off-by-default background refresher; these values are
+# implementation details, not operator contract. ``AuthGuardianScheduler``
+# keeps them as constructor fields so tests can exercise the behavior.
+_INTERVAL_SECONDS = 21600
+_MAX_REFRESH_AGE_SECONDS = 43200
+_BATCH_SIZE = 100
+_CONCURRENCY = 3
+_JITTER_SECONDS = 300.0
+_FAILURE_BACKOFF_BASE_SECONDS = 300.0
+_FAILURE_BACKOFF_MAX_SECONDS = 3600.0
+
 
 _T = TypeVar("_T")
 
@@ -256,14 +268,14 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
             "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
         )
     return AuthGuardianScheduler(
-        interval_seconds=settings.auth_guardian_interval_seconds,
+        interval_seconds=_INTERVAL_SECONDS,
         enabled=enabled,
-        max_age_seconds=settings.auth_guardian_max_refresh_age_seconds,
-        batch_size=settings.auth_guardian_batch_size,
-        concurrency=settings.auth_guardian_concurrency,
-        jitter_seconds=settings.auth_guardian_jitter_seconds,
-        failure_backoff_base_seconds=settings.auth_guardian_failure_backoff_base_seconds,
-        failure_backoff_max_seconds=settings.auth_guardian_failure_backoff_max_seconds,
+        max_age_seconds=_MAX_REFRESH_AGE_SECONDS,
+        batch_size=_BATCH_SIZE,
+        concurrency=_CONCURRENCY,
+        jitter_seconds=_JITTER_SECONDS,
+        failure_backoff_base_seconds=_FAILURE_BACKOFF_BASE_SECONDS,
+        failure_backoff_max_seconds=_FAILURE_BACKOFF_MAX_SECONDS,
         leader_election_enabled=settings.leader_election_enabled,
     )
 

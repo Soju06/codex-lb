@@ -19,6 +19,11 @@ from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
+# Planner tick cadence (fixed; issue #1340 / PRINCIPLES.md P2). The scheduler
+# keeps ``interval_seconds`` as a constructor field so tests can exercise the
+# loop with a short interval.
+_TICK_SECONDS = 300
+
 
 _T = TypeVar("_T")
 
@@ -166,6 +171,6 @@ class QuotaPlannerScheduler:
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:
     settings = get_settings()
     return QuotaPlannerScheduler(
-        interval_seconds=max(60, getattr(settings, "quota_planner_tick_seconds", 300)),
+        interval_seconds=_TICK_SECONDS,
         enabled=getattr(settings, "quota_planner_scheduler_enabled", True),
     )

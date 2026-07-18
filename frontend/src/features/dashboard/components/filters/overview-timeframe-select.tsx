@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   Select,
   SelectContent,
@@ -22,14 +24,16 @@ export function OverviewTimeframeSelect({
   value,
   onChange,
 }: OverviewTimeframeSelectProps) {
+  const { t } = useTranslation();
+
   return (
     <Select value={value} onValueChange={(next) => { if (isOverviewTimeframe(next)) onChange(next); }}>
       <SelectTrigger
         size="sm"
         className="w-28"
-        aria-label="Overview timeframe"
+        aria-label={t("dashboard.filters.overviewTimeframe")}
       >
-        <SelectValue placeholder="Overview" />
+        <SelectValue placeholder={t("dashboard.filters.overview")} />
       </SelectTrigger>
       <SelectContent align="end">
         <SelectItem value="1d">1d</SelectItem>

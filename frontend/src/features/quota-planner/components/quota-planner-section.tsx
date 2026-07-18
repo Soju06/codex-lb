@@ -1,5 +1,6 @@
 import { Activity, CalendarClock } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { Badge } from "@/components/ui/badge";
@@ -63,6 +64,7 @@ interface QuotaPlannerSectionProps {
 }
 
 export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionProps) {
+  const { t } = useTranslation();
   const {
     settingsQuery,
     decisionsQuery,
@@ -129,9 +131,9 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
           <CalendarClock className="h-4 w-4 text-primary" aria-hidden="true" />
         </div>
         <div>
-          <h3 className="text-sm font-semibold">Quota phase planner</h3>
+          <h3 className="text-sm font-semibold">{t("quotaPlanner.title")}</h3>
           <p className="text-xs text-muted-foreground">
-            Preserve cold windows, prefer expiring capacity, and record warmup decisions in safe shadow mode by default.
+            {t("quotaPlanner.description")}
           </p>
         </div>
       </div>
@@ -147,8 +149,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
           <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
             <div className="divide-y rounded-lg border">
               <div className="grid gap-3 p-3 sm:grid-cols-3">
-                <label htmlFor="quota-planner-mode" className="space-y-1 text-xs font-medium">
-                  Mode
+	                <label htmlFor="quota-planner-mode" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.mode")}
                   <Select
                     value={effectiveDraft.mode}
                     onValueChange={(value) => patchDraft({ mode: value as QuotaPlannerMode })}
@@ -157,15 +159,15 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="shadow">Shadow</SelectItem>
-                      <SelectItem value="suggest">Suggest</SelectItem>
-                      <SelectItem value="auto">Auto</SelectItem>
-                      <SelectItem value="off">Off</SelectItem>
+	                      <SelectItem value="shadow">{t("quotaPlanner.modes.shadow")}</SelectItem>
+	                      <SelectItem value="suggest">{t("quotaPlanner.modes.suggest")}</SelectItem>
+	                      <SelectItem value="auto">{t("quotaPlanner.modes.auto")}</SelectItem>
+	                      <SelectItem value="off">{t("quotaPlanner.modes.off")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </label>
-                <label htmlFor="quota-planner-timezone" className="space-y-1 text-xs font-medium">
-                  Timezone
+	                <label htmlFor="quota-planner-timezone" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.timezone")}
                   <Input
                     id="quota-planner-timezone"
                     className="h-8 text-xs"
@@ -174,8 +176,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                     onChange={(event) => patchDraft({ timezone: event.target.value })}
                   />
                 </label>
-                <label htmlFor="quota-planner-forecast" className="space-y-1 text-xs font-medium">
-                  Forecast
+	                <label htmlFor="quota-planner-forecast" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.forecast")}
                   <Select
                     value={effectiveDraft.forecastQuantile}
                     onValueChange={(value) =>
@@ -195,8 +197,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               </div>
 
               <div className="grid gap-3 p-3 sm:grid-cols-4">
-                <label htmlFor="quota-planner-work-start" className="space-y-1 text-xs font-medium">
-                  Work start
+	                <label htmlFor="quota-planner-work-start" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.workStart")}
                   <Input
                     id="quota-planner-work-start"
                     className="h-8 text-xs"
@@ -206,8 +208,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                     onChange={(event) => patchDraft({ workingHoursStart: event.target.value })}
                   />
                 </label>
-                <label htmlFor="quota-planner-work-end" className="space-y-1 text-xs font-medium">
-                  Work end
+	                <label htmlFor="quota-planner-work-end" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.workEnd")}
                   <Input
                     id="quota-planner-work-end"
                     className="h-8 text-xs"
@@ -217,8 +219,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                     onChange={(event) => patchDraft({ workingHoursEnd: event.target.value })}
                   />
                 </label>
-                <label htmlFor="quota-planner-lead-minutes" className="space-y-1 text-xs font-medium">
-                  Lead minutes
+	                <label htmlFor="quota-planner-lead-minutes" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.leadMinutes")}
                   <Input
                     id="quota-planner-lead-minutes"
                     className="h-8 text-xs"
@@ -232,8 +234,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                     }
                   />
                 </label>
-                <label htmlFor="quota-planner-max-decisions" className="space-y-1 text-xs font-medium">
-                  Max decisions/day
+	                <label htmlFor="quota-planner-max-decisions" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.maxDecisions")}
                   <Input
                     id="quota-planner-max-decisions"
                     className="h-8 text-xs"
@@ -259,14 +261,14 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                       disabled={settingsBusy}
                       onCheckedChange={(checked) => toggleWorkingDay(day.value, checked === true)}
                     />
-                    {day.label}
+	                    {t(`settings.routing.workingDays.days.${day.label.toLowerCase()}`, { defaultValue: day.label })}
                   </label>
                 ))}
               </div>
 
               <div className="grid gap-3 p-3 sm:grid-cols-3">
                 <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-                  <span className="text-xs font-medium">Prewarm planning</span>
+	                  <span className="text-xs font-medium">{t("quotaPlanner.fields.prewarmPlanning")}</span>
                   <Switch
                     checked={effectiveDraft.prewarmEnabled}
                     disabled={settingsBusy}
@@ -274,7 +276,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                   />
                 </div>
                 <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-                  <span className="text-xs font-medium">Synthetic traffic</span>
+	                  <span className="text-xs font-medium">{t("quotaPlanner.fields.syntheticTraffic")}</span>
                   <Switch
                     checked={effectiveDraft.allowSyntheticTraffic}
                     disabled={settingsBusy}
@@ -282,7 +284,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                   />
                 </div>
                 <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-                  <span className="text-xs font-medium">Dry run</span>
+	                  <span className="text-xs font-medium">{t("quotaPlanner.fields.dryRun")}</span>
                   <Switch
                     checked={effectiveDraft.dryRun}
                     disabled={settingsBusy}
@@ -292,8 +294,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               </div>
 
               <div className="grid gap-3 p-3 sm:grid-cols-3">
-                <label htmlFor="quota-planner-min-expected-gain" className="space-y-1 text-xs font-medium">
-                  Min expected gain
+	                <label htmlFor="quota-planner-min-expected-gain" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.minExpectedGain")}
                   <Input
                     id="quota-planner-min-expected-gain"
                     className="h-8 text-xs"
@@ -305,8 +307,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                     onChange={(event) => patchDraft({ minExpectedGain: Number.parseFloat(event.target.value || "0") })}
                   />
                 </label>
-                <label htmlFor="quota-planner-daily-warmup-credits" className="space-y-1 text-xs font-medium">
-                  Daily warmup credits
+	                <label htmlFor="quota-planner-daily-warmup-credits" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.dailyWarmupCredits")}
                   <Input
                     id="quota-planner-daily-warmup-credits"
                     className="h-8 text-xs"
@@ -320,8 +322,8 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                     }
                   />
                 </label>
-                <label htmlFor="quota-planner-warmup-model" className="space-y-1 text-xs font-medium">
-                  Warmup model
+	                <label htmlFor="quota-planner-warmup-model" className="space-y-1 text-xs font-medium">
+	                  {t("quotaPlanner.fields.warmupModel")}
                   <Input
                     id="quota-planner-warmup-model"
                     className="h-8 text-xs"
@@ -339,7 +341,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Activity className="h-4 w-4 text-primary" aria-hidden="true" />
-                  <span className="text-sm font-semibold">Forecast</span>
+	                  <span className="text-sm font-semibold">{t("quotaPlanner.forecast.title")}</span>
                 </div>
                 <Badge variant={effectiveDraft.mode === "off" ? "secondary" : "default"}>{effectiveDraft.mode}</Badge>
               </div>
@@ -348,25 +350,25 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               ) : forecast ? (
                 <div className="grid gap-2 text-xs">
                   <div className="flex justify-between gap-3">
-                    <span className="text-muted-foreground">Demand</span>
+	                    <span className="text-muted-foreground">{t("quotaPlanner.forecast.demand")}</span>
                     <span className="font-medium tabular-nums">{formatNumber(forecast.totalDemandUnits)}</span>
                   </div>
                   <div className="flex justify-between gap-3">
-                    <span className="text-muted-foreground">Served in simulation</span>
+	                    <span className="text-muted-foreground">{t("quotaPlanner.forecast.served")}</span>
                     <span className="font-medium tabular-nums">{formatNumber(forecast.simulation.servedUnits)}</span>
                   </div>
                   <div className="flex justify-between gap-3">
-                    <span className="text-muted-foreground">Unmet</span>
+	                    <span className="text-muted-foreground">{t("quotaPlanner.forecast.unmet")}</span>
                     <span className="font-medium tabular-nums">{formatNumber(forecast.simulation.unmetDemand)}</span>
                   </div>
                   <div className="flex justify-between gap-3">
-                    <span className="text-muted-foreground">Peak</span>
+	                    <span className="text-muted-foreground">{t("quotaPlanner.forecast.peak")}</span>
                     <span className="font-medium tabular-nums">{formatNumber(forecast.peakDemandUnits)}</span>
                   </div>
                   <div className="flex justify-between gap-3">
-                    <span className="text-muted-foreground">Peak slot</span>
+	                    <span className="text-muted-foreground">{t("quotaPlanner.forecast.peakSlot")}</span>
                     <span className="text-right font-medium">
-                      {forecast.peakSlotStart ? formatInlineTime(forecast.peakSlotStart) : "No demand yet"}
+	                      {forecast.peakSlotStart ? formatInlineTime(forecast.peakSlotStart) : t("quotaPlanner.forecast.noDemand")}
                     </span>
                   </div>
                 </div>
@@ -376,9 +378,9 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
 
           <div className="flex items-center justify-end gap-2">
             <Input
-              aria-label="Warm account id"
-              className="h-8 w-48 text-xs"
-              placeholder="account id"
+	              aria-label={t("quotaPlanner.actions.warmAccountAria")}
+	              className="h-8 w-48 text-xs"
+	              placeholder={t("quotaPlanner.actions.warmAccountPlaceholder")}
               value={warmAccountId}
               disabled={warmupBusy}
               onChange={(event) => setWarmAccountId(event.target.value)}
@@ -390,7 +392,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                 disabled={warmupBusy}
                 onCheckedChange={(checked) => setForceWarmupProbe(checked === true)}
               />
-              Force probe
+	              {t("quotaPlanner.actions.forceProbe")}
             </label>
             <Button
               type="button"
@@ -406,7 +408,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                 });
               }}
             >
-              Warm Now
+	              {t("quotaPlanner.actions.warmNow")}
             </Button>
             <Button
               type="button"
@@ -416,7 +418,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               disabled={settingsBusy || !changed || !settings}
               onClick={() => setDraft(null)}
             >
-              Reset
+	              {t("common.actions.reset")}
             </Button>
             <Button
               type="button"
@@ -430,19 +432,19 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                 updateSettingsMutation.mutate(effectiveDraft, { onSuccess: () => setDraft(null) });
               }}
             >
-              Save Planner
+	              {t("quotaPlanner.actions.save")}
             </Button>
           </div>
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <h4 className="text-xs font-semibold uppercase text-muted-foreground">Recent decisions</h4>
-              <span className="text-xs text-muted-foreground">{decisions.length} shown</span>
+	              <h4 className="text-xs font-semibold uppercase text-muted-foreground">{t("quotaPlanner.decisions.title")}</h4>
+	              <span className="text-xs text-muted-foreground">{t("quotaPlanner.decisions.shown", { count: decisions.length })}</span>
             </div>
             <div className="overflow-hidden rounded-lg border">
               {decisions.length === 0 ? (
                 <div className="px-3 py-5 text-center text-xs text-muted-foreground">
-                  Planner decisions appear after the next scheduler tick.
+	                  {t("quotaPlanner.decisions.empty")}
                 </div>
               ) : (
                 <div className="divide-y">
@@ -460,12 +462,12 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                           <span className="block truncate">
                             {decision.action}
                             {decision.accountId ? ` ${decision.accountId}` : ""} · {decision.status}
-                            {decision.scheduledAt ? ` · scheduled ${formatInlineTime(decision.scheduledAt)}` : ""}
+	                            {decision.scheduledAt ? ` · ${t("quotaPlanner.decisions.scheduled", { time: formatInlineTime(decision.scheduledAt) })}` : ""}
                           </span>
                           <span className="block truncate text-muted-foreground">
-                            {targetPeak ? `peak ${targetPeak}` : decision.reason ?? "no reason"}
-                            {expectedGain ? ` · gain ${expectedGain}` : ""}
-                            {expectedCost ? ` · cost ${expectedCost}` : ""}
+	                            {targetPeak ? t("quotaPlanner.decisions.peak", { value: targetPeak }) : decision.reason ?? t("quotaPlanner.decisions.noReason")}
+	                            {expectedGain ? ` · ${t("quotaPlanner.decisions.gain", { value: expectedGain })}` : ""}
+	                            {expectedCost ? ` · ${t("quotaPlanner.decisions.cost", { value: expectedCost })}` : ""}
                             {warmupCycle ? ` · ${warmupCycle}` : ""}
                             {skipReason ? ` · ${skipReason}` : ""}
                           </span>
@@ -479,7 +481,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                           disabled={cancelBusy || !["planned", "skipped"].includes(decision.status)}
                           onClick={() => cancelDecisionMutation.mutate(decision.id)}
                         >
-                          Cancel
+	                          {t("common.cancel")}
                         </Button>
                       </div>
                     );

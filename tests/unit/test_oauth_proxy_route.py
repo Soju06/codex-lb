@@ -223,16 +223,19 @@ class _DummyRepo:
         }
         return True
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
@@ -250,6 +253,21 @@ class _DummyRepo:
             "workspace_label": workspace_label,
             "seat_type": seat_type,
         }
+        return True
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
+    ) -> bool:
         return True
 
     async def workspace_slot_taken(

@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -37,8 +38,8 @@ import type {
   AutomationUpdateRequest,
 } from "@/features/automations/schemas";
 
-const AUTOMATION_TYPE_OPTIONS: Array<{ value: AutomationScheduleType; label: string }> = [
-  { value: "daily", label: "Daily refresh" },
+const AUTOMATION_TYPE_OPTIONS: Array<{ value: AutomationScheduleType; labelKey: string }> = [
+  { value: "daily", labelKey: "automations.types.daily" },
 ];
 
 const WEEKDAY_OPTIONS: Array<{ value: AutomationScheduleDay; shortLabel: string }> = [
@@ -130,8 +131,8 @@ function automationAccountTargetsChanged(previous: string[], next: string[]): bo
   return next.some((accountId) => !previousSet.has(accountId));
 }
 
-function formatTimezoneLabel(value: string): string {
-  return value === SERVER_DEFAULT_TIMEZONE ? "Server default" : value;
+function formatTimezoneLabel(value: string, t: ReturnType<typeof useTranslation>["t"]): string {
+  return value === SERVER_DEFAULT_TIMEZONE ? t("automations.schedule.serverDefault") : value;
 }
 
 function validateCreateForm(values: {
@@ -140,22 +141,25 @@ function validateCreateForm(values: {
   scheduleTimeValid: boolean;
   scheduleThresholdValid: boolean;
   availableAccountCount: number;
+  t: ReturnType<typeof useTranslation>["t"];
 }): CreateFormErrors {
   const errors: CreateFormErrors = {};
   if (values.name.trim().length === 0) {
-    errors.name = "Name is required.";
+    errors.name = values.t("automations.dialog.validation.nameRequired");
   }
   if (values.model.trim().length === 0) {
-    errors.model = "Model is required.";
+    errors.model = values.t("automations.dialog.validation.modelRequired");
   }
   if (!values.scheduleTimeValid) {
-    errors.time = "Enter a valid time value.";
+    errors.time = values.t("automations.dialog.validation.timeInvalid");
   }
   if (!values.scheduleThresholdValid) {
-    errors.threshold = `Threshold must be between 0 and ${MAX_SCHEDULE_THRESHOLD_MINUTES} minutes.`;
+    errors.threshold = values.t("automations.dialog.validation.thresholdInvalid", {
+      max: MAX_SCHEDULE_THRESHOLD_MINUTES,
+    });
   }
   if (values.availableAccountCount <= 0) {
-    errors.accounts = "No accounts available. Add at least one account.";
+    errors.accounts = values.t("automations.dialog.validation.noAccounts");
   }
   return errors;
 }
@@ -231,6 +235,7 @@ function AutomationJobDialogForm({
   onUpdate,
   timeFormat,
 }: AutomationJobDialogFormProps) {
+  const { t } = useTranslation();
   const isEditing = editingJob !== null;
   const { accountsQuery } = useAccounts();
   const initialName = editingJob?.name ?? "";
@@ -321,10 +326,10 @@ function AutomationJobDialogForm({
     () =>
       availableReasoningEfforts.map((effort) => (
         <SelectItem key={effort} value={effort}>
-          {REASONING_LABELS[effort] ?? effort}
+          {t(`common.reasoning.${effort}`, { defaultValue: REASONING_LABELS[effort] ?? effort })}
         </SelectItem>
       )),
-    [availableReasoningEfforts],
+    [availableReasoningEfforts, t],
   );
   const createFormErrors = useMemo(
     () =>
@@ -334,8 +339,9 @@ function AutomationJobDialogForm({
         scheduleTimeValid: scheduleTimeIsValid,
         scheduleThresholdValid: scheduleThresholdIsValid,
         availableAccountCount,
+        t,
       }),
-    [availableAccountCount, nameValidationValue, scheduleThresholdIsValid, scheduleTimeIsValid, selectedModel],
+    [availableAccountCount, nameValidationValue, scheduleThresholdIsValid, scheduleTimeIsValid, selectedModel, t],
   );
 
   const canSubmit =
@@ -385,6 +391,7 @@ function AutomationJobDialogForm({
       scheduleTimeValid: parsedTime.ok,
       scheduleThresholdValid: parsedThreshold.ok,
       availableAccountCount,
+      t,
     });
     if (Object.keys(submitErrors).length > 0 || scheduleDays.length === 0 || !parsedTime.ok || !parsedThreshold.ok) {
       return;
@@ -445,12 +452,12 @@ function AutomationJobDialogForm({
   return (
     <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
         <DialogHeader className="px-6 pt-6 pb-2 pr-12">
-          <DialogTitle>{isEditing ? "Edit automation" : "Add automation"}</DialogTitle>
-          <DialogDescription>
-            {isEditing
-              ? "Update this automation's schedule, model, accounts, and prompt."
-              : "Create a scheduled automation. Configure the type, runtime schedule, and prompt to send."}
-          </DialogDescription>
+	          <DialogTitle>{isEditing ? t("automations.dialog.editTitle") : t("automations.dialog.createTitle")}</DialogTitle>
+	          <DialogDescription>
+	            {isEditing
+	              ? t("automations.dialog.editDescription")
+	              : t("automations.dialog.createDescription")}
+	          </DialogDescription>
         </DialogHeader>
 
         <form
@@ -463,16 +470,16 @@ function AutomationJobDialogForm({
           <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 pb-4">
             <section className="space-y-3">
               <div className="space-y-0.5">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Basics</h4>
+	                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("automations.dialog.sections.basics")}</h4>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor={FORM_FIELD_IDS.name} className="text-sm font-medium">Name</label>
+	                  <label htmlFor={FORM_FIELD_IDS.name} className="text-sm font-medium">{t("apiKeys.table.name")}</label>
                   <Input
                     key={`name-${nameInputVersion}`}
                     ref={nameRef}
                     id={FORM_FIELD_IDS.name}
-                    placeholder="Automation name"
+	                    placeholder={t("automations.dialog.placeholders.name")}
                     defaultValue={nameDefaultValue}
                     aria-invalid={showFieldError("name") ? true : undefined}
                     aria-describedby={showFieldError("name") ? `${FORM_FIELD_IDS.name}-error` : undefined}
@@ -493,15 +500,15 @@ function AutomationJobDialogForm({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor={FORM_FIELD_IDS.type} className="text-sm font-medium">Automation type</label>
+	                  <label htmlFor={FORM_FIELD_IDS.type} className="text-sm font-medium">{t("automations.jobs.columns.type")}</label>
                   <Select value={automationType} onValueChange={(value) => setAutomationType(value as AutomationScheduleType)}>
                     <SelectTrigger id={FORM_FIELD_IDS.type}>
-                      <SelectValue placeholder="Select automation type" />
+	                      <SelectValue placeholder={t("automations.dialog.placeholders.type")} />
                     </SelectTrigger>
                     <SelectContent>
                       {AUTOMATION_TYPE_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+	                          {t(option.labelKey)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -509,7 +516,7 @@ function AutomationJobDialogForm({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor={FORM_FIELD_IDS.model} className="text-sm font-medium">Model</label>
+	                  <label htmlFor={FORM_FIELD_IDS.model} className="text-sm font-medium">{t("dashboard.requests.columns.model")}</label>
                   <Select
                     value={selectedModel}
                     onValueChange={(value) => {
@@ -522,14 +529,14 @@ function AutomationJobDialogForm({
                       aria-invalid={showFieldError("model") ? true : undefined}
                       aria-describedby={showFieldError("model") ? `${FORM_FIELD_IDS.model}-error` : undefined}
                     >
-                      <SelectValue placeholder="Select model" />
+	                      <SelectValue placeholder={t("automations.dialog.placeholders.model")} />
                     </SelectTrigger>
                     <SelectContent align="start">
                       {modelSelectItems}
                     </SelectContent>
                   </Select>
                   {!modelsLoading && models.length === 0 ? (
-                    <p className="text-xs text-destructive">No models available. Add or refresh models first.</p>
+	                    <p className="text-xs text-destructive">{t("automations.dialog.noModels")}</p>
                   ) : null}
                   {showFieldError("model") ? (
                     <p id={`${FORM_FIELD_IDS.model}-error`} className="text-xs text-destructive">{showFieldError("model")}</p>
@@ -537,7 +544,7 @@ function AutomationJobDialogForm({
                 </div>
 
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor={FORM_FIELD_IDS.reasoning} className="text-sm font-medium">Reasoning effort</label>
+		                  <label htmlFor={FORM_FIELD_IDS.reasoning} className="text-sm font-medium">{t("automations.dialog.reasoningEffort")}</label>
                   <Select
                     value={effectiveReasoningEffortValue}
                     onValueChange={(value) => {
@@ -546,20 +553,20 @@ function AutomationJobDialogForm({
                     }}
                   >
                     <SelectTrigger id={FORM_FIELD_IDS.reasoning}>
-                      <SelectValue placeholder="Model default" />
+	                      <SelectValue placeholder={t("automations.dialog.modelDefault")} />
                     </SelectTrigger>
                     <SelectContent align="start">
                       <SelectItem value={DEFAULT_REASONING_EFFORT_VALUE}>
-                        Model default
-                        {selectedModelMetadata?.defaultReasoningEffort
-                          ? ` (${REASONING_LABELS[selectedModelMetadata.defaultReasoningEffort] ?? selectedModelMetadata.defaultReasoningEffort})`
-                          : ""}
+	                        {t("automations.dialog.modelDefault")}
+	                        {selectedModelMetadata?.defaultReasoningEffort
+	                          ? ` (${t(`common.reasoning.${selectedModelMetadata.defaultReasoningEffort}`, { defaultValue: REASONING_LABELS[selectedModelMetadata.defaultReasoningEffort] ?? selectedModelMetadata.defaultReasoningEffort })})`
+	                          : ""}
                       </SelectItem>
                       {reasoningSelectItems}
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Available values depend on selected model.
+	                    {t("automations.dialog.reasoningHint")}
                   </p>
                 </div>
               </div>
@@ -567,11 +574,11 @@ function AutomationJobDialogForm({
 
             <section className="space-y-3">
               <div className="space-y-0.5">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Schedule</h4>
+	                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("automations.dialog.sections.schedule")}</h4>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <label htmlFor={FORM_FIELD_IDS.time} className="text-sm font-medium">Time</label>
+	                  <label htmlFor={FORM_FIELD_IDS.time} className="text-sm font-medium">{t("dashboard.requests.columns.time")}</label>
                   <Input
                     key={`time-${scheduleTimeInputVersion}`}
                     ref={timeRef}
@@ -599,7 +606,7 @@ function AutomationJobDialogForm({
                     }}
                   />
                   <p id={`${FORM_FIELD_IDS.time}-hint`} className="text-xs text-muted-foreground">
-                    {timeFormat === "24h" ? "Use 24h format: HH:MM" : "Use 12h format: HH:MM AM/PM"}
+	                    {timeFormat === "24h" ? t("automations.dialog.timeHint24h") : t("automations.dialog.timeHint12h")}
                   </p>
                   {showFieldError("time") ? (
                     <p id={`${FORM_FIELD_IDS.time}-error`} className="text-xs text-destructive">{showFieldError("time")}</p>
@@ -607,17 +614,17 @@ function AutomationJobDialogForm({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor={FORM_FIELD_IDS.timezone} className="text-sm font-medium">Timezone</label>
+	                  <label htmlFor={FORM_FIELD_IDS.timezone} className="text-sm font-medium">{t("quotaPlanner.fields.timezone")}</label>
                   <Select value={scheduleTimezone} onValueChange={setScheduleTimezone}>
                     <SelectTrigger id={FORM_FIELD_IDS.timezone}>
-                      <SelectValue placeholder="Select timezone">
-                        {formatTimezoneLabel(scheduleTimezone)}
-                      </SelectValue>
+	                      <SelectValue placeholder={t("automations.dialog.placeholders.timezone")}>
+	                        {formatTimezoneLabel(scheduleTimezone, t)}
+	                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {timezoneChoices.map((timezone) => (
                         <SelectItem key={timezone} value={timezone}>
-                          {formatTimezoneLabel(timezone)}
+	                          {formatTimezoneLabel(timezone, t)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -625,7 +632,7 @@ function AutomationJobDialogForm({
                 </div>
 
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor={FORM_FIELD_IDS.threshold} className="text-sm font-medium">Threshold (minutes)</label>
+	                  <label htmlFor={FORM_FIELD_IDS.threshold} className="text-sm font-medium">{t("automations.dialog.thresholdMinutes")}</label>
                   <Input
                     key={`threshold-${scheduleThresholdInputVersion}`}
                     ref={thresholdRef}
@@ -656,7 +663,7 @@ function AutomationJobDialogForm({
                     }}
                   />
                   <p id={`${FORM_FIELD_IDS.threshold}-hint`} className="text-xs text-muted-foreground">
-                    0 = immediate dispatch at schedule time. Values above 0 spread per-account runs randomly in that window.
+	                    {t("automations.dialog.thresholdHint")}
                   </p>
                   {showFieldError("threshold") ? (
                     <p id={`${FORM_FIELD_IDS.threshold}-error`} className="text-xs text-destructive">
@@ -669,24 +676,24 @@ function AutomationJobDialogForm({
                   <div className="border-border/70 bg-muted/10 flex items-center justify-between rounded-md border px-3 py-2.5">
                     <div className="space-y-0.5">
                       <label htmlFor={FORM_FIELD_IDS.includePaused} className="text-sm font-medium">
-                        Include paused accounts
+	                        {t("automations.dialog.includePaused")}
                       </label>
                       <p className="text-xs text-muted-foreground">
-                        Include accounts with paused status in execution. Rate-limited, quota-exceeded, and deactivated accounts are always skipped.
+	                        {t("automations.dialog.includePausedDescription")}
                       </p>
                     </div>
                     <Switch
                       id={FORM_FIELD_IDS.includePaused}
                       checked={includePausedAccounts}
                       onCheckedChange={setIncludePausedAccounts}
-                      aria-label="Include paused accounts"
+	                      aria-label={t("automations.dialog.includePaused")}
                     />
                   </div>
                 </div>
 
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor={FORM_FIELD_IDS.days} className="text-sm font-medium">Days of week</label>
-                  <div id={FORM_FIELD_IDS.days} role="group" aria-label="Days of week" className="grid grid-cols-4 gap-1.5 sm:grid-cols-7">
+	                  <label htmlFor={FORM_FIELD_IDS.days} className="text-sm font-medium">{t("automations.dialog.daysOfWeek")}</label>
+	                  <div id={FORM_FIELD_IDS.days} role="group" aria-label={t("automations.dialog.daysOfWeek")} className="grid grid-cols-4 gap-1.5 sm:grid-cols-7">
                     {WEEKDAY_OPTIONS.map((option) => {
                       const selected = scheduleDays.includes(option.value);
                       return (
@@ -704,42 +711,42 @@ function AutomationJobDialogForm({
                           )}
                           onClick={() => toggleScheduleDay(option.value)}
                         >
-                          {option.shortLabel}
+	                          {t(`settings.routing.workingDays.days.${option.value}`, { defaultValue: option.shortLabel })}
                         </Button>
                       );
                     })}
                   </div>
-                  <p className="text-xs text-muted-foreground">Choose weekdays when this automation should run.</p>
+	                  <p className="text-xs text-muted-foreground">{t("automations.dialog.daysHint")}</p>
                 </div>
               </div>
             </section>
 
             <section className="space-y-3">
               <div className="space-y-0.5">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Content / Execution</h4>
+	                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("automations.dialog.sections.execution")}</h4>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor={FORM_FIELD_IDS.prompt} className="text-sm font-medium">Prompt</label>
+	                  <label htmlFor={FORM_FIELD_IDS.prompt} className="text-sm font-medium">{t("automations.dialog.prompt")}</label>
                   <textarea
                     key={`prompt-${promptInputVersion}`}
                     ref={promptRef}
                     id={FORM_FIELD_IDS.prompt}
                     className="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive min-h-24 w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px]"
-                    placeholder="Type the prompt this automation should send."
+	                    placeholder={t("automations.dialog.placeholders.prompt")}
                     defaultValue={promptDefaultValue}
                   />
                 </div>
 
                 <div className="space-y-1.5 sm:col-span-2">
-                  <label htmlFor={FORM_FIELD_IDS.accounts} className="text-sm font-medium">Accounts</label>
+	                  <label htmlFor={FORM_FIELD_IDS.accounts} className="text-sm font-medium">{t("automations.jobs.columns.accounts")}</label>
                   <AccountMultiSelect
                     value={accountIds}
                     onChange={(value) => {
                       setAccountIds(value);
                       setTouched((current) => ({ ...current, accounts: true }));
                     }}
-                    placeholder="All accounts"
+	                    placeholder={t("apiKeys.accountSelect.all")}
                     triggerId={FORM_FIELD_IDS.accounts}
                     ariaInvalid={showFieldError("accounts") ? true : undefined}
                     ariaDescribedBy={showFieldError("accounts") ? `${FORM_FIELD_IDS.accounts}-error` : undefined}
@@ -754,19 +761,19 @@ function AutomationJobDialogForm({
 
             {submitAttempted && !canSubmit ? (
               <p className="text-xs text-muted-foreground">
-                {isEditing
-                  ? "Resolve highlighted fields to save changes."
-                  : "Resolve highlighted fields to create this automation."}
+	                {isEditing
+	                  ? t("automations.dialog.resolveToSave")
+	                  : t("automations.dialog.resolveToCreate")}
               </p>
             ) : null}
           </div>
 
           <DialogFooter className="border-t px-6 py-4">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
+	              {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={busy || modelsLoading || !canSubmit}>
-              {isEditing ? "Save changes" : "Create automation"}
+	              {isEditing ? t("automations.dialog.saveChanges") : t("automations.dialog.createAction")}
             </Button>
           </DialogFooter>
         </form>

@@ -301,12 +301,10 @@ async def test_request_log_total_count_is_cached_per_filter_signature(async_clie
     the same filter signature; distinct signatures count separately."""
     from sqlalchemy import event
 
-    from app.core.config.settings import get_settings
     from app.db.session import engine
     from app.modules.request_logs import repository as logs_repository_module
 
-    monkeypatch.setenv("CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS", "30")
-    get_settings.cache_clear()
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
     logs_repository_module._clear_recent_count_cache()
 
     count_statements: list[str] = []
@@ -323,7 +321,6 @@ async def test_request_log_total_count_is_cached_per_filter_signature(async_clie
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", _capture)
         logs_repository_module._clear_recent_count_cache()
-        get_settings.cache_clear()
 
     assert first.status_code == 200
     assert second.status_code == 200

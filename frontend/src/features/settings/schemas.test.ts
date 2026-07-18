@@ -16,6 +16,9 @@ describe("DashboardSettingsSchema", () => {
       preferEarlierResetAccounts: false,
       routingStrategy: "relative_availability",
       preferEarlierResetWindow: "secondary",
+      showResetCreditBadges: false,
+      autoRedeemResetCreditsBeforeExpiry: true,
+      showResetCreditExpiryBadge: false,
       relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 5,
       singleAccountId: "acc-1",
@@ -54,6 +57,9 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.upstreamProxyDefaultPoolId).toBe("pool_1");
     expect(parsed.routingStrategy).toBe("relative_availability");
     expect(parsed.preferEarlierResetWindow).toBe("secondary");
+    expect(parsed.showResetCreditBadges).toBe(false);
+    expect(parsed.autoRedeemResetCreditsBeforeExpiry).toBe(true);
+    expect(parsed.showResetCreditExpiryBadge).toBe(false);
     expect(parsed.relativeAvailabilityPower).toBe(2);
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.singleAccountId).toBe("acc-1");
@@ -109,6 +115,9 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(30);
     expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(false);
+    expect(parsed.showResetCreditBadges).toBe(true);
+    expect(parsed.autoRedeemResetCreditsBeforeExpiry).toBe(false);
+    expect(parsed.showResetCreditExpiryBadge).toBe(true);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
     expect(parsed.guestAccessEnabled).toBe(false);
@@ -166,6 +175,9 @@ describe("SettingsUpdateRequestSchema", () => {
       preferEarlierResetAccounts: true,
       routingStrategy: "relative_availability",
       preferEarlierResetWindow: "secondary",
+      showResetCreditBadges: false,
+      autoRedeemResetCreditsBeforeExpiry: true,
+      showResetCreditExpiryBadge: false,
       relativeAvailabilityPower: 1.5,
       relativeAvailabilityTopK: 7,
       singleAccountId: "acc-1",
@@ -201,6 +213,9 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.warmupModel).toBe("gpt-5.4-nano");
     expect(parsed.upstreamStreamTransport).toBe("websocket");
     expect(parsed.preferEarlierResetWindow).toBe("secondary");
+    expect(parsed.showResetCreditBadges).toBe(false);
+    expect(parsed.autoRedeemResetCreditsBeforeExpiry).toBe(true);
+    expect(parsed.showResetCreditExpiryBadge).toBe(false);
     expect(parsed.upstreamProxyRoutingEnabled).toBe(true);
     expect(parsed.upstreamProxyDefaultPoolId).toBeNull();
     expect(parsed.importWithoutOverwrite).toBe(true);
@@ -243,6 +258,9 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
+    expect(parsed.showResetCreditBadges).toBeUndefined();
+    expect(parsed.autoRedeemResetCreditsBeforeExpiry).toBeUndefined();
+    expect(parsed.showResetCreditExpiryBadge).toBeUndefined();
     expect(parsed.hideUpstreamQuotaFromApiKeys).toBeUndefined();
     expect(parsed.relativeAvailabilityPower).toBeUndefined();
     expect(parsed.relativeAvailabilityTopK).toBeUndefined();
@@ -415,5 +433,69 @@ describe("UpstreamProxyAdminSchema", () => {
     expect(parsed.endpoints[0]?.host).toBe("proxy.test");
     expect(parsed.pools[0]?.endpointIds).toEqual(["ep_1"]);
     expect(parsed.bindings[0]?.accountId).toBe("acc_1");
+  });
+});
+
+describe("retention fields", () => {
+  it("parses effective values plus overrides, defaulting for older backends", () => {
+    const withValues = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: true,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+      requestLogRetentionDays: 90,
+      usageHistoryRetentionDays: 45,
+      requestLogRetentionOverrideDays: null,
+      usageHistoryRetentionOverrideDays: 45,
+    });
+    expect(withValues.requestLogRetentionDays).toBe(90);
+    expect(withValues.usageHistoryRetentionDays).toBe(45);
+    expect(withValues.requestLogRetentionOverrideDays).toBeNull();
+    expect(withValues.usageHistoryRetentionOverrideDays).toBe(45);
+
+    const withoutValues = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: true,
+      importWithoutOverwrite: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+    });
+    expect(withoutValues.requestLogRetentionDays).toBe(0);
+    expect(withoutValues.usageHistoryRetentionDays).toBe(0);
+    expect(withoutValues.requestLogRetentionOverrideDays).toBeNull();
+    expect(withoutValues.usageHistoryRetentionOverrideDays).toBeNull();
+  });
+
+  it("accepts 0, floor-or-above, and null (clear) override updates", () => {
+    const parsed = SettingsUpdateRequestSchema.parse({
+      requestLogRetentionOverrideDays: 30,
+      usageHistoryRetentionOverrideDays: 0,
+    });
+    expect(parsed.requestLogRetentionOverrideDays).toBe(30);
+    expect(parsed.usageHistoryRetentionOverrideDays).toBe(0);
+
+    const cleared = SettingsUpdateRequestSchema.parse({
+      requestLogRetentionOverrideDays: null,
+      usageHistoryRetentionOverrideDays: null,
+    });
+    expect(cleared.requestLogRetentionOverrideDays).toBeNull();
+    expect(cleared.usageHistoryRetentionOverrideDays).toBeNull();
+  });
+
+  it("rejects override updates between 1 and the safety floor", () => {
+    expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionOverrideDays: 7 })).toThrow(
+      /request_log_retention_override_days must be 0 \(disabled\) or >= 30/,
+    );
+    expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionOverrideDays: 44 })).toThrow(
+      /usage_history_retention_override_days must be 0 \(disabled\) or >= 45/,
+    );
+  });
+
+  it("rejects override updates above 3650 days", () => {
+    expect(() => SettingsUpdateRequestSchema.parse({ requestLogRetentionOverrideDays: 3651 })).toThrow();
+    expect(() => SettingsUpdateRequestSchema.parse({ usageHistoryRetentionOverrideDays: 3651 })).toThrow();
   });
 });

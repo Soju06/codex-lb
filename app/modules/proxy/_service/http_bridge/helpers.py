@@ -121,6 +121,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _http_bridge_session_supports_service_tier,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -445,16 +446,24 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[str, str]:
+def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
-        return code, message
+        error_type = parsed.type if parsed and parsed.type else "server_error"
+        error_param = parsed.param if parsed else None
+        return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
-        return "upstream_unavailable", "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out"
+        return (
+            502,
+            "upstream_unavailable",
+            "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out",
+            "server_error",
+            None,
+        )
     message = str(exc).strip() or "HTTP bridge pre-created retry failed"
-    return "upstream_unavailable", message
+    return 502, "upstream_unavailable", message, "server_error", None
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
@@ -563,6 +572,17 @@ def _normalize_http_bridge_error_event(
             resets_in = raw_error.get("resets_in_seconds")
             if isinstance(resets_in, int | float):
                 rate_limit_metadata["resets_in_seconds"] = resets_in
+
+    if request_state is not None:
+        if request_state.error_code_override is not None:
+            error_code_value = request_state.error_code_override
+            explicit_error_code = True
+        if request_state.error_type_override is not None:
+            error_type_value = request_state.error_type_override
+        if request_state.error_message_override is not None:
+            error_message_value = request_state.error_message_override
+        if request_state.error_param_override is not None:
+            error_param_value = request_state.error_param_override
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":
@@ -691,6 +711,29 @@ def _http_bridge_models_compatible(existing_model: str | None, request_model: st
     return existing_model.strip().lower() == request_model.strip().lower()
 
 
+def _http_bridge_compatible(
+    session: _HTTPBridgeSession,
+    request_model: str | None,
+    request_service_tier: str | None,
+    same_model_required: bool = False,
+) -> bool:
+    """Check catalog compatibility while preserving stricter legacy reuse paths."""
+
+    model_compatible = not same_model_required or _http_bridge_models_compatible(
+        session.request_model,
+        request_model,
+    )
+    return model_compatible and _http_bridge_session_supports_service_tier(
+        session,
+        request_model=request_model,
+        request_service_tier=request_service_tier,
+    )
+
+
+def _http_bridge_alias_target_is_stale(session: _HTTPBridgeSession | None) -> bool:
+    return session is None or session.closed or not _http_bridge_session_account_active(session)
+
+
 def _http_bridge_incompatible_model_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
@@ -729,7 +772,21 @@ def _http_bridge_incompatible_model_fork_key(
     return fork_key
 
 
-def _http_bridge_unanchored_parallel_fork_key(
+def _http_bridge_locally_owned_fork_key(
+    fork_key: "_HTTPBridgeSessionKey",
+    forwarded_request: bool,
+    forwarded_original_request_unanchored: bool,
+) -> "_HTTPBridgeSessionKey | None":
+    if not forwarded_request:
+        return None
+    if fork_key.affinity_kind == "internal_request_parallel":
+        return fork_key
+    if forwarded_original_request_unanchored and fork_key.affinity_kind == "internal_unanchored_parallel":
+        return fork_key
+    return None
+
+
+def _http_bridge_parallel_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
     session: "_HTTPBridgeSession | None",
@@ -737,38 +794,76 @@ def _http_bridge_unanchored_parallel_fork_key(
     incoming_turn_state: str | None,
     previous_response_id: str | None,
     request_model: str | None,
+    request_service_tier: str | None,
     request_scope_id: str,
+    allow_model_fork: bool = True,
+    same_model_required: bool = False,
 ) -> "_HTTPBridgeSessionKey | None":
-    """Give independent process-session requests separate websocket lanes."""
+    """Give incompatible or concurrent requests an independent websocket lane."""
 
-    if key.affinity_kind != "session_header" or incoming_turn_state is not None or previous_response_id is not None:
-        return None
     reason: str | None = None
-    if inflight_creation:
-        reason = "session_creation_inflight"
-    elif session is not None and not session.closed:
-        if _http_bridge_session_has_visible_requests(session):
-            reason = "active_request"
-        elif (
-            reservation_id := getattr(session, "unanchored_reservation_id", None)
-        ) is not None and reservation_id != request_scope_id:
-            reason = "session_reserved"
-        elif not _http_bridge_models_compatible(session.request_model, request_model):
-            reason = "model_change"
-    if reason is None:
+    if key.affinity_kind == "session_header" and incoming_turn_state is None and previous_response_id is None:
+        if inflight_creation:
+            reason = "session_creation_inflight"
+        elif session is not None and not session.closed:
+            if _http_bridge_session_has_visible_requests(session):
+                reason = "active_request"
+            elif (
+                reservation_id := getattr(session, "unanchored_reservation_id", None)
+            ) is not None and reservation_id != request_scope_id:
+                reason = "session_reserved"
+            elif not _http_bridge_models_compatible(session.request_model, request_model):
+                reason = "model_change"
+    if reason is not None:
+        fork_key = _HTTPBridgeSessionKey(
+            "internal_unanchored_parallel",
+            sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+            key.api_key_id,
+        )
+        _log_http_bridge_event(
+            "unanchored_parallel_fork",
+            fork_key,
+            account_id=None,
+            model=request_model,
+            detail=f"reason={reason}",
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(request_model) if request_model else None,
+            owner_check_applied=False,
+        )
+        return fork_key
+
+    if session is None or session.closed or not _http_bridge_session_account_active(session):
         return None
+    if allow_model_fork:
+        model_fork_key = _http_bridge_incompatible_model_fork_key(
+            key=key,
+            existing_model=session.request_model,
+            request_model=request_model,
+            request_scope_id=request_scope_id,
+        )
+        if model_fork_key is not None:
+            return model_fork_key
+    if _http_bridge_compatible(
+        session,
+        request_model,
+        request_service_tier,
+        same_model_required,
+    ):
+        return None
+    if incoming_turn_state is not None or previous_response_id is not None:
+        raise ProxyResponseError(502, _http_bridge_continuity_lost_error_envelope())
 
     fork_key = _HTTPBridgeSessionKey(
-        "internal_unanchored_parallel",
-        sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+        "internal_request_parallel",
+        sha256(f"{key.affinity_kind}\0{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
         key.api_key_id,
     )
     _log_http_bridge_event(
-        "unanchored_parallel_fork",
-        key,
-        account_id=None,
+        "request_compatibility_fork",
+        fork_key,
+        account_id=session.account.id,
         model=request_model,
-        detail=f"reason={reason}",
+        detail=f"source_kind={key.affinity_kind}",
         cache_key_family=key.affinity_kind,
         model_class=_extract_model_class(request_model) if request_model else None,
         owner_check_applied=False,
@@ -874,6 +969,28 @@ def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -
 
 def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:
     return (turn_state, api_key_id)
+
+
+def _http_bridge_turn_state_alias_has_live_owner(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    turn_state: str,
+) -> bool:
+    alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+    existing_key = service._http_bridge_turn_state_index.get(alias_key)
+    if existing_key is None or existing_key == session.key:
+        return False
+    return not _http_bridge_alias_target_is_stale(service._http_bridge_sessions.get(existing_key))
+
+
+def _register_http_bridge_turn_state_aliases_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+) -> None:
+    for alias in session.downstream_turn_state_aliases:
+        service._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
+            session.key
+        )
 
 
 def _http_bridge_previous_response_alias_key(response_id: str, api_key_id: str | None) -> tuple[str, str | None]:
@@ -1663,83 +1780,19 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
 
 
-def _http_bridge_prewarm_canary_bucket(
-    settings: Any,
-    *,
-    session: _HTTPBridgeSession,
-    request_state: _WebSocketRequestState,
-    text_data: str,
-) -> tuple[str, str | None]:
-    if not getattr(settings, "http_responses_session_bridge_codex_prewarm_enabled", False):
-        return "not_eligible", None
-    reason = _http_bridge_prewarm_eligible_reason(session, request_state=request_state, text_data=text_data)
-    raw_percent = getattr(settings, "http_responses_session_bridge_codex_prewarm_canary_percent", None)
-    api_key_id = session.key.api_key_id or (request_state.api_key.id if request_state.api_key else None)
-    allowlist = set(getattr(settings, "http_responses_session_bridge_codex_prewarm_allow_api_key_ids", []) or [])
-    denylist = set(getattr(settings, "http_responses_session_bridge_codex_prewarm_deny_api_key_ids", []) or [])
-    if api_key_id is not None and api_key_id in denylist:
-        return "control", reason or "legacy_all"
-    if allowlist and api_key_id not in allowlist:
-        return "control", reason or "legacy_all"
-    if raw_percent is None:
-        return "treatment", reason or "legacy_all"
-    if reason is None:
-        return "not_eligible", None
-    percent = max(0.0, min(100.0, float(raw_percent)))
-    sample_identity = "|".join(
-        (
-            api_key_id or "no_api_key",
-            request_state.session_id or session.key.affinity_kind,
-            session.key.affinity_key,
-        )
-    )
-    digest = sha256(sample_identity.encode("utf-8")).digest()
-    sample = int.from_bytes(digest[:8], "big") / float(2**64)
-    return ("treatment" if sample * 100.0 < percent else "control", reason)
+def _http_bridge_prewarm_enabled(settings: Any) -> bool:
+    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+
+    The canary percent and allow/deny cohort scaffolding was one-time
+    rollout tooling retired by ``reduce-settings-surface-phase-4``.
+    """
+    return bool(getattr(settings, "http_responses_session_bridge_codex_prewarm_enabled", False))
 
 
-def _http_bridge_prewarm_eligible_reason(
-    session: _HTTPBridgeSession,
-    *,
-    request_state: _WebSocketRequestState,
-    text_data: str,
-) -> str | None:
-    if request_state.previous_response_id is not None:
-        return None
-    if _http_bridge_request_input_size_bytes(text_data) < 50_000:
-        return None
-    gap_seconds = max(0.0, request_state.started_at - session.last_used_at)
-    if gap_seconds < 120.0 and request_state.session_id is not None:
-        return None
-    return "first_turn_50k_gap_2m"
-
-
-def _http_bridge_request_input_size_bytes(text_data: str) -> int:
-    try:
-        payload = json.loads(text_data)
-    except json.JSONDecodeError:
-        return len(text_data.encode("utf-8"))
-    if not isinstance(payload, dict):
-        return len(text_data.encode("utf-8"))
-    input_value = payload.get("input")
-    if input_value is None:
-        return 0
-    return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-
-
-def _record_http_bridge_prewarm_outcome(
-    *,
-    outcome: str,
-    cohort: str | None,
-    bucket: str | None,
-) -> None:
+def _record_http_bridge_prewarm_outcome(*, outcome: str) -> None:
     if not PROMETHEUS_AVAILABLE or http_bridge_prewarm_total is None:
         return
-    http_bridge_prewarm_total.labels(
-        outcome=outcome,
-        cohort=cohort or "unknown",
-        bucket=bucket or "unknown",
-    ).inc()
+    http_bridge_prewarm_total.labels(outcome=outcome).inc()
 
 
 def _record_http_bridge_stuck_retire(
@@ -1991,6 +2044,22 @@ def _http_bridge_request_budget_seconds(settings: object) -> float:
     )
 
 
+def _http_bridge_admission_timeout_seconds(
+    request_state: _WebSocketRequestState,
+    admission_timeout_seconds: float,
+    settings: object,
+) -> float:
+    # Bridged requests may retry response-create gate acquisition within one
+    # bridge request budget, so every wait must be clamped to the remaining
+    # time. Re-prepared retry states reset started_at but deliberately retain
+    # the original deadline; using started_at alone would extend the budget.
+    deadline = request_state.bridge_request_deadline
+    if deadline is None:
+        deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
+    remaining_budget_seconds = deadline - time.monotonic()
+    return max(0.0, min(admission_timeout_seconds, remaining_budget_seconds))
+
+
 def _http_bridge_owner_check_required(
     key: _HTTPBridgeSessionKey,
     *,
@@ -2106,7 +2175,7 @@ for _helper_name in (
     "_effective_http_bridge_idle_ttl_seconds",
     "_http_bridge_eviction_priority",
     "_build_http_bridge_prewarm_text",
-    "_http_bridge_prewarm_canary_bucket",
+    "_http_bridge_prewarm_enabled",
     "_record_http_bridge_prewarm_outcome",
     "_record_http_bridge_stuck_retire",
     "_http_bridge_payload_without_previous_response_id",

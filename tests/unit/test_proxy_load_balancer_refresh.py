@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -25,6 +26,7 @@ from app.db.models import (
 )
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy._service.support import _http_bridge_session_supports_service_tier
 from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
@@ -32,6 +34,7 @@ from app.modules.proxy.load_balancer import (
     NO_PLAN_SUPPORT_FOR_MODEL,
     AccountLease,
     AccountState,
+    CatalogOmissionQuotaAdmission,
     LoadBalancer,
     RuntimeState,
 )
@@ -127,6 +130,7 @@ class StubAccountsRepository(AccountsRepository):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self._find_account(account_id)
         if account is None:
@@ -136,6 +140,10 @@ class StubAccountsRepository(AccountsRepository):
             or account.deactivation_reason != expected_deactivation_reason
             or account.reset_at != expected_reset_at
             or (expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at)
+            or (
+                expected_refresh_token_encrypted is not None
+                and account.refresh_token_encrypted != expected_refresh_token_encrypted
+            )
         ):
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)
@@ -1633,10 +1641,17 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
         accounts_repo_arg: AccountsRepository,
         account_arg: Account,
         state_arg: Any,
+        *,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         persist_started.set()
         await release_persist.wait()
-        return await original_persist_state_if_current(accounts_repo_arg, account_arg, state_arg)
+        return await original_persist_state_if_current(
+            accounts_repo_arg,
+            account_arg,
+            state_arg,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
 
     monkeypatch.setattr(balancer, "_persist_state_if_current", blocking_persist_state_if_current)
 
@@ -1864,9 +1879,16 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
-        persist_blocked.set()
-        await release_persist.wait()
+        # Freeze ONLY the stale selection persist (a non-terminal status). The
+        # concurrent terminal mark_permanent_failure now also routes its guarded
+        # status downgrade through update_status_if_current (finding #4's single
+        # guarded authority), so it must be allowed to complete rather than
+        # deadlocking on the same gate that holds the stale selection write.
+        if status != AccountStatus.REAUTH_REQUIRED:
+            persist_blocked.set()
+            await release_persist.wait()
         return await original_update_status_if_current(
             account_id,
             status,
@@ -1877,6 +1899,7 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
             expected_deactivation_reason=expected_deactivation_reason,
             expected_reset_at=expected_reset_at,
             expected_blocked_at=expected_blocked_at,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
         )
 
     monkeypatch.setattr(accounts_repo, "update_status_if_current", blocking_update_status_if_current)
@@ -2408,8 +2431,24 @@ async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(m
 
 
 @pytest.mark.asyncio
-async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("recorded_at_offset_seconds", "used_percent", "expect_selection", "expected_error_code"),
+    [
+        pytest.param(0, 20.0, True, None, id="fresh"),
+        pytest.param(None, 20.0, False, ADDITIONAL_QUOTA_DATA_UNAVAILABLE, id="missing"),
+        pytest.param(-181, 20.0, False, ADDITIONAL_QUOTA_DATA_UNAVAILABLE, id="stale"),
+        pytest.param(0, 100.0, False, ADDITIONAL_QUOTA_EXHAUSTED, id="exhausted"),
+    ],
+)
+async def test_select_account_handles_mapped_quota_when_account_catalog_omits_model(
+    monkeypatch,
+    recorded_at_offset_seconds: int | None,
+    used_percent: float,
+    expect_selection: bool,
+    expected_error_code: str | None,
+) -> None:
     account = _make_account("acc-gated-registry-skip", "gated-registry-skip@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -2425,23 +2464,28 @@ async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkey
     usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
     sticky_repo = StubStickySessionsRepository()
     additional_usage_repo = StubAdditionalUsageRepository(
-        primary={
-            account.id: _additional_entry(
-                2,
-                account_id=account.id,
-                window="primary",
-                used_percent=20.0,
-                reset_at=now_epoch + 300,
-                recorded_at=now,
-            )
-        }
+        primary=(
+            {}
+            if recorded_at_offset_seconds is None
+            else {
+                account.id: _additional_entry(
+                    2,
+                    account_id=account.id,
+                    window="primary",
+                    used_percent=used_percent,
+                    reset_at=now_epoch + 300,
+                    recorded_at=now + timedelta(seconds=recorded_at_offset_seconds),
+                )
+            }
+        )
     )
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
         lambda: SimpleNamespace(
-            get_snapshot=lambda: SimpleNamespace(model_plans={}),
-            plan_types_for_model=lambda _model: frozenset(),
+            get_snapshot=lambda: SimpleNamespace(account_plans={account.id: "pro"}),
+            account_ids_for_model=lambda _model: frozenset(),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
         ),
     )
 
@@ -2455,9 +2499,434 @@ async def test_select_account_skips_registry_plan_filter_for_mapped_model(monkey
     )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
+    if expect_selection:
+        assert selection.account is not None
+        assert selection.account.id == account.id
+        assert selection.catalog_omission_quota_admission == CatalogOmissionQuotaAdmission(
+            normalized_model="gpt-5.3-codex-spark",
+            canonical_quota_key="codex_spark",
+            normalized_effective_service_tier=None,
+        )
+    else:
+        assert selection.account is None
+        assert selection.catalog_omission_quota_admission is None
+    assert selection.error_code == expected_error_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["plus", "free", "edu"])
+@pytest.mark.parametrize(
+    ("catalog_supports_account", "expected_error_code"),
+    [
+        pytest.param(False, ADDITIONAL_QUOTA_DATA_UNAVAILABLE, id="catalog-omitted"),
+        pytest.param(True, None, id="catalog-supported"),
+    ],
+)
+async def test_authoritative_catalog_controls_quota_exempt_plan_evidence_requirement(
+    monkeypatch,
+    plan_type: str,
+    catalog_supports_account: bool,
+    expected_error_code: str | None,
+) -> None:
+    account = _make_account(f"acc-gated-catalog-{plan_type}", f"gated-catalog-{plan_type}@example.com")
+    account.plan_type = plan_type
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=1,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(account_plans={account.id: plan_type}),
+            account_ids_for_model=lambda _model: frozenset({account.id}) if catalog_supports_account else frozenset(),
+            plan_types_for_model=lambda _model: frozenset({plan_type}),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            StubAdditionalUsageRepository(),
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    if catalog_supports_account:
+        assert selection.account is not None
+        assert selection.account.id == account.id
+    else:
+        assert selection.account is None
+    assert selection.catalog_omission_quota_admission is None
+    assert selection.error_code == expected_error_code
+
+
+@pytest.mark.parametrize(
+    ("selected_service_tier", "equivalent_request_service_tier", "expected_effective_service_tier"),
+    [
+        pytest.param("fast", " Priority ", "priority", id="fast-alias"),
+        pytest.param(" Priority ", " FAST ", "priority", id="priority-normalized"),
+        pytest.param("   ", None, None, id="blank-omit-equivalent"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_select_account_canonicalizes_quota_omission_provenance_for_equivalent_service_tiers(
+    monkeypatch: pytest.MonkeyPatch,
+    selected_service_tier: str,
+    equivalent_request_service_tier: str | None,
+    expected_effective_service_tier: str | None,
+) -> None:
+    plus = _make_account("acc-gated-tier-plus", "gated-tier-plus@example.com")
+    plus.plan_type = "plus"
+    pro = _make_account("acc-gated-tier-pro", "gated-tier-pro@example.com")
+    pro.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    accounts_repo = StubAccountsRepository([plus, pro])
+    usage_repo = StubUsageRepository(
+        primary={
+            plus.id: UsageHistory(
+                id=1,
+                account_id=plus.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            ),
+            pro.id: UsageHistory(
+                id=2,
+                account_id=pro.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            ),
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            plus.id: _additional_entry(
+                3,
+                account_id=plus.id,
+                window="primary",
+                used_percent=10.0,
+                recorded_at=now,
+            ),
+            pro.id: _additional_entry(
+                4,
+                account_id=pro.id,
+                window="primary",
+                used_percent=10.0,
+                recorded_at=now,
+            ),
+        }
+    )
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    spark_model = replace(
+        registry.get_models_with_fallback()["gpt-5.3-codex-spark"],
+        raw={
+            "service_tiers": [{"slug": "priority"}],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "priority",
+        },
+    )
+    await registry.update(
+        {"pro": [spark_model]},
+        per_account_results={plus.id: ("plus", []), pro.id: ("pro", [])},
+        active_account_plans={plus.id: "plus", pro.id: "pro"},
+    )
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+    monkeypatch.setattr("app.modules.proxy._service.support.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        service_tier=selected_service_tier,
+    )
+    selection_inputs = await balancer._load_selection_inputs(
+        model="gpt-5.3-codex-spark",
+        service_tier=selected_service_tier,
+    )
+
     assert selection.account is not None
-    assert selection.account.id == account.id
+    assert selection.account.id == pro.id
+    assert [account.id for account in selection_inputs.accounts] == [pro.id]
+    for service_tier in (None, "auto", " Default ", "   "):
+        omit_equivalent_inputs = await balancer._load_selection_inputs(
+            model="gpt-5.3-codex-spark",
+            service_tier=service_tier,
+        )
+        assert [account.id for account in omit_equivalent_inputs.accounts] == [pro.id]
     assert selection.error_code is None
+    admission = selection.catalog_omission_quota_admission
+    assert admission == CatalogOmissionQuotaAdmission(
+        normalized_model="gpt-5.3-codex-spark",
+        canonical_quota_key="codex_spark",
+        normalized_effective_service_tier=expected_effective_service_tier,
+    )
+    assert admission is not None
+    assert admission.matches(
+        requested_model="gpt-5.3-codex-spark",
+        service_tier=equivalent_request_service_tier,
+    )
+    assert not admission.matches(
+        requested_model="gpt-5.3-codex-spark",
+        service_tier="flex",
+    )
+    bridge_session = SimpleNamespace(
+        account=selection.account,
+        catalog_omission_quota_admission=admission,
+    )
+    assert _http_bridge_session_supports_service_tier(
+        cast(Any, bridge_session),
+        request_model="gpt-5.3-codex-spark",
+        request_service_tier=equivalent_request_service_tier,
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_account_rejects_quota_override_for_unadvertised_service_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc-gated-unadvertised-tier", "gated-unadvertised-tier@example.com")
+    account.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=1,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=10.0,
+                recorded_at=now,
+            )
+        }
+    )
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    spark_model = replace(registry.get_models_with_fallback()["gpt-5.3-codex-spark"], raw={})
+    await registry.update(
+        {"pro": [spark_model]},
+        per_account_results={account.id: ("pro", [])},
+        active_account_plans={account.id: "pro"},
+    )
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([account]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        service_tier="flex",
+    )
+
+    assert selection.account is None
+    assert selection.catalog_omission_quota_admission is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
+async def test_select_account_preserves_authoritative_service_tier_accounts_when_quota_overrides_catalog(
+    monkeypatch,
+) -> None:
+    tier_rejected = _make_account("acc-gated-tier-rejected", "gated-tier-rejected@example.com")
+    tier_rejected.plan_type = "pro"
+    tier_allowed = _make_account("acc-gated-tier-allowed", "gated-tier-allowed@example.com")
+    tier_allowed.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            tier_rejected.id: UsageHistory(
+                id=1,
+                account_id=tier_rejected.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            ),
+            tier_allowed.id: UsageHistory(
+                id=2,
+                account_id=tier_allowed.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            ),
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            tier_rejected.id: _additional_entry(
+                3,
+                account_id=tier_rejected.id,
+                window="primary",
+                used_percent=10.0,
+                recorded_at=now,
+            ),
+            tier_allowed.id: _additional_entry(
+                4,
+                account_id=tier_allowed.id,
+                window="primary",
+                used_percent=10.0,
+                recorded_at=now,
+            ),
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(account_plans={tier_rejected.id: "pro", tier_allowed.id: "pro"}),
+            account_ids_for_model=lambda _model: frozenset({tier_rejected.id, tier_allowed.id}),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+            account_ids_for_model_service_tier=lambda _model, tier: (
+                frozenset({tier_allowed.id}) if tier == "priority" else None
+            ),
+            plan_types_for_model_service_tier=lambda _model, _tier: frozenset({"pro"}),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            StubAccountsRepository([tier_rejected, tier_allowed]),
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark", service_tier="priority")
+    selection_inputs = await balancer._load_selection_inputs(
+        model="gpt-5.3-codex-spark",
+        service_tier="priority",
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == tier_allowed.id
+    assert [account.id for account in selection_inputs.accounts] == [tier_allowed.id]
+    assert selection.catalog_omission_quota_admission is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("additional_limit_name", "entry_limit_name", "entry_quota_key"),
+    [
+        pytest.param("unrelated_quota", "Unrelated Quota", "unrelated_quota", id="unrelated"),
+        pytest.param("codex_spark", "GPT-5.3-Codex-Spark", "codex_spark", id="canonical"),
+    ],
+)
+async def test_explicit_additional_quota_cannot_override_model_account_catalog(
+    monkeypatch,
+    additional_limit_name: str,
+    entry_limit_name: str,
+    entry_quota_key: str,
+) -> None:
+    account = _make_account("acc-explicit-quota-override", "explicit-quota-override@example.com")
+    account.plan_type = "pro"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=1,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=5.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            account.id: _additional_entry(
+                2,
+                account_id=account.id,
+                window="primary",
+                used_percent=0.0,
+                recorded_at=now,
+                limit_name=entry_limit_name,
+                quota_key=entry_quota_key,
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(account_plans={account.id: "pro"}),
+            account_ids_for_model=lambda _model: frozenset(),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        additional_limit_name=additional_limit_name,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.catalog_omission_quota_admission is None
 
 
 @pytest.mark.asyncio
@@ -3443,3 +3912,118 @@ async def test_persist_selection_state_skips_only_additional_quota_scoped_accoun
     assert gated.status == AccountStatus.ACTIVE
     assert exempt.status == AccountStatus.RATE_LIMITED
     assert [update["account_id"] for update in accounts_repo.status_updates] == [exempt.id]
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_guards_status_write_against_peer_rotation() -> None:
+    """Regression (finding #4): mark_permanent_failure previously persisted the
+    REAUTH_REQUIRED downgrade through an UNGUARDED update_status. When the proxy
+    caller's in-memory account object is stale (e.g. an intra-process
+    singleflight joiner sharing the winner's permanent RefreshError while a peer
+    replica already re-authed/rotated the account to ACTIVE with a fresh token),
+    that unguarded write clobbered the peer's repaired ACTIVE/rotated row back to
+    REAUTH_REQUIRED and tore down its live sessions. The downgrade MUST now be a
+    compare-and-set guarded on the refresh-token ciphertext, so a peer rotation
+    causes a MISS instead of a clobber."""
+    encryptor = TokenEncryptor()
+    rotated_ciphertext = encryptor.encrypt("peer-rotated-refresh")
+    # DB row a peer already repaired: ACTIVE, holding the freshly rotated token.
+    db_account = _make_account("acc-perm-clobber")
+    db_account.status = AccountStatus.ACTIVE
+    db_account.refresh_token_encrypted = rotated_ciphertext
+
+    accounts_repo = StubAccountsRepository([db_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    # Stale in-memory object the proxy joiner still holds: same id, still ACTIVE,
+    # but the OLD (pre-rotation) refresh-token ciphertext that just failed.
+    stale_account = _make_account("acc-perm-clobber")
+    stale_account.status = AccountStatus.ACTIVE
+    stale_account.refresh_token_encrypted = encryptor.encrypt("old-consumed-refresh")
+
+    await balancer.mark_permanent_failure(stale_account, "invalid_grant")
+
+    # Guarded CAS missed on the rotated ciphertext: the peer's repaired row is
+    # NOT clobbered back to REAUTH_REQUIRED and no status write was issued.
+    assert db_account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_downgrades_when_token_matches() -> None:
+    """A genuine permanent failure (no concurrent peer rotation) still lands its
+    single guarded REAUTH_REQUIRED downgrade: the in-memory refresh-token
+    ciphertext matches the DB row, so the guarded compare-and-set applies."""
+    account = _make_account("acc-perm-downgrade")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_permanent_failure(account, "invalid_grant")
+
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert [update["account_id"] for update in accounts_repo.status_updates] == [account.id]
+    assert [update["status"] for update in accounts_repo.status_updates] == [AccountStatus.REAUTH_REQUIRED]
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_skips_routing_exclusion_on_peer_rotation() -> None:
+    """Honor the guarded-CAS result before quarantining locally.
+
+    When a peer replica concurrently re-authed/imported and rotated
+    ``refresh_token_encrypted`` (the DB row was REPAIRED and left ACTIVE), the
+    guarded status write MISSES. The caller must NOT then mark the account
+    routing-unavailable in this replica's local overlay -- doing so would
+    self-inflict a routing loss of a freshly repaired healthy account and
+    undermine the CAS guard. The account stays selectable here.
+    """
+    encryptor = TokenEncryptor()
+    rotated_ciphertext = encryptor.encrypt("peer-rotated-refresh")
+    # DB row a peer already repaired: ACTIVE, holding the freshly rotated token.
+    db_account = _make_account("acc-perm-routing-race")
+    db_account.status = AccountStatus.ACTIVE
+    db_account.refresh_token_encrypted = rotated_ciphertext
+
+    accounts_repo = StubAccountsRepository([db_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    # Stale in-memory object holding the OLD (pre-rotation) ciphertext that just
+    # failed permanently.
+    stale_account = _make_account("acc-perm-routing-race")
+    stale_account.status = AccountStatus.ACTIVE
+    stale_account.refresh_token_encrypted = encryptor.encrypt("old-consumed-refresh")
+
+    downgraded = await balancer.mark_permanent_failure(stale_account, "invalid_grant")
+
+    # Guarded CAS missed: no downgrade, no status write, and crucially the local
+    # routing overlay does NOT exclude the repaired ACTIVE account.
+    assert downgraded is False
+    assert db_account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+    assert is_account_routing_unavailable(stale_account.id) is False
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> None:
+    """A genuine permanent failure (guarded CAS applies) both persists the
+    downgrade AND marks the account routing-unavailable locally, as before."""
+    account = _make_account("acc-perm-routing-genuine")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    downgraded = await balancer.mark_permanent_failure(account, "invalid_grant")
+
+    assert downgraded is True
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is True

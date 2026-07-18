@@ -36,14 +36,19 @@ from app.core.clients.oauth import (
     generate_pkce_pair,
     request_device_code,
 )
-from app.core.config.settings import get_settings
+from app.core.config.settings import OAUTH_CALLBACK_PORT, OAUTH_REDIRECT_URI, get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
-from app.db.session import get_background_session
+from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
+from app.modules.oauth.repository import (
+    OAuthFlowRecord,
+    OAuthFlowRepository,
+    epoch_to_naive_utc,
+)
 from app.modules.oauth.schemas import (
     ManualCallbackResponse,
     OauthCompleteRequest,
@@ -311,11 +316,136 @@ class OauthService:
         self,
         accounts_repo: AccountsRepository,
         repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepository]] | None = None,
+        store: OAuthStateStore | None = None,
     ) -> None:
         self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
-        self._store = _OAUTH_STORE
+        # ``store`` is the process-local runtime registry (callback server +
+        # device poll tasks). It defaults to the module singleton; tests inject
+        # a distinct store to simulate a second replica over the shared DB.
+        self._store = store if store is not None else _OAUTH_STORE
         self._repo_factory = repo_factory
+
+    # ------------------------------------------------------------------
+    # Shared DB-backed flow persistence (cross-replica source of truth)
+    # ------------------------------------------------------------------
+
+    async def _persist_flow_record(self, record: OAuthFlowRecord) -> None:
+        async with get_background_session() as session:
+            repo = OAuthFlowRepository(session, self._encryptor)
+            await repo.purge_expired(terminal_keep=_MAX_RETAINED_TERMINAL_OAUTH_FLOWS)
+            await repo.create(record)
+
+    async def _claim_device_slot(self, flow_id: str) -> None:
+        """Atomically make ``flow_id`` the single current device flow, superseding
+        any prior one. Serialized in-process for SQLite; the single UPSERT is
+        atomic across replicas/processes on both backends."""
+
+        async with sqlite_writer_section():
+            async with get_background_session() as session:
+                await OAuthFlowRepository(session, self._encryptor).claim_device_slot(flow_id)
+
+    async def _consume_device_slot(self, flow_id: str | None) -> bool:
+        """Atomically consume the device slot iff ``flow_id`` still holds it.
+
+        The poller's point of no return before persisting tokens: returns False
+        (and the poller aborts without persisting) when the flow was superseded
+        by a newer device start, which atomically UPSERTed the slot to a
+        different ``flow_id``."""
+
+        if flow_id is None:
+            return False
+        async with sqlite_writer_section():
+            async with get_background_session() as session:
+                return await OAuthFlowRepository(session, self._encryptor).consume_device_slot(flow_id)
+
+    async def _persist_flow_status(self, flow_id: str, *, status: str, error_message: str | None) -> bool:
+        """Write a durable status transition. Returns whether it was applied; a
+        non-success write is rejected (``False``) by the monotonic guard when the
+        durable row is already ``success`` (a racing winner committed first)."""
+
+        async with get_background_session() as session:
+            repo = OAuthFlowRepository(session, self._encryptor)
+            return await repo.set_status(flow_id, status=status, error_message=error_message)
+
+    async def _load_flow_record(
+        self,
+        *,
+        flow_id: str | None = None,
+        state_token: str | None = None,
+    ) -> OAuthFlowRecord | None:
+        async with get_background_session() as session:
+            repo = OAuthFlowRepository(session, self._encryptor)
+            if flow_id is not None:
+                return await repo.get_by_flow_id(flow_id)
+            if state_token is not None:
+                return await repo.get_by_state_token(state_token)
+        return None
+
+    @staticmethod
+    def _record_to_state(record: OAuthFlowRecord) -> OAuthState:
+        return OAuthState(
+            flow_id=record.flow_id,
+            status=record.status,
+            method=record.method,
+            error_message=record.error_message,
+            state_token=record.state_token,
+            intended_account_id=record.intended_account_id,
+            code_verifier=record.code_verifier,
+            device_auth_id=record.device_auth_id,
+            user_code=record.user_code,
+            interval_seconds=record.interval_seconds,
+            expires_at=naive_utc_to_epoch(record.expires_at) if record.expires_at is not None else None,
+            finished_at=naive_utc_to_epoch(record.finished_at) if record.finished_at is not None else None,
+        )
+
+    async def _reconcile_flow_from_durable(
+        self,
+        *,
+        flow_id: str | None = None,
+        state_token: str | None = None,
+    ) -> OAuthFlowRecord | None:
+        """Single authoritative reconciliation gate: make the local in-memory
+        ``OAuthState`` agree with the shared DB BEFORE any local-state-based
+        decision, and return the durable record.
+
+        The shared DB always wins over a local ``pending``. This one gate closes
+        the whole class of "origin replica acts on stale local state" bugs by
+        unifying hydrate / terminal-reconcile / expiry-prune. Every entry point
+        that resolves a flow from local state MUST call this first:
+
+        - durable terminal (``success``/``error``) OVERRIDES a local ``pending``
+          (the flow was completed here or on another replica), so no consumed
+          authorization code is replayed and no stale pending is reported;
+        - durable ``pending`` present but missing locally -> HYDRATE it (encrypted
+          verifier + metadata) so this replica can resume/complete a flow it did
+          not start;
+        - durable row ABSENT or EXPIRED (``get_by_*`` returns ``None`` for an
+          expired pending row) -> DROP any local non-terminal flow so its cached
+          verifier / device code can never be reused past the TTL.
+        """
+
+        record = await self._load_flow_record(flow_id=flow_id, state_token=state_token)
+        async with self._store.lock:
+            local = self._store.get_flow_locked(flow_id) if flow_id is not None else None
+            if local is None and state_token is not None:
+                local = self._store.get_flow_by_state_token_locked(state_token)
+            if record is None:
+                # No live durable row (absent or expired-pending): a local
+                # non-terminal flow is stale and MUST NOT be acted on.
+                if local is not None and local.status not in _TERMINAL_OAUTH_STATUSES:
+                    self._store.remove_flow_locked(local)
+                return None
+            if record.status in _TERMINAL_OAUTH_STATUSES:
+                if local is None:
+                    self._store.remember_flow_locked(self._record_to_state(record))
+                elif local.status != record.status:
+                    self._store.set_flow_status_locked(local, status=record.status, error_message=record.error_message)
+                return record
+            # Durable pending: hydrate a flow this replica never saw.
+            if local is None:
+                self._store.remember_flow_locked(self._record_to_state(record))
+        return record
 
     async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
         force_method = (request.force_method or "").lower()
@@ -349,6 +479,14 @@ class OauthService:
             return await self._start_device_flow()
 
     async def oauth_status(self, flow_id: str | None = None) -> OauthStatusResponse:
+        if flow_id is not None:
+            # Durable status is authoritative: the reconciliation gate syncs the
+            # local in-memory flow (terminal overrides pending; expired/absent
+            # drops the stale local flow) and returns the durable record.
+            record = await self._reconcile_flow_from_durable(flow_id=flow_id)
+            if record is not None:
+                status = record.status if record.status != "idle" else "pending"
+                return OauthStatusResponse(status=status, error_message=record.error_message)
         async with self._store.lock:
             state = self._store.get_flow_locked(flow_id)
             if state is None:
@@ -358,6 +496,12 @@ class OauthService:
 
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
+        if payload.flow_id is not None:
+            # Durable status is authoritative: reconcile local state and report a
+            # durable terminal directly (never re-polling a single-use code).
+            record = await self._reconcile_flow_from_durable(flow_id=payload.flow_id)
+            if record is not None and record.status in _TERMINAL_OAUTH_STATUSES:
+                return OauthCompleteResponse(status=record.status)
         async with self._store.lock:
             flow = self._store.get_flow_locked(payload.flow_id)
             state = flow
@@ -369,21 +513,25 @@ class OauthService:
                 flow.user_code = payload.user_code
             if flow is not None:
                 self._store.set_latest_flow_locked(flow)
-            if state.status == "success":
-                return OauthCompleteResponse(status="success")
-            if state.method != "device":
+            if state.method == "device":
+                # ``/complete`` only REPORTS device status; it never starts a poll
+                # task. The originating replica is the sole device poller (started
+                # at ``start``), so a ``/complete`` served on a replica that did
+                # not originate the flow reports the durable status (via the gate
+                # above) without spawning a duplicate poller for the single-use
+                # device code. If the originating replica dies mid-poll the flow
+                # simply expires by TTL and the user retries. A targeted query
+                # (explicit ``flow_id``, sent by the dashboard after a success
+                # status) reports a terminal so the UI can invalidate; the
+                # fire-and-forget acknowledgement (no ``flow_id``) returns
+                # ``pending`` while the sole poller runs, even if this replica's
+                # own poller just raced to a terminal in-memory.
+                if state.status in _TERMINAL_OAUTH_STATUSES and payload.flow_id is not None:
+                    return OauthCompleteResponse(status=state.status)
                 return OauthCompleteResponse(status="pending")
-            if not self._ensure_device_poll_task_locked(state):
-                if flow is not None:
-                    self._store.set_flow_status_locked(
-                        flow,
-                        status="error",
-                        error_message="Device code flow is not initialized.",
-                    )
-                else:
-                    state.status = "error"
-                    state.error_message = "Device code flow is not initialized."
-                return OauthCompleteResponse(status="error")
+            if state.status == "success":
+                # Browser / manual-callback: report an observed success.
+                return OauthCompleteResponse(status="success")
             return OauthCompleteResponse(status="pending")
 
     async def _start_browser_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
@@ -396,6 +544,7 @@ class OauthService:
         settings = get_settings()
         callback_server: OAuthCallbackServer | None = None
 
+        expires_at = time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS
         async with self._store.lock:
             self._store.remember_flow_locked(
                 OAuthState(
@@ -405,16 +554,28 @@ class OauthService:
                     state_token=state_token,
                     code_verifier=code_verifier,
                     intended_account_id=intended_account_id,
-                    expires_at=time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS,
+                    expires_at=expires_at,
                 )
             )
             if self._store._callback_server is None:
                 callback_server = OAuthCallbackServer(
                     self._handle_callback,
                     host=settings.oauth_callback_host,
-                    port=settings.oauth_callback_port,
+                    port=OAUTH_CALLBACK_PORT,
                 )
                 self._store._callback_server = callback_server
+
+        await self._persist_flow_record(
+            OAuthFlowRecord(
+                flow_id=flow_id,
+                method="browser",
+                status="pending",
+                state_token=state_token,
+                code_verifier=code_verifier,
+                intended_account_id=intended_account_id,
+                expires_at=epoch_to_naive_utc(expires_at),
+            )
+        )
 
         if callback_server is not None:
             try:
@@ -428,7 +589,7 @@ class OauthService:
             flow_id=flow_id,
             method="browser",
             authorization_url=authorization_url,
-            callback_url=settings.oauth_redirect_uri,
+            callback_url=OAUTH_REDIRECT_URI,
         )
 
     async def manual_callback(self, callback_url: str, flow_id: str | None = None) -> ManualCallbackResponse:
@@ -447,6 +608,15 @@ class OauthService:
         code = params.get("code", [None])[0]
         state = params.get("state", [None])[0]
 
+        if state is not None:
+            # Durable status is authoritative: the reconciliation gate hydrates
+            # (verifier + metadata) when this replica never saw the flow, and --
+            # critically -- overrides a stale local ``pending`` with a durable
+            # terminal and drops an expired/absent flow. This closes the callback
+            # -replay class: a pasted callback for a flow already completed on
+            # another replica never re-exchanges the consumed authorization code.
+            await self._reconcile_flow_from_durable(state_token=state)
+
         async with self._store.lock:
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
@@ -457,19 +627,26 @@ class OauthService:
                 verifier = None
                 target_flow_id = None
                 can_update_error = False
-            if flow is not None and flow.status == "success" and state == flow.state_token:
+            # Durable terminal wins: return the recorded outcome instead of
+            # replaying the (already-consumed) code.
+            terminal_status = flow.status if (flow is not None and flow.status in _TERMINAL_OAUTH_STATUSES) else None
+            terminal_error = flow.error_message if flow is not None else None
+
+        if terminal_status is not None:
+            if terminal_status == "success":
                 return ManualCallbackResponse(status="success")
+            return ManualCallbackResponse(status="error", error_message=terminal_error)
 
         if error:
             message = f"OAuth error: {error}"
-            if can_update_error:
-                await self._set_error(message, flow_id=target_flow_id)
+            if can_update_error and await self._finalize_callback_error(message, flow_id=target_flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=message)
 
         if not code or not state or flow is None or not verifier:
             message = "Invalid OAuth callback: state mismatch or missing code."
-            if can_update_error:
-                await self._set_error(message, flow_id=target_flow_id)
+            if can_update_error and await self._finalize_callback_error(message, flow_id=target_flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=message)
 
         try:
@@ -485,18 +662,28 @@ class OauthService:
             asyncio.create_task(self._stop_callback_server_if_idle())
             return ManualCallbackResponse(status="success")
         except OAuthError as exc:
-            await self._set_error(exc.message, flow_id=flow.flow_id)
+            # Loser race: a concurrent callback may have committed success for the
+            # same single-use code, so honor the durable success on a rejected
+            # error write instead of surfacing this ``invalid_grant``.
+            if await self._finalize_callback_error(exc.message, flow_id=flow.flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=exc.message)
         except ReauthSeatMismatchError:
-            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id)
+            if await self._finalize_callback_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=_REAUTH_SEAT_MISMATCH_MESSAGE)
         except AccountIdentityConflictError:
-            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+            if (
+                await self._finalize_callback_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+                == "success"
+            ):
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
         except Exception as exc:
             logger.error("manual OAuth callback failed exception_type=%s", type(exc).__name__)
             message = "An internal error occurred."
-            await self._set_error(message, flow_id=flow.flow_id)
+            if await self._finalize_callback_error(message, flow_id=flow.flow_id) == "success":
+                return ManualCallbackResponse(status="success")
             return ManualCallbackResponse(status="error", error_message=message)
 
     async def _start_device_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
@@ -508,20 +695,50 @@ class OauthService:
             await self._set_error(exc.message)
             raise
 
+        expires_at = time.time() + device.expires_in_seconds
+        flow = OAuthState(
+            flow_id=flow_id,
+            status="pending",
+            method="device",
+            device_auth_id=device.device_auth_id,
+            user_code=device.user_code,
+            interval_seconds=device.interval_seconds,
+            intended_account_id=intended_account_id,
+            expires_at=expires_at,
+        )
         async with self._store.lock:
-            flow = OAuthState(
+            self._store.remove_pending_device_flows_locked()
+            self._store.remember_flow_locked(flow)
+
+        # Persist the durable row BEFORE claiming the single-active slot and
+        # starting the sole poll task, so the poller's slot consume never races a
+        # not-yet-written row.
+        await self._persist_flow_record(
+            OAuthFlowRecord(
                 flow_id=flow_id,
-                status="pending",
                 method="device",
+                status="pending",
                 device_auth_id=device.device_auth_id,
                 user_code=device.user_code,
                 interval_seconds=device.interval_seconds,
                 intended_account_id=intended_account_id,
-                expires_at=time.time() + device.expires_in_seconds,
+                expires_at=epoch_to_naive_utc(expires_at),
             )
-            self._store.remove_pending_device_flows_locked()
-            self._store.remember_flow_locked(flow)
-            self._ensure_device_poll_task_locked(flow)
+        )
+
+        async with self._store.lock:
+            # A later device start on THIS replica may have superseded this flow
+            # while its row was being persisted (the newer start removed it from
+            # the local store). Claim the single-active slot and start the sole
+            # poll task ONLY if this is still the current local device flow, and
+            # do so while holding the store lock: the claim then happens under the
+            # lock a competing start must also acquire, so claim order follows
+            # supersession order and a superseded start can neither install a
+            # stale slot pointer nor start a duplicate poller. A superseded start
+            # still returns its device code to its caller but does not poll.
+            if self._store.get_flow_locked(flow_id) is flow:
+                await self._claim_device_slot(flow_id)
+                self._ensure_device_poll_task_locked(flow)
 
         return OauthStartResponse(
             flow_id=flow_id,
@@ -539,16 +756,39 @@ class OauthService:
         code = params.get("code")
         state = params.get("state")
 
+        if state is not None:
+            # Durable status is authoritative (see manual_callback): reconcile
+            # local state before trusting the cached verifier so a browser
+            # redirect that lands back on the origin after the flow completed
+            # elsewhere -- or after the TTL -- is not replayed.
+            await self._reconcile_flow_from_durable(state_token=state)
+
         async with self._store.lock:
             flow = self._store.get_flow_by_state_token_locked(state)
             verifier = flow.code_verifier if flow is not None else None
+            terminal_status = flow.status if (flow is not None and flow.status in _TERMINAL_OAUTH_STATUSES) else None
+            terminal_error = flow.error_message if flow is not None else None
+
+        # Durable terminal wins: do not replay a consumed authorization code.
+        if terminal_status is not None:
+            if terminal_status == "success":
+                return self._html_response(_success_html())
+            return self._html_response(_error_html(terminal_error or "Authorization failed."))
 
         if error:
-            await self._set_error(f"OAuth error: {error}", flow_id=flow.flow_id if flow is not None else None)
+            outcome = await self._finalize_callback_error(
+                f"OAuth error: {error}", flow_id=flow.flow_id if flow is not None else None
+            )
+            if outcome == "success":
+                return self._html_response(_success_html())
             return self._html_response(_error_html("Authorization failed."))
 
         if not code or not state or flow is None or not verifier:
-            await self._set_error("Invalid OAuth callback state.", flow_id=flow.flow_id if flow is not None else None)
+            outcome = await self._finalize_callback_error(
+                "Invalid OAuth callback state.", flow_id=flow.flow_id if flow is not None else None
+            )
+            if outcome == "success":
+                return self._html_response(_success_html())
             return self._html_response(_error_html("Invalid OAuth callback."))
 
         try:
@@ -563,19 +803,39 @@ class OauthService:
             await self._set_success(flow.flow_id)
             html = _success_html()
         except OAuthError as exc:
-            await self._set_error(exc.message, flow_id=flow.flow_id)
-            html = _error_html(exc.message)
+            # Loser race: honor a durable success committed by a concurrent
+            # callback for the same single-use code instead of showing an error.
+            html = (
+                _success_html()
+                if await self._finalize_callback_error(exc.message, flow_id=flow.flow_id) == "success"
+                else _error_html(exc.message)
+            )
         except ReauthSeatMismatchError:
-            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id)
-            html = _error_html(_REAUTH_SEAT_MISMATCH_MESSAGE)
+            html = (
+                _success_html()
+                if await self._finalize_callback_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id) == "success"
+                else _error_html(_REAUTH_SEAT_MISMATCH_MESSAGE)
+            )
         except AccountIdentityConflictError:
-            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
-            html = _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
+            html = (
+                _success_html()
+                if await self._finalize_callback_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
+                == "success"
+                else _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
+            )
 
         asyncio.create_task(self._stop_callback_server_if_idle())
         return self._html_response(html)
 
     async def _poll_device_tokens(self, flow_id: str | None, context: "DevicePollContext") -> None:
+        # Slot ownership is the single authority for who may complete a device
+        # flow. Only the poller that atomically consumed the current device slot
+        # may persist an account OR write ANY terminal status (success or error).
+        # A poller that does not hold/win the slot writes NOTHING: this prevents a
+        # losing/duplicate poller that received ``invalid_grant`` for the consumed
+        # code from writing ``error`` during the winner's persist window (which
+        # would stop the dashboard polling before the winner's success lands).
+        consumed = False
         try:
             while time.time() < context.expires_at:
                 route = await _oauth_route()
@@ -586,17 +846,28 @@ class OauthService:
                     allow_direct_egress=route is None,
                 )
                 if tokens:
+                    # Point of no return: consume the single-active slot. If a
+                    # newer start superseded this flow, the consume matches zero
+                    # rows and we abort WITHOUT persisting or writing anything.
+                    consumed = await self._consume_device_slot(flow_id)
+                    if not consumed:
+                        return
                     await self._persist_tokens(tokens, intended_account_id=context.intended_account_id)
                     await self._set_success(flow_id)
                     return
                 await _async_sleep(context.interval_seconds)
-            await self._set_error("Device code expired.", flow_id=flow_id)
+            # Code expired: only the slot holder may record the terminal error.
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error("Device code expired.", flow_id=flow_id)
         except OAuthError as exc:
-            await self._set_error(exc.message, flow_id=flow_id)
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error(exc.message, flow_id=flow_id)
         except ReauthSeatMismatchError:
-            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow_id)
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow_id)
         except AccountIdentityConflictError:
-            await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow_id)
+            if consumed or await self._consume_device_slot(flow_id):
+                await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow_id)
         finally:
             async with self._store.lock:
                 flow = self._store.get_flow_locked(flow_id)
@@ -753,26 +1024,55 @@ class OauthService:
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:
             flow = self._store.get_flow_locked(flow_id)
-            if flow_id is not None and flow is None:
-                return
-            if flow is None:
+            if flow is not None:
+                self._store.set_flow_status_locked(flow, status="success", error_message=None)
+            elif flow_id is None:
                 self._store.state.status = "success"
                 self._store.state.error_message = None
-                return
-            self._store.set_flow_status_locked(flow, status="success", error_message=None)
+        if flow_id is not None:
+            # Durable, cross-replica status: the originating replica reads this
+            # on its next status poll instead of its stale in-memory pending.
+            await self._persist_flow_status(flow_id, status="success", error_message=None)
 
-    async def _set_error(self, message: str, flow_id: str | None = None) -> None:
+    async def _set_error(self, message: str, flow_id: str | None = None) -> bool:
+        """Record a terminal error. Returns whether the durable error was applied.
+
+        The durable write happens FIRST: if the monotonic guard rejects it
+        (``False``) because the durable row is already ``success`` — a racing
+        callback/poller committed success for the same single-use code — the
+        local in-memory flow is left untouched (never shadowed into ``error``),
+        and the caller must honor the durable success instead of surfacing the
+        error. ``flow_id`` of ``None`` updates only the local latest state.
+        """
+
+        if flow_id is None:
+            async with self._store.lock:
+                if self._store.state.flow_id is None:
+                    self._store.state.status = "error"
+                    self._store.state.error_message = message
+            return True
+        applied = await self._persist_flow_status(flow_id, status="error", error_message=message)
+        if not applied:
+            return False
         async with self._store.lock:
-            if flow_id is None and self._store.state.flow_id is not None:
-                return
             flow = self._store.get_flow_locked(flow_id)
-            if flow_id is not None and flow is None:
-                return
-            if flow is None:
-                self._store.state.status = "error"
-                self._store.state.error_message = message
-                return
-            self._store.set_flow_status_locked(flow, status="error", error_message=message)
+            if flow is not None:
+                self._store.set_flow_status_locked(flow, status="error", error_message=message)
+        return True
+
+    async def _finalize_callback_error(self, message: str, *, flow_id: str | None) -> str:
+        """Record a terminal error for a browser/manual-callback flow and return
+        the status to report. If the durable error write is rejected because a
+        racing callback already committed ``success`` for the same single-use
+        code, reconcile the local flow and report the durable ``success`` instead
+        of misreporting an error (the loser must not surface an error)."""
+
+        if await self._set_error(message, flow_id=flow_id):
+            return "error"
+        record = await self._reconcile_flow_from_durable(flow_id=flow_id) if flow_id is not None else None
+        if record is not None and record.status == "success":
+            return "success"
+        return "error"
 
     def _start_callback_server_stop_locked(self, server: OAuthCallbackServer) -> asyncio.Task[None]:
         stop_task = self._store._callback_server_stop_task

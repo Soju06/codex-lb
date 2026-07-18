@@ -17,10 +17,12 @@ from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
 from app.core.types import JsonValue
+from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -122,10 +124,6 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -559,6 +557,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
             {
                 "object": "response.compaction",
                 "compaction_summary": {
+                    "id": "cmp_trigger_summary",
                     "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
                     "summary_text": "condensed thread state",
                 },
@@ -602,11 +601,13 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
     assert events[0]["item"] == {
+        "id": "cmp_trigger_summary",
         "type": "compaction",
         "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
     }
     assert events[1]["response"]["output"] == [
         {
+            "id": "cmp_trigger_summary",
             "type": "compaction",
             "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
         }
@@ -779,6 +780,66 @@ async def test_proxy_responses_stream_surfaces_additional_quota_data_unavailable
     event = _extract_first_event(lines)
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_routes_spark_when_fresh_quota_overrides_account_catalog(
+    async_client,
+    monkeypatch,
+) -> None:
+    email = "spark-account-catalog-omission@example.com"
+    raw_account_id = "acc_spark_account_catalog_omission"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email, plan_type="pro")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        additional_usage = AdditionalUsageRepository(session)
+        await additional_usage.add_entry(
+            account_id=account_id,
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=0.0,
+            reset_at=None,
+            window_minutes=300,
+            recorded_at=utcnow(),
+        )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(account_plans={account_id: "pro"}),
+            account_ids_for_model=lambda _model: frozenset(),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
+    )
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, selected_account_id, base_url=None, **kwargs):
+        del headers, access_token, base_url, kwargs
+        seen_payload.update(payload.to_payload())
+        seen_payload["selected_account_id"] = selected_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_spark_catalog_omission",'
+            '"object":"response","status":"completed","output":[],"usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.3-codex-spark", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_payload["model"] == "gpt-5.3-codex-spark"
+    assert seen_payload["selected_account_id"] == raw_account_id
 
 
 @pytest.mark.asyncio
@@ -1251,7 +1312,7 @@ async def test_v1_responses_previous_response_owner_lookup_failure_without_http_
         if False:
             yield ""
 
-    monkeypatch.setattr(RequestLogsRepository, "find_latest_account_id_for_response_id", fail_owner_lookup)
+    monkeypatch.setattr(RequestLogsRepository, "find_latest_owner_record_for_response_id", fail_owner_lookup)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
 
     response = await async_client.post(
@@ -1417,10 +1478,6 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1518,10 +1575,6 @@ async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         http_downstream_transport_policy="smart",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1612,10 +1665,6 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1649,9 +1698,8 @@ async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstre
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
-        log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
-        log_upstream_request_summary = False
+        trace_channels = frozenset()
 
     async def fail_open_upstream_websocket(**kwargs):
         del kwargs
@@ -1720,10 +1768,6 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
-        log_proxy_request_payload=False,
-        log_proxy_request_shape=False,
-        log_proxy_request_shape_raw_cache_key=False,
-        log_proxy_service_tier_trace=False,
         stream_idle_timeout_seconds=300.0,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
@@ -1756,9 +1800,8 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
         stream_idle_timeout_seconds = 45.0
         max_sse_event_bytes = 1024
         image_inline_fetch_enabled = False
-        log_upstream_request_payload = False
         proxy_request_budget_seconds = 75.0
-        log_upstream_request_summary = False
+        trace_channels = frozenset()
 
     captured: dict[str, object] = {}
 

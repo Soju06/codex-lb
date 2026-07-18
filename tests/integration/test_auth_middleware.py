@@ -224,6 +224,27 @@ async def test_remote_proxy_denied_before_auth_is_configured(app_instance):
 
 
 @pytest.mark.asyncio
+async def test_untrusted_loopback_proxy_hint_does_not_bypass_proxy_auth(app_instance, monkeypatch):
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50001))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            response = await proxied_client.get(
+                "/v1/models",
+                headers={"X-Forwarded-For": "203.0.113.24"},
+            )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
 async def test_proxy_unauthenticated_client_cidr_allows_explicit_remote_proxy_peer(app_instance, monkeypatch):
     _set_proxy_unauthenticated_client_cidrs_env(
         monkeypatch,
@@ -258,6 +279,60 @@ async def test_proxy_unauthenticated_client_cidr_does_not_allow_other_remote_pee
             spoofed = await remote_client.get("/v1/models", headers={"Host": "localhost"})
             assert spoofed.status_code == 401
             assert spoofed.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_untrusted_loopback_proxy_hint_does_not_bypass_dashboard_bootstrap(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+        trusted_proxy_cidrs="10.0.0.0/8",
+    )
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            response = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers={"X-Forwarded-For": "203.0.113.24"},
+                json={"password": "password123"},
+            )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_forwarded_hint_does_not_bypass_direct_local_auth(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=False,
+    )
+    await get_settings_cache().invalidate()
+    forwarded_headers = [
+        ("X-Forwarded-For", ""),
+        ("X-Forwarded-For", "203.0.113.24"),
+    ]
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            proxy_response = await proxied_client.get("/v1/models", headers=forwarded_headers)
+            bootstrap_response = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=forwarded_headers,
+                json={"password": "password123"},
+            )
+
+    assert proxy_response.status_code == 401
+    assert proxy_response.json()["error"]["code"] == "invalid_api_key"
+    assert bootstrap_response.status_code == 401
+    assert bootstrap_response.json()["error"]["code"] == "invalid_bootstrap_token"
 
 
 @pytest.mark.asyncio
@@ -319,6 +394,59 @@ async def test_remote_first_run_requires_bootstrap_token(app_instance, monkeypat
 
             protected_after = await remote_client.get("/api/settings")
             assert protected_after.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_separate_forwarded_field_cannot_spoof_local_first_run(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+    )
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            blocked = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=[
+                    ("Forwarded", "for=127.0.0.1"),
+                    ("Forwarded", "for=203.0.113.24"),
+                ],
+                json={"password": "password123"},
+            )
+
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_bootstrap_token"
+
+
+@pytest.mark.asyncio
+async def test_repeated_singleton_proxy_header_cannot_spoof_local_first_run(app_instance, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN", "bootstrap-secret")
+    _set_dashboard_auth_env(
+        monkeypatch,
+        mode=DashboardAuthMode.STANDARD,
+        trust_proxy_headers=True,
+    )
+    await get_settings_cache().invalidate()
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as proxied_client:
+            blocked = await proxied_client.post(
+                "/api/dashboard-auth/password/setup",
+                headers=[
+                    ("X-Forwarded-For", "127.0.0.1"),
+                    ("X-Real-IP", "127.0.0.1"),
+                    ("X-Real-IP", "203.0.113.24"),
+                ],
+                json={"password": "password123"},
+            )
+
+    assert blocked.status_code == 401
+    assert blocked.json()["error"]["code"] == "invalid_bootstrap_token"
 
 
 @pytest.mark.asyncio

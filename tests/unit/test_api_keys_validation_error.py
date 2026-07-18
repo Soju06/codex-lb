@@ -77,6 +77,7 @@ async def test_build_limit_rows_for_update_raises_typed_validation_error_on_dupl
             reset_usage=False,
         )
     assert "duplicate" in str(info.value).lower()
+    assert "('total_tokens', 'daily', None)" in str(info.value)
 
 
 def test_api_key_validation_error_is_value_error_subclass_for_back_compat() -> None:

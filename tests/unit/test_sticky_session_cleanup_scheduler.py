@@ -22,8 +22,9 @@ class _FakeLeader:
 
 
 def test_build_sticky_session_cleanup_scheduler_respects_enabled_setting(monkeypatch) -> None:
-    settings = SimpleNamespace(sticky_session_cleanup_interval_seconds=42, sticky_session_cleanup_enabled=False)
+    settings = SimpleNamespace(sticky_session_cleanup_enabled=False)
     monkeypatch.setattr(cleanup_scheduler, "get_settings", lambda: settings)
+    monkeypatch.setattr(cleanup_scheduler, "_CLEANUP_INTERVAL_SECONDS", 42)
 
     scheduler = cleanup_scheduler.build_sticky_session_cleanup_scheduler()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections import Counter
 from types import SimpleNamespace
 from typing import cast
 
@@ -88,6 +89,30 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
     return generate_unique_account_id(account_id, email)
+
+
+@pytest.mark.asyncio
+async def test_openapi_operation_ids_are_unique_and_thread_goal_methods_stable(async_client):
+    response = await async_client.get("/openapi.json")
+
+    assert response.status_code == 200
+    schema = response.json()
+    operation_ids: list[str] = []
+    http_methods = {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+    for path, path_item in schema["paths"].items():
+        for method, operation in path_item.items():
+            if method not in http_methods:
+                continue
+            operation_id = operation.get("operationId")
+            assert isinstance(operation_id, str), f"{method.upper()} {path} has no operationId"
+            operation_ids.append(operation_id)
+
+    duplicate_ids = {operation_id: count for operation_id, count in Counter(operation_ids).items() if count > 1}
+    assert duplicate_ids == {}
+
+    thread_goal = schema["paths"]["/backend-api/codex/thread/goal/get"]
+    assert thread_goal["get"]["operationId"] == "thread_goal_get_backend_api_codex_thread_goal_get_get"
+    assert thread_goal["post"]["operationId"] == "thread_goal_get_backend_api_codex_thread_goal_get_post"
 
 
 @pytest.mark.asyncio

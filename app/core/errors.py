@@ -114,9 +114,10 @@ def response_failed_event(
     response_id: str | None = None,
     created_at: int | None = None,
     error_param: str | None = None,
+    resets_at: int | float | None = None,
     incomplete_details: dict[str, str] | None = None,
 ) -> ResponseFailedEvent:
-    error = openai_error(code, message, error_type)["error"]
+    error = openai_error(code, message, error_type, resets_at=resets_at)["error"]
     if error_param:
         error["param"] = error_param
     if created_at is None:

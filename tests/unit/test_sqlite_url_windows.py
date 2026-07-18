@@ -60,6 +60,15 @@ class TestSqlitePathFromUrlWindows:
     def test_normalize_decodes_percent_encoded_file_path(self) -> None:
         assert normalize_sqlite_url(ENCODED_WINDOWS_URL) == f"sqlite:///{DECODED_WINDOWS_PATH}"
 
+    def test_decodes_encoded_drive_with_unescaped_separators(self) -> None:
+        url = "sqlite:///C%3A/Users/me/.codex-lb/store.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == "C:/Users/me/.codex-lb/store.db"
+        assert normalize_sqlite_url(url) == "sqlite:///C:/Users/me/.codex-lb/store.db"
+
     def test_preserves_literal_percent_sequences_from_data_dir_defaults(self) -> None:
         url = "sqlite+aiosqlite:////var/lib/codex%20lb/store.db"
 
@@ -87,7 +96,7 @@ class TestSqlitePathFromUrlWindows:
 
         normalized = normalize_sqlite_url(url)
 
-        assert normalized == r"sqlite:///C:\Users\me\foo#bar\store.db"
+        assert normalized == r"sqlite:///C:\Users\me\foo%23bar\store.db"
         assert sqlite_db_path_from_url(normalized) == Path(r"C:\Users\me\foo#bar\store.db")
 
     def test_raw_windows_literal_percent_path_is_not_decoded(self) -> None:
@@ -194,7 +203,7 @@ def test_background_engine_creation_decodes_encoded_hash_for_sqlalchemy(monkeypa
     try:
         session_module.init_background_db(encoded_url)
 
-        assert created_urls == [r"sqlite+aiosqlite:///C:\data#set\store.db"]
+        assert created_urls == [r"sqlite+aiosqlite:///C:\data%23set\store.db"]
     finally:
         session_module._background_engine = None
         session_module._background_session_factory = None

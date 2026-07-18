@@ -13,12 +13,25 @@ When a SQLite database URL is converted to a filesystem path for direct filesyst
 - **AND** the path is extracted and decoded
 - **THEN** `sqlite3.connect()` receives `C:\Users\...\store.db` (the real file), not the percent-escaped literal
 
+#### Scenario: Encoded drive with URL slash separators resolves to the real file
+
+- **GIVEN** a Windows SQLite URL with an encoded drive colon and normal URL path separators (`sqlite:///C%3A/Users/me/.codex-lb/store.db`)
+- **WHEN** the path is extracted and decoded
+- **THEN** the filesystem path is `C:/Users/me/.codex-lb/store.db`, not the literal `C%3A/Users/me/.codex-lb/store.db`
+
 #### Scenario: Startup uses the decoded SQLite path
 
 - **GIVEN** a percent-encoded SQLite file URL whose decoded parent directory differs from the percent-literal parent
 - **WHEN** `init_db()` prepares the SQLite directory and runs the startup integrity check
 - **THEN** the decoded parent directory is created
 - **AND** the integrity check receives the decoded database path
+
+#### Scenario: URL normalization preserves encoded path separators
+
+- **GIVEN** an encoded Windows SQLite URL whose decoded database path contains a URL separator such as `#`
+- **WHEN** the URL is normalized for SQLAlchemy consumers
+- **THEN** the returned URL keeps that separator percent-encoded in the URL path
+- **AND** filesystem extraction still decodes it to the real path segment
 
 #### Scenario: POSIX paths are unchanged
 

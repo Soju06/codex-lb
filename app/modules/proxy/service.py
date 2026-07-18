@@ -131,9 +131,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.file_ops import _FileOpsMixin
-from app.modules.proxy._service.http_bridge import (
-    _HTTPBridgeMixin,
-)
+from app.modules.proxy._service.http_bridge import _HTTPBridgeMixin
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -316,15 +314,9 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTPBridgeRetryCircuitMixin,
     _initialize_http_bridge_retry_circuit,
 )
-from app.modules.proxy._service.observability import (
-    _hash_identifier as _hash_identifier,
-)
-from app.modules.proxy._service.observability import (
-    _hash_identifier_or_none as _hash_identifier_or_none,
-)
-from app.modules.proxy._service.observability import (
-    _interesting_header_keys as _interesting_header_keys,
-)
+from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
+from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
+from app.modules.proxy._service.observability import _interesting_header_keys as _interesting_header_keys
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )

@@ -145,9 +145,10 @@ class _StickySessionsRepository:
         account_id: str,
         *,
         kind: StickySessionKind,
+        is_subagent: bool = False,
     ) -> StickySession:
         self.account_id = account_id
-        return StickySession(key=key, account_id=account_id, kind=kind)
+        return StickySession(key=key, account_id=account_id, kind=kind, is_subagent=is_subagent)
 
     async def delete(self, *args: Any, **kwargs: Any) -> bool:
         del args, kwargs

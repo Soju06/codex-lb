@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import aiohttp
 import anyio
@@ -42,6 +42,235 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CatalogOmissionQuotaAdmission
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_fork_session_closed_after_stream_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    key = proxy_service._HTTPBridgeSessionKey(
+        "internal_unanchored_parallel",
+        "fork-key",
+        None,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="fork-key"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus")),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    await event_queue.put(None)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_fork_close",
+        response_id=None,
+        model="gpt-5.4",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_state.event_queue = event_queue
+
+    close_mock = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_mock)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(sse_keepalive_interval_seconds=0),
+    )
+
+    gen = service._stream_http_bridge_session_events(
+        session=session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+
+    async for _ in gen:
+        pass
+
+    close_mock.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_subagent_prompt_cache_ttl_closes_session_after_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "subagent-cache", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="subagent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus")),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+        is_subagent=True,
+        subagent_prompt_cache_ttl_seconds=30,
+    )
+
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    await event_queue.put(None)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_subagent_reuse",
+        response_id=None,
+        model="gpt-5.4",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_state.event_queue = event_queue
+
+    close_mock = AsyncMock()
+    refresh_mock = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_mock)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_refresh_completed_subagent_sticky_mapping", refresh_mock)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(sse_keepalive_interval_seconds=0),
+    )
+
+    gen = service._stream_http_bridge_session_events(
+        session=session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+
+    async for _ in gen:
+        pass
+
+    refresh_mock.assert_awaited_once_with(session)
+    close_mock.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_refresh_completed_subagent_sticky_mapping_touches_prompt_cache_entry() -> None:
+    sticky_repo = SimpleNamespace(upsert=AsyncMock())
+
+    class _Repos:
+        sticky_sessions = sticky_repo
+
+        async def __aenter__(self) -> "_Repos":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    service = proxy_service.ProxyService(cast(Any, lambda: _Repos()))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "subagent-cache", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="subagent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+        is_subagent=True,
+        subagent_prompt_cache_ttl_seconds=30,
+    )
+
+    await service._refresh_completed_subagent_sticky_mapping(session)
+
+    sticky_repo.upsert.assert_awaited_once_with(
+        "subagent-cache",
+        "acc-1",
+        kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        is_subagent=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_completed_subagent_sticky_mapping_removes_retained_no_cache_key() -> None:
+    sticky_repo = SimpleNamespace(delete=AsyncMock())
+
+    class _Repos:
+        sticky_sessions = sticky_repo
+
+        async def __aenter__(self) -> "_Repos":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "subagent:scope-no-cache:parent-cache", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="subagent:scope-no-cache:parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+        is_subagent=True,
+        subagent_prompt_cache_ttl_seconds=None,
+    )
+
+    await http_bridge_helpers_module._delete_completed_subagent_sticky_mapping(lambda: _Repos(), session)
+
+    sticky_repo.delete.assert_has_awaits(
+        [
+            call(
+                "subagent:parent-cache",
+                kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+                is_subagent=True,
+            ),
+            call(
+                "subagent:scope-no-cache:parent-cache",
+                kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+                is_subagent=True,
+            ),
+        ],
+        any_order=True,
+    )
+    assert sticky_repo.delete.await_count == 2
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +336,51 @@ def test_forwarded_fork_keeps_authenticated_original_unanchored_state() -> None:
         True,
         True,
     )
+
+
+def test_subagent_bridge_key_namespaces_non_prompt_cache_keys() -> None:
+    key, affinity, idle_ttl, subagent_ttl = http_bridge_helpers_module._subagent_prompt_cache_bridge_key(
+        proxy_service._HTTPBridgeSessionKey("session_header", "parent-session", None),
+        proxy_service._AffinityPolicy(
+            key="parent-session",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            max_age_seconds=600,
+        ),
+        is_subagent=True,
+        forwarded_request=False,
+        idle_ttl_seconds=120.0,
+        request_scope_id="request-scope-1",
+        subagent_prompt_cache_ttl_seconds=30,
+    )
+
+    assert key.affinity_key == "subagent:request-scope-1:parent-session"
+    assert affinity.key == "subagent:request-scope-1:parent-session"
+    assert affinity.kind is proxy_service.StickySessionKind.CODEX_SESSION
+    assert affinity.max_age_seconds == 600
+    assert idle_ttl == 120.0
+    assert subagent_ttl is None
+
+
+def test_subagent_bridge_key_preserves_forwarded_or_namespaced_prompt_cache_key() -> None:
+    forwarded_key, forwarded_affinity, forwarded_idle_ttl, forwarded_subagent_ttl = (
+        http_bridge_helpers_module._subagent_prompt_cache_bridge_key(
+            proxy_service._HTTPBridgeSessionKey("prompt_cache", "subagent:parent-cache", None),
+            proxy_service._AffinityPolicy(
+                key="subagent:parent-cache",
+                kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+            ),
+            is_subagent=True,
+            forwarded_request=True,
+            idle_ttl_seconds=120.0,
+            request_scope_id="request-scope-1",
+            subagent_prompt_cache_ttl_seconds=30,
+        )
+    )
+
+    assert forwarded_key.affinity_key == "subagent:parent-cache"
+    assert forwarded_affinity.key == "subagent:parent-cache"
+    assert forwarded_idle_ttl == 120.0
+    assert forwarded_subagent_ttl == 30
 
 
 @pytest.mark.asyncio
@@ -4034,6 +4308,7 @@ async def test_create_http_bridge_session_filters_http_headers_for_upstream_webs
     assert "transfer-encoding" not in forwarded
     assert "upgrade" not in forwarded
     assert "x-codex-turn-metadata" not in forwarded
+    assert "x-parent-session-id" not in forwarded
     assert "x-openai-subagent" not in forwarded
     assert "x-codex-parent-thread-id" not in forwarded
     assert "x-codex-window-id" not in forwarded
@@ -4129,6 +4404,7 @@ async def test_reconnect_http_bridge_session_filters_http_headers_for_upstream_w
     assert "transfer-encoding" not in forwarded
     assert "upgrade" not in forwarded
     assert "x-codex-turn-metadata" not in forwarded
+    assert "x-parent-session-id" not in forwarded
     assert "x-openai-subagent" not in forwarded
     assert "x-codex-parent-thread-id" not in forwarded
     assert "x-codex-window-id" not in forwarded
@@ -5766,6 +6042,143 @@ async def test_stream_via_http_bridge_does_not_prefer_durable_account_for_soft_p
     assert chunks == []
     assert captured["previous_response_id"] is None
     assert captured["preferred_account_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_isolates_subagent_key_before_durable_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "prompt_cache_key": "parent-cache",
+        },
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-subagent-durable-lookup",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    await event_queue.put(None)
+
+    def fake_prepare(
+        _prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        return request_state, '{"type":"response.create"}'
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey(
+            "prompt_cache",
+            "subagent:scope-subagent-durable-lookup:parent-cache",
+            None,
+        ),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="subagent:scope-subagent-durable-lookup:parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-subagent", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    lookup_request_targets = AsyncMock(return_value=None)
+    legacy_anchor_calls: list[dict[str, Any]] = []
+
+    async def fake_legacy_forward_anchor_lookup(**kwargs: Any) -> None:
+        legacy_anchor_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                        http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=0,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_legacy_forward_anchor_lookup",
+        fake_legacy_forward_anchor_lookup,
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_request_targets)
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    request_scope_token = set_request_scope_id("scope-subagent-durable-lookup")
+    try:
+        chunks = [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={
+                    "x-parent-session-id": "parent-session",
+                    "x-codex-session-id": "parent-session",
+                    "x-codex-turn-state": "parent-turn-state",
+                },
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=True,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+            )
+        ]
+    finally:
+        reset_request_scope_id(request_scope_token)
+
+    assert chunks == []
+    lookup_request_targets.assert_awaited_once_with(
+        session_key_kind="turn_state_header",
+        session_key_value="subagent:scope-subagent-durable-lookup:parent-turn-state",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert len(legacy_anchor_calls) == 1
+    assert legacy_anchor_calls[0]["turn_state"] is None
 
 
 @pytest.mark.asyncio
@@ -9710,6 +10123,8 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -9721,6 +10136,8 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            is_subagent,
+            subagent_prompt_cache_ttl_seconds,
         )
         captured["key"] = create_key
         return created_session
@@ -9795,6 +10212,8 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -9806,6 +10225,8 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            is_subagent,
+            subagent_prompt_cache_ttl_seconds,
         )
         captured["key"] = create_key
         return created_session
@@ -9881,6 +10302,8 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -9892,6 +10315,8 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            is_subagent,
+            subagent_prompt_cache_ttl_seconds,
         )
         captured["key"] = create_key
         return created_session
@@ -9936,6 +10361,402 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
 
     assert resolved is created_session
     assert captured["key"] == requested_key
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_namespaces_subagent_prompt_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    requested_key = proxy_service._HTTPBridgeSessionKey("session_header", "parent-session", None)
+    created_session = proxy_service._HTTPBridgeSession(
+        key=requested_key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_create_http_bridge_session(
+        create_key: proxy_service._HTTPBridgeSessionKey,
+        *,
+        headers: dict[str, str],
+        affinity: proxy_service._AffinityPolicy,
+        api_key: proxy_service.ApiKeyData | None,
+        request_model: str | None,
+        idle_ttl_seconds: float,
+        request_stage: str = "first_turn",
+        preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
+        fallback_on_preferred_account_unavailable: bool = True,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
+    ) -> proxy_service._HTTPBridgeSession:
+        del (
+            headers,
+            api_key,
+            request_model,
+            request_stage,
+            preferred_account_id,
+            require_preferred_account,
+            fallback_on_preferred_account_unavailable,
+        )
+        captured.update(
+            {
+                "key": create_key,
+                "affinity": affinity,
+                "idle_ttl_seconds": idle_ttl_seconds,
+                "is_subagent": is_subagent,
+                "subagent_prompt_cache_ttl_seconds": subagent_prompt_cache_ttl_seconds,
+            }
+        )
+        return created_session
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=30),
+    )
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=30,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        requested_key,
+        headers={
+            "x-parent-session-id": "parent-session-1",
+            "x-codex-session-id": "parent-session",
+        },
+        affinity=proxy_service._AffinityPolicy(
+            key="parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+
+    assert resolved is created_session
+    subagent_key = captured["key"]
+    assert isinstance(subagent_key, proxy_service._HTTPBridgeSessionKey)
+    assert subagent_key.affinity_kind == "prompt_cache"
+    assert subagent_key.affinity_key == "subagent:parent-cache"
+    subagent_affinity = captured["affinity"]
+    assert isinstance(subagent_affinity, proxy_service._AffinityPolicy)
+    assert subagent_affinity.key == "subagent:parent-cache"
+    assert captured["idle_ttl_seconds"] == 30.0
+    assert captured["is_subagent"] is True
+    assert captured["subagent_prompt_cache_ttl_seconds"] == 30
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_refreshes_reused_subagent_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    requested_key = proxy_service._HTTPBridgeSessionKey("session_header", "parent-session", None)
+    stable_subagent_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "subagent:parent-cache", None)
+    session = proxy_service._HTTPBridgeSession(
+        key=stable_subagent_key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="subagent:parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=30,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus")),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=30.0,
+        is_subagent=True,
+        subagent_prompt_cache_ttl_seconds=30,
+    )
+    service._http_bridge_sessions[stable_subagent_key] = session
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=45),
+    )
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=45,
+                )
+            )
+        ),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        requested_key,
+        headers={
+            "x-parent-session-id": "parent-session-1",
+            "x-codex-session-id": "parent-session",
+        },
+        affinity=proxy_service._AffinityPolicy(
+            key="parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+    )
+
+    assert resolved is session
+    assert session.idle_ttl_seconds == 45.0
+    assert session.subagent_prompt_cache_ttl_seconds == 45
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_no_cache_subagent_uses_request_scoped_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    requested_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "parent-cache", None)
+    created_session = proxy_service._HTTPBridgeSession(
+        key=requested_key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_create_http_bridge_session(
+        create_key: proxy_service._HTTPBridgeSessionKey,
+        *,
+        headers: dict[str, str],
+        affinity: proxy_service._AffinityPolicy,
+        api_key: proxy_service.ApiKeyData | None,
+        request_model: str | None,
+        idle_ttl_seconds: float,
+        request_stage: str = "first_turn",
+        preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
+        fallback_on_preferred_account_unavailable: bool = True,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
+    ) -> proxy_service._HTTPBridgeSession:
+        del (
+            headers,
+            affinity,
+            api_key,
+            request_model,
+            idle_ttl_seconds,
+            request_stage,
+            preferred_account_id,
+            require_preferred_account,
+            fallback_on_preferred_account_unavailable,
+            is_subagent,
+            subagent_prompt_cache_ttl_seconds,
+        )
+        captured["key"] = create_key
+        return created_session
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=0),
+    )
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=0,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+
+    request_scope_token = set_request_scope_id("scope-subagent-no-cache")
+    try:
+        resolved = await service._get_or_create_http_bridge_session(
+            requested_key,
+            headers={"x-parent-session-id": "parent-session-1"},
+            affinity=proxy_service._AffinityPolicy(
+                key="parent-cache",
+                kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+    finally:
+        reset_request_scope_id(request_scope_token)
+
+    assert resolved is created_session
+    subagent_key = captured["key"]
+    assert isinstance(subagent_key, proxy_service._HTTPBridgeSessionKey)
+    assert subagent_key.affinity_key == "subagent:scope-subagent-no-cache:parent-cache"
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_subagent_ignores_parent_turn_state_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    parent_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "parent-cache", None)
+    parent_session = proxy_service._HTTPBridgeSession(
+        key=parent_key,
+        headers={"x-codex-turn-state": "parent-turn-state"},
+        affinity=proxy_service._AffinityPolicy(
+            key="parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-parent", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    service._http_bridge_sessions[parent_key] = parent_session
+    service._http_bridge_turn_state_index[
+        proxy_service._http_bridge_turn_state_alias_key("parent-turn-state", None)
+    ] = parent_key
+    requested_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "parent-cache", None)
+    created_session = proxy_service._HTTPBridgeSession(
+        key=requested_key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="parent-cache",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-child", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    create_session = AsyncMock(return_value=created_session)
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=0),
+    )
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=0,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+
+    request_scope_token = set_request_scope_id("scope-subagent-no-alias")
+    try:
+        resolved = await service._get_or_create_http_bridge_session(
+            requested_key,
+            headers={
+                "x-parent-session-id": "parent-session",
+                "x-codex-turn-state": "parent-turn-state",
+            },
+            affinity=proxy_service._AffinityPolicy(
+                key="parent-cache",
+                kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+    finally:
+        reset_request_scope_id(request_scope_token)
+
+    assert resolved is created_session
+    assert resolved is not parent_session
+    create_call = create_session.await_args
+    assert create_call is not None
+    create_key = create_call.args[0]
+    assert isinstance(create_key, proxy_service._HTTPBridgeSessionKey)
+    assert create_key.affinity_key == "subagent:scope-subagent-no-alias:parent-cache"
 
 
 @pytest.mark.asyncio

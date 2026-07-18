@@ -20,6 +20,7 @@ class StickySessionEntryResponse(DashboardModel):
     updated_at: datetime
     expires_at: datetime | None = None
     is_stale: bool
+    is_subagent: bool
 
 
 class StickySessionsListResponse(DashboardModel):

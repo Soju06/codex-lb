@@ -34,9 +34,10 @@ describe("useStickySessions", () => {
         displayName: "sticky-a@example.com",
         kind: "prompt_cache",
         createdAt: "2026-03-10T12:00:00Z",
-        updatedAt: "2026-03-10T12:05:00Z",
-        expiresAt: "2026-03-10T12:10:00Z",
-        isStale: false,
+      updatedAt: "2026-03-10T12:05:00Z",
+      expiresAt: "2026-03-10T12:10:00Z",
+      isStale: false,
+      isSubagent: false,
       },
     ];
     const queryClient = createTestQueryClient();

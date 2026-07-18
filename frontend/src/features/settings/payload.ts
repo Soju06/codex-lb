@@ -45,6 +45,8 @@ export function buildSettingsUpdateRequest(
     weeklyPaceSmoothingMinutes: settings.weeklyPaceSmoothingMinutes,
     guestAccessEnabled: settings.guestAccessEnabled,
     hideUpstreamQuotaFromApiKeys: settings.hideUpstreamQuotaFromApiKeys,
+    httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds:
+      settings.httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds,
     ...patch,
   };
   if (payload.expectedVersion === undefined) {

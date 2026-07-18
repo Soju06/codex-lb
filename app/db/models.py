@@ -598,6 +598,12 @@ class StickySession(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    is_subagent: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
 
 class DashboardSettings(Base):
@@ -732,6 +738,12 @@ class DashboardSettings(Base):
         default=3600,
         server_default=text("3600"),
         nullable=False,
+    )
+    http_responses_session_bridge_subagent_prompt_cache_ttl_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        default=None,
+        server_default=None,
+        nullable=True,
     )
     http_responses_session_bridge_gateway_safe_mode: Mapped[bool] = mapped_column(
         Boolean,

@@ -65,12 +65,13 @@ def _make_sticky_repo(existing_account_id: str | None = None) -> AsyncMock:
 
 async def _invoke_stickiness(
     states: list[AccountState],
-    sticky_key: str,
+    sticky_key: str | None,
     sticky_repo: AsyncMock,
     *,
-    sticky_kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
+    sticky_kind: StickySessionKind | None = StickySessionKind.PROMPT_CACHE,
     reallocate_sticky: bool = False,
     sticky_max_age_seconds: int | None = 600,
+    sticky_is_subagent: bool = False,
     budget_threshold_pct: float = 95.0,
     secondary_budget_threshold_pct: float = 100.0,
     routing_strategy: RoutingStrategy = "usage_weighted",
@@ -98,6 +99,7 @@ async def _invoke_stickiness(
         sticky_kind=sticky_kind,
         reallocate_sticky=reallocate_sticky,
         sticky_max_age_seconds=sticky_max_age_seconds,
+        sticky_is_subagent=sticky_is_subagent,
         budget_threshold_pct=budget_threshold_pct,
         secondary_budget_threshold_pct=secondary_budget_threshold_pct,
         prefer_earlier_reset_accounts=False,
@@ -107,6 +109,51 @@ async def _invoke_stickiness(
         relative_availability_top_k=relative_availability_top_k,
         sticky_repo=sticky_repo,
         routing_costs_by_account_id=routing_costs_by_account_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_cache_subagent_skips_sticky_mapping() -> None:
+    repo = _make_sticky_repo()
+
+    result = await _invoke_stickiness(
+        [_active("a")],
+        None,
+        repo,
+        sticky_kind=None,
+        sticky_max_age_seconds=None,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+    repo.get_account_id.assert_not_called()
+    repo.upsert.assert_not_called()
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_positive_subagent_ttl_uses_sticky_mapping() -> None:
+    repo = _make_sticky_repo()
+
+    result = await _invoke_stickiness(
+        [_active("a")],
+        "subagent-cache-key",
+        repo,
+        sticky_max_age_seconds=120,
+        sticky_is_subagent=True,
+    )
+
+    assert result.account is not None
+    repo.get_account_id.assert_awaited_once_with(
+        "subagent-cache-key",
+        kind=StickySessionKind.PROMPT_CACHE,
+        max_age_seconds=120,
+    )
+    repo.upsert.assert_awaited_once_with(
+        "subagent-cache-key",
+        "a",
+        kind=StickySessionKind.PROMPT_CACHE,
+        is_subagent=True,
     )
 
 
@@ -178,7 +225,7 @@ async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once()
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.STICKY_THREAD)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.STICKY_THREAD, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -234,7 +281,7 @@ async def test_sticky_deleted_when_pinned_account_removed_from_pool():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +306,7 @@ async def test_all_accounts_exhausted_keeps_pinned_no_thrashing():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -279,7 +326,7 @@ async def test_pool_exhausted_but_better_candidate_exists_reallocates():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -301,7 +348,7 @@ async def test_round_robin_pool_health_check_prefers_budget_safe_candidate():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key-round-robin", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key-round-robin", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key-round-robin", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -364,7 +411,9 @@ async def test_capacity_weighted_pool_health_check_prefers_budget_safe_candidate
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key-capacity-weighted", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key-capacity-weighted", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with(
+        "key-capacity-weighted", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False
+    )
 
 
 @pytest.mark.asyncio
@@ -382,7 +431,7 @@ async def test_pool_exhausted_single_account_keeps_pinned():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -402,7 +451,7 @@ async def test_pool_exhausted_with_custom_threshold():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -421,7 +470,7 @@ async def test_pool_exhausted_candidate_with_none_usage_triggers_reallocation():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -440,7 +489,7 @@ async def test_first_request_creates_sticky_mapping():
 
     assert result.account is not None
     assert result.account.account_id == "a"
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -477,7 +526,9 @@ async def test_first_sticky_request_honors_relative_availability_tuning():
 
     assert result.account is not None
     assert result.account.account_id == "a"
-    repo.upsert.assert_called_once_with("key-relative-availability", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with(
+        "key-relative-availability", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +554,7 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
 
     assert result.account is not None
     assert result.account.account_id == "a"
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -523,7 +574,7 @@ async def test_grace_period_keeps_rate_limited_pinned_account_even_when_usage_is
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -640,7 +691,7 @@ async def test_paused_pinned_account_persists_fallback():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -659,7 +710,7 @@ async def test_reauth_required_pinned_account_persists_fallback():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +763,7 @@ async def test_codex_session_persists_fallback_during_outage():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -734,7 +785,7 @@ async def test_rate_limit_far_away_does_not_reallocate_codex_session_affinity():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with("session_123", "b", kind=StickySessionKind.CODEX_SESSION, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -775,7 +826,7 @@ async def test_budget_exhaustion_triggers_reallocation():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -795,7 +846,7 @@ async def test_budget_threshold_80_triggers_at_85_percent():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -815,7 +866,7 @@ async def test_budget_threshold_95_no_reallocation_at_85_percent():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -837,7 +888,9 @@ async def test_budget_threshold_reallocates_codex_session_affinity():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
-    repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with(
+        "codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION, is_subagent=False
+    )
 
 
 @pytest.mark.asyncio
@@ -863,7 +916,7 @@ async def test_budget_threshold_reallocates_sticky_thread_affinity():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("thread-X", kind=StickySessionKind.STICKY_THREAD)
-    repo.upsert.assert_called_once_with("thread-X", "b", kind=StickySessionKind.STICKY_THREAD)
+    repo.upsert.assert_called_once_with("thread-X", "b", kind=StickySessionKind.STICKY_THREAD, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -885,7 +938,9 @@ async def test_budget_threshold_reallocates_to_primary_safe_secondary_pressured_
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
-    repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with(
+        "codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION, is_subagent=False
+    )
 
 
 @pytest.mark.asyncio
@@ -988,7 +1043,9 @@ async def test_fresh_sticky_mapping_uses_normal_budget_gate():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("new-codex-session", "a", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with(
+        "new-codex-session", "a", kind=StickySessionKind.CODEX_SESSION, is_subagent=False
+    )
 
 
 @pytest.mark.asyncio
@@ -1011,7 +1068,9 @@ async def test_secondary_budget_threshold_controls_sticky_reallocation():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
-    repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
+    repo.upsert.assert_called_once_with(
+        "codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION, is_subagent=False
+    )
 
 
 @pytest.mark.asyncio
@@ -1033,7 +1092,7 @@ async def test_rate_limit_far_away_triggers_reallocation():
     assert result.account is not None
     assert result.account.account_id == "b"
     repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)
 
 
 @pytest.mark.asyncio
@@ -1057,4 +1116,4 @@ async def test_burn_first_reallocation_only_when_burn_first_is_selectable():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
-    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE, is_subagent=False)

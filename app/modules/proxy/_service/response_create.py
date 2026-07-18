@@ -49,6 +49,7 @@ _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline im
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
 _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS = (
     "x-codex-turn-metadata",
+    "x-parent-session-id",
     "x-openai-subagent",
     "x-codex-parent-thread-id",
     "x-codex-window-id",

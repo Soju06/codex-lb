@@ -194,12 +194,14 @@ class StubStickySessionsRepository(StickySessionsRepository):
     ) -> str | None:
         return None
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self, key: str, account_id: str, *, kind: StickySessionKind, is_subagent: bool = False
+    ) -> StickySession:
         row = self._build_row(key, account_id, kind)
         self.upserts.append(row)
         return row
 
-    async def delete(self, key: str, *, kind: StickySessionKind | None = None) -> bool:
+    async def delete(self, key: str, *, kind: StickySessionKind | None = None, is_subagent: bool | None = None) -> bool:
         self.deletes.append((key, kind))
         return False
 

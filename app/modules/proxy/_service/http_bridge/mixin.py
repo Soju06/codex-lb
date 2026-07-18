@@ -71,6 +71,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _close_http_bridge_session_bounded,
+    _delete_completed_subagent_sticky_mapping,
+    _detect_subagent_session,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
@@ -124,6 +126,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _renew_durable_http_bridge_lease,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
+    _subagent_prompt_cache_bridge_key,
+    _sync_reused_http_bridge_session,
     _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
@@ -252,20 +256,10 @@ class _HTTPBridgeMixin(
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
-    async def _close_http_bridge_session_bounded(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        reason: str,
-    ) -> None:
+    async def _close_http_bridge_session_bounded(self, session: "_HTTPBridgeSession", *, reason: str) -> None:
         await _close_http_bridge_session_bounded(self, session, reason=reason)
 
-    def _schedule_http_bridge_session_closes(
-        self,
-        sessions: list["_HTTPBridgeSession"],
-        *,
-        reason: str,
-    ) -> None:
+    def _schedule_http_bridge_session_closes(self, sessions: list["_HTTPBridgeSession"], *, reason: str) -> None:
         for session in sessions:
             if len(self._background_cleanup_tasks) >= _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD:
                 logger.warning(
@@ -375,7 +369,6 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession": ...
-
     @overload
     async def _get_or_create_http_bridge_session(
         self,
@@ -434,20 +427,41 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
-        settings = _service_get_settings()
+        settings, dashboard_settings = _service_get_settings(), await _service_get_settings_cache().get()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key = _sticky_key_from_session_header(headers)
         initial_session_key = session_header_fallback_key or (key if key.affinity_kind == "session_header" else None)
+        original_key, original_affinity_key = key, affinity.key
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
+        )
+        is_subagent_session, subagent_prompt_cache_ttl_seconds = _detect_subagent_session(headers, dashboard_settings)
+        subagent_key_result = _subagent_prompt_cache_bridge_key(
+            key,
+            affinity,
+            is_subagent_session,
+            forwarded_request,
+            idle_ttl_seconds,
+            request_scope_id,
+            subagent_prompt_cache_ttl_seconds,
+        )
+        key, affinity, effective_idle_ttl_seconds, subagent_prompt_cache_ttl_seconds = subagent_key_result
+        if key != original_key or affinity.key != original_affinity_key:
+            incoming_turn_state = incoming_session_key = initial_session_key = None
+        reuse_metadata = (
+            api_key,
+            request_model,
+            request_service_tier,
+            effective_idle_ttl_seconds,
+            is_subagent_session,
+            subagent_prompt_cache_ttl_seconds,
         )
         model_transition_rebind = bool(
             durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, request_model)
         )
-        if model_transition_rebind:
-            durable_lookup = None
+        durable_lookup = None if model_transition_rebind else durable_lookup
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
             async with self._http_bridge_lock:
@@ -474,7 +488,6 @@ class _HTTPBridgeMixin(
                             error_type="server_error",
                         ),
                     )
-        effective_idle_ttl_seconds = idle_ttl_seconds
         forwarded_affinity = (
             _forwarded_http_bridge_session_key(
                 headers,
@@ -652,10 +665,7 @@ class _HTTPBridgeMixin(
                     assert existing is not None
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        existing.api_key = api_key
-                        existing.request_model = request_model
-                        existing.request_service_tier = request_service_tier
-                        existing.last_used_at = _service_time().monotonic()
+                        _sync_reused_http_bridge_session(existing, reuse_metadata)
                         await _refresh_reused_http_bridge_session_with_handoff(
                             self,
                             existing,
@@ -1285,7 +1295,6 @@ class _HTTPBridgeMixin(
                 except Exception:
                     pass
                 continue
-
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1355,10 +1364,7 @@ class _HTTPBridgeMixin(
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        session.api_key = api_key
-                        session.request_model = request_model
-                        session.request_service_tier = request_service_tier
-                        session.last_used_at = _service_time().monotonic()
+                        _sync_reused_http_bridge_session(session, reuse_metadata)
                         return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     old_account_id = session.account.id
@@ -1374,7 +1380,6 @@ class _HTTPBridgeMixin(
                     if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
-
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
@@ -1386,6 +1391,8 @@ class _HTTPBridgeMixin(
                     "request_model": request_model,
                     "request_service_tier": request_service_tier,
                     "idle_ttl_seconds": effective_idle_ttl_seconds,
+                    "is_subagent": is_subagent_session,
+                    "subagent_prompt_cache_ttl_seconds": subagent_prompt_cache_ttl_seconds,
                     "request_stage": request_stage,
                     "preferred_account_id": preferred_account_id,
                     "require_preferred_account": require_preferred_account,
@@ -1404,7 +1411,13 @@ class _HTTPBridgeMixin(
                     for parameter in create_signature.parameters.values()
                 )
                 if create_signature is not None and not create_accepts_var_keyword:
-                    for optional_kwarg in ("request_service_tier", "request_usage_budget", "request_deadline"):
+                    for optional_kwarg in (
+                        "request_service_tier",
+                        "request_usage_budget",
+                        "request_deadline",
+                        "is_subagent",
+                        "subagent_prompt_cache_ttl_seconds",
+                    ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
@@ -1598,6 +1611,7 @@ class _HTTPBridgeMixin(
                 api_key=None,
                 response_create_gate=response_create_gate,
             )
+        await _delete_completed_subagent_sticky_mapping(self._repo_factory, session)
         _log_http_bridge_event(
             "close",
             session.key,
@@ -1817,12 +1831,10 @@ class _HTTPBridgeMixin(
 
     async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
         """Renew the durable lease; callers must hold ``self._http_bridge_lock``."""
-
         await _renew_durable_http_bridge_lease(self, session)
 
     async def reconcile_durable_http_bridge_ownership(self) -> int:
         """Close local sessions whose durable row is owned by another instance/epoch."""
-
         return await _reconcile_durable_http_bridge_ownership(self)
 
     async def _create_http_bridge_session(
@@ -1841,6 +1853,8 @@ class _HTTPBridgeMixin(
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -1865,12 +1879,23 @@ class _HTTPBridgeMixin(
         preferred_candidate_id = preferred_account_id
         selected_account_lease: AccountLease | None = None
         while True:
+            subagent_no_cache = is_subagent and subagent_prompt_cache_ttl_seconds is None
             select_kwargs = {
                 "request_id": request_state.request_log_id or request_state.request_id,
                 "kind": "http_bridge",
                 "request_stage": request_stage,
                 "api_key": api_key,
-                "affinity_policy": affinity,
+                "sticky_key": None if subagent_no_cache else affinity.selection_key,
+                "sticky_kind": None if subagent_no_cache else affinity.kind,
+                "reallocate_sticky": affinity.reallocate_sticky,
+                "sticky_source": None if subagent_no_cache else affinity.codex_session_source,
+                "legacy_sticky_key": None if subagent_no_cache else affinity.legacy_selection_key,
+                "spill_bare_session_on_account_cap": False if subagent_no_cache else affinity.spill_on_account_cap,
+                "require_unambiguous_account": False if subagent_no_cache else affinity.require_unambiguous_account,
+                "sticky_max_age_seconds": subagent_prompt_cache_ttl_seconds
+                if is_subagent
+                else affinity.max_age_seconds,
+                "sticky_is_subagent": is_subagent,
                 "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
@@ -2087,6 +2112,8 @@ class _HTTPBridgeMixin(
             downstream_turn_state=None,
             account_lease=selected_account_lease,
             catalog_omission_quota_admission=selection.catalog_omission_quota_admission,
+            is_subagent=is_subagent,
+            subagent_prompt_cache_ttl_seconds=subagent_prompt_cache_ttl_seconds,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))

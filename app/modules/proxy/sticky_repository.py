@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, StickySession, StickySessionKind
+from app.db.models import Account, HttpBridgeSessionRecord, HttpBridgeSessionState, StickySession, StickySessionKind
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
@@ -64,13 +64,25 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        is_subagent: bool = False,
+    ) -> StickySession:
         # RETURNING collapses the previous upsert + re-select + refresh
         # (4 round trips) into one statement; this runs inline before the
         # first upstream byte on sticky requests, so round trips are TTFT.
         # populate_existing forces the returned row to overwrite any stale
         # identity-map instance the session may already hold for this key.
-        statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        statement = self._build_upsert_statement(
+            key,
+            account_id,
+            kind,
+            is_subagent=is_subagent,
+        ).returning(StickySession)
         async with sqlite_writer_section():
             result = await self._session.execute(statement, execution_options={"populate_existing": True})
             row = result.scalar_one_or_none()
@@ -79,13 +91,21 @@ class StickySessionsRepository:
             raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
         return row
 
-    async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
+    async def delete(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        is_subagent: bool | None = None,
+    ) -> bool:
         if not key:
             return False
         statement = delete(StickySession).where(
             StickySession.key == key,
             StickySession.kind == kind,
         )
+        if is_subagent is not None:
+            statement = statement.where(StickySession.is_subagent == is_subagent)
         async with sqlite_writer_section():
             result = await self._session.execute(statement.returning(StickySession.key))
             await self._session.commit()
@@ -117,6 +137,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        is_subagent: bool | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
     ) -> list[tuple[str, StickySessionKind]]:
@@ -125,6 +146,7 @@ class StickySessionsRepository:
                 select(StickySession.key, StickySession.kind),
                 kind=kind,
                 updated_before=updated_before,
+                is_subagent=is_subagent,
                 account_query=account_query,
                 key_query=key_query,
             )
@@ -143,6 +165,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        is_subagent: bool | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
         sort_by: StickySessionSortBy = "updated_at",
@@ -156,6 +179,7 @@ class StickySessionsRepository:
                 select(StickySession, Account.email),
                 kind=kind,
                 updated_before=updated_before,
+                is_subagent=is_subagent,
                 account_query=account_query,
                 key_query=key_query,
             )
@@ -177,6 +201,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None = None,
         updated_before: datetime | None = None,
+        is_subagent: bool | None = None,
         account_query: str | None = None,
         key_query: str | None = None,
     ) -> int:
@@ -184,26 +209,78 @@ class StickySessionsRepository:
             select(func.count()).select_from(StickySession).join(Account, Account.id == StickySession.account_id),
             kind=kind,
             updated_before=updated_before,
+            is_subagent=is_subagent,
             account_query=account_query,
             key_query=key_query,
         )
         result = await self._session.execute(statement)
         return int(result.scalar_one())
 
-    async def purge_prompt_cache_before(self, cutoff: datetime) -> int:
-        return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE)
+    async def purge_prompt_cache_before(
+        self,
+        cutoff: datetime,
+        *,
+        is_subagent: bool | None = None,
+        protect_active_bridge_mappings: bool = False,
+    ) -> int:
+        if protect_active_bridge_mappings:
+            return await self._purge_prompt_cache_before_excluding_active_bridge(cutoff, is_subagent=is_subagent)
+        return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE, is_subagent=is_subagent)
 
-    async def purge_before(self, cutoff: datetime, *, kind: StickySessionKind | None = None) -> int:
-        stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
-        if kind is not None:
-            stmt = stmt.where(StickySession.kind == kind)
+    async def _purge_prompt_cache_before_excluding_active_bridge(
+        self,
+        cutoff: datetime,
+        *,
+        is_subagent: bool | None,
+    ) -> int:
+        active_bridge_mapping = (
+            select(HttpBridgeSessionRecord.id)
+            .where(
+                HttpBridgeSessionRecord.session_key_kind == StickySessionKind.PROMPT_CACHE.value,
+                HttpBridgeSessionRecord.session_key_value == StickySession.key,
+                HttpBridgeSessionRecord.state.in_((HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING)),
+            )
+            .exists()
+        )
+        stmt = delete(StickySession).where(
+            StickySession.updated_at < to_utc_naive(cutoff),
+            StickySession.kind == StickySessionKind.PROMPT_CACHE,
+            ~active_bridge_mapping,
+        )
+        if is_subagent is not None:
+            stmt = stmt.where(StickySession.is_subagent == is_subagent)
         async with sqlite_writer_section():
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())
             await self._session.commit()
         return deleted
 
-    def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+    async def purge_before(
+        self,
+        cutoff: datetime,
+        *,
+        kind: StickySessionKind | None = None,
+        is_subagent: bool | None = None,
+    ) -> int:
+        stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
+        if kind is not None:
+            stmt = stmt.where(StickySession.kind == kind)
+        if is_subagent is not None:
+            stmt = stmt.where(StickySession.is_subagent == is_subagent)
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt.returning(StickySession.key))
+            deleted = len(result.scalars().all())
+            await self._session.commit()
+        return deleted
+
+    def _build_upsert_statement(
+        self,
+        key: str,
+        account_id: str,
+        kind: StickySessionKind,
+        *,
+        is_subagent: bool,
+    ) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_fn = pg_insert
@@ -211,11 +288,17 @@ class StickySessionsRepository:
             insert_fn = sqlite_insert
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
-        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        statement = insert_fn(StickySession).values(
+            key=key,
+            account_id=account_id,
+            kind=kind,
+            is_subagent=is_subagent,
+        )
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
+                "is_subagent": is_subagent,
                 "updated_at": func.now(),
             },
         )
@@ -226,6 +309,7 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind | None,
         updated_before: datetime | None,
+        is_subagent: bool | None,
         account_query: str | None,
         key_query: str | None,
     ):
@@ -233,6 +317,8 @@ class StickySessionsRepository:
             statement = statement.where(StickySession.kind == kind)
         if updated_before is not None:
             statement = statement.where(StickySession.updated_at < to_utc_naive(updated_before))
+        if is_subagent is not None:
+            statement = statement.where(StickySession.is_subagent == is_subagent)
         if account_query:
             statement = statement.where(func.lower(Account.email).contains(account_query.lower()))
         if key_query:

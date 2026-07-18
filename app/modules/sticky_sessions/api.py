@@ -65,6 +65,7 @@ async def list_sticky_sessions(
                 updated_at=entry.updated_at,
                 expires_at=entry.expires_at,
                 is_stale=entry.is_stale,
+                is_subagent=entry.is_subagent,
             )
             for entry in result.entries
         ],

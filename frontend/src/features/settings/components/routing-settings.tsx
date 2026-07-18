@@ -103,6 +103,7 @@ type RoutingSettingsDraft = {
   limitWarmupIdleThreshold: string;
   additionalQuotaKey: string;
   additionalQuotaPolicy: AdditionalQuotaRoutingPolicy;
+  subagentPromptCacheTtl: string;
 };
 
 function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSettingsDraft {
@@ -123,6 +124,10 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     limitWarmupIdleThreshold: String(settings.limitWarmupIdleThresholdPercent),
     additionalQuotaKey: "",
     additionalQuotaPolicy: "inherit",
+    subagentPromptCacheTtl:
+      settings.httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds == null
+        ? ""
+        : String(settings.httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds),
   };
 }
 
@@ -183,6 +188,14 @@ export function RoutingSettings({
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const parsedSubagentPromptCacheTtl =
+    draft.subagentPromptCacheTtl.trim() === "" ? null : Number.parseInt(draft.subagentPromptCacheTtl, 10);
+  const subagentPromptCacheTtlValid =
+    parsedSubagentPromptCacheTtl === null ||
+    (Number.isInteger(parsedSubagentPromptCacheTtl) && parsedSubagentPromptCacheTtl >= 0);
+  const subagentPromptCacheTtlChanged =
+    subagentPromptCacheTtlValid &&
+    parsedSubagentPromptCacheTtl !== settings.httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds;
   const parsedProxyAccountResponseCreateLimit = parseNonnegativeInteger(draft.proxyAccountResponseCreateLimit);
   const parsedProxyAccountStreamLimit = parseNonnegativeInteger(draft.proxyAccountStreamLimit);
   const parsedProxyAccountStreamRecoveryReserve = parseNonnegativeInteger(
@@ -1146,6 +1159,50 @@ export function RoutingSettings({
                 onClick={() => void save({ openaiCacheAffinityMaxAgeSeconds: parsedCacheAffinityTtl })}
               >
                 {t("settings.routing.promptCacheTtl.save")}
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">{t("settings.routing.subagentPromptCache.label")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("settings.routing.subagentPromptCache.description")}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label={t("settings.routing.subagentPromptCache.label")}
+                type="number"
+                min={0}
+                step={1}
+                inputMode="numeric"
+                placeholder={t("settings.routing.subagentPromptCache.placeholder")}
+                value={draft.subagentPromptCacheTtl}
+                disabled={busy}
+                onChange={(event) => updateDraft({ subagentPromptCacheTtl: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && subagentPromptCacheTtlChanged) {
+                    void save({
+                      httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds: parsedSubagentPromptCacheTtl,
+                    });
+                  }
+                }}
+                className="h-8 w-28 text-xs"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={busy || !subagentPromptCacheTtlChanged}
+                onClick={() =>
+                  void save({
+                    httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds: parsedSubagentPromptCacheTtl,
+                  })
+                }
+              >
+                {t("settings.routing.subagentPromptCache.save")}
               </Button>
             </div>
           </div>

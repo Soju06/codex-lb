@@ -136,6 +136,13 @@ export const DashboardSettingsSchema = z
     usageHistoryRetentionDays: z.number().int().min(0).max(3650).optional().default(0),
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional().default(null),
+    httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds: z
+      .number()
+      .int()
+      .nonnegative()
+      .nullable()
+      .optional()
+      .default(null),
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -211,6 +218,7 @@ export const SettingsUpdateRequestSchema = z
     // alias), value = store the override.
     requestLogRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional(),
     usageHistoryRetentionOverrideDays: z.number().int().min(0).max(3650).nullable().optional(),
+    httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds: z.number().int().nonnegative().nullable().optional(),
   })
   .superRefine((settings, ctx) => {
     if (

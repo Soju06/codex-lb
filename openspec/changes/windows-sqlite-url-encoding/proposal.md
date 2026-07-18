@@ -10,6 +10,7 @@ Non-Windows SQLite installs and PostgreSQL installs are unaffected (their paths 
 ## What Changes
 
 - `sqlite_db_path_from_url` now `urllib.parse.unquote()`s the path before turning it into a `Path`, so `sqlite3.connect()` receives the real filesystem path on every platform. No-op on already-decoded paths.
+- Startup directory creation now reuses the same decoded SQLite path helper, so `init_db()` creates/checks the real database parent instead of a percent-literal sibling.
 - `_build_alembic_config` now escapes `%` -> `%%` before storing the URL in the Alembic `Config`. `get_main_option()` decodes `%%` back to `%`, so the URL SQLAlchemy receives is unchanged; the escape is transparent to every consumer of the config.
 
 ## Capabilities
@@ -25,4 +26,4 @@ Non-Windows SQLite installs and PostgreSQL installs are unaffected (their paths 
 
 ## Impact
 
-`app/db/sqlite_utils.py`, `app/db/migrate.py`. New regression tests in `tests/unit/test_sqlite_url_windows.py`. No schema, API, or settings change.
+`app/db/sqlite_utils.py`, `app/db/session.py`, `app/db/migrate.py`. New regression tests in `tests/unit/test_sqlite_url_windows.py`. No schema, API, or settings change.

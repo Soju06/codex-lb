@@ -24,7 +24,7 @@ def _sqlite_path_uses_sqlalchemy_windows_escapes(path: str) -> bool:
         len(lower_path) >= 5
         and lower_path[1:4] == "%3a"
         and lower_path[0].isalpha()
-        and (lower_path[4:7] in ("%5c", "%2f") or (path[0].isupper() and lower_path[4] in ("\\", "/")))
+        and (lower_path[4:7] in ("%5c", "%2f") or lower_path[4] in ("\\", "/"))
     ):
         return True
     return lower_path.startswith("%5c%5c")
@@ -40,14 +40,6 @@ def _decode_sqlalchemy_windows_sqlite_path(path: str) -> str:
     return urllib.parse.unquote(path)
 
 
-def _decode_sqlite_url_reserved_separators(path: str) -> str:
-    return path.replace("%23", "#").replace("%3f", "?").replace("%3F", "?")
-
-
-def _quote_sqlite_url_path_separators(path: str) -> str:
-    return urllib.parse.quote(path, safe=":/\\")
-
-
 def sqlite_db_path_from_url(url: str) -> Path | None:
     if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
         return None
@@ -60,7 +52,6 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     path = url[marker_index + len(marker) :]
     if _sqlite_path_is_raw_windows_drive(path):
         path = path.partition("?")[0]
-        path = _decode_sqlite_url_reserved_separators(path)
     else:
         path = path.partition("?")[0]
         path = path.partition("#")[0]
@@ -100,8 +91,6 @@ def normalize_sqlite_url(url: str) -> str:
         return url
 
     decoded_path = _decode_sqlalchemy_windows_sqlite_path(path)
-    if decoded_path != path:
-        decoded_path = _quote_sqlite_url_path_separators(decoded_path)
     return f"{url[:path_start]}{decoded_path}{url[suffix_index:]}"
 
 

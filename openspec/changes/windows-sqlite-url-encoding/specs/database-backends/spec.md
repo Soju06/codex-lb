@@ -26,12 +26,13 @@ When a SQLite database URL is converted to a filesystem path for direct filesyst
 - **THEN** the decoded parent directory is created
 - **AND** the integrity check receives the decoded database path
 
-#### Scenario: URL normalization preserves encoded path separators
+#### Scenario: URL normalization preserves decoded Windows path characters
 
-- **GIVEN** an encoded Windows SQLite URL whose decoded database path contains a URL separator such as `#`
+- **GIVEN** an encoded Windows SQLite URL whose decoded database path contains spaces, literal `%`, or `#`
 - **WHEN** the URL is normalized for SQLAlchemy consumers
-- **THEN** the returned URL keeps that separator percent-encoded in the URL path
-- **AND** filesystem extraction still decodes it to the real path segment
+- **THEN** the returned URL contains the real decoded Windows filesystem path
+- **AND** filesystem extraction from that normalized URL returns the same decoded path
+- **AND** a raw Windows URL containing a literal percent sequence such as `%23` is not decoded unless it first matched a SQLAlchemy-rendered encoded Windows form
 
 #### Scenario: POSIX paths are unchanged
 

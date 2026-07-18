@@ -69,6 +69,15 @@ class TestSqlitePathFromUrlWindows:
         assert str(path) == "C:/Users/me/.codex-lb/store.db"
         assert normalize_sqlite_url(url) == "sqlite:///C:/Users/me/.codex-lb/store.db"
 
+    def test_decodes_lowercase_encoded_drive_with_unescaped_separators(self) -> None:
+        url = "sqlite:///c%3A/Users/me/.codex-lb/store.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == "c:/Users/me/.codex-lb/store.db"
+        assert normalize_sqlite_url(url) == "sqlite:///c:/Users/me/.codex-lb/store.db"
+
     def test_preserves_literal_percent_sequences_from_data_dir_defaults(self) -> None:
         url = "sqlite+aiosqlite:////var/lib/codex%20lb/store.db"
 
@@ -96,8 +105,16 @@ class TestSqlitePathFromUrlWindows:
 
         normalized = normalize_sqlite_url(url)
 
-        assert normalized == r"sqlite:///C:\Users\me\foo%23bar\store.db"
+        assert normalized == r"sqlite:///C:\Users\me\foo#bar\store.db"
         assert sqlite_db_path_from_url(normalized) == Path(r"C:\Users\me\foo#bar\store.db")
+
+    def test_normalize_preserves_decoded_windows_space_and_percent_characters(self) -> None:
+        url = "sqlite:///C%3A%5CUsers%5CFirst%20Last%5C100%25%5Cstore.db"
+
+        normalized = normalize_sqlite_url(url)
+
+        assert normalized == r"sqlite:///C:\Users\First Last\100%\store.db"
+        assert sqlite_db_path_from_url(normalized) == Path(r"C:\Users\First Last\100%\store.db")
 
     def test_raw_windows_literal_percent_path_is_not_decoded(self) -> None:
         url = r"sqlite:///C:\codex%20lb\store.db"
@@ -108,14 +125,23 @@ class TestSqlitePathFromUrlWindows:
         assert str(path) == r"C:\codex%20lb\store.db"
         assert normalize_sqlite_url(url) == url
 
-    def test_posix_literal_encoded_drive_segment_is_not_decoded(self) -> None:
+    def test_raw_windows_literal_encoded_hash_path_is_not_decoded(self) -> None:
+        url = r"sqlite:///C:\data%23set\store.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == r"C:\data%23set\store.db"
+        assert normalize_sqlite_url(url) == url
+
+    def test_lowercase_windows_encoded_drive_segment_is_decoded(self) -> None:
         url = "sqlite+aiosqlite:///c%3A/cache.db"
 
         path = sqlite_db_path_from_url(url)
 
         assert path is not None
-        assert str(path) == "c%3A/cache.db"
-        assert normalize_sqlite_url(url) == url
+        assert str(path) == "c:/cache.db"
+        assert normalize_sqlite_url(url) == "sqlite+aiosqlite:///c:/cache.db"
 
 
 class TestBuildAlembicConfigWindowsUrl:
@@ -203,7 +229,7 @@ def test_background_engine_creation_decodes_encoded_hash_for_sqlalchemy(monkeypa
     try:
         session_module.init_background_db(encoded_url)
 
-        assert created_urls == [r"sqlite+aiosqlite:///C:\data%23set\store.db"]
+        assert created_urls == [r"sqlite+aiosqlite:///C:\data#set\store.db"]
     finally:
         session_module._background_engine = None
         session_module._background_session_factory = None

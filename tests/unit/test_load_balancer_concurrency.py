@@ -105,6 +105,23 @@ async def test_account_lease_uses_explicit_dashboard_cap_snapshot_not_startup_en
     assert third is None
 
 
+@pytest.mark.asyncio
+async def test_opportunistic_selection_preserves_usage_limit_exhaustion_error() -> None:
+    account = _make_account("acc-opportunistic-usage-exhausted")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.reset_at = int(time.time() + 300)
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+
+    result = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_OPPORTUNISTIC,
+    )
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.resets_at == account.reset_at
+
+
 class _StubAccountsRepository:
     def __init__(self, accounts: list[Account]) -> None:
         self._accounts = accounts

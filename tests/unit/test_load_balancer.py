@@ -584,7 +584,7 @@ def test_select_account_skips_rate_limited_until_reset():
 def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
     now = 1_700_000_000.0
     states = [
-        AccountState("a", AccountStatus.RATE_LIMITED, reset_at=int(now + 60)),
+        AccountState("a", AccountStatus.RATE_LIMITED, used_percent=100.0, reset_at=int(now + 60)),
         AccountState("b", AccountStatus.QUOTA_EXCEEDED, reset_at=int(now + 3600)),
         AccountState("paused", AccountStatus.PAUSED),
     ]
@@ -594,7 +594,21 @@ def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
     assert result.account is None
     assert result.error_code == "usage_limit_reached"
     assert result.error_message == "Rate limit exceeded. Try again in 60s"
-    assert result.resets_at is None
+    assert result.resets_at == int(now + 60)
+
+
+def test_select_account_does_not_treat_generic_rate_limit_as_usage_exhaustion():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0, reset_at=int(now + 60)),
+        AccountState("b", AccountStatus.RATE_LIMITED, secondary_used_percent=10.0, reset_at=int(now + 120)),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "No available accounts"
 
 
 def test_select_account_does_not_misclassify_transient_backoff_as_usage_exhaustion():
@@ -623,6 +637,37 @@ def test_select_account_does_not_report_ignored_standard_quota_as_pool_exhaustio
 
     assert result.account is not None
     assert result.account.account_id == "quota"
+
+
+def test_select_account_excludes_per_account_standard_quota_bypass_from_pool_exhaustion():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "quota",
+        AccountStatus.QUOTA_EXCEEDED,
+        reset_at=int(now + 3600),
+        cooldown_until=now + 30,
+        ignore_standard_quota=True,
+    )
+
+    result = select_account([state], now=now)
+
+    assert result.account is None
+    assert result.error_code is None
+
+
+def test_select_account_excludes_scoped_standard_quota_bypass_from_pool_exhaustion():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "quota",
+        AccountStatus.QUOTA_EXCEEDED,
+        reset_at=int(now + 3600),
+        cooldown_until=now + 30,
+    )
+
+    result = select_account([state], now=now, bypass_quota_exceeded_account_ids={"quota"})
+
+    assert result.account is None
+    assert result.error_code is None
 
 
 def test_select_account_reports_paused_and_deactivated_without_reauth_reason():

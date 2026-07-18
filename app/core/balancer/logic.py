@@ -157,36 +157,48 @@ def pool_usage_exhaustion(
     *,
     current: float,
     ignore_standard_quota: bool = False,
+    ignore_standard_quota_account_ids: Collection[str] | None = None,
 ) -> SelectionResult | None:
     """Describe pool-wide subscription exhaustion without parsing retry text."""
     if ignore_standard_quota:
         return None
+    ignored_account_ids = set(ignore_standard_quota_account_ids or ())
+
+    def _usage_exhausted(state: AccountState) -> bool:
+        if state.status == AccountStatus.QUOTA_EXCEEDED:
+            return True
+        if state.status != AccountStatus.RATE_LIMITED:
+            return False
+        usage_values = (state.used_percent, state.secondary_used_percent)
+        return any(value is not None and float(value) >= 100.0 for value in usage_values)
+
     eligible = [
         state
         for state in states
-        if state.status
+        if not state.ignore_standard_quota
+        and state.account_id not in ignored_account_ids
+        and state.status
         not in (
             AccountStatus.PAUSED,
             AccountStatus.REAUTH_REQUIRED,
             AccountStatus.DEACTIVATED,
         )
     ]
-    if not eligible or any(
-        state.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) for state in eligible
-    ):
+    if not eligible or any(not _usage_exhausted(state) for state in eligible):
         return None
 
-    # AccountState.reset_at can contain a conservative local fallback. Until
-    # reset provenance is represented explicitly, omit it rather than expose
-    # a synthetic value as an upstream reset timestamp.
+    # Only usage-proven exhausted accounts reach this branch; surface their
+    # earliest known reset so the structured 429 can satisfy the API contract.
     reset_candidates = [state.reset_at for state in eligible if state.reset_at is not None]
+    resets_at = int(min(reset_candidates)) if reset_candidates else None
     message = "Usage limit reached"
-    if reset_candidates:
-        message = _format_retry_hint(max(0.0, min(reset_candidates) - current))
+    if resets_at is not None:
+        message = _format_retry_hint(max(0.0, resets_at - current))
     return SelectionResult(
         account=None,
         error_message=message,
         error_code=USAGE_LIMIT_REACHED,
+        resets_at=resets_at,
     )
 
 
@@ -571,9 +583,8 @@ def select_account(
             usage_exhaustion = pool_usage_exhaustion(
                 all_states,
                 current=current,
-                ignore_standard_quota=(
-                    ignore_standard_quota or bypass_quota_exceeded or bypass_quota_exceeded_account_ids is not None
-                ),
+                ignore_standard_quota=ignore_standard_quota or bypass_quota_exceeded,
+                ignore_standard_quota_account_ids=bypass_account_ids,
             )
             if usage_exhaustion is not None:
                 return usage_exhaustion

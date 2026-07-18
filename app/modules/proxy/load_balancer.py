@@ -22,6 +22,7 @@ from app.core.balancer import (
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
+    USAGE_LIMIT_REACHED,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -465,6 +466,7 @@ class LoadBalancer:
         selected_account_map: dict[str, Account] = {}
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        selection_resets_at: int | None = None
         if sticky_key is None:
             attempt = 0
             while True:
@@ -498,6 +500,7 @@ class LoadBalancer:
                     )
                     if not selection_states and states:
                         selection_error_code = _account_cap_error_code(lease_kind)
+                        selection_resets_at = None
                         error_message = _account_cap_error_message(lease_kind, caps)
                         result = SelectionResult(None, error_message)
                         logger.warning(
@@ -509,6 +512,7 @@ class LoadBalancer:
                         _record_account_cap_rejection(lease_kind)
                     else:
                         selection_error_code = None
+                        selection_resets_at = None
                         result = _select_account_preferring_budget_safe(
                             selection_states,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -561,6 +565,7 @@ class LoadBalancer:
                     else:
                         error_message = result.error_message
                         selection_error_code = result.error_code or selection_error_code
+                        selection_resets_at = result.resets_at or selection_resets_at
 
                 pre_persist_runtime_state = {
                     aid: (
@@ -698,6 +703,7 @@ class LoadBalancer:
                 )
                 if not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
+                    selection_resets_at = None
                     result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
                     logger.warning(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
@@ -708,6 +714,7 @@ class LoadBalancer:
                     _record_account_cap_rejection(lease_kind)
                 else:
                     selection_error_code = None
+                    selection_resets_at = None
                     async with self._repo_factory() as repos:
                         result = await self._select_with_stickiness(
                             states=selection_states,
@@ -777,6 +784,7 @@ class LoadBalancer:
                     else:
                         error_message = result.error_message
                         selection_error_code = result.error_code or selection_error_code
+                        selection_resets_at = result.resets_at or selection_resets_at
 
                 try:
                     async with self._repo_factory() as repos:
@@ -838,7 +846,11 @@ class LoadBalancer:
             )
 
         if selected_snapshot is None:
-            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message:
+            if (
+                traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+                and error_message
+                and selection_error_code != USAGE_LIMIT_REACHED
+            ):
                 return AccountSelection(
                     account=None,
                     error_message=error_message,
@@ -847,7 +859,12 @@ class LoadBalancer:
             if error_message == "No available accounts":
                 set_degraded("all upstream accounts are unavailable")
                 error_message = _format_degraded_error_message(error_message)
-            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+            return AccountSelection(
+                account=None,
+                error_message=error_message,
+                error_code=selection_error_code,
+                resets_at=selection_resets_at,
+            )
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
             selected_snapshot.id,
@@ -1160,6 +1177,13 @@ class LoadBalancer:
             ignore_standard_quota=False,
         )
         if result.account is None:
+            if result.error_code == USAGE_LIMIT_REACHED:
+                return AccountSelection(
+                    account=None,
+                    error_message=result.error_message,
+                    error_code=result.error_code,
+                    resets_at=result.resets_at,
+                )
             return AccountSelection(
                 account=None,
                 error_message=result.error_message,

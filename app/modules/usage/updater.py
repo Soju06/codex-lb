@@ -365,11 +365,26 @@ class UsageUpdater:
         access_token_override: str | None = None,
     ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
+        result = await self.force_refresh_result(
+            account,
+            ignore_refresh_disabled=ignore_refresh_disabled,
+            access_token_override=access_token_override,
+        )
+        return result.usage_written
+
+    async def force_refresh_result(
+        self,
+        account: Account,
+        *,
+        ignore_refresh_disabled: bool = False,
+        access_token_override: str | None = None,
+    ) -> AccountRefreshResult:
+        """Refresh one account and expose whether the upstream fetch completed."""
         settings = get_settings()
         if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         try:
             result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
                 account.id,
@@ -384,7 +399,7 @@ class UsageUpdater:
             if result.fetch_succeeded:
                 _last_successful_refresh[account.id] = utcnow()
                 _clear_usage_refresh_auth_cooldown(account.id)
-            return result.usage_written
+            return result
         except Exception as exc:
             logger.warning(
                 "Forced usage refresh failed account_id=%s request_id=%s error=%s",
@@ -393,7 +408,7 @@ class UsageUpdater:
                 exc,
                 exc_info=True,
             )
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
     async def _refresh_account_if_stale(
         self,

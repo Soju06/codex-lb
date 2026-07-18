@@ -16,6 +16,7 @@ from app.modules.accounts.service import (
     AccountNotProbableError,
     AccountsService,
 )
+from app.modules.usage.updater import AccountRefreshResult
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +71,9 @@ def _build_service(
     # Stop the real UsageUpdater from running — the unit test asserts the
     # service-level orchestration, not the refresh internals.
     usage_updater = AsyncMock()
-    usage_updater.force_refresh = AsyncMock(return_value=True)
+    usage_updater.force_refresh_result = AsyncMock(
+        return_value=AccountRefreshResult(usage_written=True, fetch_succeeded=True)
+    )
     service._usage_updater = usage_updater
     return service
 
@@ -125,7 +128,7 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     assert result.status == "probed"
     assert result.account_id == _ACCOUNT_ID
     assert result.probe_status_code == 200
-    assert result.usage_refresh_succeeded is True
+    assert result.usage_refresh_ready_for_probe_settlement()
     assert result.primary_used_percent_before == 100.0
     assert result.primary_used_percent_after == 100.0
     assert result.secondary_used_percent_before == 80.0
@@ -138,7 +141,7 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     assert captured_kwargs["model"] == "gpt-5.5-test"
 
     assert service._usage_updater is not None
-    force_refresh_mock = service._usage_updater.force_refresh
+    force_refresh_mock = service._usage_updater.force_refresh_result
     assert isinstance(force_refresh_mock, AsyncMock)
     force_refresh_mock.assert_awaited_once_with(account, ignore_refresh_disabled=True)
 
@@ -148,9 +151,9 @@ async def test_probe_account_reports_failed_usage_refresh(monkeypatch):
     account = _make_account(status=AccountStatus.RATE_LIMITED)
     service = _build_service(account=account, primary_pct=100.0, secondary_pct=80.0)
     assert service._usage_updater is not None
-    force_refresh_mock = service._usage_updater.force_refresh
+    force_refresh_mock = service._usage_updater.force_refresh_result
     assert isinstance(force_refresh_mock, AsyncMock)
-    force_refresh_mock.return_value = False
+    force_refresh_mock.return_value = AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
     async def _fake_probe(**kwargs):
         del kwargs
@@ -162,7 +165,7 @@ async def test_probe_account_reports_failed_usage_refresh(monkeypatch):
 
     assert result is not None
     assert result.probe_status_code == 200
-    assert result.usage_refresh_succeeded is False
+    assert not result.usage_refresh_ready_for_probe_settlement()
 
 
 @pytest.mark.asyncio

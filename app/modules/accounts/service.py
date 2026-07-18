@@ -738,22 +738,23 @@ class AccountsService:
             model=probe_model,
         )
 
-        usage_refresh_succeeded: bool | None = None
+        usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
-            usage_refresh_succeeded = await self._usage_updater.force_refresh(
+            usage_refresh_result = await self._usage_updater.force_refresh_result(
                 probe_account,
                 ignore_refresh_disabled=True,
             )
-            get_account_selection_cache().invalidate()
+            usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
+            if usage_refresh_fetch_succeeded:
+                get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
 
-        return AccountProbeResponse(
+        response = AccountProbeResponse(
             status="probed",
             account_id=account_id,
             probe_status_code=probe_status,
-            usage_refresh_succeeded=usage_refresh_succeeded,
             primary_used_percent_before=primary_before,
             primary_used_percent_after=primary_after,
             secondary_used_percent_before=secondary_before,
@@ -761,6 +762,8 @@ class AccountsService:
             account_status_before=status_before,
             account_status_after=refreshed.status.value,
         )
+        response._usage_refresh_fetch_succeeded = usage_refresh_fetch_succeeded
+        return response
 
     async def _latest_usage_percents(self, account_id: str) -> tuple[float | None, float | None]:
         if self._usage_repo is None:

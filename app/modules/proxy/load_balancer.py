@@ -535,7 +535,10 @@ class LoadBalancer:
                         stream_reserve_slots=stream_reserve_slots,
                     )
                     if suppress_recovery_probe_candidates:
-                        selection_states = _filter_recovery_probe_candidates(selection_states)
+                        selection_states = _filter_recovery_probe_candidates(
+                            selection_states,
+                            traffic_class=traffic_class,
+                        )
                     if not selection_states and states:
                         selection_error_code = _account_cap_error_code(lease_kind)
                         error_message = _account_cap_error_message(lease_kind, caps)
@@ -566,6 +569,7 @@ class LoadBalancer:
                             selection_states,
                             result.account,
                             routing_strategy=routing_strategy,
+                            traffic_class=traffic_class,
                         )
                         if probing_result_requires_reservation and result.account is not None:
                             # Unbound recovery admissions have the same
@@ -900,7 +904,10 @@ class LoadBalancer:
                     else:
                         selection_states = cap_eligible_states
                     if suppress_recovery_probe_candidates:
-                        selection_states = _filter_recovery_probe_candidates(selection_states)
+                        selection_states = _filter_recovery_probe_candidates(
+                            selection_states,
+                            traffic_class=traffic_class,
+                        )
                     probe_reservation: _ProbeReservation | None = None
                 sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
                 if not selection_states and states:
@@ -985,6 +992,7 @@ class LoadBalancer:
                         selection_states,
                         result.account,
                         routing_strategy=routing_strategy,
+                        traffic_class=traffic_class,
                     )
                     if should_reserve_probe and probing_result_requires_reservation:
                         # Sticky persistence happens outside the runtime lock.
@@ -2669,18 +2677,34 @@ def _probing_result_requires_recovery_reservation(
     result_account: AccountState | None,
     *,
     routing_strategy: str,
+    traffic_class: TrafficClass,
 ) -> bool:
     if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
         return False
     if result_account is None or result_account.health_tier != HEALTH_TIER_PROBING:
         return False
-    return any(state.health_tier == HEALTH_TIER_HEALTHY for state in states)
+    return _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class)
 
 
-def _filter_recovery_probe_candidates(states: list[AccountState]) -> list[AccountState]:
-    if not any(state.health_tier == HEALTH_TIER_HEALTHY for state in states):
+def _filter_recovery_probe_candidates(
+    states: list[AccountState],
+    *,
+    traffic_class: TrafficClass,
+) -> list[AccountState]:
+    if not _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class):
         return states
     return [state for state in states if state.health_tier != HEALTH_TIER_PROBING]
+
+
+def _pool_has_available_healthy_account_without_backoff(
+    states: Iterable[AccountState],
+    *,
+    traffic_class: TrafficClass,
+) -> bool:
+    return _pool_has_available_account_without_backoff(
+        (state for state in states if state.health_tier == HEALTH_TIER_HEALTHY),
+        traffic_class=traffic_class,
+    )
 
 
 def _pool_has_available_account_without_backoff(

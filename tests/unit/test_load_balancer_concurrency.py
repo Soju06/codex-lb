@@ -1163,6 +1163,41 @@ def test_bypass_routing_strategies_do_not_require_probe_reservations(routing_str
         states,
         states[1],
         routing_strategy=routing_strategy,
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+    )
+
+
+def test_blocked_healthy_tier_peer_does_not_suppress_recovery_probe() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    blocked_healthy = AccountState(
+        "blocked-healthy-tier",
+        AccountStatus.RATE_LIMITED,
+        used_percent=100.0,
+        reset_at=now_epoch + 300,
+        health_tier=HEALTH_TIER_HEALTHY,
+    )
+    due_probe = AccountState(
+        "due-probe",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        reset_at=now_epoch + 300,
+        last_selected_at=0.0,
+        health_tier=HEALTH_TIER_PROBING,
+    )
+    states = [blocked_healthy, due_probe]
+
+    assert (
+        load_balancer_module._filter_recovery_probe_candidates(
+            states,
+            traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
+        )
+        == states
+    )
+    assert not load_balancer_module._probing_result_requires_recovery_reservation(
+        states,
+        due_probe,
+        routing_strategy="usage_weighted",
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_FOREGROUND,
     )
 
 

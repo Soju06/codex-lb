@@ -12,7 +12,7 @@ from app.core.usage.models import UsagePayload
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.schemas import AccountProbeResponse
 from app.modules.accounts.service import AccountsService
-from app.modules.usage.updater import UsageUpdater
+from app.modules.usage.updater import AccountRefreshResult, UsageUpdater
 
 pytestmark = pytest.mark.integration
 
@@ -103,11 +103,11 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
         captured["had_token"] = bool(access_token)
         return 200
 
-    async def _force_refresh_succeeds(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
-        return True
+    async def _force_refresh_fetches_without_writing(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
+        return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
 
     monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
-    monkeypatch.setattr(UsageUpdater, "force_refresh", _force_refresh_succeeds)
+    monkeypatch.setattr(UsageUpdater, "force_refresh_result", _force_refresh_fetches_without_writing)
 
     proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
     monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
@@ -127,6 +127,7 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
     assert body["status"] == "probed"
     assert body["accountId"] == account_id
     assert body["probeStatusCode"] == 200
+    assert "usageRefreshSucceeded" not in body
     assert body["accountStatusBefore"] == "active"
     assert body["accountStatusAfter"] == "active"
 
@@ -147,13 +148,13 @@ async def test_probe_active_account_returns_snapshot_when_advisory_settlement_fa
         del model
         return 200
 
-    async def _force_refresh_succeeds(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
-        return True
+    async def _force_refresh_fetches_without_writing(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
+        return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
 
     record_probe_result = AsyncMock(side_effect=RuntimeError("local settlement unavailable"))
 
     monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
-    monkeypatch.setattr(UsageUpdater, "force_refresh", _force_refresh_succeeds)
+    monkeypatch.setattr(UsageUpdater, "force_refresh_result", _force_refresh_fetches_without_writing)
     proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
     monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
 
@@ -181,14 +182,15 @@ async def test_probe_success_skips_advisory_settlement_when_usage_refresh_fails(
     record_probe_result = AsyncMock()
 
     async def _probe_without_usage_refresh(self, account_id, model=None):  # noqa: ARG001 - route orchestration only
-        return AccountProbeResponse(
+        response = AccountProbeResponse(
             status="probed",
             account_id=account_id,
             probe_status_code=200,
-            usage_refresh_succeeded=False,
             account_status_before="rate_limited",
             account_status_after="rate_limited",
         )
+        response._usage_refresh_fetch_succeeded = False
+        return response
 
     monkeypatch.setattr(AccountsService, "probe_account", _probe_without_usage_refresh)
     proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
@@ -199,7 +201,7 @@ async def test_probe_success_skips_advisory_settlement_when_usage_refresh_fails(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["probeStatusCode"] == 200
-    assert body["usageRefreshSucceeded"] is False
+    assert "usageRefreshSucceeded" not in body
     record_probe_result.assert_not_awaited()
 
 
@@ -208,14 +210,15 @@ async def test_probe_failure_still_records_advisory_settlement_after_usage_refre
     record_probe_result = AsyncMock()
 
     async def _failed_probe_without_usage_refresh(self, account_id, model=None):  # noqa: ARG001 - route orchestration only
-        return AccountProbeResponse(
+        response = AccountProbeResponse(
             status="probed",
             account_id=account_id,
             probe_status_code=429,
-            usage_refresh_succeeded=False,
             account_status_before="rate_limited",
             account_status_after="rate_limited",
         )
+        response._usage_refresh_fetch_succeeded = False
+        return response
 
     monkeypatch.setattr(AccountsService, "probe_account", _failed_probe_without_usage_refresh)
     proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()

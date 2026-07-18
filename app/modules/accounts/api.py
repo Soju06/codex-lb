@@ -297,7 +297,7 @@ async def probe_account(
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     probe_succeeded = 200 <= result.probe_status_code < 300
-    if not probe_succeeded or result.usage_refresh_succeeded is True:
+    if not probe_succeeded or result.usage_refresh_ready_for_probe_settlement():
         try:
             await get_proxy_service_for_app(request.app).record_account_probe_result(
                 account_id=result.account_id,
@@ -311,7 +311,7 @@ async def probe_account(
             )
     else:
         logger.warning(
-            "Force Probe success skipped advisory settlement after failed usage refresh "
+            "Force Probe success skipped advisory settlement before successful usage refresh fetch "
             "account_id=%s probe_status_code=%s",
             result.account_id,
             result.probe_status_code,

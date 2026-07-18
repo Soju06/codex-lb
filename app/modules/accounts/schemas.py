@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -227,16 +227,20 @@ class AccountProbeRequest(DashboardModel):
 
 
 class AccountProbeResponse(DashboardModel):
+    _usage_refresh_fetch_succeeded: bool | None = PrivateAttr(default=None)
+
     status: str
     account_id: str
     probe_status_code: int
-    usage_refresh_succeeded: bool | None = None
     primary_used_percent_before: float | None = None
     primary_used_percent_after: float | None = None
     secondary_used_percent_before: float | None = None
     secondary_used_percent_after: float | None = None
     account_status_before: str
     account_status_after: str
+
+    def usage_refresh_ready_for_probe_settlement(self) -> bool:
+        return self._usage_refresh_fetch_succeeded is True
 
 
 class AccountUsageResetConsumeRequest(DashboardModel):

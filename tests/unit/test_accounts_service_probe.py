@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -166,6 +166,30 @@ async def test_probe_account_reports_failed_usage_refresh(monkeypatch):
     assert result is not None
     assert result.probe_status_code == 200
     assert not result.usage_refresh_ready_for_probe_settlement()
+
+
+@pytest.mark.asyncio
+async def test_probe_account_invalidates_selection_cache_after_failed_refresh_attempt(monkeypatch):
+    account = _make_account(status=AccountStatus.RATE_LIMITED)
+    service = _build_service(account=account, primary_pct=100.0, secondary_pct=80.0)
+    assert service._usage_updater is not None
+    force_refresh_mock = service._usage_updater.force_refresh_result
+    assert isinstance(force_refresh_mock, AsyncMock)
+    force_refresh_mock.return_value = AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+    cache = SimpleNamespace(invalidate=Mock())
+    monkeypatch.setattr("app.modules.accounts.service.get_account_selection_cache", lambda: cache)
+
+    async def _fake_probe(**kwargs):
+        del kwargs
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert not result.usage_refresh_ready_for_probe_settlement()
+    cache.invalidate.assert_called_once_with()
 
 
 @pytest.mark.asyncio

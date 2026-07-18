@@ -208,6 +208,24 @@ class _StubStickySessionsRepository:
         self.account_id = None
         return True
 
+    async def restore_if_current(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str | None,
+        restore_account_id: str | None,
+    ) -> bool:
+        if self.account_id != expected_account_id:
+            return False
+        if restore_account_id is None:
+            self.deleted.append((key, kind))
+            self.account_id = None
+            return True
+        self.upserts.append((key, restore_account_id, kind))
+        self.account_id = restore_account_id
+        return True
+
 
 class _ConcurrentUnboundStickySessionsRepository(_StubStickySessionsRepository):
     def __init__(self, expected_lookups: int) -> None:
@@ -1982,6 +2000,70 @@ async def test_sticky_probe_reservation_restores_affinity_after_repeated_commit_
 
 
 @pytest.mark.asyncio
+async def test_sticky_probe_reservation_restore_does_not_clobber_newer_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    unavailable_owner = _make_account("acc-probe-sticky-newer-owner")
+    unavailable_owner.status = AccountStatus.RATE_LIMITED
+    unavailable_owner.reset_at = now_epoch + 3600
+    healthy = _make_account("acc-probe-sticky-newer-healthy")
+    probing = _make_account("acc-probe-sticky-newer-probing")
+    newer_owner = _make_account("acc-probe-sticky-newer-current")
+    accounts_repo = _StubAccountsRepository([unavailable_owner, healthy, probing, newer_owner])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                171,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                172,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = unavailable_owner.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=23,
+        health_version=9,
+    )
+
+    def lose_commit_after_new_owner(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        sticky_repo.account_id = newer_owner.id
+        return False
+
+    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", lose_commit_after_new_owner)
+
+    selected = await balancer.select_account(
+        sticky_key="probe-sticky-newer-owner",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == newer_owner.id
+    assert selected.lease is not None
+    assert sticky_repo.account_id == newer_owner.id
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 0
+    assert probing_runtime.last_selected_at == 0.0
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2411,6 +2493,30 @@ async def test_force_probe_success_survives_lease_only_version_bumps() -> None:
     assert runtime.probe_success_streak == 1
     assert runtime.version == 43
     assert runtime.health_version == 8
+
+
+@pytest.mark.asyncio
+async def test_force_probe_success_clears_stale_errors_before_tier_check() -> None:
+    account = _make_account("acc-force-probe-stale-errors")
+    accounts_repo = _StubAccountsRepository([account])
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, _StubUsageRepository({}, {})))
+    prior_error_at = time.time() - 120.0
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        error_count=2,
+        last_error_at=prior_error_at,
+        probe_success_streak=0,
+        version=40,
+        health_version=7,
+    )
+
+    await balancer.record_probe_result(account_id=account.id, http_status=200)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    assert runtime.error_count == 0
+    assert runtime.last_error_at is None
+    assert runtime.probe_success_streak == 1
 
 
 @pytest.mark.asyncio

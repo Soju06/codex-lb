@@ -745,8 +745,11 @@ class AccountsService:
                 ignore_refresh_disabled=True,
             )
             usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
-            if usage_refresh_fetch_succeeded:
-                get_account_selection_cache().invalidate()
+            # Forced refresh can still persist fresh OAuth credentials before a
+            # later upstream usage fetch fails. Selection-cache rows carry
+            # cloned encrypted tokens, so every forced attempt must invalidate
+            # cached accounts, not only attempts that wrote usage rows.
+            get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)

@@ -1230,6 +1230,7 @@ class LoadBalancer:
                                 sticky_repo=repos.sticky_sessions,
                                 sticky_key=sticky_key,
                                 sticky_kind=sticky_kind,
+                                expected_account_id=sticky_mutation.account_id,
                                 sticky_existing_account_id=sticky_existing_account_id,
                             )
                         raise
@@ -1239,15 +1240,16 @@ class LoadBalancer:
                         # provisional affinity must not escape; restore the
                         # previous sticky owner before retrying against a fresh
                         # runtime snapshot.
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
                         async with self._repo_factory() as repos:
                             await self._restore_sticky_mutation(
                                 sticky_repo=repos.sticky_sessions,
                                 sticky_key=sticky_key,
                                 sticky_kind=sticky_kind,
+                                expected_account_id=sticky_mutation.account_id,
                                 sticky_existing_account_id=sticky_existing_account_id,
                             )
-                        await self.release_account_lease(selected_lease)
-                        selected_lease = None
                         selected_snapshot = None
                         error_message = None
                         selected_states = []
@@ -2222,14 +2224,17 @@ class LoadBalancer:
         sticky_repo: StickySessionsRepository,
         sticky_key: str,
         sticky_kind: StickySessionKind,
+        expected_account_id: str | None,
         sticky_existing_account_id: str | None | object,
     ) -> None:
         if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
             return
-        if isinstance(sticky_existing_account_id, str):
-            await sticky_repo.upsert(sticky_key, sticky_existing_account_id, kind=sticky_kind)
-            return
-        await sticky_repo.delete(sticky_key, kind=sticky_kind)
+        await sticky_repo.restore_if_current(
+            sticky_key,
+            kind=sticky_kind,
+            expected_account_id=expected_account_id,
+            restore_account_id=sticky_existing_account_id if isinstance(sticky_existing_account_id, str) else None,
+        )
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
         lock = await self._get_account_lock(account.id)
@@ -2410,6 +2415,13 @@ class LoadBalancer:
 
             settings = get_settings()
             now = time.time()
+            was_probe_eligible = runtime.health_tier == HEALTH_TIER_PROBING
+            if was_probe_eligible and (runtime.error_count > 0 or runtime.last_error_at is not None):
+                runtime.error_count = 0
+                runtime.last_error_at = None
+                runtime.version += 1
+                runtime.health_version += 1
+
             _sync_runtime_health_tier(
                 account_id=account_id,
                 status=account_status,
@@ -2422,8 +2434,7 @@ class LoadBalancer:
             )
             if runtime.health_tier != HEALTH_TIER_PROBING:
                 return
-
-            if runtime.error_count > 0 or runtime.last_error_at is not None:
+            if not was_probe_eligible and (runtime.error_count > 0 or runtime.last_error_at is not None):
                 runtime.error_count = 0
                 runtime.last_error_at = None
                 runtime.version += 1

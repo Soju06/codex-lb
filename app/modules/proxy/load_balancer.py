@@ -559,7 +559,11 @@ class LoadBalancer:
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
                         )
-                        if result.account is not None and result.account.health_tier == HEALTH_TIER_PROBING:
+                        probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
+                            selection_states,
+                            result.account,
+                        )
+                        if probing_result_requires_reservation and result.account is not None:
                             # Unbound recovery admissions have the same
                             # externally-visible probe quiet interval as sticky
                             # ones, but account-state persistence happens after
@@ -577,7 +581,8 @@ class LoadBalancer:
                                 traffic_class=traffic_class,
                                 routing_costs_by_account_id=effective_routing_costs,
                             )
-                            if probe_reservation is None or probe_reservation.account_id != result.account.account_id:
+                            result_account_id = result.account.account_id
+                            if probe_reservation is None or probe_reservation.account_id != result_account_id:
                                 self._release_due_probe_reservation_locked(probe_reservation)
                                 probe_reservation = None
                                 probe_reservation_invalidated = True
@@ -937,7 +942,11 @@ class LoadBalancer:
                             or reallocate_sticky
                         )
                     )
-                    if should_reserve_probe:
+                    probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
+                        selection_states,
+                        result.account,
+                    )
+                    if should_reserve_probe and probing_result_requires_reservation:
                         # Sticky persistence happens outside the runtime lock.
                         # Delay the reversible reservation until after sticky
                         # selection proves we are not simply retaining a
@@ -961,11 +970,7 @@ class LoadBalancer:
                         ):
                             self._release_due_probe_reservation_locked(probe_reservation)
                             probe_reservation = None
-                        if (
-                            probe_reservation is None
-                            and result.account is not None
-                            and result.account.health_tier == HEALTH_TIER_PROBING
-                        ):
+                        if probe_reservation is None and result.account is not None:
                             # The result came from a pre-DB snapshot, but the
                             # current runtime no longer admits that probing
                             # candidate. Rebuild from fresh state instead of
@@ -2233,7 +2238,6 @@ class LoadBalancer:
                 plan_type=account.plan_type,
                 primary_used=normalized_usage.primary_used,
             )
-            account_status = account.status
             routing_policy = _normalize_account_routing_policy(account.routing_policy)
 
         async with lock:
@@ -2249,6 +2253,13 @@ class LoadBalancer:
                 runtime.version += 1
                 runtime.health_version += 1
 
+            normalized_state = _state_from_account(
+                account=account,
+                primary_entry=primary_entry,
+                secondary_entry=effective_secondary_entry,
+                runtime=replace(runtime),
+            )
+            account_status = normalized_state.status
             if account_status != AccountStatus.ACTIVE:
                 return
 
@@ -2508,6 +2519,15 @@ def _filter_states_for_account_caps(
                 continue
         filtered.append(state)
     return filtered
+
+
+def _probing_result_requires_recovery_reservation(
+    states: Collection[AccountState],
+    result_account: AccountState | None,
+) -> bool:
+    if result_account is None or result_account.health_tier != HEALTH_TIER_PROBING:
+        return False
+    return any(state.health_tier != HEALTH_TIER_PROBING for state in states)
 
 
 def _pool_has_available_account_without_backoff(

@@ -486,6 +486,36 @@ async def test_successful_force_probe_counts_after_draining_quiet_period() -> No
 
 
 @pytest.mark.asyncio
+async def test_successful_force_probe_counts_after_persisted_status_normalizes_active() -> None:
+    account = _make_account("acc-force-probe-stale-rate-limit")
+    now_epoch = int(time.time())
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = now_epoch - 30
+    usage_repo = _StubUsageRepository(
+        {
+            account.id: _usage_row_with_percent(
+                85,
+                account.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            )
+        },
+        {},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), usage_repo))
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        probe_success_streak=0,
+    )
+
+    await balancer.record_probe_result(account_id=account.id, http_status=200)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    assert runtime.probe_success_streak == 1
+
+
+@pytest.mark.asyncio
 async def test_force_probe_uses_monthly_usage_for_free_account_health() -> None:
     account = _make_account("acc-force-probe-monthly")
     account.plan_type = "free"
@@ -981,6 +1011,79 @@ async def test_probing_recovery_selection_updates_timestamp_and_restores_healthy
     assert normal.account.id == healthy.id
 
 
+@pytest.mark.asyncio
+async def test_recent_probing_account_remains_selectable_when_pool_has_no_healthy_fallback() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    probing = _make_account("acc-recent-probing-only")
+    accounts_repo = _StubAccountsRepository([probing])
+    usage_repo = _StubUsageRepository(
+        {
+            probing.id: _usage_row_with_percent(
+                94,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    recent_selection = time.time()
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=recent_selection,
+        version=5,
+    )
+
+    selected = await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    last_selected_at = balancer._runtime[probing.id].last_selected_at
+    assert last_selected_at is not None
+    assert last_selected_at > recent_selection
+
+
+@pytest.mark.asyncio
+async def test_sticky_recent_probing_account_remains_selectable_when_pool_has_no_healthy_fallback() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    probing = _make_account("acc-sticky-recent-probing-only")
+    sticky_repo = _StubStickySessionsRepository()
+    accounts_repo = _StubAccountsRepository([probing])
+    usage_repo = _StubUsageRepository(
+        {
+            probing.id: _usage_row_with_percent(
+                95,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    recent_selection = time.time()
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=recent_selection,
+        version=5,
+    )
+
+    selected = await balancer.select_account(
+        sticky_key="recent-probing-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    assert sticky_repo.account_id == probing.id
+    assert sticky_repo.deleted == []
+    last_selected_at = balancer._runtime[probing.id].last_selected_at
+    assert last_selected_at is not None
+    assert last_selected_at > recent_selection
+
+
 def test_probe_reservation_rejects_stale_last_selected_snapshot() -> None:
     healthy = _make_account("acc-stale-probe-healthy")
     probing = _make_account("acc-stale-probe-snapshot")
@@ -1155,8 +1258,8 @@ async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
     assert selected.lease is not None
     probing_runtime = balancer._runtime[probing.id]
     assert probing_runtime.inflight_streams == 1
-    assert probing_runtime.version == 22
-    assert probing_runtime.health_version == 8
+    assert probing_runtime.version == 23
+    assert probing_runtime.health_version == 7
 
     await balancer.release_account_lease(selected.lease)
 

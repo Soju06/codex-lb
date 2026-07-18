@@ -172,8 +172,7 @@ def pool_usage_exhaustion(
         )
     ]
     if not eligible or any(
-        state.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
-        for state in eligible
+        state.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) for state in eligible
     ):
         return None
 
@@ -573,9 +572,7 @@ def select_account(
                 all_states,
                 current=current,
                 ignore_standard_quota=(
-                    ignore_standard_quota
-                    or bypass_quota_exceeded
-                    or bypass_quota_exceeded_account_ids is not None
+                    ignore_standard_quota or bypass_quota_exceeded or bypass_quota_exceeded_account_ids is not None
                 ),
             )
             if usage_exhaustion is not None:

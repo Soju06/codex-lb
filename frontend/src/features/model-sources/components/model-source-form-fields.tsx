@@ -1,4 +1,5 @@
 import type { Control } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 
 import { Checkbox } from "@/components/ui/checkbox";
 import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -17,13 +18,13 @@ type ModelSourceFormFieldsProps = {
 };
 
 const CAPABILITY_TOGGLES = [
-  ["supportsChatCompletions", "Chat Completions"] as const,
-  ["supportsResponses", "Responses"] as const,
-  ["supportsAudioTranscriptions", "Audio Transcriptions"] as const,
-  ["supportsStreaming", "Streaming"] as const,
-  ["supportsTools", "Tools"] as const,
-  ["supportsVision", "Vision"] as const,
-  ["supportsReasoning", "Reasoning"] as const,
+  ["supportsChatCompletions", "modelSources.capabilities.chatCompletions"] as const,
+  ["supportsResponses", "modelSources.capabilities.responses"] as const,
+  ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
+  ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
+  ["supportsTools", "modelSources.capabilities.tools"] as const,
+  ["supportsVision", "modelSources.capabilities.vision"] as const,
+  ["supportsReasoning", "modelSources.capabilities.reasoning"] as const,
 ];
 
 export function ModelSourceFormFields({
@@ -33,6 +34,7 @@ export function ModelSourceFormFields({
   apiKeyLabel,
   apiKeyPlaceholder,
 }: ModelSourceFormFieldsProps) {
+  const { t } = useTranslation();
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -41,7 +43,7 @@ export function ModelSourceFormFields({
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Name</FormLabel>
+	              <FormLabel>{t("apiKeys.table.name")}</FormLabel>
               <FormControl>
                 <Input {...field} autoComplete="off" />
               </FormControl>
@@ -55,7 +57,7 @@ export function ModelSourceFormFields({
           name="baseUrl"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Base URL</FormLabel>
+	              <FormLabel>{t("modelSources.fields.baseUrl")}</FormLabel>
               <FormControl>
                 <Input {...field} placeholder="https://api.example.com/v1" autoComplete="off" />
               </FormControl>
@@ -84,7 +86,7 @@ export function ModelSourceFormFields({
         name="models"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>Models</FormLabel>
+	            <FormLabel>{t("apiKeys.table.models")}</FormLabel>
             <FormControl>
               <Input {...field} placeholder="deepseek-v4-flash, local-coder" autoComplete="off" />
             </FormControl>
@@ -95,7 +97,7 @@ export function ModelSourceFormFields({
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
-          <label className="text-sm font-medium">Context window</label>
+	          <label className="text-sm font-medium">{t("modelSources.fields.contextWindow")}</label>
           <Input
             value={draft.contextWindow}
             onChange={(event) => updateDraft({ contextWindow: event.target.value })}
@@ -104,7 +106,7 @@ export function ModelSourceFormFields({
           />
         </div>
         <div className="space-y-1">
-          <label className="text-sm font-medium">Max output tokens</label>
+	          <label className="text-sm font-medium">{t("modelSources.fields.maxOutputTokens")}</label>
           <Input
             value={draft.maxOutputTokens}
             onChange={(event) => updateDraft({ maxOutputTokens: event.target.value })}
@@ -115,13 +117,13 @@ export function ModelSourceFormFields({
       </div>
 
       <div className="space-y-2">
-        <div className="text-sm font-medium">Pricing (USD per 1M tokens)</div>
-        <p className="text-xs text-muted-foreground">
-          Leave blank to skip cost accounting. Applied to every model listed above.
-        </p>
+	        <div className="text-sm font-medium">{t("modelSources.fields.pricing")}</div>
+	        <p className="text-xs text-muted-foreground">
+	          {t("modelSources.fields.pricingDescription")}
+	        </p>
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Input</label>
+	            <label className="text-xs text-muted-foreground">{t("common.units.input")}</label>
             <Input
               value={draft.inputPer1M}
               onChange={(event) => updateDraft({ inputPer1M: event.target.value })}
@@ -130,7 +132,7 @@ export function ModelSourceFormFields({
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Cached input</label>
+	            <label className="text-xs text-muted-foreground">{t("common.units.cached")}</label>
             <Input
               value={draft.cachedInputPer1M}
               onChange={(event) => updateDraft({ cachedInputPer1M: event.target.value })}
@@ -139,7 +141,7 @@ export function ModelSourceFormFields({
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Output</label>
+	            <label className="text-xs text-muted-foreground">{t("common.units.output")}</label>
             <Input
               value={draft.outputPer1M}
               onChange={(event) => updateDraft({ outputPer1M: event.target.value })}
@@ -151,14 +153,13 @@ export function ModelSourceFormFields({
       </div>
 
       <div className="space-y-2">
-        <div className="text-sm font-medium">Audio pricing (USD per minute)</div>
-        <p className="text-xs text-muted-foreground">
-          For audio-transcription models billed by duration. Takes precedence over token pricing on
-          the transcription route.
-        </p>
+	        <div className="text-sm font-medium">{t("modelSources.fields.audioPricing")}</div>
+	        <p className="text-xs text-muted-foreground">
+	          {t("modelSources.fields.audioPricingDescription")}
+	        </p>
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Per minute</label>
+	            <label className="text-xs text-muted-foreground">{t("modelSources.fields.perMinute")}</label>
             <Input
               value={draft.audioPerMinute}
               onChange={(event) => updateDraft({ audioPerMinute: event.target.value })}
@@ -170,13 +171,13 @@ export function ModelSourceFormFields({
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
-        {CAPABILITY_TOGGLES.map(([key, label]) => (
+	        {CAPABILITY_TOGGLES.map(([key, labelKey]) => (
           <label key={key} className="flex items-center gap-2 rounded-md border p-2 text-sm">
             <Checkbox
               checked={draft[key]}
               onCheckedChange={(checked) => updateDraft({ [key]: checked === true })}
             />
-            {label}
+	            {t(labelKey)}
           </label>
         ))}
       </div>

@@ -8,10 +8,12 @@ import {
   createRequestLogEntry,
   createRequestLogFilterOptions,
   createRequestLogsResponse,
+  createUpstreamProxyAdmin,
   type AccountSummary,
   type AccountTrendsResponse,
   type RequestLogEntry,
 } from "../src/test/mocks/factories";
+import type { RateLimitResetCreditsSnapshot } from "../src/features/accounts/schemas";
 
 // ── Time helpers ──
 
@@ -23,6 +25,10 @@ function offsetIso(minutes: number): string {
 
 function trendIso(hoursAgo: number): string {
   return new Date(BASE_TIME.getTime() - hoursAgo * 3600_000).toISOString();
+}
+
+function futureIso(days: number): string {
+  return new Date(Date.now() + days * 24 * 3600_000).toISOString();
 }
 
 // ── 7 accounts (6 plus + 1 pro) — based on real W04 proportions ──
@@ -43,6 +49,8 @@ export const accounts: AccountSummary[] = [
     usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 34 },
     resetAtPrimary: offsetIso(48),
     resetAtSecondary: offsetIso(3 * 24 * 60),
+    availableResetCredits: 3,
+    resetCreditNearestExpiresAt: futureIso(2),
   }),
   // Plus accounts — distributed remaining traffic
   createAccountSummary({
@@ -54,6 +62,8 @@ export const accounts: AccountSummary[] = [
     usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 3 },
     resetAtPrimary: offsetIso(52),
     resetAtSecondary: offsetIso(3 * 24 * 60),
+    availableResetCredits: 2,
+    resetCreditNearestExpiresAt: futureIso(4),
   }),
   createAccountSummary({
     accountId: "acc_03",
@@ -64,6 +74,8 @@ export const accounts: AccountSummary[] = [
     usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 5 },
     resetAtPrimary: offsetIso(55),
     resetAtSecondary: offsetIso(3 * 24 * 60),
+    availableResetCredits: 1,
+    resetCreditNearestExpiresAt: futureIso(7),
   }),
   createAccountSummary({
     accountId: "acc_04",
@@ -492,6 +504,37 @@ export const unauthenticatedSession = createDashboardAuthSession({
 });
 
 export const settings = createDashboardSettings();
+
+export const upstreamProxyAdmin = createUpstreamProxyAdmin({
+  endpoints: [],
+  pools: [],
+  bindings: [],
+});
+
+export const resetCreditSnapshots: Record<string, RateLimitResetCreditsSnapshot> = Object.fromEntries(
+  accounts.map((account) => {
+    const availableCount = account.availableResetCredits ?? 0;
+    const nearestExpiresAt = account.resetCreditNearestExpiresAt ?? null;
+    return [
+      account.accountId,
+      {
+        availableCount,
+        nearestExpiresAt,
+        credits: Array.from({ length: availableCount }, (_, index) => ({
+          id: `${account.accountId}_reset_credit_${index + 1}`,
+          status: "available",
+          resetType: "rate_limit",
+          grantedAt: offsetIso(-24 * 60),
+          expiresAt: nearestExpiresAt,
+          title: "Rate limit reset",
+          description: "Mock dashboard screenshot credit",
+          redeemedAt: null,
+          redeemStartedAt: null,
+        })),
+      },
+    ];
+  }),
+);
 
 export const filterOptions = createRequestLogFilterOptions({
   accountIds: accounts.map((a) => a.accountId),

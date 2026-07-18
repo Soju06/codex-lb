@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { listAccounts } from "@/features/accounts/api";
+import { getSettings } from "@/features/settings/api";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 
@@ -62,11 +63,18 @@ export function AppHeader({
     refetchIntervalInBackground: false,
     staleTime: 30_000,
   });
+  const { data: settings } = useQuery({
+    queryKey: ["settings", "detail"],
+    queryFn: getSettings,
+  });
+  const showResetCreditBadges = settings?.showResetCreditBadges ?? true;
   const totalAvailableResetCredits = accounts.reduce(
     (total, account) => total + Math.max(0, account.availableResetCredits ?? 0),
     0,
   );
-  const accountsResetBadge = totalAvailableResetCredits > 99
+  const accountsResetBadge = !showResetCreditBadges
+    ? null
+    : totalAvailableResetCredits > 99
     ? "99+"
     : totalAvailableResetCredits > 0
       ? String(totalAvailableResetCredits)

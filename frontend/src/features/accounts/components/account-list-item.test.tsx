@@ -247,4 +247,19 @@ describe("AccountListItem", () => {
 
     expect(screen.queryByText("99+")).not.toBeInTheDocument();
   });
+
+  it("hides the reset-credit badge when badge display is disabled", () => {
+    const account = createAccountSummary({ availableResetCredits: 3 });
+
+    render(
+      <AccountListItem
+        account={account}
+        selected={false}
+        showResetCreditBadge={false}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("3")).not.toBeInTheDocument();
+  });
 });

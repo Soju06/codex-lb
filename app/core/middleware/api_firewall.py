@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from collections.abc import Awaitable, Callable
+from ipaddress import IPv4Network, IPv6Network
 from typing import cast
 
 from fastapi import FastAPI, Request
@@ -10,6 +10,11 @@ from fastapi.responses import JSONResponse, Response
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.middleware.firewall_cache import get_firewall_ip_cache
+from app.core.request_locality import (
+    FORWARDED_CHAIN_HEADER_NAMES,
+    parse_trusted_proxy_networks,
+    resolve_connection_client_ip,
+)
 from app.db.session import get_background_session
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
@@ -17,7 +22,7 @@ from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 
 def add_api_firewall_middleware(app: FastAPI) -> None:
     settings = get_settings()
-    trusted_proxy_networks = _parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
+    trusted_proxy_networks = parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
     firewall_cache = get_firewall_ip_cache()
 
     @app.middleware("http")
@@ -34,6 +39,7 @@ def add_api_firewall_middleware(app: FastAPI) -> None:
             request.client.host if request.client else None,
             trust_proxy_headers=settings.firewall_trust_proxy_headers,
             trusted_proxy_networks=trusted_proxy_networks,
+            allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,
         )
         cached_decision = await firewall_cache.is_allowed(client_ip) if client_ip is not None else None
         if cached_decision is not None:
@@ -73,72 +79,5 @@ def _resolve_client_ip(
         request.client.host if request.client else None,
         trust_proxy_headers=trust_proxy_headers,
         trusted_proxy_networks=trusted_proxy_networks,
+        allowed_proxy_header_names=FORWARDED_CHAIN_HEADER_NAMES,
     )
-
-
-def resolve_connection_client_ip(
-    headers: Mapping[str, str],
-    socket_ip: str | None,
-    *,
-    trust_proxy_headers: bool,
-    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
-) -> str | None:
-    if trust_proxy_headers and socket_ip and _is_trusted_proxy_source(socket_ip, trusted_proxy_networks):
-        forwarded_for = headers.get("x-forwarded-for")
-        if forwarded_for:
-            resolved_from_chain = _resolve_client_ip_from_xff_chain(
-                socket_ip,
-                forwarded_for,
-                trusted_proxy_networks,
-            )
-            if resolved_from_chain is not None:
-                return resolved_from_chain
-    return socket_ip
-
-
-def _parse_trusted_proxy_networks(cidrs: list[str]) -> tuple[IPv4Network | IPv6Network, ...]:
-    return tuple(ip_network(cidr, strict=False) for cidr in cidrs)
-
-
-def _resolve_client_ip_from_xff_chain(
-    socket_ip: str,
-    forwarded_for: str,
-    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...],
-) -> str | None:
-    hops = [entry.strip() for entry in forwarded_for.split(",")]
-    if not hops:
-        return None
-    if any(not _is_valid_ip(entry) for entry in hops):
-        return None
-
-    chain = [*hops, socket_ip]
-    resolved = socket_ip
-    for index in range(len(chain) - 1, 0, -1):
-        current_proxy = chain[index]
-        previous_hop = chain[index - 1]
-        if not _is_trusted_proxy_source(current_proxy, trusted_proxy_networks):
-            resolved = current_proxy
-            break
-        resolved = previous_hop
-    return resolved
-
-
-def _is_trusted_proxy_source(
-    host: str,
-    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...],
-) -> bool:
-    if not trusted_proxy_networks:
-        return False
-    try:
-        source_ip = ip_address(host)
-    except ValueError:
-        return False
-    return any(source_ip in network for network in trusted_proxy_networks)
-
-
-def _is_valid_ip(value: str) -> bool:
-    try:
-        ip_address(value)
-    except ValueError:
-        return False
-    return True

@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, NoReturn, Protocol
 
 import anyio
@@ -30,7 +31,11 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import (
+    AccountLease,
+    AccountSelection,
+    CatalogOmissionQuotaAdmission,
+)
 from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
@@ -52,7 +57,13 @@ _FIRST_TOKEN_EVENT_TYPES = frozenset(
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
-    {"turn_state_header", "session_header", "internal_unanchored_parallel", "internal_model_parallel"}
+    {
+        "turn_state_header",
+        "session_header",
+        "internal_unanchored_parallel",
+        "internal_model_parallel",
+        "internal_request_parallel",
+    }
 )
 _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
 _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
@@ -60,6 +71,7 @@ _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
     default=None,
@@ -534,8 +546,6 @@ class _WebSocketRequestState:
     bridge_request_deadline: float | None = None
     prewarm_status: str | None = None
     prewarm_latency_ms: int | None = None
-    prewarm_canary_bucket: str | None = None
-    prewarm_eligible_reason: str | None = None
     session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
     archive_request_id: str | None = None
@@ -548,6 +558,7 @@ class _WebSocketRequestState:
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
     request_kind: str = "normal"
+    generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -556,6 +567,12 @@ class _WebSocketRequestState:
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
     excluded_account_ids: set[str] = field(default_factory=set)
+    # A narrowly classified pre-acceptance account/model rejection may move
+    # once to another account. Keep the original upstream error until that
+    # replacement connection is established so an empty replacement pool does
+    # not turn the upstream 400 into a proxy-generated 5xx/no-accounts error.
+    precreated_replay_reason: str | None = None
+    precreated_replay_account_id: str | None = None
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
@@ -586,9 +603,16 @@ class _WebSocketRequestState:
     error_message_override: str | None = None
     error_type_override: str | None = None
     error_param_override: str | None = None
+    failure_phase_override: str | None = None
+    failure_detail_override: str | None = None
+    upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
     previous_response_not_found_rewritten: bool = False
+    previous_response_owner_lookup_source: str | None = None
+    previous_response_owner_lookup_outcome: str | None = None
+    previous_response_owner_requested_at: datetime | None = None
+    previous_response_owner_session_id: str | None = None
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -664,6 +688,7 @@ class _HTTPBridgeSession:
     unanchored_reservation_id: str | None = None
     admission_waiter_count: int = 0
     request_service_tier: str | None = None
+    catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
@@ -718,17 +743,30 @@ def _http_bridge_session_supports_service_tier(
             return False
         return True
     account_indexes_cover_owner = True
+    current_account_plan: str | None = None
+    current_account_plan_is_authoritative = False
     get_snapshot = getattr(registry, "get_snapshot", None)
     if callable(get_snapshot):
         snapshot = get_snapshot()
-        account_indexes_cover_owner = snapshot is not None and session.account.id in snapshot.account_plans
+        current_account_plan_is_authoritative = snapshot is not None and session.account.id in snapshot.account_plans
+        account_indexes_cover_owner = current_account_plan_is_authoritative
+        if current_account_plan_is_authoritative:
+            current_account_plan = snapshot.account_plans[session.account.id]
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
     model_account_ids = (
         account_ids_for_model(request_model)
         if callable(account_ids_for_model) and account_indexes_cover_owner
         else None
     )
-    if model_account_ids is not None and session.account.id not in model_account_ids:
+    model_catalog_omits_account = model_account_ids is not None and session.account.id not in model_account_ids
+    quota_admission_matches = (
+        session.catalog_omission_quota_admission is not None
+        and session.catalog_omission_quota_admission.matches(
+            requested_model=request_model,
+            service_tier=request_service_tier,
+        )
+    )
+    if model_catalog_omits_account and not quota_admission_matches:
         return False
     # Keep bridge reuse aligned with account selection: clients commonly send
     # these omit-equivalent values explicitly, but neither selects a specific
@@ -742,13 +780,20 @@ def _http_bridge_session_supports_service_tier(
             if account_indexes_cover_owner
             else None
         )
-        if allowed_account_ids is not None:
+        if allowed_account_ids is not None and not model_catalog_omits_account:
             return session.account.id in allowed_account_ids
 
         allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
     if allowed_plans is None:
         return True
-    return account_plan_matches_allowed(session.account.plan_type, allowed_plans)
+    if current_account_plan_is_authoritative:
+        account_plan = current_account_plan
+    elif session.catalog_omission_quota_admission is not None:
+        # Quota admission proves model support, not the owner's current plan eligibility.
+        return False
+    else:
+        account_plan = session.account.plan_type
+    return account_plan_matches_allowed(account_plan, allowed_plans)
 
 
 @dataclass(slots=True)
@@ -798,7 +843,18 @@ def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestSta
     request_state.error_message_override = None
     request_state.error_type_override = None
     request_state.error_param_override = None
+    request_state.failure_phase_override = None
+    request_state.failure_detail_override = None
+    request_state.upstream_error_code_override = None
     request_state.error_http_status_override = None
+
+
+def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequestState) -> None:
+    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        return
+    request_state.precreated_replay_reason = None
+    request_state.precreated_replay_account_id = None
+    _clear_websocket_request_error_overrides(request_state)
 
 
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
@@ -814,7 +870,15 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         return False
     if request_state.replay_count >= 1:
         return False
-    if request_state.last_downstream_sequence_number is not None:
+    sequenced_created_only_prewarm = (
+        request_state.generate_false_prewarm
+        and request_state.last_downstream_sequence_number == 0
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+        and request_state.response_event_count == 1
+        and not request_state.downstream_visible
+    )
+    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:
         return False

@@ -17,6 +17,7 @@ from app.core.balancer import (
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     account_status_for_permanent_failure,
+    plausible_rate_limit_reset_at,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -818,12 +819,11 @@ class UsageUpdater:
                 # ended: throttles are not always quota-based. Rows without
                 # blocked_at are stale window-derived markings and keep the
                 # fresh-usage recovery below.
-                cooldown_deadline = (
-                    float(account.reset_at)
-                    if account.reset_at
-                    else float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+                now = time.time()
+                cooldown_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
+                    float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
                 )
-                if time.time() < cooldown_deadline:
+                if now < cooldown_deadline:
                     return
             long_window = monthly or secondary
             if primary is None and monthly is None:

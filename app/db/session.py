@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
 
+# PostgreSQL pool checkout timeout and connection recycle window. Fixed
+# application constants (issue #1340): recycle keeps pooled connections
+# younger than any reasonable server/proxy keep-alive boundary, and neither
+# value is an operator decision. Pool sizing stays configurable via
+# ``database_pool_size`` / ``database_max_overflow``.
+_POSTGRES_POOL_TIMEOUT_SECONDS = 30.0
+_POSTGRES_POOL_RECYCLE_SECONDS = 1800
+
 
 def _is_sqlite_url(url: str) -> bool:
     return url.startswith("sqlite+aiosqlite:///") or url.startswith("sqlite:///")
@@ -45,21 +53,27 @@ def _postgres_async_connect_args(url: str) -> dict[str, int] | None:
     return {"prepared_statement_cache_size": 0}
 
 
-def _postgres_async_engine_kwargs(url: str, *, background: bool) -> dict[str, object]:
+def _postgres_async_engine_kwargs(url: str) -> dict[str, object]:
+    """Engine kwargs shared by the main and background PostgreSQL engines.
+
+    The background engine always derives its pool sizing from the main pool
+    settings; it exists to isolate background-task checkouts, not to be sized
+    independently.
+    """
     connect_args = _postgres_async_connect_args(url)
     kwargs: dict[str, object] = {"connect_args": connect_args or {}}
     if os.environ.get("CODEX_LB_TEST_DATABASE_URL") and url.startswith("postgresql+asyncpg://"):
         kwargs["poolclass"] = NullPool
     else:
-        kwargs["pool_size"] = _database_pool_size(background=background)
-        kwargs["max_overflow"] = _database_max_overflow(background=background)
-        kwargs["pool_timeout"] = _settings.database_pool_timeout_seconds
+        kwargs["pool_size"] = _settings.database_pool_size
+        kwargs["max_overflow"] = _settings.database_max_overflow
+        kwargs["pool_timeout"] = _POSTGRES_POOL_TIMEOUT_SECONDS
         # Detect server-side connection drops (idle timeout, restart, network reset)
         # before the first real query, and cycle long-lived connections so they
         # never reach an upstream keep-alive boundary. SQLite paths do not need
         # either knob — aiosqlite has no analogous server-side disconnect.
         kwargs["pool_pre_ping"] = True
-        kwargs["pool_recycle"] = _settings.database_pool_recycle_seconds
+        kwargs["pool_recycle"] = _POSTGRES_POOL_RECYCLE_SECONDS
     return kwargs
 
 
@@ -68,20 +82,6 @@ def _sqlite_file_async_engine_kwargs() -> dict[str, object]:
         "poolclass": NullPool,
         "connect_args": {"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
     }
-
-
-def _database_pool_size(*, background: bool) -> int:
-    if background:
-        return _settings.database_background_pool_size or _settings.database_pool_size
-    return _settings.database_pool_size
-
-
-def _database_max_overflow(*, background: bool) -> int:
-    if background:
-        if _settings.database_background_max_overflow is not None:
-            return _settings.database_background_max_overflow
-        return _settings.database_max_overflow
-    return _settings.database_max_overflow
 
 
 def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
@@ -117,7 +117,7 @@ else:
     engine = create_async_engine(
         _settings.database_url,
         echo=False,
-        **_postgres_async_engine_kwargs(_settings.database_url, background=False),
+        **_postgres_async_engine_kwargs(_settings.database_url),
     )
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -213,7 +213,11 @@ def _load_sqlite_backup_creator() -> _SqliteBackupCreator:
 
 
 def init_background_db(url: str | None = None) -> None:
-    """Initialize separate DB pool for background tasks (smaller pool).
+    """Initialize a separate DB engine for background tasks.
+
+    The background engine isolates background-task checkouts from the request
+    pool; its pool sizing always derives from ``database_pool_size`` /
+    ``database_max_overflow``.
 
     Args:
         url: Database URL. If None, uses settings.database_url.
@@ -240,7 +244,7 @@ def init_background_db(url: str | None = None) -> None:
         _background_engine = create_async_engine(
             db_url,
             echo=False,
-            **_postgres_async_engine_kwargs(db_url, background=True),
+            **_postgres_async_engine_kwargs(db_url),
         )
 
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)

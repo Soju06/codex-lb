@@ -254,8 +254,8 @@ if PROMETHEUS_AVAILABLE:
     )
     http_bridge_prewarm_total = Counter(
         "codex_lb_http_bridge_prewarm_total",
-        "Total HTTP bridge Codex prewarm outcomes by cohort and canary bucket",
-        ["outcome", "cohort", "bucket"],
+        "Total HTTP bridge Codex prewarm outcomes",
+        ["outcome"],
         registry=REGISTRY,
     )
     http_bridge_stuck_retire_total = Counter(

@@ -860,6 +860,15 @@ def _ok_proc(payload: str = "{}") -> Any:
     return _Proc()
 
 
+def _transient_gh_proc() -> Any:
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "gh: HTTP 503"
+
+    return _Proc()
+
+
 def test_run_gh_switches_to_fallback_token_on_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
     monkeypatch.setenv("GH_TOKEN", "primary-token")
@@ -881,6 +890,43 @@ def test_run_gh_switches_to_fallback_token_on_rate_limit(monkeypatch: pytest.Mon
 
     assert result == {}
     assert calls == ["primary-token", "fallback-token"]
+
+
+def test_run_gh_retries_transient_read_only_api_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        del kwargs
+        calls.append(command)
+        if len(calls) == 1:
+            return _transient_gh_proc()
+        return _ok_proc('{"ok": true}')
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    assert module.run_gh(["api", "/repos/example/project/issues/1/labels"]) == {"ok": True}
+    assert len(calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_run_gh_does_not_retry_mutating_pr_comment(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        del kwargs
+        calls.append(command)
+        return _transient_gh_proc()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    with pytest.raises(module.GhError):
+        module.run_gh(["pr", "comment", "1344", "--body", "@codex review"])
+    assert len(calls) == 1
 
 
 def test_run_gh_fails_without_distinct_fallback_token(monkeypatch: pytest.MonkeyPatch) -> None:

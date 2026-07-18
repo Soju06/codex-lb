@@ -54,6 +54,14 @@ describe("AccountMultiSelect", () => {
     });
   });
 
+  it("pluralizes the selected account count", async () => {
+    renderWithProviders(
+      <AccountMultiSelect value={["acc_primary", "acc_secondary"]} onChange={vi.fn()} />,
+    );
+
+    expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
+  });
+
   it("excludes hard-blocked accounts from new selections", async () => {
     server.use(
       http.get("/api/accounts", () =>

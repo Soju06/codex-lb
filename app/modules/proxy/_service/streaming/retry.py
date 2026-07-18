@@ -34,6 +34,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _LOCAL_ACCOUNT_CAP_ERROR_CODES,
     _account_capacity_wait_payload,
@@ -60,6 +61,7 @@ from app.modules.proxy.affinity import (
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
+    _is_account_model_unsupported_error,
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
@@ -331,6 +333,11 @@ class _StreamingRetryMixin:
         network_recovery = ProcessNetworkRecovery(transport="stream", request_id=request_id)
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        last_account_model_rejection: ProxyResponseError | None = None
+        last_account_model_rejection_account_id: str | None = None
+        account_model_replacement_account_id: str | None = None
+        account_model_replay_attempted = False
+        current_account_lease: AccountLease | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
         deferred_capacity_account: Account | None = None
@@ -538,6 +545,105 @@ class _StreamingRetryMixin:
                 sticky=upstream_transport_sticky,
                 status=status,
             )
+
+        async def _render_account_model_rejection(
+            exc: ProxyResponseError,
+            *,
+            account_id: str | None,
+        ) -> str:
+            error = _parse_openai_error(exc.payload)
+            error_code = (
+                _normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                or "invalid_request_error"
+            )
+            error_message = error.message if error and error.message else "Upstream rejected the requested model"
+            event = response_failed_event(
+                error_code,
+                error_message,
+                error_type=(error.type if error else None) or "invalid_request_error",
+                response_id=request_id,
+                error_param=error.param if error else None,
+            )
+            _apply_error_metadata(event["response"]["error"], error)
+            if not any_attempt_logged:
+                await proxy._write_request_log(
+                    account_id=account_id,
+                    api_key=api_key,
+                    request_id=request_id,
+                    model=payload.model,
+                    latency_ms=int((time.monotonic() - start) * 1000),
+                    status="error",
+                    error_code=error_code,
+                    error_message=error_message,
+                    reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                    transport=request_transport,
+                    upstream_transport=upstream_stream_transport,
+                    service_tier=payload.service_tier,
+                    requested_service_tier=payload.service_tier,
+                    useragent=useragent,
+                    useragent_group=useragent_group,
+                    client_ip=client_ip,
+                )
+            return format_sse_event(event)
+
+        async def _retry_account_model_rejection(
+            exc: ProxyResponseError,
+            account: Account,
+            *,
+            outcome: str,
+        ) -> bool | None:
+            nonlocal affinity, current_account_lease
+            nonlocal account_model_replay_attempted
+            nonlocal last_account_model_rejection, last_account_model_rejection_account_id
+            error = _parse_openai_error(exc.payload)
+            error_code = _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            if not _is_account_model_unsupported_error(
+                code=error_code,
+                message=error.message if error else None,
+                model=payload.model,
+            ):
+                return None
+            can_move_verified_owner = bool(
+                require_preferred_account
+                and preferred_account_id == account.id
+                and verified_fresh_replay_payload is not None
+            )
+            can_try_other_account = bool(
+                not account_model_replay_attempted
+                and attempt < max_attempts - 1
+                and (
+                    can_move_verified_owner
+                    or (not require_preferred_account and account.id != file_preferred_account_id)
+                )
+            )
+            if not can_try_other_account:
+                return False
+            logger.info(
+                "Retrying stream after account/model rejection request_id=%s account_id=%s model=%s phase=%s reason=%s",
+                request_id,
+                account.id,
+                payload.model,
+                outcome,
+                _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
+            )
+            account_model_replay_attempted = True
+            last_account_model_rejection = exc
+            last_account_model_rejection_account_id = account.id
+            await _release_tracked_stream_lease(current_account_lease)
+            current_account_lease = None
+            if not _move_verified_fresh_replay_from_owner(
+                account_id=account.id,
+                outcome=outcome,
+            ):
+                excluded_account_ids.add(account.id)
+                affinity = replace(affinity, reallocate_sticky=True)
+            return True
 
         try:
             if payload.previous_response_id is not None:
@@ -804,6 +910,14 @@ class _StreamingRetryMixin:
                             continue
                     break
                 if not account:
+                    if last_account_model_rejection is not None:
+                        if propagate_http_errors:
+                            raise last_account_model_rejection
+                        yield await _render_account_model_rejection(
+                            last_account_model_rejection,
+                            account_id=last_account_model_rejection_account_id,
+                        )
+                        return
                     if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
                         no_accounts_msg = selection.error_message or "Local account capacity is exhausted"
                         error_code = selection.error_code
@@ -986,6 +1100,16 @@ class _StreamingRetryMixin:
                     return
 
                 account_id_value = account.id
+                if last_account_model_rejection is not None and account.id != last_account_model_rejection_account_id:
+                    # The original 400 is only the fallback when account
+                    # selection cannot produce a replacement. Once this
+                    # replacement attempt starts, its own failure is the one
+                    # that must reach the client. Keep the separate replay
+                    # budget so another account/model rejection cannot trigger
+                    # a second transparent replay.
+                    account_model_replacement_account_id = account.id
+                    last_account_model_rejection = None
+                    last_account_model_rejection_account_id = None
                 if (
                     require_preferred_account
                     and preferred_account_id is not None
@@ -1093,6 +1217,7 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        selected_account_model_replacement = account.id == account_model_replacement_account_id
                         if isinstance(exc, RefreshError):
                             if exc.is_permanent:
                                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
@@ -1105,7 +1230,8 @@ class _StreamingRetryMixin:
                                 # duration of the replacement stream.
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                continue
+                                if not selected_account_model_replacement:
+                                    continue
                             if is_transient_refresh_contention(exc):
                                 # Transient CROSS-REPLICA refresh contention: benign
                                 # claim contention (the account's refresh claim is
@@ -1124,7 +1250,11 @@ class _StreamingRetryMixin:
                                         exc.code,
                                         account.id,
                                     )
-                                if not require_preferred_account and preferred_account_id is None:
+                                if (
+                                    not selected_account_model_replacement
+                                    and not require_preferred_account
+                                    and preferred_account_id is None
+                                ):
                                     # Movable request: release the stream lease and
                                     # fail over to a different account instead of
                                     # reselecting the same one until attempts are
@@ -1187,7 +1317,7 @@ class _StreamingRetryMixin:
                                 )
                                 yield format_sse_event(event)
                                 return
-                            if not exc.transport_error:
+                            if not exc.transport_error and not selected_account_model_replacement:
                                 # Non-transport, non-permanent RefreshError: release
                                 # the stream lease and reselect (its prior behavior).
                                 await _release_tracked_stream_lease(current_account_lease)
@@ -1210,7 +1340,8 @@ class _StreamingRetryMixin:
                         )
                         message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
                         if (
-                            _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
+                            not selected_account_model_replacement
+                            and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                             and attempt + 1 < max_attempts
                             and _move_verified_fresh_replay_from_owner(
                                 account_id=account.id,
@@ -1231,7 +1362,8 @@ class _StreamingRetryMixin:
                             )
                             continue
                         if (
-                            not require_preferred_account
+                            not selected_account_model_replacement
+                            and not require_preferred_account
                             and preferred_account_id is None
                             and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                             and attempt + 1 < max_attempts
@@ -1360,6 +1492,23 @@ class _StreamingRetryMixin:
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
+                            if account.id == account_model_replacement_account_id:
+                                # Account/model routing gets exactly one selected
+                                # replacement.  Its own pre-visible 5xx/transport
+                                # failure is terminal; allowing the normal
+                                # transient path here would silently select a third
+                                # account.  Re-raise into the outer terminal
+                                # renderer to retain the replacement details.
+                                if isinstance(tex, ProxyResponseError):
+                                    raise
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        tex.code,
+                                        str(tex.error.get("message") or "Upstream error"),
+                                        error_type="server_error",
+                                    ),
+                                ) from tex
                             if settlement.downstream_visible:
                                 failed_response_id = settlement.response_id or request_id
                                 if isinstance(tex, ProxyResponseError):
@@ -1434,6 +1583,19 @@ class _StreamingRetryMixin:
                                     error.type if error else None,
                                 )
                                 error_message = error.message if error else None
+                                account_model_retry = await _retry_account_model_rejection(
+                                    tex,
+                                    account,
+                                    outcome="previsible",
+                                )
+                                if account_model_retry is not None:
+                                    if not account_model_retry:
+                                        raise
+                                    # Leaving the same-account loop reaches
+                                    # the outer account-selection ``continue``
+                                    # below, where the rejected account is
+                                    # already excluded by the helper.
+                                    break
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
                                     if (
                                         account.security_work_authorized
@@ -1690,6 +1852,18 @@ class _StreamingRetryMixin:
                     if _facade()._is_proxy_budget_exhausted_error(exc):
                         await _settle_process_network_budget_exhaustion(account, settlement)
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
+                        return
+                    account_model_retry = await _retry_account_model_rejection(
+                        exc,
+                        account,
+                        outcome="outer_proxy_error",
+                    )
+                    if account_model_retry:
+                        continue
+                    if account_model_retry is False:
+                        if propagate_http_errors:
+                            raise
+                        yield await _render_account_model_rejection(exc, account_id=account.id)
                         return
                     if exc.status_code == 401:
                         remaining_budget = _facade()._remaining_budget_seconds(deadline)
@@ -1981,6 +2155,21 @@ class _StreamingRetryMixin:
                                 error.code if error else None,
                                 error.type if error else None,
                             )
+                            account_model_retry = await _retry_account_model_rejection(
+                                retry_exc,
+                                account,
+                                outcome="post_refresh",
+                            )
+                            if account_model_retry:
+                                continue
+                            if account_model_retry is False:
+                                if propagate_http_errors:
+                                    raise
+                                yield await _render_account_model_rejection(
+                                    retry_exc,
+                                    account_id=account.id,
+                                )
+                                return
                             if error_code == "account_response_create_cap":
                                 last_transient_exc = retry_exc
                                 if can_try_other_account:
@@ -2132,6 +2321,14 @@ class _StreamingRetryMixin:
                     return
             # When HTTP error propagation is enabled and the last failure was
             # a transient 500, re-raise to preserve the upstream status/payload.
+            if last_account_model_rejection is not None:
+                if propagate_http_errors:
+                    raise last_account_model_rejection
+                yield await _render_account_model_rejection(
+                    last_account_model_rejection,
+                    account_id=last_account_model_rejection_account_id,
+                )
+                return
             if propagate_http_errors and last_transient_exc is not None:
                 raise last_transient_exc
             if last_retryable_stream_error is not None:

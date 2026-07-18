@@ -24,6 +24,9 @@ class DashboardSettingsData:
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str
+    show_reset_credit_badges: bool
+    auto_redeem_reset_credits_before_expiry: bool
+    show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -55,6 +58,10 @@ class DashboardSettingsData:
     guest_access_enabled: bool
     guest_password_configured: bool
     limit_warmup_staggered_idle_enabled: bool
+    request_log_retention_days: int
+    usage_history_retention_days: int
+    request_log_retention_override_days: int | None
+    usage_history_retention_override_days: int | None
     version: int
 
 
@@ -71,6 +78,9 @@ class DashboardSettingsUpdateData:
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str
+    show_reset_credit_badges: bool
+    auto_redeem_reset_credits_before_expiry: bool
+    show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -100,6 +110,12 @@ class DashboardSettingsUpdateData:
     weekly_pace_smoothing_minutes: int
     guest_access_enabled: bool
     limit_warmup_staggered_idle_enabled: bool
+    # Tri-state retention overrides: value set = store, clear flag = reset to
+    # NULL (inherit the deprecated env alias), neither = leave untouched.
+    request_log_retention_override_days: int | None
+    usage_history_retention_override_days: int | None
+    clear_request_log_retention_override: bool
+    clear_usage_history_retention_override: bool
 
 
 class SettingsService:
@@ -124,6 +140,9 @@ class SettingsService:
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+            show_reset_credit_badges=row.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
@@ -159,6 +178,10 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
+            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_override_days=row.request_log_retention_days,
+            usage_history_retention_override_days=row.usage_history_retention_days,
             version=row.version,
         )
 
@@ -184,6 +207,9 @@ class SettingsService:
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=payload.prefer_earlier_reset_window,
+            show_reset_credit_badges=payload.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=payload.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=payload.show_reset_credit_expiry_badge,
             routing_strategy=payload.routing_strategy,
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
@@ -217,6 +243,10 @@ class SettingsService:
             weekly_pace_smoothing_minutes=payload.weekly_pace_smoothing_minutes,
             guest_access_enabled=payload.guest_access_enabled,
             limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
+            request_log_retention_days=payload.request_log_retention_override_days,
+            usage_history_retention_days=payload.usage_history_retention_override_days,
+            clear_request_log_retention=payload.clear_request_log_retention_override,
+            clear_usage_history_retention=payload.clear_usage_history_retention_override,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -234,6 +264,9 @@ class SettingsService:
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+            show_reset_credit_badges=row.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
@@ -269,6 +302,10 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            request_log_retention_days=_effective_request_log_retention(row.request_log_retention_days),
+            usage_history_retention_days=_effective_usage_history_retention(row.usage_history_retention_days),
+            request_log_retention_override_days=row.request_log_retention_days,
+            usage_history_retention_override_days=row.usage_history_retention_days,
             version=row.version,
         )
 
@@ -286,6 +323,15 @@ def _effective_stream_limit(value: int | None) -> int:
 
 def _effective_stream_recovery_reserve(value: int | None) -> int:
     return get_settings().proxy_account_stream_recovery_reserve if value is None else value
+
+
+def _effective_request_log_retention(value: int | None) -> int:
+    # Dashboard value (non-NULL) wins; the deprecated env alias applies while unset.
+    return get_settings().request_log_retention_days if value is None else value
+
+
+def _effective_usage_history_retention(value: int | None) -> int:
+    return get_settings().usage_history_retention_days if value is None else value
 
 
 def _normalize_additional_quota_key(raw_quota_key: str) -> str | None:

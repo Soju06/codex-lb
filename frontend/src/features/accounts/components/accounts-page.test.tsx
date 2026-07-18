@@ -39,6 +39,15 @@ vi.mock("@/features/accounts/hooks/use-oauth", () => ({
 }));
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
+  useSettings: vi.fn(() => ({
+    settingsQuery: {
+      data: {
+        showResetCreditBadges: true,
+        showResetCreditExpiryBadge: true,
+      },
+      error: null,
+    },
+  })),
   useUpstreamProxyAdmin: vi.fn(() => ({
     upstreamProxyQuery: { data: null, error: null },
     accountBindingMutation: {

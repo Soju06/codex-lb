@@ -30,6 +30,7 @@ from app.db.models import Account, AccountStatus
 from app.modules.rate_limit_reset_credits import api as reset_credits_api
 from app.modules.rate_limit_reset_credits.api import (
     ConsumeResetCreditResponseSchema,
+    ResetCreditRedeemRequestAlreadyPinned,
     _assert_account_can_redeem_reset_credit,
     _build_refresh_usage_callback,
     _redeem_soonest_reset_credit,
@@ -450,6 +451,30 @@ async def test_redeem_retries_same_request_id_after_local_credit_vanishes_with_d
 
 
 @pytest.mark.asyncio
+async def test_redeem_skip_if_request_pinned_avoids_upstream_retry(
+    fake_redeem_ledger: dict[tuple[str, str], str],
+) -> None:
+    store = RateLimitResetCreditsStore()
+    fake_redeem_ledger[("acc_1", "auto-id")] = "cached"
+    await store.set("acc_1", _snapshot([_credit("cached")], available_count=1))
+
+    with pytest.raises(ResetCreditRedeemRequestAlreadyPinned) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_raise_not_called,  # type: ignore[arg-type]
+            consume_fn=_raise_not_called,  # type: ignore[arg-type]
+            redeem_request_id="auto-id",
+            skip_if_redeem_request_pinned=True,
+        )
+
+    assert excinfo.value.account_id == "acc_1"
+    assert excinfo.value.credit_id == "cached"
+    assert fake_redeem_ledger == {("acc_1", "auto-id"): "cached"}
+
+
+@pytest.mark.asyncio
 async def test_redeem_retries_same_request_id_after_local_credit_vanishes(
     fake_redeem_ledger: dict[tuple[str, str], str],
 ) -> None:
@@ -634,6 +659,94 @@ async def test_redeem_consumes_fresh_available_credit_when_cached_credit_disappe
     assert result.available_count_before == 1
     assert result.available_count_after == 0
     assert store.get("acc_1") is None
+
+
+@pytest.mark.asyncio
+async def test_redeem_expected_credit_id_does_not_retarget_other_fresh_credit(
+    fake_redeem_ledger: dict[tuple[str, str], str],
+) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("target")], available_count=1))
+    consume_calls: list[str] = []
+    fresh_response = _response([_credit("later", expires_at="2026-08-01T00:00:00Z")], available_count=1)
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        consume_calls.append(credit_id)
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 1,
+            }
+        )
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(fresh_response),
+            consume_fn=consume_fn,
+            redeem_request_id="auto-id",
+            expected_credit_id="target",
+            expected_credit_expires_at=datetime(2026, 7, 12),
+        )
+
+    assert excinfo.value.code == "no_available_reset_credit"
+    assert consume_calls == []
+    assert fake_redeem_ledger == {}
+    snapshot = store.get("acc_1")
+    assert snapshot is not None
+    assert [credit.id for credit in snapshot.credits] == ["later"]
+
+
+@pytest.mark.asyncio
+async def test_redeem_expected_credit_expiry_change_does_not_consume(
+    fake_redeem_ledger: dict[tuple[str, str], str],
+) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("target")], available_count=1))
+    consume_calls: list[str] = []
+    fresh_response = _response([_credit("target", expires_at="2026-08-01T00:00:00Z")], available_count=1)
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        consume_calls.append(credit_id)
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 1,
+            }
+        )
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(fresh_response),
+            consume_fn=consume_fn,
+            redeem_request_id="auto-id",
+            expected_credit_id="target",
+            expected_credit_expires_at=datetime(2026, 7, 12),
+        )
+
+    assert excinfo.value.code == "target_reset_credit_changed"
+    assert consume_calls == []
+    assert fake_redeem_ledger == {}
+    snapshot = store.get("acc_1")
+    assert snapshot is not None
+    assert [credit.id for credit in snapshot.credits] == ["target"]
 
 
 @pytest.mark.asyncio

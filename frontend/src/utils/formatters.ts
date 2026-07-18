@@ -1,52 +1,93 @@
 import { RESET_ERROR_LABEL } from "@/utils/constants";
 import { getTimeFormatPreference, type TimeFormatPreference } from "@/hooks/use-time-format";
+import i18n from "@/i18n";
 
-const numberFormatter = new Intl.NumberFormat("en-US");
-const compactFormatter = new Intl.NumberFormat("en-US", {
-  notation: "compact",
-  maximumFractionDigits: 2,
-});
-const currencyFormatter = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-const dateFormatter = new Intl.DateTimeFormat("en-US", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-const timeFormatterMap: Record<TimeFormatPreference, Intl.DateTimeFormat> = {
-  "12h": new Intl.DateTimeFormat("en-US", {
+function t(key: string, options?: Record<string, unknown>): string {
+  return i18n.t(key, options);
+}
+
+function getIntlLocale(): string {
+  const language = (i18n.resolvedLanguage ?? i18n.language ?? "en").toLowerCase();
+  if (language.startsWith("ko")) {
+    return "ko-KR";
+  }
+  if (language.startsWith("zh")) {
+    return "zh-CN";
+  }
+  return "en-US";
+}
+
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+const compactFormatters = new Map<string, Intl.NumberFormat>();
+const currencyFormatters = new Map<string, Intl.NumberFormat>();
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+const chartDateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function getCachedFormatter<TFormatter>(
+  cache: Map<string, TFormatter>,
+  key: string,
+  create: () => TFormatter,
+): TFormatter {
+  const cached = cache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const formatter = create();
+  cache.set(key, formatter);
+  return formatter;
+}
+
+function getNumberFormatter(): Intl.NumberFormat {
+  const locale = getIntlLocale();
+  return getCachedFormatter(numberFormatters, locale, () => new Intl.NumberFormat(locale));
+}
+
+function getCompactFormatter(): Intl.NumberFormat {
+  const locale = getIntlLocale();
+  return getCachedFormatter(compactFormatters, locale, () => new Intl.NumberFormat(locale, {
+    notation: "compact",
+    maximumFractionDigits: 2,
+  }));
+}
+
+function getCurrencyFormatter(): Intl.NumberFormat {
+  const locale = getIntlLocale();
+  return getCachedFormatter(currencyFormatters, locale, () => new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }));
+}
+
+function getDateFormatter(): Intl.DateTimeFormat {
+  const locale = getIntlLocale();
+  return getCachedFormatter(dateFormatters, locale, () => new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }));
+}
+
+function createTimeFormatter(locale: string, preference: TimeFormatPreference): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hourCycle: "h12",
-  }),
-  "24h": new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }),
-};
-const chartDateTimeFormatterMap: Record<TimeFormatPreference, Intl.DateTimeFormat> = {
-  "12h": new Intl.DateTimeFormat("en-US", {
+    hourCycle: preference === "12h" ? "h12" : "h23",
+  });
+}
+
+function createChartDateTimeFormatter(locale: string, preference: TimeFormatPreference): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hourCycle: "h12",
-  }),
-  "24h": new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }),
-};
+    hourCycle: preference === "12h" ? "h12" : "h23",
+  });
+}
 
 export type FormattedDateTime = {
   time: string;
@@ -54,11 +95,19 @@ export type FormattedDateTime = {
 };
 
 function getTimeFormatter(): Intl.DateTimeFormat {
-  return timeFormatterMap[getTimeFormatPreference()];
+  const locale = getIntlLocale();
+  const preference = getTimeFormatPreference();
+  return getCachedFormatter(timeFormatters, `${locale}:${preference}`, () => createTimeFormatter(locale, preference));
 }
 
 function getChartDateTimeFormatter(): Intl.DateTimeFormat {
-  return chartDateTimeFormatterMap[getTimeFormatPreference()];
+  const locale = getIntlLocale();
+  const preference = getTimeFormatPreference();
+  return getCachedFormatter(
+    chartDateTimeFormatters,
+    `${locale}:${preference}`,
+    () => createChartDateTimeFormatter(locale, preference),
+  );
 }
 
 type TokenState = {
@@ -103,17 +152,17 @@ export function parseDate(iso: string | null | undefined): Date | null {
 
 export function formatNumber(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : numberFormatter.format(numeric);
+  return numeric === null ? "--" : getNumberFormatter().format(numeric);
 }
 
 export function formatCompactNumber(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : compactFormatter.format(numeric);
+  return numeric === null ? "--" : getCompactFormatter().format(numeric);
 }
 
 export function formatCurrency(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : currencyFormatter.format(numeric);
+  return numeric === null ? "--" : getCurrencyFormatter().format(numeric);
 }
 
 export function formatPercent(value: unknown): string {
@@ -182,17 +231,23 @@ export function formatTokensWithCached(totalTokens: unknown, cachedInputTokens: 
   if (cached === null || cached <= 0) {
     return formatCompactNumber(total);
   }
-  return `${formatCompactNumber(total)} (${formatCompactNumber(cached)} Cached)`;
+  return t("formatters.cachedTokensInline", {
+    total: formatCompactNumber(total),
+    cached: formatCompactNumber(cached),
+  });
 }
 
 export function formatCachedTokensMeta(totalTokens: unknown, cachedInputTokens: unknown): string {
   const total = toNumber(totalTokens);
   const cached = toNumber(cachedInputTokens);
   if (total === null || total <= 0 || cached === null || cached <= 0) {
-    return "Cached: --";
+    return t("formatters.cachedTokensMetaEmpty");
   }
   const percent = Math.min(100, Math.max(0, (cached / total) * 100));
-  return `Cached: ${formatCompactNumber(cached)} (${Math.round(percent)}%)`;
+  return t("formatters.cachedTokensMeta", {
+    cached: formatCompactNumber(cached),
+    percent: Math.round(percent),
+  });
 }
 
 export function formatModelLabel(
@@ -217,7 +272,7 @@ export function formatTimeLong(iso: string | null | undefined): FormattedDateTim
   }
   return {
     time: getTimeFormatter().format(date),
-    date: dateFormatter.format(date),
+    date: getDateFormatter().format(date),
   };
 }
 
@@ -256,36 +311,40 @@ export function formatElapsed(ms: number | null | undefined): string {
 export function formatRelative(ms: number): string {
   const minutes = Math.ceil(ms / 60_000);
   if (minutes < 60) {
-    return `in ${minutes}m`;
+    return t("formatters.relative.minutes", { count: minutes });
   }
   const hours = Math.ceil(minutes / 60);
   if (hours < 24) {
-    return `in ${hours}h`;
+    return t("formatters.relative.hours", { count: hours });
   }
   const days = Math.ceil(hours / 24);
-  return `in ${days}d`;
+  return t("formatters.relative.days", { count: days });
 }
 
 export function formatResetRelative(ms: number): string {
   if (ms <= 60_000) {
-    return "in 1m";
+    return t("formatters.relative.minutes", { count: 1 });
   }
 
   const totalMinutes = Math.floor(ms / 60_000);
   if (totalMinutes < 60) {
-    return `in ${totalMinutes}m`;
+    return t("formatters.relative.minutes", { count: totalMinutes });
   }
 
   if (totalMinutes < 1440) {
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
-    return minutes > 0 ? `in ${hours}h ${minutes}m` : `in ${hours}h`;
+    return minutes > 0
+      ? t("formatters.relative.hoursMinutes", { hours, minutes })
+      : t("formatters.relative.hours", { count: hours });
   }
 
   const totalHours = Math.floor(ms / 3_600_000);
   const days = Math.floor(totalHours / 24);
   const hours = totalHours % 24;
-  return hours > 0 ? `in ${days}d ${hours}h` : `in ${days}d`;
+  return hours > 0
+    ? t("formatters.relative.daysHours", { days, hours })
+    : t("formatters.relative.days", { count: days });
 }
 
 export function formatCountdown(seconds: number): string {
@@ -302,7 +361,7 @@ export function formatQuotaResetLabel(resetAt: string | null | undefined): strin
   }
   const diffMs = date.getTime() - Date.now();
   if (diffMs <= 0) {
-    return "now";
+    return t("formatters.now");
   }
   return formatResetRelative(diffMs);
 }
@@ -320,7 +379,7 @@ export type SingleUnitRemaining = {
 export function formatSingleUnitRemaining(expiresAtIso: string): SingleUnitRemaining {
   const ms = new Date(expiresAtIso).getTime() - Date.now();
   if (ms <= 0) {
-    return { label: "now", expiringSoon: true };
+    return { label: t("formatters.now"), expiringSoon: true };
   }
   const days = Math.floor(ms / DAY_MS);
   const hours = Math.floor(ms / HOUR_MS);
@@ -332,7 +391,7 @@ export function formatSingleUnitRemaining(expiresAtIso: string): SingleUnitRemai
         ? `${hours}h`
         : minutes >= 1
           ? `${minutes}m`
-          : "now";
+          : t("formatters.now");
   return { label, expiringSoon: ms < EXPIRING_SOON_THRESHOLD_MS };
 }
 
@@ -343,9 +402,9 @@ export function formatQuotaResetMeta(
   const labelSecondary = formatQuotaResetLabel(resetAtSecondary);
   const windowSecondary = formatWindowLabel("secondary", windowMinutesSecondary);
   if (labelSecondary === RESET_ERROR_LABEL) {
-    return "Quota reset unavailable";
+    return t("formatters.quotaResetUnavailable");
   }
-  return `Quota reset (${windowSecondary}) · ${labelSecondary}`;
+  return t("formatters.quotaResetMeta", { window: windowSecondary, label: labelSecondary });
 }
 
 export function truncateText(value: unknown, maxLen = 80): string {
@@ -365,34 +424,34 @@ export function truncateText(value: unknown, maxLen = 80): string {
 export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefined): string {
   const expiresAt = auth?.access?.expiresAt;
   if (!expiresAt) {
-    return "Missing";
+    return t("formatters.token.missing");
   }
   const expiresDate = parseDate(expiresAt);
   if (!expiresDate) {
-    return "Unknown";
+    return t("formatters.token.unknown");
   }
   const diffMs = expiresDate.getTime() - Date.now();
   if (diffMs <= 0) {
-    return "Expired";
+    return t("formatters.token.expired");
   }
-  return `Valid (${formatRelative(diffMs)})`;
+  return t("formatters.token.valid", { relative: formatRelative(diffMs) });
 }
 
 export function formatRefreshTokenLabel(auth: AccountAuthStatus | null | undefined): string {
   const state = auth?.refresh?.state;
   const labelMap: Record<string, string> = {
-    stored: "Stored",
-    missing: "Missing",
-    expired: "Expired",
+    stored: t("formatters.token.stored"),
+    missing: t("formatters.token.missing"),
+    expired: t("formatters.token.expired"),
   };
-  return state && labelMap[state] ? labelMap[state] : "Unknown";
+  return state && labelMap[state] ? labelMap[state] : t("formatters.token.unknown");
 }
 
 export function formatIdTokenLabel(auth: AccountAuthStatus | null | undefined): string {
   const state = auth?.idToken?.state;
   const labelMap: Record<string, string> = {
-    parsed: "Parsed",
-    unknown: "Unknown",
+    parsed: t("formatters.token.parsed"),
+    unknown: t("formatters.token.unknown"),
   };
-  return state && labelMap[state] ? labelMap[state] : "Unknown";
+  return state && labelMap[state] ? labelMap[state] : t("formatters.token.unknown");
 }

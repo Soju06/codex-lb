@@ -7,6 +7,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { lazy, Suspense, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import {
@@ -71,6 +72,7 @@ export function ApiDetail({
 	onRegenerate,
 	onToggleActive,
 }: ApiDetailProps) {
+	const { t } = useTranslation();
 	const [showAccumulated, setShowAccumulated] = useState(false);
 
 	const chartData = useMemo(() => {
@@ -94,10 +96,10 @@ export function ApiDetail({
 
 	const usageMessage = useMemo(() => {
 		if (usage7Day) return null;
-		if (usage7DayLoading) return "Loading 7-day usage...";
-		if (usage7DayError) return "7-day usage unavailable";
+		if (usage7DayLoading) return t("apis.detail.loadingUsage");
+		if (usage7DayError) return t("apis.detail.usageUnavailable");
 		return null;
-	}, [usage7Day, usage7DayError, usage7DayLoading]);
+	}, [t, usage7Day, usage7DayError, usage7DayLoading]);
 
 	const hasDonutData = usage7Day && usage7Day.accountCosts.length > 0;
 	const hasTrends = trends && (trends.cost.length > 0 || trends.tokens.length > 0);
@@ -109,10 +111,10 @@ export function ApiDetail({
 					<KeyRound className="h-5 w-5 text-muted-foreground" />
 				</div>
 				<p className="mt-3 text-sm font-medium text-muted-foreground">
-					Select an API key
+					{t("apis.detail.emptyTitle")}
 				</p>
 				<p className="mt-1 text-xs text-muted-foreground/70">
-					Choose an API key from the list to view details.
+					{t("apis.detail.emptyDescription")}
 				</p>
 			</div>
 		);
@@ -134,17 +136,17 @@ export function ApiDetail({
 							disabled={busy}
 						>
 							<Ellipsis className="size-4" />
-							<span className="sr-only">Actions</span>
+							<span className="sr-only">{t("apiKeys.table.actions")}</span>
 						</Button>
 					</DropdownMenuTrigger>
 					<DropdownMenuContent align="end">
 						<DropdownMenuItem onClick={() => onEdit(apiKey)}>
 							<Pencil className="size-4" />
-							Edit
+							{t("common.actions.edit")}
 						</DropdownMenuItem>
 						<DropdownMenuItem onClick={() => onRegenerate(apiKey)}>
 							<RefreshCw className="size-4" />
-							Regenerate
+							{t("common.actions.regenerate")}
 						</DropdownMenuItem>
 					</DropdownMenuContent>
 				</DropdownMenu>
@@ -176,22 +178,22 @@ export function ApiDetail({
 						>
 							<div className="mb-3 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
 								<div>
-									<h3 className="text-sm font-semibold">Usage Trend</h3>
-									<p className="text-xs text-muted-foreground">7-day token and cost activity</p>
+										<h3 className="text-sm font-semibold">{t("apis.detail.usageTrend")}</h3>
+										<p className="text-xs text-muted-foreground">{t("apis.detail.usageTrendDescription")}</p>
 								</div>
 								<div className="flex flex-wrap items-center justify-start gap-3 md:justify-end">
 									<div className="flex items-center gap-3 text-[10px] text-muted-foreground" data-testid="api-trend-legend">
 										<span className="flex items-center gap-1.5">
-											Tokens
+												{t("apiKeys.limitTypes.total_tokens")}
 											<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
 										</span>
 										<span className="flex items-center gap-1.5">
-											Cost
+												{t("apiKeys.limitTypes.cost_usd")}
 											<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
 										</span>
 									</div>
 									<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
-										<span id="api-trend-accumulated-label" className="text-[10px]">Accumulated</span>
+											<span id="api-trend-accumulated-label" className="text-[10px]">{t("apis.detail.accumulated")}</span>
 										<Switch
 											size="sm"
 											aria-labelledby="api-trend-accumulated-label"
@@ -233,7 +235,7 @@ export function ApiDetail({
 						disabled={busy}
 					>
 						<Ellipsis className="h-3.5 w-3.5" />
-						Disable
+							{t("common.actions.disable")}
 					</Button>
 				) : (
 					<Button
@@ -244,7 +246,7 @@ export function ApiDetail({
 						disabled={busy}
 					>
 						<Play className="h-3.5 w-3.5" />
-						Enable
+							{t("common.actions.enable")}
 					</Button>
 				)}
 				<Button
@@ -256,7 +258,7 @@ export function ApiDetail({
 					disabled={busy}
 				>
 					<Trash2 className="h-3.5 w-3.5" />
-					Delete
+					{t("common.actions.delete")}
 				</Button>
 			</div>
 		</div>

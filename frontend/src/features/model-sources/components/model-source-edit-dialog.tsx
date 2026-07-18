@@ -1,6 +1,7 @@
 import { useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,10 +15,10 @@ import {
 import { Form } from "@/components/ui/form";
 import { ModelSourceFormFields } from "@/features/model-sources/components/model-source-form-fields";
 import {
+  createModelSourceFormSchema,
   draftFromSource,
   modelIdsToInput,
   modelSourceDraftReducer,
-  modelSourceFormSchema,
   type ModelSourceDraft,
   type ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
@@ -177,8 +178,9 @@ type ModelSourceEditFormProps = {
 };
 
 function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEditFormProps) {
+  const { t } = useTranslation();
   const form = useForm<ModelSourceFormValues>({
-    resolver: zodResolver(modelSourceFormSchema),
+    resolver: zodResolver(createModelSourceFormSchema(t)),
     defaultValues: {
       name: source.name,
       baseUrl: source.baseUrl,
@@ -234,12 +236,12 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
           control={form.control}
           draft={draft}
           updateDraft={updateDraft}
-          apiKeyLabel="Upstream API key"
-          apiKeyPlaceholder="Leave blank to keep current key"
+	          apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
+	          apiKeyPlaceholder={t("modelSources.editDialog.keepCurrentKey")}
         />
         <DialogFooter>
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
-            Save
+	            {t("common.actions.save")}
           </Button>
         </DialogFooter>
       </form>
@@ -254,12 +256,13 @@ export function ModelSourceEditDialog({
   onOpenChange,
   onSubmit,
 }: ModelSourceEditDialogProps) {
+  const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Edit model source</DialogTitle>
-          <DialogDescription>Update the endpoint, models, pricing, and capabilities.</DialogDescription>
+	          <DialogTitle>{t("modelSources.editDialog.title")}</DialogTitle>
+	          <DialogDescription>{t("modelSources.editDialog.description")}</DialogDescription>
         </DialogHeader>
 
         {source ? (
@@ -271,7 +274,7 @@ export function ModelSourceEditDialog({
             onClose={() => onOpenChange(false)}
           />
         ) : (
-          <p className="text-sm text-muted-foreground">Select a model source to edit.</p>
+	          <p className="text-sm text-muted-foreground">{t("modelSources.editDialog.selectSource")}</p>
         )}
       </DialogContent>
     </Dialog>

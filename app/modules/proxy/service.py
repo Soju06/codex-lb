@@ -231,7 +231,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_prewarm_canary_bucket as _http_bridge_prewarm_canary_bucket,
+    _http_bridge_prewarm_enabled as _http_bridge_prewarm_enabled,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_budget_seconds as _http_bridge_request_budget_seconds,

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select
 
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
@@ -19,16 +21,49 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 10_000
 
 
+@dataclass(frozen=True, slots=True)
+class EffectiveRetention:
+    request_log_days: int
+    usage_history_days: int
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.request_log_days or self.usage_history_days)
+
+
+async def get_effective_retention() -> EffectiveRetention:
+    """Resolve the retention windows with dashboard-first precedence.
+
+    A non-NULL dashboard value (SettingsCache-backed, so a dashboard change
+    takes effect without restart) wins; while the dashboard value is unset the
+    deprecated env alias applies; 0 means disabled at either layer.
+    """
+    env = get_settings()
+    dashboard = await get_settings_cache().get()
+    return EffectiveRetention(
+        request_log_days=(
+            env.request_log_retention_days
+            if dashboard.request_log_retention_days is None
+            else dashboard.request_log_retention_days
+        ),
+        usage_history_days=(
+            env.usage_history_retention_days
+            if dashboard.usage_history_retention_days is None
+            else dashboard.usage_history_retention_days
+        ),
+    )
+
+
 async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
-    """Prune aged rows per the retention settings. Returns rows deleted per table."""
-    settings = get_settings()
+    """Prune aged rows per the effective retention settings. Returns rows deleted per table."""
+    retention = await get_effective_retention()
     now = now or utcnow()
     deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
-    if settings.request_log_retention_days:
-        cutoff = now - timedelta(days=settings.request_log_retention_days)
+    if retention.request_log_days:
+        cutoff = now - timedelta(days=retention.request_log_days)
         deleted["request_logs"] = await _prune_request_logs(cutoff, now=now)
-    if settings.usage_history_retention_days:
-        cutoff = now - timedelta(days=settings.usage_history_retention_days)
+    if retention.usage_history_days:
+        cutoff = now - timedelta(days=retention.usage_history_days)
         deleted["usage_history"] = await _prune_usage_history(cutoff)
         deleted["additional_usage_history"] = await _prune_additional_usage_history(cutoff)
     total = sum(deleted.values())

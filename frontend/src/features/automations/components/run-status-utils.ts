@@ -1,3 +1,5 @@
+import type { TFunction } from "i18next";
+
 import type { AutomationRunStatus } from "@/features/automations/schemas";
 
 function statusVariant(
@@ -18,11 +20,12 @@ function statusVariant(
 export function formatRunStatusLabel(
   value: AutomationRunStatus,
   pendingAccounts?: number | null,
+  t?: TFunction,
 ): string {
   if (value === "running" && (pendingAccounts ?? 0) > 0) {
-    return "in progress";
+    return t ? t("automations.statuses.inProgress") : "in progress";
   }
-  return value;
+  return t ? t(`automations.statuses.${value}`, { defaultValue: value }) : value;
 }
 
 export function runStatusVariant(
@@ -39,4 +42,3 @@ export function accountStateBadgeVariant(
   }
   return statusVariant(value);
 }
-

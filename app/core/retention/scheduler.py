@@ -8,8 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
 
-from app.core.config.settings import get_settings
-from app.core.retention.job import run_retention_pass
+from app.core.retention.job import get_effective_retention, run_retention_pass
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +29,21 @@ def _get_leader_election() -> _LeaderElectionLike:
 
 @dataclass(slots=True)
 class DataRetentionScheduler:
+    """Always-on hourly tick that re-resolves the effective retention.
+
+    Retention is a runtime (dashboard) setting, so enablement cannot be
+    frozen at startup: each tick reads the SettingsCache-backed effective
+    configuration and skips (before leader election) while retention is
+    disabled. The pass itself stays gated behind the heartbeat-renewed
+    ``run_if_leader`` so at most one instance prunes at a time.
+    """
+
     interval_seconds: int
-    enabled: bool
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def start(self) -> None:
-        if not self.enabled:
-            return
         if self._task and not self._task.done():
             return
         self._stop.clear()
@@ -62,6 +67,13 @@ class DataRetentionScheduler:
                 continue
 
     async def _prune_once(self) -> None:
+        try:
+            retention = await get_effective_retention()
+        except Exception:
+            logger.exception("Failed to resolve effective data retention settings")
+            return
+        if not retention.enabled:
+            return
         await _get_leader_election().run_if_leader(self._prune_as_leader)
 
     async def _prune_as_leader(self) -> None:
@@ -73,8 +85,4 @@ class DataRetentionScheduler:
 
 
 def build_data_retention_scheduler() -> DataRetentionScheduler:
-    settings = get_settings()
-    return DataRetentionScheduler(
-        interval_seconds=RETENTION_INTERVAL_SECONDS,
-        enabled=bool(settings.request_log_retention_days or settings.usage_history_retention_days),
-    )
+    return DataRetentionScheduler(interval_seconds=RETENTION_INTERVAL_SECONDS)

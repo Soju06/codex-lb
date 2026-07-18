@@ -56,44 +56,9 @@ jobs:
       - name: Detect file changes
         id: filter
         if: steps.force.outputs.full_suite != 'true'
-        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706
-        with:
-          filters: |
-            frontend:
-              - 'frontend/**'
-              - 'Makefile'
-              - '.github/workflows/ci.yml'
-            backend:
-              - '.github/scripts/**'
-              - 'app/**'
-              - 'tests/**'
-              - 'config/**'
-              - 'scripts/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - 'Makefile'
-              - '.github/workflows/ci.yml'
-            helm:
-              - 'deploy/helm/**'
-              - 'Makefile'
-              - '.github/workflows/ci.yml'
-            docker:
-              - 'Dockerfile'
-              - 'Dockerfile.*'
-              - '.dockerignore'
-              - 'docker-compose*.yml'
-              - 'app/**'
-              - 'config/**'
-              - 'frontend/**'
-              - 'scripts/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.github/workflows/ci.yml'
-            migrations:
-              - 'app/db/alembic/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.github/workflows/ci.yml'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/detect_changed_areas.py
 
   contributors:
     name: Contributors attribution

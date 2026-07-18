@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { ChevronsUpDown, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,21 +21,22 @@ export type ModelSourceMultiSelectProps = {
   placeholder?: string;
 };
 
-function sourceSubtitle(source: ModelSource): string {
+function sourceSubtitle(source: ModelSource, t: ReturnType<typeof useTranslation>["t"]): string {
   const protocols = [
     source.supportsChatCompletions ? "chat" : null,
     source.supportsResponses ? "responses" : null,
     source.supportsAudioTranscriptions ? "audio" : null,
   ].filter(Boolean);
-  const count = `${source.models.length} model${source.models.length === 1 ? "" : "s"}`;
-  return `${count} · ${protocols.join(", ") || "disabled"}`;
+  const count = t("modelSources.selector.modelCount", { count: source.models.length });
+  return `${count} · ${protocols.join(", ") || t("common.states.disabled")}`;
 }
 
 export function ModelSourceMultiSelect({
   value,
   onChange,
-  placeholder = "All model sources",
+  placeholder,
 }: ModelSourceMultiSelectProps) {
+  const { t } = useTranslation();
   const { modelSourcesQuery } = useModelSources();
   const sources = useMemo(() => modelSourcesQuery.data?.sources ?? [], [modelSourcesQuery.data]);
   const [search, setSearch] = useState("");
@@ -79,7 +81,9 @@ export function ModelSourceMultiSelect({
   );
 
   const label =
-    value.length === 0 ? placeholder : `${value.length} source${value.length === 1 ? "" : "s"} selected`;
+    value.length === 0
+      ? (placeholder ?? t("modelSources.selector.all"))
+      : t("modelSources.selector.selected", { count: value.length });
 
   return (
     <div className="space-y-1.5">
@@ -92,7 +96,7 @@ export function ModelSourceMultiSelect({
             disabled={modelSourcesQuery.isLoading}
           >
             <span className="truncate text-left">
-              {modelSourcesQuery.isLoading ? "Loading model sources..." : label}
+	              {modelSourcesQuery.isLoading ? t("modelSources.selector.loading") : label}
             </span>
             <ChevronsUpDown className="ml-1 size-4 shrink-0 opacity-50" />
           </Button>
@@ -102,7 +106,7 @@ export function ModelSourceMultiSelect({
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search sources..."
+	              placeholder={t("modelSources.selector.search")}
               className="h-7 text-xs"
               onClick={(event) => event.stopPropagation()}
               onKeyDown={(event) => event.stopPropagation()}
@@ -114,7 +118,7 @@ export function ModelSourceMultiSelect({
             onCheckedChange={() => onChange([])}
             onSelect={(event) => event.preventDefault()}
           >
-            All model sources
+	            {t("modelSources.selector.all")}
           </DropdownMenuCheckboxItem>
           <DropdownMenuSeparator />
           {filtered.map((source) => (
@@ -127,12 +131,12 @@ export function ModelSourceMultiSelect({
             >
               <div className="min-w-0 py-0.5">
                 <div className="truncate text-sm font-medium">{source.name}</div>
-                <div className="truncate text-[11px] text-muted-foreground">{sourceSubtitle(source)}</div>
+	                <div className="truncate text-[11px] text-muted-foreground">{sourceSubtitle(source, t)}</div>
               </div>
             </DropdownMenuCheckboxItem>
           ))}
           {filtered.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">No model sources found</div>
+	            <div className="px-2 py-1.5 text-xs text-muted-foreground">{t("modelSources.selector.empty")}</div>
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>

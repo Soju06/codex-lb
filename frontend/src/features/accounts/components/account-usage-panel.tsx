@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Clock, Flame, RotateCcw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -13,9 +14,11 @@ import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
   formatCurrency,
+  formatLocalDateTimeSeconds,
   formatPercentNullable,
   formatQuotaResetLabel,
   formatResetRelative,
+  formatSingleUnitRemaining,
   formatWindowLabel,
 } from "@/utils/formatters";
 
@@ -44,12 +47,13 @@ function QuotaRow({
   percent: number | null;
   resetAt: string | null | undefined;
 }) {
+  const { t } = useTranslation();
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const hasPercent = percent !== null;
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs">
-        <span className="font-medium">{label} remaining</span>
+        <span className="font-medium">{t("accounts.usage.remainingLabel", { label })}</span>
         <span
           className={cn(
             "tabular-nums font-medium",
@@ -73,7 +77,7 @@ function QuotaRow({
       </div>
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
-        <span>Reset {formatQuotaResetLabel(resetAt ?? null)}</span>
+        <span>{t("accounts.usage.resetAt", { label: formatQuotaResetLabel(resetAt ?? null) })}</span>
       </div>
     </div>
   );
@@ -97,8 +101,8 @@ function formatAdditionalLimitName(limitName: string, quotaKey?: string | null):
 function formatResetCountdown(resetAt: number | null): string | null {
   if (resetAt === null) return null;
   const diffMs = resetAt * 1000 - Date.now();
-  if (diffMs <= 0) return "Resetting...";
-  return `Resets ${formatResetRelative(diffMs)}`;
+  if (diffMs <= 0) return "resetting";
+  return formatResetRelative(diffMs);
 }
 
 function AdditionalQuotaRow({
@@ -110,14 +114,20 @@ function AdditionalQuotaRow({
   usedPercent: number;
   resetAt: number | null;
 }) {
+  const { t } = useTranslation();
   const clamped = Math.max(0, Math.min(100, usedPercent));
   const countdown = formatResetCountdown(resetAt);
+  const countdownLabel = countdown === "resetting"
+    ? t("formatters.resetting")
+    : countdown
+      ? t("accounts.usage.resetsAt", { label: countdown })
+      : null;
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs">
         <span className="text-muted-foreground">{label}</span>
-        <span className="tabular-nums font-medium">{Math.round(usedPercent)}% used</span>
+        <span className="tabular-nums font-medium">{t("accounts.usage.percentUsed", { percent: Math.round(usedPercent) })}</span>
       </div>
       <div className="h-1.5 rounded-full bg-muted">
         <div
@@ -134,7 +144,7 @@ function AdditionalQuotaRow({
           style={{ width: `${clamped}%` }}
         />
       </div>
-      {countdown ? <p className="text-[11px] text-muted-foreground">{countdown}</p> : null}
+      {countdownLabel ? <p className="text-[11px] text-muted-foreground">{countdownLabel}</p> : null}
     </div>
   );
 }
@@ -150,6 +160,7 @@ function ResetCreditsRow({
   resetCredits,
   loading,
   unavailable,
+  nearestExpiresAt,
   resetDisabled,
   onReset,
 }: {
@@ -157,9 +168,11 @@ function ResetCreditsRow({
   resetCredits?: AccountUsageResetCredits | null;
   loading?: boolean;
   unavailable?: boolean;
+  nearestExpiresAt?: string | null;
   resetDisabled?: boolean;
   onReset?: (accountId: string) => void;
 }) {
+  const { t } = useTranslation();
   if (resetCredits == null && !loading && !unavailable) {
     return null;
   }
@@ -167,31 +180,38 @@ function ResetCreditsRow({
   const availableCount = resetCredits?.availableCount ?? 0;
   const valueLabel =
     loading && resetCredits == null
-      ? "Checking..."
+      ? t("accounts.usage.resetCredits.checking")
       : unavailable && resetCredits == null
-        ? "Unavailable"
-        : `${availableCount} available`;
+        ? t("common.states.unavailable")
+        : t("accounts.usage.resetCredits.available", { count: availableCount });
+  const expiryCountdown = nearestExpiresAt ? formatSingleUnitRemaining(nearestExpiresAt) : null;
 
   return (
-    <div className="flex items-center justify-between rounded-md border bg-background/60 px-3 py-2 text-xs">
+    <div className="flex items-center justify-between gap-3 rounded-md border bg-background/60 px-3 py-2 text-xs">
       <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
         <RotateCcw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        <span className="truncate font-medium">Usage resets</span>
+        <span className="truncate font-medium">{t("accounts.usage.resetCredits.title")}</span>
       </span>
-      <span className="flex shrink-0 items-center gap-2">
-        <span className="tabular-nums font-semibold">{valueLabel}</span>
+      <span className="flex min-w-0 flex-1 items-center justify-end gap-2">
+        {nearestExpiresAt && expiryCountdown ? (
+          <span className="min-w-0 max-w-[min(18rem,42vw)] truncate text-[11px] text-muted-foreground">
+            {t("accounts.usage.resetCredits.expires", { time: formatLocalDateTimeSeconds(nearestExpiresAt) })}{" "}
+            <span className="tabular-nums">({expiryCountdown.label})</span>
+          </span>
+        ) : null}
+        <span className="shrink-0 tabular-nums font-semibold">{valueLabel}</span>
         {onReset ? (
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            className="h-6 gap-1 px-1.5 text-[11px]"
-            aria-label="Reset usage"
+            className="h-6 shrink-0 gap-1 px-1.5 text-[11px]"
+            aria-label={t("accounts.usageResetDialog.title")}
             onClick={() => onReset(accountId)}
             disabled={resetDisabled || availableCount <= 0}
           >
             <RotateCcw className="h-3 w-3" aria-hidden="true" />
-            Reset
+            {t("common.actions.reset")}
           </Button>
         ) : null}
       </span>
@@ -208,6 +228,7 @@ export function AccountUsagePanel({
   resetDisabled = false,
   onReset,
 }: AccountUsagePanelProps) {
+  const { t } = useTranslation();
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
   const monthly = account.usage?.monthlyRemainingPercent ?? null;
@@ -226,14 +247,14 @@ export function AccountUsagePanel({
 
   return (
     <div className="min-w-0 space-y-4 rounded-lg border bg-muted/30 p-4">
-      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Usage</h3>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.title")}</h3>
       <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaRow label="Monthly" percent={monthly} resetAt={account.resetAtMonthly} />
+          <QuotaRow label={t("common.quota.monthly")} percent={monthly} resetAt={account.resetAtMonthly} />
         ) : (
           <>
             {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
-            <QuotaRow label="Weekly" percent={secondary} resetAt={account.resetAtSecondary} />
+            <QuotaRow label={t("common.quota.weekly")} percent={secondary} resetAt={account.resetAtSecondary} />
           </>
         )}
       </div>
@@ -242,24 +263,29 @@ export function AccountUsagePanel({
         resetCredits={resetCredits}
         loading={resetCreditsLoading}
         unavailable={resetCreditsUnavailable}
+        nearestExpiresAt={account.resetCreditNearestExpiresAt ?? null}
         resetDisabled={resetDisabled}
         onReset={onReset}
       />
       <div className="rounded-md border bg-background/60 px-3 py-2">
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.requestLogsTotal")}</p>
         {hasRequestUsage ? (
           <p className="mt-1 break-words text-xs tabular-nums text-muted-foreground">
-            {formatCompactNumber(requestUsage?.totalTokens)} tok | {formatCompactNumber(requestUsage?.cachedInputTokens)} cached |{" "}
-            {formatCompactNumber(requestUsage?.requestCount)} req | {formatCurrency(requestUsage?.totalCostUsd)}
+            {t("accounts.usage.requestUsageMeta", {
+              tokens: formatCompactNumber(requestUsage?.totalTokens),
+              cached: formatCompactNumber(requestUsage?.cachedInputTokens),
+              requests: formatCompactNumber(requestUsage?.requestCount),
+              cost: formatCurrency(requestUsage?.totalCostUsd),
+            })}
           </p>
         ) : (
-          <p className="mt-1 text-xs text-muted-foreground">No request usage yet.</p>
+          <p className="mt-1 text-xs text-muted-foreground">{t("accounts.usage.noRequestUsage")}</p>
         )}
       </div>
       {account.additionalQuotas.length > 0 ? (
         <div className="space-y-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Additional Quotas
+            {t("accounts.usage.additionalQuotas")}
           </p>
           {account.additionalQuotas.map((quota) => (
             <div key={quota.quotaKey ?? quota.limitName} className="rounded-md border bg-background/60 px-3 py-2 space-y-2">
@@ -268,7 +294,9 @@ export function AccountUsagePanel({
                 {quota.routingPolicy != null && quota.routingPolicy !== "inherit" ? (
                   <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-orange-200 bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 dark:border-orange-900/60 dark:bg-orange-950/40 dark:text-orange-300">
                     <Flame className="h-3 w-3" aria-hidden="true" />
-                    {ADDITIONAL_ROUTING_POLICY_LABELS[quota.routingPolicy] ?? quota.routingPolicy}
+                    {t(`common.routingPolicies.${quota.routingPolicy === "burn_first" ? "burnFirst" : quota.routingPolicy}`, {
+                      defaultValue: ADDITIONAL_ROUTING_POLICY_LABELS[quota.routingPolicy] ?? quota.routingPolicy,
+                    })}
                   </span>
                 ) : null}
               </p>
@@ -293,7 +321,7 @@ export function AccountUsagePanel({
       {hasTrends && (
         <div className="pt-3">
           <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">7-day trend</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.trendTitle")}</h4>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
@@ -301,12 +329,12 @@ export function AccountUsagePanel({
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-                {monthlyOnly ? "Monthly" : "Weekly"}
+                {monthlyOnly ? t("common.quota.monthly") : t("common.quota.weekly")}
               </span>
               {secondaryScheduledTrendPoints.length > 0 ? (
                 <span className="flex items-center gap-1.5">
                   <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
-                  {monthlyOnly ? "Monthly plan" : "Weekly plan"}
+                  {monthlyOnly ? t("accounts.usage.monthlyPlan") : t("accounts.usage.weeklyPlan")}
                 </span>
               ) : null}
             </div>

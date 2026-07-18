@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
@@ -36,6 +37,8 @@ import { formatModelLabel, formatSlug } from "@/utils/formatters";
 const MODEL_OPTION_DELIMITER = ":::";
 
 export function DashboardPage() {
+  const { t, i18n } = useTranslation();
+  const resolvedLanguage = i18n.resolvedLanguage;
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
@@ -113,6 +116,7 @@ export function DashboardPage() {
   const logPage = logsQuery.data;
 
   const view = useMemo(() => {
+    void resolvedLanguage;
     if (!overview || !logPage) {
       return null;
     }
@@ -125,7 +129,7 @@ export function DashboardPage() {
       },
       projectionsQuery.data,
     );
-  }, [overview, logPage, isDark, showAccountBurnrate, projectionsQuery.data]);
+  }, [overview, logPage, isDark, showAccountBurnrate, projectionsQuery.data, resolvedLanguage]);
 
   const accountOptions = useMemo(() => {
     const entries = new Map<string, { label: string; isEmail: boolean }>();
@@ -166,9 +170,9 @@ export function DashboardPage() {
     () =>
       (optionsQuery.data?.statuses ?? []).map((status) => ({
         value: status,
-        label: REQUEST_STATUS_LABELS[status] ?? formatSlug(status),
+        label: t(`dashboard.requestStatus.${status}`, { defaultValue: REQUEST_STATUS_LABELS[status] ?? formatSlug(status) }),
       })),
-    [optionsQuery.data?.statuses],
+    [optionsQuery.data?.statuses, t],
   );
 
   const errorMessage =
@@ -182,9 +186,9 @@ export function DashboardPage() {
       {/* Page header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("dashboard.page.title")}</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Overview, account health, and recent request logs.
+            {t("dashboard.page.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -197,7 +201,7 @@ export function DashboardPage() {
             onClick={handleRefresh}
             disabled={isRefreshing}
             className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-            title="Refresh dashboard"
+            title={t("dashboard.page.refresh")}
           >
             <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
           </button>
@@ -242,7 +246,7 @@ export function DashboardPage() {
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex min-w-0 items-center gap-3">
-                <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Accounts</h2>
+                <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("accounts.page.title")}</h2>
                 <AccountSummaryLine accounts={overview?.accounts ?? []} />
               </div>
               <div className="h-px min-w-8 flex-1 bg-border" />
@@ -263,7 +267,7 @@ export function DashboardPage() {
 
           <section className="space-y-4">
             <div className="flex items-center gap-3">
-              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">Request Logs</h2>
+              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("dashboard.requests.title")}</h2>
               <div className="h-px flex-1 bg-border" />
             </div>
             <RequestFilters

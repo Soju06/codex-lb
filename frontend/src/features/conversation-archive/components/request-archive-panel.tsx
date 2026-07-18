@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -22,6 +23,7 @@ export function RequestArchivePanel({
   requestId: string | null | undefined;
   requestedAt?: string | null | undefined;
 }) {
+  const { t } = useTranslation();
   const [expandedIndex, setExpandedIndex] = useState<number | null>(0);
   const recordsQuery = useConversationArchiveRecords(
     requestId
@@ -41,7 +43,7 @@ export function RequestArchivePanel({
   if (recordsQuery.isPending) {
     return (
       <section className="space-y-2">
-        <h3 className="text-sm font-medium">Archive</h3>
+        <h3 className="text-sm font-medium">{t("conversationArchive.title")}</h3>
         <Skeleton className="h-20 w-full" />
       </section>
     );
@@ -50,9 +52,9 @@ export function RequestArchivePanel({
   if (recordsQuery.isError) {
     return (
       <section className="space-y-2">
-        <h3 className="text-sm font-medium">Archive</h3>
+        <h3 className="text-sm font-medium">{t("conversationArchive.title")}</h3>
         <div className="rounded-md border border-destructive/25 bg-destructive/10 p-3 text-xs text-destructive">
-          {recordsQuery.error instanceof Error ? recordsQuery.error.message : "Failed to load archive records"}
+          {recordsQuery.error instanceof Error ? recordsQuery.error.message : t("conversationArchive.loadFailed")}
         </div>
       </section>
     );
@@ -63,12 +65,12 @@ export function RequestArchivePanel({
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-medium">Archive</h3>
-        <span className="text-xs text-muted-foreground">{recordsQuery.data?.total ?? 0} records</span>
+        <h3 className="text-sm font-medium">{t("conversationArchive.title")}</h3>
+        <span className="text-xs text-muted-foreground">{t("conversationArchive.records", { count: recordsQuery.data?.total ?? 0 })}</span>
       </div>
       {records.length === 0 ? (
         <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
-          No archived payloads for this request.
+          {t("conversationArchive.empty")}
         </div>
       ) : (
         <div className="max-h-[42vh] overflow-y-auto rounded-md border">
@@ -86,8 +88,8 @@ export function RequestArchivePanel({
                 </button>
                 {expanded ? (
                   <div className="grid gap-2 border-t bg-muted/20 p-3 md:grid-cols-2">
-                    <JsonBlock title="Payload" value={record.payload} />
-                    <JsonBlock title="Metadata" value={metadataForRecord(record)} />
+                    <JsonBlock title={t("conversationArchive.payload")} value={record.payload} />
+                    <JsonBlock title={t("conversationArchive.metadata")} value={metadataForRecord(record)} />
                   </div>
                 ) : null}
               </div>
@@ -96,7 +98,7 @@ export function RequestArchivePanel({
         </div>
       )}
       {recordsQuery.data?.hasMore ? (
-        <div className="text-xs text-muted-foreground">Showing first {REQUEST_ARCHIVE_LIMIT} records.</div>
+        <div className="text-xs text-muted-foreground">{t("conversationArchive.showingFirst", { count: REQUEST_ARCHIVE_LIMIT })}</div>
       ) : null}
     </section>
   );

@@ -12,9 +12,11 @@ import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-p
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
+import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
@@ -103,6 +105,7 @@ export function SettingsPage() {
           <div className="space-y-4">
             <AppearanceSettings />
             <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+            <ResetCreditSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             {canWrite ? (
               <GuestAccessSettings
                 settings={settings}
@@ -171,6 +174,17 @@ export function SettingsPage() {
               <FirewallSection disabled={controlsDisabled} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               <StickySessionsSection disabled={controlsDisabled} />
+              <DataRetentionSettings
+                key={[
+                  settings.requestLogRetentionOverrideDays,
+                  settings.usageHistoryRetentionOverrideDays,
+                  settings.requestLogRetentionDays,
+                  settings.usageHistoryRetentionDays,
+                ].join(":")}
+                settings={settings}
+                busy={controlsDisabled}
+                onSave={handleSave}
+              />
             </AdvancedSettingsGroup>
           </div>
 

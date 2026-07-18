@@ -15545,6 +15545,63 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
 
 
 @pytest.mark.asyncio
+async def test_select_websocket_connect_account_preserves_usage_limit_for_required_owner(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_owner_usage_limit",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_stage="reattach",
+    )
+    emit_connect_failure = AsyncMock()
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 1h",
+            error_code="usage_limit_reached",
+            resets_at=1_700_003_600,
+        )
+    )
+
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
+
+    result = await service._select_websocket_connect_account(
+        time.monotonic() + 10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace()),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id="acc_owner",
+        require_preferred_account=True,
+    )
+
+    assert result is None
+    emit_connect_failure.assert_awaited_once()
+    call = emit_connect_failure.await_args
+    assert call is not None
+    assert call.kwargs["status_code"] == 429
+    assert call.kwargs["error_code"] == "usage_limit_reached"
+    assert call.kwargs["account_id"] == "acc_owner"
+    assert call.kwargs["payload"]["error"]["code"] == "usage_limit_reached"
+    assert call.kwargs["payload"]["error"]["type"] == "usage_limit_reached"
+    assert call.kwargs["payload"]["error"]["resets_at"] == 1_700_003_600
+
+
+@pytest.mark.asyncio
 async def test_select_websocket_connect_account_records_fail_closed_for_preferred_account_mismatch(
     monkeypatch,
     caplog,

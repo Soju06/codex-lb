@@ -2275,19 +2275,16 @@ class _WebSocketMixin:
             )
             return None
         if require_preferred_account and preferred_account_id is not None:
-            if _facade()._is_local_account_cap_code(error_code):
+            if _facade()._is_local_account_cap_code(error_code) or error_code == "usage_limit_reached":
+                status_code, error_payload = selection_failure_response(selection)
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
                     account_id=preferred_account_id,
                     api_key=api_key,
                     request_state=request_state,
-                    status_code=429,
-                    payload=openai_error(
-                        error_code,
-                        error_message,
-                        error_type="rate_limit_error",
-                    ),
+                    status_code=status_code,
+                    payload=error_payload,
                     error_code=error_code,
                     error_message=error_message,
                 )

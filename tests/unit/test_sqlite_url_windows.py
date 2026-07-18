@@ -87,8 +87,17 @@ class TestSqlitePathFromUrlWindows:
 
         normalized = normalize_sqlite_url(url)
 
-        assert normalized == r"sqlite:///C:\Users\me\foo%23bar\store.db"
+        assert normalized == r"sqlite:///C:\Users\me\foo#bar\store.db"
         assert sqlite_db_path_from_url(normalized) == Path(r"C:\Users\me\foo#bar\store.db")
+
+    def test_raw_windows_literal_percent_path_is_not_decoded(self) -> None:
+        url = r"sqlite:///C:\codex%20lb\store.db"
+
+        path = sqlite_db_path_from_url(url)
+
+        assert path is not None
+        assert str(path) == r"C:\codex%20lb\store.db"
+        assert normalize_sqlite_url(url) == url
 
     def test_posix_literal_encoded_drive_segment_is_not_decoded(self) -> None:
         url = "sqlite+aiosqlite:///c%3A/cache.db"
@@ -164,6 +173,33 @@ def test_background_engine_creation_decodes_percent_encoded_sqlite_url(tmp_path,
         session_module._background_session_factory = None
 
 
+def test_background_engine_creation_decodes_encoded_hash_for_sqlalchemy(monkeypatch) -> None:
+    from app.db import session as session_module
+
+    encoded_url = "sqlite+aiosqlite:///C%3A%5Cdata%23set%5Cstore.db"
+    created_urls: list[str] = []
+
+    class FakeEngine:
+        sync_engine = object()
+
+    def fake_create_async_engine(url: str, **kwargs):
+        del kwargs
+        created_urls.append(url)
+        return FakeEngine()
+
+    monkeypatch.setattr(session_module, "create_async_engine", fake_create_async_engine)
+    monkeypatch.setattr(session_module, "_configure_sqlite_engine", lambda *args, **kwargs: None)
+    monkeypatch.setattr(session_module, "async_sessionmaker", lambda *args, **kwargs: object())
+
+    try:
+        session_module.init_background_db(encoded_url)
+
+        assert created_urls == [r"sqlite+aiosqlite:///C:\data#set\store.db"]
+    finally:
+        session_module._background_engine = None
+        session_module._background_session_factory = None
+
+
 @pytest.mark.asyncio
 async def test_startup_init_db_decodes_percent_encoded_sqlite_path(tmp_path, monkeypatch) -> None:
     """Regression: startup must not create/check the percent-literal DB path.
@@ -177,8 +213,8 @@ async def test_startup_init_db_decodes_percent_encoded_sqlite_path(tmp_path, mon
     from app.db.sqlite_utils import IntegrityCheck
 
     monkeypatch.chdir(tmp_path)
-    decoded_db_path = Path(DECODED_WINDOWS_PATH)
-    encoded_url = ENCODED_WINDOWS_URL.replace("sqlite:///", "sqlite+aiosqlite:///")
+    decoded_db_path, encoded_url = _dashboard_fixture_path_and_url(tmp_path)
+    encoded_url = encoded_url.replace("sqlite:///", "sqlite+aiosqlite:///")
     checked_paths: list[str] = []
 
     monkeypatch.setattr(
@@ -199,7 +235,7 @@ async def test_startup_init_db_decodes_percent_encoded_sqlite_path(tmp_path, mon
         return IntegrityCheck(ok=True, details=None)
 
     async def fake_run_startup_migrations(database_url: str):
-        assert database_url == f"sqlite+aiosqlite:///{DECODED_WINDOWS_PATH}"
+        assert database_url == f"sqlite+aiosqlite:///{decoded_db_path}"
         return SimpleNamespace(
             current_revision="head",
             bootstrap=SimpleNamespace(stamped_revision=None, legacy_row_count=0),
@@ -219,7 +255,7 @@ async def test_startup_init_db_decodes_percent_encoded_sqlite_path(tmp_path, mon
     await session_module.init_db()
 
     assert checked_paths == [str(decoded_db_path)]
-    assert not Path("C%3A%5CUsers%5Cme%5C.codex-lb%5Cstore.db").exists()
+    assert not (tmp_path / "C%3A%5CUsers%5Cme%5C.codex-lb%5Cstore.db").exists()
 
 
 @pytest.mark.asyncio

@@ -20,8 +20,6 @@ class SqliteIntegrityCheckMode(str, Enum):
 
 def _sqlite_path_uses_sqlalchemy_windows_escapes(path: str) -> bool:
     lower_path = path.lower()
-    if len(path) >= 3 and path[1] == ":" and path[0].isalpha() and path[2] in ("\\", "/"):
-        return True
     if (
         len(lower_path) >= 7
         and lower_path[1:4] == "%3a"
@@ -32,14 +30,14 @@ def _sqlite_path_uses_sqlalchemy_windows_escapes(path: str) -> bool:
     return lower_path.startswith("%5c%5c")
 
 
+def _sqlite_path_is_raw_windows_drive(path: str) -> bool:
+    return len(path) >= 3 and path[1] == ":" and path[0].isalpha() and path[2] in ("\\", "/")
+
+
 def _decode_sqlalchemy_windows_sqlite_path(path: str) -> str:
     if not _sqlite_path_uses_sqlalchemy_windows_escapes(path):
         return path
     return urllib.parse.unquote(path)
-
-
-def _escape_sqlite_url_path_separators(path: str) -> str:
-    return path.replace("%", "%25").replace("?", "%3F").replace("#", "%23")
 
 
 def sqlite_db_path_from_url(url: str) -> Path | None:
@@ -52,8 +50,11 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
         return None
 
     path = url[marker_index + len(marker) :]
-    path = path.partition("?")[0]
-    path = path.partition("#")[0]
+    if _sqlite_path_is_raw_windows_drive(path):
+        path = path.partition("?")[0]
+    else:
+        path = path.partition("?")[0]
+        path = path.partition("#")[0]
 
     # SQLAlchemy's `URL.render_as_string()` percent-encodes Windows drive and
     # UNC SQLite paths (e.g. `sqlite:///C%3A%5CUsers%5C...%5Cstore.db`). Decode
@@ -90,8 +91,6 @@ def normalize_sqlite_url(url: str) -> str:
         return url
 
     decoded_path = _decode_sqlalchemy_windows_sqlite_path(path)
-    if decoded_path != path:
-        decoded_path = _escape_sqlite_url_path_separators(decoded_path)
     return f"{url[:path_start]}{decoded_path}{url[suffix_index:]}"
 
 

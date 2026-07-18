@@ -1927,7 +1927,6 @@ async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolve
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         transport="http",
-        skip_request_log=True,
     )
     session = _make_bridge_session(
         key_value="bridge-precreated-completed",

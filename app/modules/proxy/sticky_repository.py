@@ -106,9 +106,8 @@ class StickySessionsRepository:
         if expected_account_id is None:
             if restore_account_id is None:
                 return True
-            statement = (
-                self._build_insert_do_nothing_statement(key, restore_account_id, kind)
-                .returning(StickySession.key)
+            statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind).returning(
+                StickySession.key
             )
         elif restore_account_id is None:
             statement = (

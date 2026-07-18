@@ -296,14 +296,23 @@ async def probe_account(
         ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
-    try:
-        await get_proxy_service_for_app(request.app).record_account_probe_result(
-            account_id=result.account_id,
-            http_status=result.probe_status_code,
-        )
-    except Exception:
-        logger.exception(
-            "Force Probe advisory settlement failed account_id=%s probe_status_code=%s",
+    probe_succeeded = 200 <= result.probe_status_code < 300
+    if not probe_succeeded or result.usage_refresh_succeeded is True:
+        try:
+            await get_proxy_service_for_app(request.app).record_account_probe_result(
+                account_id=result.account_id,
+                http_status=result.probe_status_code,
+            )
+        except Exception:
+            logger.exception(
+                "Force Probe advisory settlement failed account_id=%s probe_status_code=%s",
+                result.account_id,
+                result.probe_status_code,
+            )
+    else:
+        logger.warning(
+            "Force Probe success skipped advisory settlement after failed usage refresh "
+            "account_id=%s probe_status_code=%s",
             result.account_id,
             result.probe_status_code,
         )

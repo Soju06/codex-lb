@@ -1449,6 +1449,54 @@ async def test_unbound_recovery_probe_falls_back_after_repeated_reservation_loss
 
 
 @pytest.mark.asyncio
+async def test_unbound_recovery_probe_falls_back_after_repeated_commit_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-probe-commit-loss-healthy")
+    probing = _make_account("acc-probe-commit-loss-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                151,
+                healthy.id,
+                used_percent=80.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                152,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=31,
+        health_version=7,
+    )
+    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", lambda *args, **kwargs: False)
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == healthy.id
+    assert selected.error_message is None
+    assert selected.lease is not None
+    assert balancer._runtime[probing.id].last_selected_at == 0.0
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_unbound_recovery_probe_selects_with_only_draining_peer() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     probing = _make_account("acc-unbound-probe-draining-probe")
@@ -1843,6 +1891,62 @@ async def test_sticky_probe_reservation_retries_when_health_changes_during_stick
 
 
 @pytest.mark.asyncio
+async def test_sticky_probe_reservation_restores_affinity_after_repeated_commit_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    unavailable_owner = _make_account("acc-probe-sticky-commit-owner")
+    unavailable_owner.status = AccountStatus.RATE_LIMITED
+    unavailable_owner.reset_at = now_epoch + 3600
+    healthy = _make_account("acc-probe-sticky-commit-healthy")
+    probing = _make_account("acc-probe-sticky-commit-probing")
+    accounts_repo = _StubAccountsRepository([unavailable_owner, healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                153,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                154,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = unavailable_owner.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=23,
+        health_version=9,
+    )
+    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", lambda *args, **kwargs: False)
+
+    selected = await balancer.select_account(
+        sticky_key="probe-sticky-commit-loss",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == healthy.id
+    assert selected.lease is not None
+    assert sticky_repo.account_id == healthy.id
+    assert balancer._runtime[probing.id].last_selected_at == 0.0
+    assert all(account_id != probing.id for _, account_id, _ in sticky_repo.upserts[-1:])
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1912,7 +2016,11 @@ async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
     assert selected.account.id == healthy.id
     assert selected.lease is not None
     assert sticky_repo.account_id == healthy.id
-    assert all(account_id != probing.id for _, account_id, _ in sticky_repo.upserts)
+    assert sticky_repo.upserts[-1] == (
+        "probe-post-persist-cas",
+        healthy.id,
+        StickySessionKind.PROMPT_CACHE,
+    )
     probing_runtime = balancer._runtime[probing.id]
     assert probing_runtime.inflight_streams == 0
     assert probing_runtime.last_selected_at == 0.0
@@ -1967,8 +2075,8 @@ async def test_sticky_probe_reservation_does_not_leak_affinity_when_persistence_
 
     probing_runtime = balancer._runtime[probing.id]
     assert probing_runtime.inflight_streams == 0
-    assert probing_runtime.last_selected_at != 0.0
-    assert probing_runtime.health_version == 12
+    assert probing_runtime.last_selected_at == 0.0
+    assert probing_runtime.health_version == 11
     assert sticky_repo.account_id == unavailable_owner.id
     assert sticky_repo.upserts == []
 

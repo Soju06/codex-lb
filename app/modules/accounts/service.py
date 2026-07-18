@@ -738,8 +738,12 @@ class AccountsService:
             model=probe_model,
         )
 
+        usage_refresh_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
-            await self._usage_updater.force_refresh(probe_account, ignore_refresh_disabled=True)
+            usage_refresh_succeeded = await self._usage_updater.force_refresh(
+                probe_account,
+                ignore_refresh_disabled=True,
+            )
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
@@ -749,6 +753,7 @@ class AccountsService:
             status="probed",
             account_id=account_id,
             probe_status_code=probe_status,
+            usage_refresh_succeeded=usage_refresh_succeeded,
             primary_used_percent_before=primary_before,
             primary_used_percent_after=primary_after,
             secondary_used_percent_before=secondary_before,

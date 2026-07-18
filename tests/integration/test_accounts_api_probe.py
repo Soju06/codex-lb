@@ -10,7 +10,9 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.usage.models import UsagePayload
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts.schemas import AccountProbeResponse
 from app.modules.accounts.service import AccountsService
+from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.integration
 
@@ -101,7 +103,11 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
         captured["had_token"] = bool(access_token)
         return 200
 
+    async def _force_refresh_succeeds(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
+        return True
+
     monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr(UsageUpdater, "force_refresh", _force_refresh_succeeds)
 
     proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
     monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
@@ -141,9 +147,13 @@ async def test_probe_active_account_returns_snapshot_when_advisory_settlement_fa
         del model
         return 200
 
+    async def _force_refresh_succeeds(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
+        return True
+
     record_probe_result = AsyncMock(side_effect=RuntimeError("local settlement unavailable"))
 
     monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr(UsageUpdater, "force_refresh", _force_refresh_succeeds)
     proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
     monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
 
@@ -163,6 +173,60 @@ async def test_probe_active_account_returns_snapshot_when_advisory_settlement_fa
     record_probe_result.assert_awaited_once_with(
         account_id=account_id,
         http_status=200,
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_success_skips_advisory_settlement_when_usage_refresh_fails(async_client, monkeypatch):
+    record_probe_result = AsyncMock()
+
+    async def _probe_without_usage_refresh(self, account_id, model=None):  # noqa: ARG001 - route orchestration only
+        return AccountProbeResponse(
+            status="probed",
+            account_id=account_id,
+            probe_status_code=200,
+            usage_refresh_succeeded=False,
+            account_status_before="rate_limited",
+            account_status_after="rate_limited",
+        )
+
+    monkeypatch.setattr(AccountsService, "probe_account", _probe_without_usage_refresh)
+    proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
+    monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
+
+    response = await async_client.post("/api/accounts/acc_probe_usage_refresh_failed/probe")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["probeStatusCode"] == 200
+    assert body["usageRefreshSucceeded"] is False
+    record_probe_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_probe_failure_still_records_advisory_settlement_after_usage_refresh_fails(async_client, monkeypatch):
+    record_probe_result = AsyncMock()
+
+    async def _failed_probe_without_usage_refresh(self, account_id, model=None):  # noqa: ARG001 - route orchestration only
+        return AccountProbeResponse(
+            status="probed",
+            account_id=account_id,
+            probe_status_code=429,
+            usage_refresh_succeeded=False,
+            account_status_before="rate_limited",
+            account_status_after="rate_limited",
+        )
+
+    monkeypatch.setattr(AccountsService, "probe_account", _failed_probe_without_usage_refresh)
+    proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
+    monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
+
+    response = await async_client.post("/api/accounts/acc_probe_usage_refresh_failed_429/probe")
+
+    assert response.status_code == 200, response.text
+    record_probe_result.assert_awaited_once_with(
+        account_id="acc_probe_usage_refresh_failed_429",
+        http_status=429,
     )
 
 

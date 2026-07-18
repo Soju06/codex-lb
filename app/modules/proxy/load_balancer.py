@@ -791,7 +791,17 @@ class LoadBalancer:
                         selected_states = []
                         selected_account_map = {}
                         if attempt >= _MAX_SELECTION_ATTEMPTS:
-                            break
+                            suppress_recovery_probe_candidates = True
+                            attempt = 0
+                            selection_inputs = await load_selection_inputs()
+                            if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                                return AccountSelection(
+                                    account=None,
+                                    error_message=selection_inputs.error_message,
+                                    error_code=selection_inputs.error_code,
+                                )
+                            await asyncio.sleep(0)
+                            continue
                         selection_inputs = await load_selection_inputs()
                         if selection_inputs.error_code is not None and not selection_inputs.accounts:
                             return AccountSelection(
@@ -1177,6 +1187,20 @@ class LoadBalancer:
                     sticky_mutation = sticky_outcome.mutation
                     assert sticky_mutation is not None
                     try:
+                        async with self._repo_factory() as repos:
+                            await self._persist_sticky_mutation(
+                                sticky_repo=repos.sticky_sessions,
+                                sticky_key=sticky_key,
+                                sticky_kind=sticky_kind,
+                                mutation=sticky_mutation,
+                            )
+                    except BaseException:
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        async with self._runtime_lock:
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                        raise
+                    try:
                         async with self._runtime_lock:
                             assert probe_reservation is not None
                             reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
@@ -1193,11 +1217,27 @@ class LoadBalancer:
                         selected_lease = None
                         async with self._runtime_lock:
                             self._release_due_probe_reservation_locked(probe_reservation)
+                        async with self._repo_factory() as repos:
+                            await self._restore_sticky_mutation(
+                                sticky_repo=repos.sticky_sessions,
+                                sticky_key=sticky_key,
+                                sticky_kind=sticky_kind,
+                                sticky_existing_account_id=sticky_existing_account_id,
+                            )
                         raise
                     if not reservation_committed:
                         # Runtime health changed while account-state persistence
-                        # was in flight. The lease and provisional affinity must
-                        # not escape; retry against a fresh runtime snapshot.
+                        # was in flight. The lease, probe quiet interval, and
+                        # provisional affinity must not escape; restore the
+                        # previous sticky owner before retrying against a fresh
+                        # runtime snapshot.
+                        async with self._repo_factory() as repos:
+                            await self._restore_sticky_mutation(
+                                sticky_repo=repos.sticky_sessions,
+                                sticky_key=sticky_key,
+                                sticky_kind=sticky_kind,
+                                sticky_existing_account_id=sticky_existing_account_id,
+                            )
                         await self.release_account_lease(selected_lease)
                         selected_lease = None
                         selected_snapshot = None
@@ -1205,7 +1245,17 @@ class LoadBalancer:
                         selected_states = []
                         selected_account_map = {}
                         if attempt >= _MAX_SELECTION_ATTEMPTS:
-                            break
+                            suppress_recovery_probe_candidates = True
+                            attempt = 0
+                            selection_inputs = await load_selection_inputs()
+                            if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                                return AccountSelection(
+                                    account=None,
+                                    error_message=selection_inputs.error_message,
+                                    error_code=selection_inputs.error_code,
+                                )
+                            await asyncio.sleep(0)
+                            continue
                         selection_inputs = await load_selection_inputs()
                         if selection_inputs.error_code is not None and not selection_inputs.accounts:
                             return AccountSelection(
@@ -1215,21 +1265,6 @@ class LoadBalancer:
                             )
                         await asyncio.sleep(0)
                         continue
-                    try:
-                        async with self._repo_factory() as repos:
-                            await self._persist_sticky_mutation(
-                                sticky_repo=repos.sticky_sessions,
-                                sticky_key=sticky_key,
-                                sticky_kind=sticky_kind,
-                                mutation=sticky_mutation,
-                            )
-                    except BaseException:
-                        # The probe CAS is already committed, so the rejected
-                        # reservation cannot leak affinity. Release only the
-                        # request-local lease before surfacing the failure.
-                        await self.release_account_lease(selected_lease)
-                        selected_lease = None
-                        raise
                 elif selected_snapshot is not None and reserved_probe_admitted:
                     reservation_committed = False
                     try:
@@ -1261,7 +1296,17 @@ class LoadBalancer:
                         selected_states = []
                         selected_account_map = {}
                         if attempt >= _MAX_SELECTION_ATTEMPTS:
-                            break
+                            suppress_recovery_probe_candidates = True
+                            attempt = 0
+                            selection_inputs = await load_selection_inputs()
+                            if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                                return AccountSelection(
+                                    account=None,
+                                    error_message=selection_inputs.error_message,
+                                    error_code=selection_inputs.error_code,
+                                )
+                            await asyncio.sleep(0)
+                            continue
                         selection_inputs = await load_selection_inputs()
                         if selection_inputs.error_code is not None and not selection_inputs.accounts:
                             return AccountSelection(
@@ -2162,6 +2207,21 @@ class LoadBalancer:
             await sticky_repo.delete(sticky_key, kind=sticky_kind)
             return
         await sticky_repo.upsert(sticky_key, mutation.account_id, kind=sticky_kind)
+
+    @staticmethod
+    async def _restore_sticky_mutation(
+        *,
+        sticky_repo: StickySessionsRepository,
+        sticky_key: str,
+        sticky_kind: StickySessionKind,
+        sticky_existing_account_id: str | None | object,
+    ) -> None:
+        if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
+            return
+        if isinstance(sticky_existing_account_id, str):
+            await sticky_repo.upsert(sticky_key, sticky_existing_account_id, kind=sticky_kind)
+            return
+        await sticky_repo.delete(sticky_key, kind=sticky_kind)
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
         lock = await self._get_account_lock(account.id)

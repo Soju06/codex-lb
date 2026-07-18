@@ -125,6 +125,7 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     assert result.status == "probed"
     assert result.account_id == _ACCOUNT_ID
     assert result.probe_status_code == 200
+    assert result.usage_refresh_succeeded is True
     assert result.primary_used_percent_before == 100.0
     assert result.primary_used_percent_after == 100.0
     assert result.secondary_used_percent_before == 80.0
@@ -140,6 +141,28 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     force_refresh_mock = service._usage_updater.force_refresh
     assert isinstance(force_refresh_mock, AsyncMock)
     force_refresh_mock.assert_awaited_once_with(account, ignore_refresh_disabled=True)
+
+
+@pytest.mark.asyncio
+async def test_probe_account_reports_failed_usage_refresh(monkeypatch):
+    account = _make_account(status=AccountStatus.RATE_LIMITED)
+    service = _build_service(account=account, primary_pct=100.0, secondary_pct=80.0)
+    assert service._usage_updater is not None
+    force_refresh_mock = service._usage_updater.force_refresh
+    assert isinstance(force_refresh_mock, AsyncMock)
+    force_refresh_mock.return_value = False
+
+    async def _fake_probe(**kwargs):
+        del kwargs
+        return 200
+
+    monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
+
+    result = await service.probe_account(_ACCOUNT_ID)
+
+    assert result is not None
+    assert result.probe_status_code == 200
+    assert result.usage_refresh_succeeded is False
 
 
 @pytest.mark.asyncio

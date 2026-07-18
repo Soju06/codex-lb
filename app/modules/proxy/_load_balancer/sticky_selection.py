@@ -226,6 +226,7 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     selected_lease: AccountLease | None
     error_message: str | None
     error_code: str | None
+    resets_at: int | None = None
     disposition: StickySelectionDisposition = "shared_result"
 
 
@@ -266,6 +267,7 @@ async def run_sticky_selection_path(
     selected_lease: AccountLease | None = None
     error_message: str | None = None
     selection_error_code: str | None = None
+    selection_resets_at: int | None = None
 
     def _direct_error(
         *,
@@ -405,9 +407,11 @@ async def run_sticky_selection_path(
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
         if hard_sticky and not selection_states:
             selection_error_code = "hard_affinity_saturated"
+            selection_resets_at = None
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
         elif not selection_states and states:
             selection_error_code = _account_cap_error_code(lease_kind)
+            selection_resets_at = None
             result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
             logger.warning(
                 "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
@@ -435,14 +439,17 @@ async def run_sticky_selection_path(
             )
             if result.account is None:
                 selection_error_code = "hard_affinity_saturated"
+                selection_resets_at = None
                 result = SelectionResult(
                     None,
                     result.error_message or "Hard affinity owner account is unavailable",
                 )
             else:
                 selection_error_code = None
+                selection_resets_at = None
         else:
             selection_error_code = None
+            selection_resets_at = None
             try:
                 async with owner._repo_factory() as repos:
                     sticky_outcome = await owner._select_with_stickiness(
@@ -526,6 +533,7 @@ async def run_sticky_selection_path(
             if result.account is None:
                 error_message = result.error_message
                 selection_error_code = result.error_code or selection_error_code
+                selection_resets_at = result.resets_at or selection_resets_at
             elif probe_reservation_invalidated:
                 selected = None
             else:
@@ -857,6 +865,7 @@ async def run_sticky_selection_path(
         selected_lease=selected_lease,
         error_message=error_message,
         error_code=selection_error_code,
+        resets_at=selection_resets_at,
     )
 
 

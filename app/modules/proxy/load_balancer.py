@@ -22,6 +22,7 @@ from app.core.balancer import (
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
+    USAGE_LIMIT_REACHED,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -575,6 +576,7 @@ class LoadBalancer:
         error_message: str | None = None
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
         if sticky_source == "session_header" and legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
@@ -646,6 +648,7 @@ class LoadBalancer:
             selected_lease = unbound_outcome.selected_lease
             error_message = unbound_outcome.error_message
             selection_error_code = unbound_outcome.error_code
+            selection_resets_at = unbound_outcome.resets_at
             if unbound_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -690,6 +693,7 @@ class LoadBalancer:
             selected_lease = sticky_outcome.selected_lease
             error_message = sticky_outcome.error_message
             selection_error_code = sticky_outcome.error_code
+            selection_resets_at = sticky_outcome.resets_at
             if sticky_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -736,7 +740,12 @@ class LoadBalancer:
                 and (selection_inputs.accounts or selection_inputs.error_code is not None)
             ):
                 set_normal()
-            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+            return AccountSelection(
+                account=None,
+                error_message=error_message,
+                error_code=selection_error_code,
+                resets_at=selection_resets_at,
+            )
         if not circuit_breaker_open:
             set_normal()
         logger.info(
@@ -1191,6 +1200,13 @@ class LoadBalancer:
             ignore_standard_quota=False,
         )
         if result.account is None:
+            if result.error_code == USAGE_LIMIT_REACHED:
+                return AccountSelection(
+                    account=None,
+                    error_message=result.error_message,
+                    error_code=result.error_code,
+                    resets_at=result.resets_at,
+                )
             return AccountSelection(
                 account=None,
                 error_message=result.error_message,

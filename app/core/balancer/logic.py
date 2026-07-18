@@ -165,17 +165,13 @@ def pool_usage_exhaustion(
     ignored_account_ids = set(ignore_standard_quota_account_ids or ())
 
     def _usage_exhausted(state: AccountState) -> bool:
-        if state.status == AccountStatus.QUOTA_EXCEEDED:
-            return True
-        if state.status != AccountStatus.RATE_LIMITED:
+        if state.status not in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
             return False
         usage_values = (state.used_percent, state.secondary_used_percent)
         return any(value is not None and float(value) >= 100.0 for value in usage_values)
 
     def _usage_exhausted_reset_candidates(state: AccountState) -> list[float]:
-        if state.status == AccountStatus.QUOTA_EXCEEDED:
-            return [float(state.reset_at)] if state.reset_at is not None else []
-        if state.status != AccountStatus.RATE_LIMITED:
+        if state.status not in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
             return []
         candidates: list[float] = []
         if state.used_percent is not None and float(state.used_percent) >= 100.0 and state.reset_at is not None:

@@ -786,6 +786,8 @@ class _WebSocketMixin:
 
         async def release_current_account_lease() -> None:
             nonlocal account_lease
+            if account_lease is None:
+                return
             await proxy._load_balancer.release_account_lease(account_lease)
             account_lease = None
 
@@ -1507,7 +1509,12 @@ class _WebSocketMixin:
                     )
                     connected_account_lease = request_state.websocket_stream_lease
                     request_state.websocket_stream_lease = None
-                    if completed_downstream_receive_is_terminal():
+                    try:
+                        completed_downstream_receive_terminal_after_connect = completed_downstream_receive_is_terminal()
+                    except BaseException:
+                        await proxy._load_balancer.release_account_lease(connected_account_lease)
+                        raise
+                    if completed_downstream_receive_terminal_after_connect:
                         await proxy._load_balancer.release_account_lease(connected_account_lease)
                         break
                     if upstream is None or account is None:

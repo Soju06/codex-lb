@@ -1481,9 +1481,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 and request_state.previous_response_id is not None
             )
             clean_close_hard_continuity_anchor = (
-                close_classification == "clean"
-                and hard_session_affinity
-                and request_state.hard_continuity_anchor
+                close_classification == "clean" and hard_session_affinity and request_state.hard_continuity_anchor
             )
             clean_close_retry_for_current_close = (
                 close_classification == "clean"

@@ -3277,6 +3277,82 @@ async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_idle_recovery_transport_failure_yields_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    detach = AsyncMock()
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_stream_request_budget_seconds=60.0,
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=0.001,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_stream_keepalive_max_count", lambda: 1)
+
+    session = _make_bridge_session(key_value="sid-idle-retry-transport")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-idle-retry-transport",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"hello"}',
+        transport="http",
+    )
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        target_session.pending_requests.append(request_state)
+
+    retry_error = UpstreamWebSocketTransportError(
+        "Codex upstream websocket send failed: OSError",
+        error_code="proxy_network_unavailable",
+    )
+    retry_precreated = AsyncMock(side_effect=retry_error)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data="{}",
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+        )
+    ]
+
+    assert len(chunks) == 1
+    payload = proxy_service.parse_sse_data_json(chunks[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    response = payload["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "proxy_network_unavailable"
+    assert error["message"] == "Codex upstream websocket send failed: OSError"
+    retry_precreated.assert_awaited_once_with(session, restart_reader=True)
+    detach.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_capacity_wait_with_response_id_sends_explicit_keepalive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

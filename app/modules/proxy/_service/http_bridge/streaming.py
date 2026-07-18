@@ -34,6 +34,7 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.errors import (
     openai_error,
     response_failed_event,
@@ -2341,10 +2342,43 @@ class _HTTPBridgeStreamingMixin:
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
         request_state.bridge_request_deadline = request_deadline
-        account_neutral_recovery = is_http_bridge_account_neutral_replay(
-            kind=session.key.affinity_kind,
-            key=session.key.affinity_key,
-        )
+
+        async def retry_precreated_for_idle_recovery(
+            *,
+            downstream_response_id: str,
+            after_circuit_cooldown: bool = False,
+        ) -> tuple[bool, str | None]:
+            try:
+                return (
+                    await self._retry_http_bridge_precreated_request(
+                        session,
+                        restart_reader=True,
+                    ),
+                    None,
+                )
+            except UpstreamWebSocketTransportError as exc:
+                if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                    stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                logger.info(
+                    "HTTP bridge stream idle recovery retry%s failed with transport error request_id=%s error_code=%s",
+                    " after circuit cooldown" if after_circuit_cooldown else "",
+                    request_state.request_id,
+                    exc.error_code,
+                )
+                return (
+                    False,
+                    format_sse_event(
+                        cast(
+                            Mapping[str, JsonValue],
+                            response_failed_event(
+                                exc.error_code,
+                                str(exc),
+                                response_id=downstream_response_id,
+                            ),
+                        )
+                    ),
+                )
+
         while True:
             try:
                 if account_neutral_recovery:
@@ -2496,10 +2530,12 @@ class _HTTPBridgeStreamingMixin:
                             if not response_started:
                                 retried = False
                                 if not circuit_keepalive_waiting:
-                                    retried = await self._retry_http_bridge_precreated_request(
-                                        session,
-                                        restart_reader=True,
+                                    retried, terminal_event = await retry_precreated_for_idle_recovery(
+                                        downstream_response_id=downstream_response_id,
                                     )
+                                    if terminal_event is not None:
+                                        yield terminal_event
+                                        break
                                     if retried:
                                         logger.info(
                                             "HTTP bridge stream idle recovery retried pre-response request_id=%s",
@@ -2552,10 +2588,13 @@ class _HTTPBridgeStreamingMixin:
                                     was_circuit_keepalive_waiting = circuit_keepalive_waiting
                                     circuit_keepalive_waiting = False
                                     if was_circuit_keepalive_waiting and not retried:
-                                        retried = await self._retry_http_bridge_precreated_request(
-                                            session,
-                                            restart_reader=True,
+                                        retried, terminal_event = await retry_precreated_for_idle_recovery(
+                                            downstream_response_id=downstream_response_id,
+                                            after_circuit_cooldown=True,
                                         )
+                                        if terminal_event is not None:
+                                            yield terminal_event
+                                            break
                                     if retried:
                                         logger.info(
                                             "HTTP bridge stream idle recovery retried after circuit cooldown "

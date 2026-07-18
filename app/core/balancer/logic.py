@@ -624,7 +624,7 @@ def select_account(
     # Recovery is a liveness admission inside the already-eligible pool. Pick
     # it before routing-policy preferences so burn/preserve policy cannot make
     # PROBING permanent, but never before quota/cooldown/security filtering.
-    due_probe = _oldest_due_probing_account(probing, current=current) if healthy else None
+    due_probe = _oldest_due_probing_account(probing, current=current) if healthy or recovery_probe_only else None
     if recovery_probe_only and due_probe is None:
         return SelectionResult(None, None)
     health_pool = [due_probe] if due_probe is not None else healthy or probing or draining or available

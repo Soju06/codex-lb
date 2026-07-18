@@ -243,6 +243,12 @@ class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
         return self._initial_account_id
 
 
+class _FailingUpsertStickySessionsRepository(_StubStickySessionsRepository):
+    async def upsert(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise RuntimeError("sticky persistence unavailable")
+
+
 @asynccontextmanager
 async def _repo_factory(
     accounts_repo: _StubAccountsRepository,
@@ -1067,6 +1073,95 @@ async def test_unbound_probe_reservation_rolls_back_when_persistence_fails(
 
 
 @pytest.mark.asyncio
+async def test_unbound_probe_lease_preserves_reservation_until_commit() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-unbound-lease-healthy")
+    probing = _make_account("acc-unbound-lease-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                142,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                143,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=17,
+        health_version=5,
+    )
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    assert selected.lease is not None
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 1
+    assert probing_runtime.last_selected_at is not None
+    assert probing_runtime.last_selected_at > 0.0
+    assert probing_runtime.version == 18
+    assert probing_runtime.health_version == 6
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    probing = _make_account("acc-unbound-probe-only")
+    accounts_repo = _StubAccountsRepository([probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            probing.id: _usage_row_with_percent(
+                144,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=21,
+        health_version=7,
+    )
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == probing.id
+    assert selected.lease is not None
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 1
+    assert probing_runtime.version == 22
+    assert probing_runtime.health_version == 8
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_unbound_stickies_reserve_one_due_probe() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     healthy = _make_account("acc-concurrent-recovery-healthy")
@@ -1488,6 +1583,56 @@ async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
     assert probing_runtime.version == 33
 
     await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_sticky_probe_reservation_rolls_back_when_affinity_persistence_fails() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    unavailable_owner = _make_account("acc-probe-affinity-fail-owner")
+    unavailable_owner.status = AccountStatus.RATE_LIMITED
+    unavailable_owner.reset_at = now_epoch + 3600
+    healthy = _make_account("acc-probe-affinity-fail-healthy")
+    probing = _make_account("acc-probe-affinity-fail-probing")
+    accounts_repo = _StubAccountsRepository([unavailable_owner, healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                145,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                146,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _FailingUpsertStickySessionsRepository()
+    sticky_repo.account_id = unavailable_owner.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=41,
+        health_version=11,
+    )
+
+    with pytest.raises(RuntimeError, match="sticky persistence unavailable"):
+        await balancer.select_account(
+            sticky_key="probe-affinity-fail",
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+        )
+
+    probing_runtime = balancer._runtime[probing.id]
+    assert probing_runtime.inflight_streams == 0
+    assert probing_runtime.last_selected_at == 0.0
+    assert probing_runtime.health_version == 11
 
 
 @pytest.mark.asyncio

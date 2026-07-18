@@ -616,10 +616,19 @@ class LoadBalancer:
                                     selected_reset_at = int(state.reset_at) if state.reset_at else None
                                     break
                             if lease_kind is not None:
+                                selected_reserved_probe = bool(
+                                    probe_reservation is not None and selected.id == probe_reservation.account_id
+                                )
                                 selected_lease = self._acquire_account_lease_locked(
                                     selected.id,
                                     kind=lease_kind,
                                     estimated_tokens=estimated_lease_tokens,
+                                    # Keep the provisional recovery token intact
+                                    # until DB persistence and the final probe CAS
+                                    # commit the admission. Recording selection
+                                    # here would make the CAS fail while still
+                                    # consuming the quiet interval.
+                                    record_selection=not selected_reserved_probe,
                                 )
                             selected_snapshot = _clone_account(selected)
                             selected_snapshot.status = result.account.status
@@ -1108,7 +1117,61 @@ class LoadBalancer:
                     selected_account_map = {}
                     await asyncio.sleep(0)
                     continue
-                if selected_snapshot is not None and reserved_probe_admitted:
+                should_persist_sticky_mutation = (
+                    sticky_outcome.mutation is not None
+                    and selection_error_code is None
+                    and (selected_snapshot is not None or result.account is None)
+                )
+                if selected_snapshot is not None and reserved_probe_admitted and should_persist_sticky_mutation:
+                    reservation_committed = False
+                    assert sticky_kind is not None
+                    sticky_mutation = sticky_outcome.mutation
+                    assert sticky_mutation is not None
+                    try:
+                        async with self._runtime_lock:
+                            if self._probe_reservation_current_locked(probe_reservation):
+                                async with self._repo_factory() as repos:
+                                    await self._persist_sticky_mutation(
+                                        sticky_repo=repos.sticky_sessions,
+                                        sticky_key=sticky_key,
+                                        sticky_kind=sticky_kind,
+                                        mutation=sticky_mutation,
+                                    )
+                                reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                            else:
+                                self._release_due_probe_reservation_locked(probe_reservation)
+                    except BaseException:
+                        # The recovery probe must stay provisional until both
+                        # the affinity write and probe CAS commit succeed. If
+                        # affinity persistence fails, release the exact token so
+                        # the quiet interval is not consumed without traffic.
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        async with self._runtime_lock:
+                            self._release_due_probe_reservation_locked(probe_reservation)
+                        raise
+                    if not reservation_committed:
+                        # Runtime health changed while account-state persistence
+                        # was in flight. The lease and provisional affinity must
+                        # not escape; retry against a fresh runtime snapshot.
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        selected_snapshot = None
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        if attempt >= _MAX_SELECTION_ATTEMPTS:
+                            break
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        await asyncio.sleep(0)
+                        continue
+                elif selected_snapshot is not None and reserved_probe_admitted:
                     reservation_committed = False
                     async with self._runtime_lock:
                         reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
@@ -1135,24 +1198,21 @@ class LoadBalancer:
                             )
                         await asyncio.sleep(0)
                         continue
-                should_persist_sticky_mutation = (
-                    sticky_outcome.mutation is not None
-                    and selection_error_code is None
-                    and (selected_snapshot is not None or result.account is None)
-                )
-                if should_persist_sticky_mutation:
+                if should_persist_sticky_mutation and not reserved_probe_admitted:
                     # Sticky decisions stay provisional until cap classification,
                     # final lease admission, account-state persistence, and the
                     # probe CAS (when present) all succeed. Applying one final
                     # desired-state mutation avoids unsafe compensating writes.
                     assert sticky_kind is not None
+                    sticky_mutation = sticky_outcome.mutation
+                    assert sticky_mutation is not None
                     try:
                         async with self._repo_factory() as repos:
                             await self._persist_sticky_mutation(
                                 sticky_repo=repos.sticky_sessions,
                                 sticky_key=sticky_key,
                                 sticky_kind=sticky_kind,
-                                mutation=sticky_outcome.mutation,
+                                mutation=sticky_mutation,
                             )
                     except BaseException:
                         # Runtime admission may already be committed. Preserve

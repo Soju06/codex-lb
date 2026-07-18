@@ -387,6 +387,17 @@ async def test_sticky_sessions_api_stale_only_uses_subagent_ttl(async_client):
     assert set(remaining) == {"parent-cache-fresh"}
     assert remaining["parent-cache-fresh"]["isStale"] is False
 
+    await _insert_sticky_session(
+        key="subagent-cache-stale-purge",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=60,
+        is_subagent=True,
+    )
+    response = await async_client.post("/api/sticky-sessions/purge", json={"staleOnly": True})
+    assert response.status_code == 200
+    assert response.json()["deletedCount"] == 1
+
 
 @pytest.mark.asyncio
 async def test_sticky_sessions_api_filters_by_account_and_key(async_client):

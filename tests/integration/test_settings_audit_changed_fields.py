@@ -61,6 +61,11 @@ def _default_put_body() -> dict[str, Any]:
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
         ),
         (
+            "httpResponsesSessionBridgeSubagentPromptCacheTtlSeconds",
+            30,
+            "http_responses_session_bridge_subagent_prompt_cache_ttl_seconds",
+        ),
+        (
             "httpResponsesSessionBridgeGatewaySafeMode",
             True,
             "http_responses_session_bridge_gateway_safe_mode",

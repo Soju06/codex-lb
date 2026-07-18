@@ -122,6 +122,7 @@ class StickySessionCleanupScheduler:
                     deleted_count += await sticky_repo.purge_prompt_cache_before(
                         subagent_cutoff,
                         is_subagent=True,
+                        protect_active_bridge_mappings=True,
                     )
                     if deleted_count > 0:
                         logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)

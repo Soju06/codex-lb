@@ -80,6 +80,8 @@ class StickySessionsService:
             kind=kind,
             stale_cutoff=stale_cutoff,
             subagent_stale_cutoff=subagent_stale_cutoff,
+            account_query=normalized_account_query,
+            key_query=normalized_key_query,
         )
         if stale_only and kind not in (None, StickySessionKind.PROMPT_CACHE):
             return StickySessionListData(
@@ -197,7 +199,12 @@ class StickySessionsService:
     async def purge_entries(self) -> int:
         settings = await self._settings_repository.get_or_create()
         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
-        return await self._repository.purge_prompt_cache_before(cutoff)
+        subagent_cutoff = self._subagent_stale_cutoff(
+            settings.http_responses_session_bridge_subagent_prompt_cache_ttl_seconds
+        )
+        parent_deleted = await self._repository.purge_prompt_cache_before(cutoff, is_subagent=False)
+        subagent_deleted = await self._repository.purge_prompt_cache_before(subagent_cutoff, is_subagent=True)
+        return parent_deleted + subagent_deleted
 
     def _to_entry(
         self,
@@ -233,6 +240,8 @@ class StickySessionsService:
         kind: StickySessionKind | None,
         stale_cutoff: datetime,
         subagent_stale_cutoff: datetime,
+        account_query: str | None,
+        key_query: str | None,
     ) -> int:
         if kind not in (None, StickySessionKind.PROMPT_CACHE):
             return 0
@@ -240,11 +249,15 @@ class StickySessionsService:
             kind=StickySessionKind.PROMPT_CACHE,
             updated_before=stale_cutoff,
             is_subagent=False,
+            account_query=account_query,
+            key_query=key_query,
         )
         subagent_count = await self._repository.count_entries(
             kind=StickySessionKind.PROMPT_CACHE,
             updated_before=subagent_stale_cutoff,
             is_subagent=True,
+            account_query=account_query,
+            key_query=key_query,
         )
         return parent_count + subagent_count
 
@@ -266,6 +279,7 @@ class StickySessionsService:
         offset: int,
         limit: int,
     ) -> tuple[list[StickySessionListEntryRecord], int]:
+        fetch_limit = offset + limit
         parent_rows = await self._repository.list_entries(
             kind=StickySessionKind.PROMPT_CACHE,
             updated_before=stale_cutoff,
@@ -275,7 +289,7 @@ class StickySessionsService:
             sort_by=sort_by,
             sort_dir=sort_dir,
             offset=0,
-            limit=None,
+            limit=fetch_limit,
         )
         subagent_rows = await self._repository.list_entries(
             kind=StickySessionKind.PROMPT_CACHE,
@@ -286,11 +300,18 @@ class StickySessionsService:
             sort_by=sort_by,
             sort_dir=sort_dir,
             offset=0,
-            limit=None,
+            limit=fetch_limit,
         )
         rows = list(parent_rows) + list(subagent_rows)
         rows.sort(key=self._stale_sort_key(sort_by), reverse=sort_dir == "desc")
-        return rows[offset : offset + limit], len(rows)
+        total = await self._count_stale_prompt_cache_entries(
+            kind=StickySessionKind.PROMPT_CACHE,
+            stale_cutoff=stale_cutoff,
+            subagent_stale_cutoff=subagent_stale_cutoff,
+            account_query=account_query,
+            key_query=key_query,
+        )
+        return rows[offset : offset + limit], total
 
     async def _stale_prompt_cache_identifiers(
         self,

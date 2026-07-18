@@ -846,6 +846,7 @@ async def update_settings(
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
+            "http_responses_session_bridge_subagent_prompt_cache_ttl_seconds",
             "http_responses_session_bridge_gateway_safe_mode",
             "sticky_reallocation_budget_threshold_pct",
             "sticky_reallocation_primary_budget_threshold_pct",

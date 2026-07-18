@@ -88,6 +88,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     assert sticky_repo.purge_prompt_cache_before.await_count == 2
     assert sticky_repo.purge_prompt_cache_before.await_args_list[0].kwargs["is_subagent"] is False
     assert sticky_repo.purge_prompt_cache_before.await_args_list[1].kwargs["is_subagent"] is True
+    assert sticky_repo.purge_prompt_cache_before.await_args_list[1].kwargs["protect_active_bridge_mappings"] is True
     sticky_repo.purge_before.assert_not_called()
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
@@ -150,6 +151,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
         await scheduler._cleanup_once()
 
     assert sticky_repo.purge_prompt_cache_before.await_count == 2
+    assert sticky_repo.purge_prompt_cache_before.await_args_list[1].kwargs["protect_active_bridge_mappings"] is True
     bridge_repo.purge_closed_before.assert_not_called()
     bridge_repo.purge_abandoned_before.assert_not_called()
     ring_service.purge_stale_before.assert_called_once()
@@ -207,6 +209,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
         await scheduler._cleanup_once()
 
     assert sticky_repo.purge_prompt_cache_before.await_count == 2
+    assert sticky_repo.purge_prompt_cache_before.await_args_list[1].kwargs["protect_active_bridge_mappings"] is True
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
     ring_service.purge_stale_before.assert_called_once()

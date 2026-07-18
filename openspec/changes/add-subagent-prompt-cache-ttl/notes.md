@@ -25,5 +25,3 @@ Subagent bridge sessions are closed at response-stream completion. An optional p
 ## Visibility Gap
 
 Active bridge-session visibility is outside this change.
-
-

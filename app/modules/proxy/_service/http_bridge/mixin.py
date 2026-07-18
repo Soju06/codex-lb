@@ -127,6 +127,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
     _subagent_prompt_cache_bridge_key,
+    _sync_reused_http_bridge_session,
     _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
@@ -426,24 +427,36 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
-        settings = _service_get_settings()
-        dashboard_settings = await _service_get_settings_cache().get()
+        settings, dashboard_settings = _service_get_settings(), await _service_get_settings_cache().get()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key = _sticky_key_from_session_header(headers)
         initial_session_key = session_header_fallback_key or (key if key.affinity_kind == "session_header" else None)
+        original_key, original_affinity_key = key, affinity.key
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
         )
         is_subagent_session, subagent_prompt_cache_ttl_seconds = _detect_subagent_session(headers, dashboard_settings)
-        key, affinity, effective_idle_ttl_seconds = _subagent_prompt_cache_bridge_key(
+        subagent_key_result = _subagent_prompt_cache_bridge_key(
             key,
             affinity,
-            is_subagent=is_subagent_session,
-            idle_ttl_seconds=idle_ttl_seconds,
-            request_scope_id=request_scope_id,
-            subagent_prompt_cache_ttl_seconds=subagent_prompt_cache_ttl_seconds,
+            is_subagent_session,
+            forwarded_request,
+            idle_ttl_seconds,
+            request_scope_id,
+            subagent_prompt_cache_ttl_seconds,
+        )
+        key, affinity, effective_idle_ttl_seconds, subagent_prompt_cache_ttl_seconds = subagent_key_result
+        if key != original_key or affinity.key != original_affinity_key:
+            incoming_turn_state = incoming_session_key = initial_session_key = None
+        reuse_metadata = (
+            api_key,
+            request_model,
+            request_service_tier,
+            effective_idle_ttl_seconds,
+            is_subagent_session,
+            subagent_prompt_cache_ttl_seconds,
         )
         model_transition_rebind = bool(
             durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, request_model)
@@ -652,10 +665,7 @@ class _HTTPBridgeMixin(
                     assert existing is not None
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        existing.api_key = api_key
-                        existing.request_model = request_model
-                        existing.request_service_tier = request_service_tier
-                        existing.last_used_at = _service_time().monotonic()
+                        _sync_reused_http_bridge_session(existing, reuse_metadata)
                         await _refresh_reused_http_bridge_session_with_handoff(
                             self,
                             existing,
@@ -1285,7 +1295,6 @@ class _HTTPBridgeMixin(
                 except Exception:
                     pass
                 continue
-
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1355,10 +1364,7 @@ class _HTTPBridgeMixin(
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        session.api_key = api_key
-                        session.request_model = request_model
-                        session.request_service_tier = request_service_tier
-                        session.last_used_at = _service_time().monotonic()
+                        _sync_reused_http_bridge_session(session, reuse_metadata)
                         return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     old_account_id = session.account.id
@@ -1374,7 +1380,6 @@ class _HTTPBridgeMixin(
                     if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
-
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
@@ -1826,12 +1831,10 @@ class _HTTPBridgeMixin(
 
     async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
         """Renew the durable lease; callers must hold ``self._http_bridge_lock``."""
-
         await _renew_durable_http_bridge_lease(self, session)
 
     async def reconcile_durable_http_bridge_ownership(self) -> int:
         """Close local sessions whose durable row is owned by another instance/epoch."""
-
         return await _reconcile_durable_http_bridge_ownership(self)
 
     async def _create_http_bridge_session(

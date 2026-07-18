@@ -65,6 +65,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _detect_subagent_session,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -76,7 +77,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
-    _http_bridge_session_has_visible_requests,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
@@ -91,6 +91,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
+    _subagent_prompt_cache_bridge_key,
     _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -791,6 +792,34 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
+        request_scope_id = ensure_request_scope_id()
+        is_subagent_session, subagent_prompt_cache_ttl_seconds = _detect_subagent_session(
+            headers,
+            dashboard_settings,
+        )
+        original_bridge_session_key = bridge_session_key
+        original_affinity_key = affinity.key
+        (
+            bridge_session_key,
+            affinity,
+            _effective_lookup_idle_ttl_seconds,
+            _effective_subagent_prompt_cache_ttl_seconds,
+        ) = _subagent_prompt_cache_bridge_key(
+            bridge_session_key,
+            affinity,
+            is_subagent_session,
+            forwarded_request,
+            idle_ttl_seconds,
+            request_scope_id,
+            subagent_prompt_cache_ttl_seconds,
+        )
+        del _effective_lookup_idle_ttl_seconds, _effective_subagent_prompt_cache_ttl_seconds
+        subagent_bridge_key_isolated = (
+            bridge_session_key != original_bridge_session_key or affinity.key != original_affinity_key
+        )
+        if subagent_bridge_key_isolated:
+            incoming_turn_state_header = None
+            incoming_session_header = None
         session_header_fallback_key = (
             _make_http_bridge_session_header_fallback_key(
                 headers=headers,
@@ -800,10 +829,12 @@ class _HTTPBridgeStreamingMixin:
             if not forwarded_request
             else None
         )
+        if subagent_bridge_key_isolated:
+            session_header_fallback_key = None
         legacy_anchor_lookup = await _legacy_forward_anchor_lookup(
             durable_bridge=self._durable_bridge,
             bridge_session_key=bridge_session_key,
-            turn_state=_sticky_key_from_turn_state_header(headers),
+            turn_state=incoming_turn_state_header,
             api_key=api_key,
             previous_response_id=payload.previous_response_id,
             forwarded_request=forwarded_request,
@@ -813,7 +844,7 @@ class _HTTPBridgeStreamingMixin:
             incoming_turn_state_header = _sticky_key_from_turn_state_header(headers)
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             bridge_session_key,
-            _sticky_key_from_turn_state_header(headers),
+            incoming_turn_state_header,
             payload.previous_response_id,
             forwarded_request,
             forwarded_original_request_unanchored,
@@ -2295,23 +2326,6 @@ class _HTTPBridgeStreamingMixin:
                 if _http_bridge_session_is_unanchored_parallel_fork(session):
                     await self._close_http_bridge_session(session)
                 elif session.is_subagent:
-                    ttl = session.subagent_prompt_cache_ttl_seconds
-                    if ttl is None:
-                        await self._close_http_bridge_session(session)
-                    else:
-                        scheduled_last_used_at = session.last_used_at
+                    if session.subagent_prompt_cache_ttl_seconds is not None:
                         await self._refresh_completed_subagent_sticky_mapping(session)
-
-                        async def _delayed_subagent_close() -> None:
-                            await asyncio.sleep(ttl)
-                            if session.closed or session.last_used_at != scheduled_last_used_at:
-                                return
-                            if _http_bridge_session_has_visible_requests(session):
-                                return
-                            await self._close_http_bridge_session(session)
-
-                        self._schedule_cancel_safe_cleanup(
-                            _delayed_subagent_close(),
-                            action="http_bridge_session_close",
-                            request_id=session.key.affinity_key,
-                        )
+                    await self._close_http_bridge_session(session)

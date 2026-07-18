@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, StickySession, StickySessionKind
+from app.db.models import Account, HttpBridgeSessionRecord, HttpBridgeSessionState, StickySession, StickySessionKind
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
@@ -216,8 +216,44 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return int(result.scalar_one())
 
-    async def purge_prompt_cache_before(self, cutoff: datetime, *, is_subagent: bool | None = None) -> int:
+    async def purge_prompt_cache_before(
+        self,
+        cutoff: datetime,
+        *,
+        is_subagent: bool | None = None,
+        protect_active_bridge_mappings: bool = False,
+    ) -> int:
+        if protect_active_bridge_mappings:
+            return await self._purge_prompt_cache_before_excluding_active_bridge(cutoff, is_subagent=is_subagent)
         return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE, is_subagent=is_subagent)
+
+    async def _purge_prompt_cache_before_excluding_active_bridge(
+        self,
+        cutoff: datetime,
+        *,
+        is_subagent: bool | None,
+    ) -> int:
+        active_bridge_mapping = (
+            select(HttpBridgeSessionRecord.id)
+            .where(
+                HttpBridgeSessionRecord.session_key_kind == StickySessionKind.PROMPT_CACHE.value,
+                HttpBridgeSessionRecord.session_key_value == StickySession.key,
+                HttpBridgeSessionRecord.state.in_((HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING)),
+            )
+            .exists()
+        )
+        stmt = delete(StickySession).where(
+            StickySession.updated_at < to_utc_naive(cutoff),
+            StickySession.kind == StickySessionKind.PROMPT_CACHE,
+            ~active_bridge_mapping,
+        )
+        if is_subagent is not None:
+            stmt = stmt.where(StickySession.is_subagent == is_subagent)
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt.returning(StickySession.key))
+            deleted = len(result.scalars().all())
+            await self._session.commit()
+        return deleted
 
     async def purge_before(
         self,

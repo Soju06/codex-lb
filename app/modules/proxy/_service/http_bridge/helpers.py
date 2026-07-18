@@ -1872,33 +1872,49 @@ def _detect_subagent_session(
 def _subagent_prompt_cache_bridge_key(
     key: _HTTPBridgeSessionKey,
     affinity: _AffinityPolicy,
-    *,
     is_subagent: bool,
+    forwarded_request: bool,
     idle_ttl_seconds: float,
     request_scope_id: str,
     subagent_prompt_cache_ttl_seconds: int | None,
-) -> tuple[_HTTPBridgeSessionKey, _AffinityPolicy, float]:
-    if not is_subagent or key.affinity_kind != "prompt_cache" or affinity.kind is not StickySessionKind.PROMPT_CACHE:
-        return key, affinity, idle_ttl_seconds
+) -> tuple[_HTTPBridgeSessionKey, _AffinityPolicy, float, int | None]:
+    prompt_cache_affinity_key = affinity.key if affinity.kind is StickySessionKind.PROMPT_CACHE else None
+    is_prompt_cache = bool(prompt_cache_affinity_key)
+    effective_subagent_prompt_cache_ttl_seconds = subagent_prompt_cache_ttl_seconds if is_prompt_cache else None
+    if (
+        not is_subagent
+        or forwarded_request
+        or key.affinity_key.startswith("subagent:")
+        or (affinity.key is not None and affinity.key.startswith("subagent:"))
+    ):
+        return key, affinity, idle_ttl_seconds, effective_subagent_prompt_cache_ttl_seconds
 
-    if subagent_prompt_cache_ttl_seconds is None:
-        subagent_affinity_key = f"subagent:{request_scope_id}:{key.affinity_key}"
+    if is_prompt_cache and subagent_prompt_cache_ttl_seconds is not None:
+        assert prompt_cache_affinity_key is not None
+        subagent_affinity_key = f"subagent:{prompt_cache_affinity_key}"
+        subagent_affinity_kind = StickySessionKind.PROMPT_CACHE.value
+        effective_idle_ttl_seconds = float(subagent_prompt_cache_ttl_seconds)
+        effective_max_age_seconds = subagent_prompt_cache_ttl_seconds
     else:
-        subagent_affinity_key = f"subagent:{key.affinity_key}"
+        subagent_affinity_key = f"subagent:{request_scope_id}:{prompt_cache_affinity_key or key.affinity_key}"
+        subagent_affinity_kind = key.affinity_kind
+        effective_idle_ttl_seconds = idle_ttl_seconds
+        effective_max_age_seconds = affinity.max_age_seconds
     return (
         _HTTPBridgeSessionKey(
-            key.affinity_kind,
+            subagent_affinity_kind,
             subagent_affinity_key,
             key.api_key_id,
-            strength=key.strength,
+            strength=None if subagent_affinity_kind == StickySessionKind.PROMPT_CACHE.value else key.strength,
         ),
         _AffinityPolicy(
             key=subagent_affinity_key,
             kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,
-            max_age_seconds=subagent_prompt_cache_ttl_seconds,
+            max_age_seconds=effective_max_age_seconds,
         ),
-        idle_ttl_seconds if subagent_prompt_cache_ttl_seconds is None else float(subagent_prompt_cache_ttl_seconds),
+        effective_idle_ttl_seconds,
+        effective_subagent_prompt_cache_ttl_seconds,
     )
 
 
@@ -1917,13 +1933,35 @@ async def _delete_completed_subagent_sticky_mapping(
         return
     try:
         async with repo_factory() as repositories:
-            await repositories.sticky_sessions.delete(
-                affinity.key,
-                kind=StickySessionKind.PROMPT_CACHE,
-                is_subagent=True,
-            )
+            keys_to_delete = {affinity.key}
+            if isinstance(affinity.key, str) and affinity.key.startswith("subagent:"):
+                parts = affinity.key.split(":", 2)
+                if len(parts) == 3 and parts[2]:
+                    keys_to_delete.add(f"subagent:{parts[2]}")
+            for key in keys_to_delete:
+                await repositories.sticky_sessions.delete(
+                    key,
+                    kind=StickySessionKind.PROMPT_CACHE,
+                    is_subagent=True,
+                )
     except Exception:
         logger.warning("Failed to delete completed subagent sticky mapping", exc_info=True)
+
+
+def _sync_reused_http_bridge_session(
+    session: Any,
+    metadata: tuple[Any, str | None, str | None, float, bool, int | None],
+) -> None:
+    api_key, request_model, request_service_tier, idle_ttl_seconds, is_subagent, subagent_ttl = metadata
+    session.api_key = api_key
+    session.request_model = request_model
+    session.request_service_tier = request_service_tier
+    session.last_used_at = _service_time().monotonic()
+    if not (getattr(session, "is_subagent", False) or is_subagent):
+        return
+    session.idle_ttl_seconds = idle_ttl_seconds
+    session.is_subagent = True
+    session.subagent_prompt_cache_ttl_seconds = subagent_ttl
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

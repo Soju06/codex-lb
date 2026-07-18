@@ -2446,6 +2446,7 @@ def _state_from_account(
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
     effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
     effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
+    usage_exhaustion_evidence_status = status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED)
 
     return AccountState(
         account_id=account.id,
@@ -2465,8 +2466,8 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=capacity_credits,
         health_tier=new_tier,
-        priority_used_percent=used_percent,
-        priority_secondary_used_percent=secondary_used,
+        priority_used_percent=used_percent if usage_exhaustion_evidence_status else None,
+        priority_secondary_used_percent=secondary_used if usage_exhaustion_evidence_status else None,
         inflight_response_creates=runtime.inflight_response_creates,
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,

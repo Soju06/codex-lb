@@ -2059,6 +2059,30 @@ def test_state_from_account_keeps_raw_usage_evidence_separate_from_pressure(monk
     assert state.priority_used_percent == 98.0
 
 
+def test_state_from_account_preserves_pressure_for_active_routing(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=94.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(inflight_streams=1),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 96.5
+    assert state.priority_used_percent is None
+    assert _state_above_sticky_budget_threshold(state, 95.0) is True
+
+
 def test_state_from_account_clears_stale_advisory_account_reset_for_active_account(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 300)

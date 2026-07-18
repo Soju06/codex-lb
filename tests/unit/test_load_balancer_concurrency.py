@@ -516,6 +516,28 @@ async def test_successful_force_probe_counts_after_persisted_status_normalizes_a
 
 
 @pytest.mark.asyncio
+async def test_successful_force_probe_does_not_clear_errors_before_probe_eligibility() -> None:
+    account = _make_account("acc-force-probe-ineligible-clear")
+    accounts_repo = _StubAccountsRepository([account])
+    usage_repo = _StubUsageRepository(primary={}, secondary={})
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[account.id] = RuntimeState(
+        health_tier=HEALTH_TIER_HEALTHY,
+        error_count=2,
+        last_error_at=time.time(),
+        health_version=3,
+    )
+
+    await balancer.record_probe_result(account_id=account.id, http_status=200)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.error_count == 2
+    assert runtime.last_error_at is not None
+    assert runtime.probe_success_streak == 0
+    assert runtime.health_version >= 3
+
+
+@pytest.mark.asyncio
 async def test_force_probe_uses_monthly_usage_for_free_account_health() -> None:
     account = _make_account("acc-force-probe-monthly")
     account.plan_type = "free"
@@ -1130,6 +1152,20 @@ def test_probe_reservation_rejects_stale_last_selected_snapshot() -> None:
     assert balancer._runtime[probing.id].version == 5
 
 
+@pytest.mark.parametrize("routing_strategy", ["sequential_drain", "reset_drain", "single_account"])
+def test_bypass_routing_strategies_do_not_require_probe_reservations(routing_strategy: str) -> None:
+    states = [
+        AccountState("healthy", AccountStatus.ACTIVE, health_tier=HEALTH_TIER_HEALTHY),
+        AccountState("probing", AccountStatus.ACTIVE, health_tier=HEALTH_TIER_PROBING),
+    ]
+
+    assert not load_balancer_module._probing_result_requires_recovery_reservation(
+        states,
+        states[1],
+        routing_strategy=routing_strategy,
+    )
+
+
 @pytest.mark.asyncio
 async def test_unbound_probe_reservation_rolls_back_when_persistence_fails(
     monkeypatch: pytest.MonkeyPatch,
@@ -1361,6 +1397,53 @@ async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
     assert probing_runtime.inflight_streams == 1
     assert probing_runtime.version == 23
     assert probing_runtime.health_version == 7
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_unbound_recovery_probe_falls_back_after_repeated_reservation_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-probe-loss-healthy")
+    probing = _make_account("acc-probe-loss-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                147,
+                healthy.id,
+                used_percent=80.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                148,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=31,
+        health_version=7,
+    )
+    monkeypatch.setattr(balancer, "_reserve_due_probe_locked", lambda *args, **kwargs: None)
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == healthy.id
+    assert selected.error_message is None
+    assert selected.lease is not None
 
     await balancer.release_account_lease(selected.lease)
 
@@ -1839,7 +1922,7 @@ async def test_sticky_probe_reservation_rechecks_health_after_state_persistence(
 
 
 @pytest.mark.asyncio
-async def test_sticky_probe_reservation_rolls_back_when_affinity_persistence_fails() -> None:
+async def test_sticky_probe_reservation_does_not_leak_affinity_when_persistence_fails() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     unavailable_owner = _make_account("acc-probe-affinity-fail-owner")
     unavailable_owner.status = AccountStatus.RATE_LIMITED
@@ -1884,8 +1967,10 @@ async def test_sticky_probe_reservation_rolls_back_when_affinity_persistence_fai
 
     probing_runtime = balancer._runtime[probing.id]
     assert probing_runtime.inflight_streams == 0
-    assert probing_runtime.last_selected_at == 0.0
-    assert probing_runtime.health_version == 11
+    assert probing_runtime.last_selected_at != 0.0
+    assert probing_runtime.health_version == 12
+    assert sticky_repo.account_id == unavailable_owner.id
+    assert sticky_repo.upserts == []
 
 
 @pytest.mark.asyncio

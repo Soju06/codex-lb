@@ -502,6 +502,7 @@ class LoadBalancer:
         selection_error_code: str | None = None
         if sticky_key is None:
             attempt = 0
+            suppress_recovery_probe_candidates = False
             while True:
                 attempt += 1
                 probe_reservation: _ProbeReservation | None = None
@@ -533,6 +534,8 @@ class LoadBalancer:
                         caps=caps,
                         stream_reserve_slots=stream_reserve_slots,
                     )
+                    if suppress_recovery_probe_candidates:
+                        selection_states = _filter_recovery_probe_candidates(selection_states)
                     if not selection_states and states:
                         selection_error_code = _account_cap_error_code(lease_kind)
                         error_message = _account_cap_error_message(lease_kind, caps)
@@ -562,6 +565,7 @@ class LoadBalancer:
                         probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
                             selection_states,
                             result.account,
+                            routing_strategy=routing_strategy,
                         )
                         if probing_result_requires_reservation and result.account is not None:
                             # Unbound recovery admissions have the same
@@ -647,7 +651,17 @@ class LoadBalancer:
                     selected_states = []
                     selected_account_map = {}
                     if attempt >= _MAX_SELECTION_ATTEMPTS:
-                        break
+                        suppress_recovery_probe_candidates = True
+                        attempt = 0
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        await asyncio.sleep(0)
+                        continue
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -793,6 +807,7 @@ class LoadBalancer:
         else:
             sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
             attempt = 0
+            suppress_recovery_probe_candidates = False
             while True:
                 attempt += 1
                 if sticky_kind is not None:
@@ -874,6 +889,8 @@ class LoadBalancer:
                         ]
                     else:
                         selection_states = cap_eligible_states
+                    if suppress_recovery_probe_candidates:
+                        selection_states = _filter_recovery_probe_candidates(selection_states)
                     probe_reservation: _ProbeReservation | None = None
                 sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
                 if not selection_states and states:
@@ -957,6 +974,7 @@ class LoadBalancer:
                     probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
                         selection_states,
                         result.account,
+                        routing_strategy=routing_strategy,
                     )
                     if should_reserve_probe and probing_result_requires_reservation:
                         # Sticky persistence happens outside the runtime lock.
@@ -1075,7 +1093,17 @@ class LoadBalancer:
                     selected_states = []
                     selected_account_map = {}
                     if attempt >= _MAX_SELECTION_ATTEMPTS:
-                        break
+                        suppress_recovery_probe_candidates = True
+                        attempt = 0
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        await asyncio.sleep(0)
+                        continue
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -1151,28 +1179,16 @@ class LoadBalancer:
                     try:
                         async with self._runtime_lock:
                             assert probe_reservation is not None
-                            if self._probe_reservation_current_locked(probe_reservation):
-                                async with self._repo_factory() as repos:
-                                    await self._persist_sticky_mutation(
-                                        sticky_repo=repos.sticky_sessions,
-                                        sticky_key=sticky_key,
-                                        sticky_kind=sticky_kind,
-                                        mutation=sticky_mutation,
-                                    )
-                                reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
-                                if reservation_committed:
-                                    self._sync_committed_probe_state_locked(
-                                        probe_reservation,
-                                        selected_account_map,
-                                        selected_states,
-                                    )
+                            reservation_committed = self._commit_due_probe_reservation_locked(probe_reservation)
+                            if reservation_committed:
+                                self._sync_committed_probe_state_locked(
+                                    probe_reservation,
+                                    selected_account_map,
+                                    selected_states,
+                                )
                             else:
                                 self._release_due_probe_reservation_locked(probe_reservation)
                     except BaseException:
-                        # The recovery probe must stay provisional until both
-                        # the affinity write and probe CAS commit succeed. If
-                        # affinity persistence fails, release the exact token so
-                        # the quiet interval is not consumed without traffic.
                         await self.release_account_lease(selected_lease)
                         selected_lease = None
                         async with self._runtime_lock:
@@ -1199,6 +1215,21 @@ class LoadBalancer:
                             )
                         await asyncio.sleep(0)
                         continue
+                    try:
+                        async with self._repo_factory() as repos:
+                            await self._persist_sticky_mutation(
+                                sticky_repo=repos.sticky_sessions,
+                                sticky_key=sticky_key,
+                                sticky_kind=sticky_kind,
+                                mutation=sticky_mutation,
+                            )
+                    except BaseException:
+                        # The probe CAS is already committed, so the rejected
+                        # reservation cannot leak affinity. Release only the
+                        # request-local lease before surfacing the failure.
+                        await self.release_account_lease(selected_lease)
+                        selected_lease = None
+                        raise
                 elif selected_snapshot is not None and reserved_probe_admitted:
                     reservation_committed = False
                     try:
@@ -2298,11 +2329,6 @@ class LoadBalancer:
             # snapshot. Lease-only version bumps must not drop Force Probe.
             if runtime.health_version != expected_health_version:
                 return
-            if runtime.error_count > 0 or runtime.last_error_at is not None:
-                runtime.error_count = 0
-                runtime.last_error_at = None
-                runtime.version += 1
-                runtime.health_version += 1
 
             normalized_state = _state_from_account(
                 account=account,
@@ -2328,6 +2354,12 @@ class LoadBalancer:
             )
             if runtime.health_tier != HEALTH_TIER_PROBING:
                 return
+
+            if runtime.error_count > 0 or runtime.last_error_at is not None:
+                runtime.error_count = 0
+                runtime.last_error_at = None
+                runtime.version += 1
+                runtime.health_version += 1
 
             runtime.probe_success_streak += 1
             runtime.version += 1
@@ -2575,10 +2607,20 @@ def _filter_states_for_account_caps(
 def _probing_result_requires_recovery_reservation(
     states: Collection[AccountState],
     result_account: AccountState | None,
+    *,
+    routing_strategy: str,
 ) -> bool:
+    if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
+        return False
     if result_account is None or result_account.health_tier != HEALTH_TIER_PROBING:
         return False
     return any(state.health_tier == HEALTH_TIER_HEALTHY for state in states)
+
+
+def _filter_recovery_probe_candidates(states: list[AccountState]) -> list[AccountState]:
+    if not any(state.health_tier == HEALTH_TIER_HEALTHY for state in states):
+        return states
+    return [state for state in states if state.health_tier != HEALTH_TIER_PROBING]
 
 
 def _pool_has_available_account_without_backoff(

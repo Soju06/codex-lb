@@ -455,7 +455,7 @@ from app.modules.proxy.request_policy import (
     openai_validation_error,
     validate_model_access,
 )
-from app.modules.proxy.selection_errors import selection_failure_response
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 from app.modules.proxy.tool_call_dedupe import (
     mark_duplicate_tool_call_downstream_event,
     rewrite_parallel_tool_call_text,
@@ -2182,6 +2182,8 @@ class _WebSocketMixin:
             account = selection.account
             if account is not None:
                 break
+            if selection.error_code == USAGE_LIMIT_REACHED:
+                break
 
             async def _heartbeat(remaining_seconds: float) -> None:
                 event = _account_capacity_wait_payload(
@@ -2275,7 +2277,7 @@ class _WebSocketMixin:
             )
             return None
         if require_preferred_account and preferred_account_id is not None:
-            if _facade()._is_local_account_cap_code(error_code) or error_code == "usage_limit_reached":
+            if _facade()._is_local_account_cap_code(error_code):
                 status_code, error_payload = selection_failure_response(selection)
                 await proxy._emit_websocket_connect_failure(
                     websocket,

@@ -465,6 +465,57 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
 
 
 @pytest.mark.asyncio
+async def test_stream_cap_takes_precedence_over_remaining_quota_exhausted_account() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    capped = _make_account("acc-stream-cap-mixed-capped")
+    exhausted = _make_account("acc-stream-cap-mixed-exhausted")
+    exhausted.status = AccountStatus.QUOTA_EXCEEDED
+    exhausted.reset_at = now_epoch + 3600
+    accounts_repo = _StubAccountsRepository([capped, exhausted])
+    usage_repo = _StubUsageRepository(
+        primary={
+            capped.id: _usage_row_with_percent(
+                203,
+                capped.id,
+                used_percent=50.0,
+                reset_at=now_epoch + 300,
+            ),
+            exhausted.id: _usage_row_with_percent(
+                204,
+                exhausted.id,
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    leases = [
+        (
+            await balancer.select_account(
+                routing_strategy="usage_weighted",
+                lease_kind="stream",
+            )
+        ).lease
+        for _ in range(8)
+    ]
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert selected.error_message is not None
+    assert "Account stream capacity is exhausted" in selected.error_message
+    assert selected.resets_at is None
+
+    for lease in leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
 async def test_account_stream_recovery_reserve_keeps_last_slot_for_reattach() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     account = _make_account("acc-stream-recovery-reserve")

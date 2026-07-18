@@ -881,6 +881,7 @@ class _StreamingRetryMixin:
                         deferred_capacity_lease = None
                     if (
                         not account
+                        and selection.error_code != USAGE_LIMIT_REACHED
                         and (
                             selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
                             or not (propagate_http_errors and last_transient_exc is not None)

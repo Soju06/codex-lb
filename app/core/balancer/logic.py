@@ -164,25 +164,41 @@ def pool_usage_exhaustion(
         return None
     ignored_account_ids = set(ignore_standard_quota_account_ids or ())
 
+    def _primary_usage_evidence(state: AccountState) -> float | None:
+        return state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+
+    def _secondary_usage_evidence(state: AccountState) -> float | None:
+        if state.limit_scoped_usage and state.priority_secondary_used_percent is None:
+            return _primary_usage_evidence(state)
+        return (
+            state.priority_secondary_used_percent
+            if state.priority_secondary_used_percent is not None
+            else state.secondary_used_percent
+        )
+
     def _usage_exhausted(state: AccountState) -> bool:
         if state.status not in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
             return False
-        usage_values = (state.used_percent, state.secondary_used_percent)
+        usage_values = (_primary_usage_evidence(state), _secondary_usage_evidence(state))
         return any(value is not None and float(value) >= 100.0 for value in usage_values)
 
-    def _usage_exhausted_reset_candidates(state: AccountState) -> list[float]:
+    def _usage_exhausted_reset_at(state: AccountState) -> float | None:
         if state.status not in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
-            return []
+            return None
         candidates: list[float] = []
-        if state.used_percent is not None and float(state.used_percent) >= 100.0 and state.reset_at is not None:
+        primary_evidence = _primary_usage_evidence(state)
+        secondary_evidence = _secondary_usage_evidence(state)
+        if primary_evidence is not None and float(primary_evidence) >= 100.0 and state.reset_at is not None:
             candidates.append(float(state.reset_at))
         if (
-            state.secondary_used_percent is not None
-            and float(state.secondary_used_percent) >= 100.0
+            secondary_evidence is not None
+            and float(secondary_evidence) >= 100.0
             and state.secondary_reset_at is not None
         ):
             candidates.append(float(state.secondary_reset_at))
-        return candidates
+        if not candidates:
+            return None
+        return max(candidates)
 
     eligible = [
         state
@@ -202,7 +218,7 @@ def pool_usage_exhaustion(
     # Only usage-proven exhausted accounts reach this branch; surface the
     # earliest reset for an actually exhausted window so the structured 429
     # does not retry a secondary-window exhaustion at the primary reset time.
-    reset_candidates = [reset_at for state in eligible for reset_at in _usage_exhausted_reset_candidates(state)]
+    reset_candidates = [reset_at for state in eligible if (reset_at := _usage_exhausted_reset_at(state)) is not None]
     resets_at = int(min(reset_candidates)) if reset_candidates else None
     message = "Usage limit reached"
     if resets_at is not None:
@@ -446,6 +462,8 @@ def select_account(
     primary_first_usage_weighted: bool = False,
     routing_costs: RoutingCostsByAccount | None = None,
     replica_salt: str | None = None,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -510,6 +528,7 @@ def select_account(
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
+    usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in all_states:
@@ -593,14 +612,15 @@ def select_account(
                     return SelectionResult(None, f"opportunistic burn window closed: {reason}")
                 available = opportunistic_available
         else:
-            usage_exhaustion = pool_usage_exhaustion(
-                all_states,
-                current=current,
-                ignore_standard_quota=ignore_standard_quota or bypass_quota_exceeded,
-                ignore_standard_quota_account_ids=bypass_account_ids,
-            )
-            if usage_exhaustion is not None:
-                return usage_exhaustion
+            if allow_usage_exhaustion_error:
+                usage_exhaustion = pool_usage_exhaustion(
+                    usage_exhaustion_state_list,
+                    current=current,
+                    ignore_standard_quota=ignore_standard_quota or bypass_quota_exceeded,
+                    ignore_standard_quota_account_ids=bypass_account_ids,
+                )
+                if usage_exhaustion is not None:
+                    return usage_exhaustion
             reauth_required = [s for s in all_states if s.status == AccountStatus.REAUTH_REQUIRED]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]

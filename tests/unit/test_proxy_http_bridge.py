@@ -3870,6 +3870,112 @@ async def test_reconnect_http_bridge_session_uses_bridge_budget_for_capacity_wai
 
 
 @pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_skips_capacity_wait_for_usage_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+
+    async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 1h",
+            error_code="usage_limit_reached",
+            resets_at=1_700_003_600,
+        )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect-usage-limit-now",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.5)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_sleep_for_account_selection_recovery",
+        lambda *_args, **_kwargs: pytest.fail("usage_limit_reached must not enter recovery wait"),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["code"] == "usage_limit_reached"
+    assert exc_info.value.payload["error"]["type"] == "usage_limit_reached"
+    assert exc_info.value.payload["error"]["resets_at"] == 1_700_003_600
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_preserves_owner_error_for_owner_usage_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+
+    async def select_account(_deadline: float, **_kwargs: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 1h",
+            error_code="usage_limit_reached",
+            resets_at=1_700_003_600,
+        )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reconnect-owner-usage-limit",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+        preferred_account_id=session.account.id,
+    )
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.5)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_sleep_for_account_selection_recovery",
+        lambda *_args, **_kwargs: pytest.fail("owner-only usage_limit_reached must not enter recovery wait"),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(
+            session,
+            request_state=request_state,
+            require_preferred_account=True,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert exc_info.value.payload["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_preserves_exclusions_after_capacity_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -368,6 +368,7 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        allow_usage_exhaustion_error: bool = True,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -525,7 +526,26 @@ class LoadBalancer:
                             traffic_class=traffic_class,
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
+                            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                            usage_exhaustion_states=states,
                         )
+                        if (
+                            result.account is None
+                            and result.error_code is None
+                            and lease_kind is not None
+                            and len(selection_states) < len(states)
+                            and any(
+                                state.status == AccountStatus.ACTIVE
+                                for state in states
+                                if state not in selection_states
+                            )
+                        ):
+                            selection_error_code = _account_cap_error_code(lease_kind)
+                            result = SelectionResult(
+                                None,
+                                _account_cap_error_message(lease_kind, caps),
+                                error_code=selection_error_code,
+                            )
 
                     selected_account_map = account_map
                     selected_states = []
@@ -735,7 +755,26 @@ class LoadBalancer:
                             traffic_class=traffic_class,
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
+                            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                            usage_exhaustion_states=states,
                         )
+                        if (
+                            result.account is None
+                            and result.error_code is None
+                            and lease_kind is not None
+                            and len(selection_states) < len(states)
+                            and any(
+                                state.status == AccountStatus.ACTIVE
+                                for state in states
+                                if state not in selection_states
+                            )
+                        ):
+                            selection_error_code = _account_cap_error_code(lease_kind)
+                            result = SelectionResult(
+                                None,
+                                _account_cap_error_message(lease_kind, caps),
+                                error_code=selection_error_code,
+                            )
                 selected_account_map = account_map
                 selected_states = []
                 async with self._runtime_lock:
@@ -1175,6 +1214,7 @@ class LoadBalancer:
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             ignore_standard_quota=False,
+            usage_exhaustion_states=states,
         )
         if result.account is None:
             if result.error_code == USAGE_LIMIT_REACHED:
@@ -1376,6 +1416,8 @@ class LoadBalancer:
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
+        allow_usage_exhaustion_error: bool = True,
+        usage_exhaustion_states: Iterable[AccountState] | None = None,
     ) -> SelectionResult:
         if not sticky_key or not sticky_repo:
             return _select_account_preferring_budget_safe(
@@ -1389,6 +1431,8 @@ class LoadBalancer:
                 traffic_class=traffic_class,
                 ignore_standard_quota=ignore_standard_quota,
                 routing_costs_by_account_id=routing_costs_by_account_id,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=usage_exhaustion_states,
             )
         if sticky_kind is None:
             raise ValueError("sticky_kind is required when sticky_key is provided")
@@ -1502,6 +1546,8 @@ class LoadBalancer:
                             traffic_class=traffic_class,
                             ignore_standard_quota=ignore_standard_quota,
                             routing_costs_by_account_id=routing_costs_by_account_id,
+                            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                            usage_exhaustion_states=usage_exhaustion_states,
                         )
                         pool_also_exhausted = pool_best.account is not None and (
                             pool_best.account.account_id == pinned.account_id
@@ -1589,6 +1635,8 @@ class LoadBalancer:
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             await sticky_repo.upsert(sticky_key, chosen.account.account_id, kind=sticky_kind)
@@ -2417,6 +2465,8 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=capacity_credits,
         health_tier=new_tier,
+        priority_used_percent=used_percent,
+        priority_secondary_used_percent=secondary_used,
         inflight_response_creates=runtime.inflight_response_creates,
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
@@ -2919,6 +2969,8 @@ def _select_account_preferring_budget_safe(
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     state_budget_threshold = (
@@ -2950,6 +3002,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
 
     best_health_states = _best_health_tier_states(state_list)
@@ -2967,6 +3021,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if burn_first.account is not None:
             return burn_first
@@ -2990,6 +3046,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if preferred.account is not None:
             return preferred
@@ -3007,6 +3065,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
     return select_account(
         state_list,
@@ -3020,6 +3080,8 @@ def _select_account_preferring_budget_safe(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
+        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+        usage_exhaustion_states=usage_exhaustion_states,
     )
 
 

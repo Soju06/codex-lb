@@ -9420,6 +9420,11 @@ async def test_service_compact_passes_chatgpt_account_id_to_core(monkeypatch):
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: pytest.fail("usage_limit_reached must not enter recovery wait"),
+    )
+    monkeypatch.setattr(
         service._load_balancer,
         "select_account",
         AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
@@ -15545,7 +15550,7 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
 
 
 @pytest.mark.asyncio
-async def test_select_websocket_connect_account_preserves_usage_limit_for_required_owner(monkeypatch):
+async def test_select_websocket_connect_account_preserves_continuity_for_owner_usage_limit(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     request_state = proxy_service._WebSocketRequestState(
@@ -15593,12 +15598,11 @@ async def test_select_websocket_connect_account_preserves_usage_limit_for_requir
     emit_connect_failure.assert_awaited_once()
     call = emit_connect_failure.await_args
     assert call is not None
-    assert call.kwargs["status_code"] == 429
-    assert call.kwargs["error_code"] == "usage_limit_reached"
+    assert call.kwargs["status_code"] == 502
+    assert call.kwargs["error_code"] == "previous_response_owner_unavailable"
     assert call.kwargs["account_id"] == "acc_owner"
-    assert call.kwargs["payload"]["error"]["code"] == "usage_limit_reached"
-    assert call.kwargs["payload"]["error"]["type"] == "usage_limit_reached"
-    assert call.kwargs["payload"]["error"]["resets_at"] == 1_700_003_600
+    assert call.kwargs["payload"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert call.kwargs["payload"]["error"]["type"] == "server_error"
 
 
 @pytest.mark.asyncio
@@ -15877,6 +15881,65 @@ async def test_select_websocket_connect_account_sends_capacity_keepalive_and_ret
     assert sent_payload["type"] == "codex.keepalive"
     assert sent_payload["status"] == "waiting_for_account_capacity"
     assert sent_payload["request_id"] == "ws_req_capacity_wait"
+
+
+@pytest.mark.asyncio
+async def test_select_websocket_connect_account_skips_capacity_wait_for_usage_limit(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_usage_limit_now",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    websocket_send = AsyncMock()
+
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 1h",
+                error_code="usage_limit_reached",
+                resets_at=1_700_003_600,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_sleep_for_account_selection_recovery",
+        lambda *_args, **_kwargs: pytest.fail("usage_limit_reached must not enter recovery wait"),
+    )
+
+    result = await service._select_websocket_connect_account(
+        time.monotonic() + 10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id=None,
+        require_preferred_account=False,
+    )
+
+    assert result is None
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"]["code"] == "usage_limit_reached"
+    assert sent_payload["error"]["type"] == "usage_limit_reached"
+    assert sent_payload["error"]["resets_at"] == 1_700_003_600
 
 
 @pytest.mark.asyncio

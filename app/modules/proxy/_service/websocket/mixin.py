@@ -4394,7 +4394,8 @@ class _WebSocketMixin:
         if (
             error_code == "stream_incomplete"
             and request_state.previous_response_id is not None
-            and error_message == "Upstream websocket closed before response.completed"
+            and isinstance(error_message, str)
+            and error_message.startswith("Upstream websocket closed before response.completed")
         ):
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)

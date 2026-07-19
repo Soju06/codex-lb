@@ -62,3 +62,11 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
 - **AND** the replay MUST preserve the original parent `previous_response_id`
 - **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any reasoning, text, item, or tool output, while another request is pending, or after the replay budget is exhausted
+- **AND** when an untyped transport close is not replayed because those safety gates block replay or the replay budget is exhausted, the bridge MUST surface `stream_incomplete` without recording an upstream account-health penalty
+
+#### Scenario: Previous-response stream close suffix remains account-neutral
+
+- **GIVEN** a websocket Responses continuation is anchored by `previous_response_id`
+- **WHEN** finalization receives `response.failed` with `code="stream_incomplete"` and an `Upstream websocket closed before response.completed` message that includes transport detail suffix text
+- **THEN** the request log MUST record `stream_incomplete`
+- **AND** the proxy MUST NOT record an upstream account-health penalty for that account

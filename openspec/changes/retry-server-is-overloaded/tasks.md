@@ -10,4 +10,6 @@
   lifecycle-only events but before model output, with the same safety gates.
 - [x] Add lifecycle negative controls for public SDK streams, prior model
   output, and exhausted replay budget.
+- [x] Keep unreplayable untyped bridge closes and previous-response close
+  suffixes account-neutral.
 - [x] Update the Responses compatibility requirement and validate OpenSpec.

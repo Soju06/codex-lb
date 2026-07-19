@@ -19307,6 +19307,57 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_finalize_websocket_previous_response_stream_close_suffix_is_account_neutral(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_prev_close_suffix")
+    handle_stream_error = AsyncMock()
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload: dict[str, JsonValue] = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_prev_close_suffix",
+            "error": {
+                "code": "stream_incomplete",
+                "message": "Upstream websocket closed before response.completed: no close frame received or sent",
+            },
+        },
+    }
+    event = parse_sse_event(f"data: {json.dumps(payload)}\n\n")
+    assert event is not None
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_close_suffix",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_parent_close_suffix",
+    )
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=account,
+        account_id_value=account.id,
+        event=event,
+        event_type="response.failed",
+        payload=payload,
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.retire_after_drain is False
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[-1]["error_code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
 async def test_finalize_websocket_empty_prewarm_does_not_store_continuity_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

@@ -12780,13 +12780,14 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         '{"type":"response.create","model":"gpt-5.6-sol",'
         '"input":[{"role":"user","content":[{"type":"input_text","text":"full resend"}]}]}'
     )
+    started_at = time.monotonic()
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-verified-owner-limit",
         model="gpt-5.6-sol",
         service_tier="priority",
         reasoning_effort="high",
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=started_at,
         previous_response_id="resp_verified_owner",
         preferred_account_id="acc-limited",
         proxy_injected_previous_response_id=True,
@@ -12822,25 +12823,30 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         pending_lock=anyio.Lock(),
         response_create_gate=asyncio.Semaphore(1),
         queued_request_count=1,
-        last_used_at=1.0,
+        last_used_at=started_at,
         idle_ttl_seconds=120.0,
         upstream_turn_state="turn-old-account",
         downstream_turn_state="turn-client-alias",
     )
     handle_stream_error = AsyncMock()
     release_create_lease = AsyncMock()
+    fallback_account = cast(Any, SimpleNamespace(id="acc-fallback", status=AccountStatus.ACTIVE))
+    fallback_upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(response_header=lambda _name: None, close=AsyncMock(), send_text=AsyncMock()),
+    )
 
-    async def retry_precreated(retry_session):
-        assert retry_session is session
-        assert session.upstream_turn_state is None
-        assert session.downstream_turn_state is None
-        assert request_state.previous_response_id is None
-        assert request_state.preferred_account_id is None
-        assert request_state.request_text == fresh_text
-        assert request_state.excluded_account_ids == {account.id}
-        assert request_state.affinity_policy.reallocate_sticky is True
-        assert list(session.pending_requests) == [request_state]
-        return True
+    async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(account=fallback_account, error_message=None, error_code=None)
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    async def open_upstream(_account: object, _headers: dict[str, str], **_: object) -> UpstreamResponsesWebSocket:
+        return fallback_upstream
+
+    response_create_lease = object()
+    acquire_create_lease = AsyncMock(return_value=response_create_lease)
 
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(
@@ -12848,7 +12854,14 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         "_release_request_state_account_response_create_lease",
         release_create_lease,
     )
-    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(
+        service,
+        "_acquire_account_response_create_lease_or_overload",
+        acquire_create_lease,
+    )
 
     await service._process_http_bridge_upstream_text(
         session,
@@ -12867,6 +12880,19 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
 
     handle_stream_error.assert_awaited_once()
     release_create_lease.assert_awaited_once_with(request_state)
+    acquire_create_lease.assert_awaited_once()
+    cast(Any, fallback_upstream).send_text.assert_awaited_once_with(fresh_text)
+    assert session.account is fallback_account
+    assert session.upstream is fallback_upstream
+    assert session.upstream_turn_state is None
+    assert session.downstream_turn_state is None
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.request_text == fresh_text
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True
+    assert request_state.account_response_create_lease is response_create_lease
+    assert list(session.pending_requests) == [request_state]
     assert request_state.event_queue is not None
     assert request_state.event_queue.empty()
 
@@ -15336,7 +15362,7 @@ async def test_http_bridge_reader_preserves_routed_aiohttp_close_code(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("routed", [False, True], ids=["direct-close", "routed-receive-error"])
-async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_stream_incomplete(
+async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_account_neutral_stream_incomplete(
     monkeypatch: pytest.MonkeyPatch,
     routed: bool,
 ) -> None:
@@ -15382,7 +15408,7 @@ async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_str
     assert session.last_upstream_close_code == (None if routed else 1011)
     assert len(failure_calls) == 1
     assert failure_calls[0]["error_code"] == "stream_incomplete"
-    assert failure_calls[0]["penalize_account"] is True
+    assert failure_calls[0]["penalize_account"] is False
 
 
 @pytest.mark.asyncio

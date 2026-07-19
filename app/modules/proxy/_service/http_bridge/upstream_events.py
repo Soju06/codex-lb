@@ -624,7 +624,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         error_code=message.error_code or "stream_incomplete",
                         error_message=_upstream_websocket_disconnect_message(message),
-                        penalize_account=message.error_code != "proxy_network_unavailable",
+                        penalize_account=message.error_code is not None
+                        and message.error_code != "proxy_network_unavailable",
                     )
                 break
         except asyncio.CancelledError:

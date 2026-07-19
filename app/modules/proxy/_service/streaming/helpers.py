@@ -744,6 +744,8 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
         "lease_kind",
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",
+        "spill_bare_session_on_account_cap",
+        "require_unambiguous_account",
     )
     if any(name in kwargs for name in optional_kwargs):
         try:

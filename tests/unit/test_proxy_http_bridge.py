@@ -3690,7 +3690,8 @@ async def test_select_account_with_budget_prefers_durable_account_id_when_availa
     assert selection.account.id == "acc-preferred"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] == {"acc-preferred"}
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["required_account_id"] == "acc-preferred"
 
 
 @pytest.mark.asyncio
@@ -4467,7 +4468,8 @@ async def test_select_account_with_budget_required_file_pin_does_not_fallback_on
     assert selection.error_code == "account_stream_cap"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["required_account_id"] == "acc-file-owner"
 
 
 @pytest.mark.asyncio
@@ -4512,7 +4514,8 @@ async def test_select_account_with_budget_required_file_pin_overrides_single_acc
     assert selection.account.id == "acc-file-owner"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["required_account_id"] == "acc-file-owner"
     assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
 
 
@@ -4595,8 +4598,10 @@ async def test_select_account_with_budget_soft_preference_can_fallback_after_acc
     assert select_account.await_count == 2
     first_call = select_account.await_args_list[0]
     second_call = select_account.await_args_list[1]
-    assert first_call.kwargs["account_ids"] == {"acc-soft"}
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["required_account_id"] == "acc-soft"
     assert second_call.kwargs["account_ids"] is None
+    assert second_call.kwargs["required_account_id"] is None
 
 
 def test_headers_with_authorization_restores_missing_proxy_api_header() -> None:
@@ -6535,7 +6540,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_anchor_when_forwar
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=owner_forward))
 
     async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
-        del kwargs
+        captured["forwarded_file_owner_account_id"] = kwargs["file_owner_account_id"]
         if False:
             yield ""
         return
@@ -6557,11 +6562,15 @@ async def test_stream_via_http_bridge_does_not_inject_durable_anchor_when_forwar
             codex_idle_ttl_seconds=1800.0,
             max_sessions=8,
             queue_limit=4,
+            # The file pin exists only on this origin replica; the remote
+            # bridge owner must receive the origin-resolved ownership proof.
+            rewritten_file_account_id="acc-1",
         )
     ]
 
     assert chunks == []
     assert captured["previous_response_id"] is None
+    assert captured["forwarded_file_owner_account_id"] == "acc-1"
 
 
 @pytest.mark.asyncio
@@ -8008,6 +8017,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
@@ -8239,6 +8249,37 @@ async def test_http_bridge_local_owner_account_id_records_resolution_source(
             "value": 1.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_sessions() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    turn_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "turn-owner", None)
+    response_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "response-owner", None)
+    turn_session = _make_bridge_session(key=turn_key, key_value="turn-owner")
+    response_session = _make_bridge_session(key=response_key, key_value="response-owner")
+    turn_session.account = cast(
+        Any,
+        SimpleNamespace(id="acc-shared-seat", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    response_session.account = cast(
+        Any,
+        SimpleNamespace(id="acc-shared-seat", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    service._http_bridge_sessions[turn_key] = turn_session
+    service._http_bridge_sessions[response_key] = response_session
+    service._http_bridge_turn_state_index[("http_turn_conflict", None)] = turn_key
+    service._http_bridge_previous_response_index[("resp_conflict", None)] = response_key
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._http_bridge_local_owner_account_id(
+            key=turn_key,
+            incoming_turn_state="http_turn_conflict",
+            previous_response_id="resp_conflict",
+            api_key=None,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio
@@ -8938,6 +8979,7 @@ async def test_stream_via_http_bridge_local_previous_response_rebind_fails_exist
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
@@ -9359,6 +9401,7 @@ async def test_stream_via_http_bridge_context_overflow_does_not_retry_hard_affin
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
@@ -14565,6 +14608,7 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
 

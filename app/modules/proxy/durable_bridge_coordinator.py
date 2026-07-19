@@ -7,6 +7,8 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import openai_error
 from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
 from app.modules.proxy.durable_bridge_repository import (
@@ -62,6 +64,7 @@ class DurableBridgeSessionCoordinator:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
+            resolved_snapshots: list[DurableBridgeSessionSnapshot] = []
             for alias_kind, alias_value in (
                 (_DURABLE_TURN_STATE_ALIAS, turn_state),
                 (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
@@ -75,7 +78,22 @@ class DurableBridgeSessionCoordinator:
                     api_key_scope=api_key_scope,
                 )
                 if snapshot is not None:
-                    return _to_lookup(snapshot)
+                    resolved_snapshots.append(snapshot)
+            resolved_identities = {(snapshot.id, snapshot.account_id) for snapshot in resolved_snapshots}
+            if len(resolved_identities) > 1:
+                # Turn-state/response/session aliases are independent hard
+                # evidence. Returning the first match would silently discard a
+                # conflicting durable owner based on source ordering.
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "continuity_owner_conflict",
+                        "Durable continuity aliases resolve to conflicting upstream owners.",
+                        error_type="server_error",
+                    ),
+                )
+            if resolved_snapshots:
+                return _to_lookup(resolved_snapshots[0])
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
@@ -210,6 +228,18 @@ class DurableBridgeSessionCoordinator:
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)
+
+    async def purge_owned_sessions_on_startup(
+        self,
+        *,
+        instance_id: str,
+        ownerless_cutoff: datetime | None = None,
+    ) -> int:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).purge_owned_sessions_on_startup(
+                instance_id=instance_id,
+                ownerless_cutoff=ownerless_cutoff,
+            )
 
     async def register_turn_state(
         self,

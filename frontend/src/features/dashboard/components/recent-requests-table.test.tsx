@@ -203,6 +203,7 @@ describe("RecentRequestsTable", () => {
             inputTokens: 1000,
             outputTokens: 200,
             outputTokensRaw: 200,
+            reasoningTokens: 40,
             cachedInputTokens: 0,
             reasoningEffort: null,
             costUsd: 0,
@@ -219,7 +220,7 @@ describe("RecentRequestsTable", () => {
 
     expect(row).not.toBeNull();
     expect(within(row as HTMLElement).getByText("200ms")).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByText("250.0")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("200.0")).toBeInTheDocument();
   });
 
   it("does not calculate TPS from fallback output tokens", () => {

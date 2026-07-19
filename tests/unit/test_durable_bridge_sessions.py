@@ -4,12 +4,21 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.utils.time import utcnow
-from app.db.models import Base, HttpBridgeSessionAlias
+from app.db.models import (
+    Base,
+    HttpBridgeSessionAlias,
+    HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
+    StickySession,
+    StickySessionKind,
+)
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 
 pytestmark = pytest.mark.unit
 
@@ -107,6 +116,66 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
     )
     assert by_session is not None
     assert by_session.canonical_key == "sid-123"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_aliases(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-turn-owner",
+        api_key_id="key-conflict",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-turn-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    response_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-response-owner",
+        api_key_id="key-conflict",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-response-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=turn_owner.session_id,
+        api_key_id="key-conflict",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        turn_state="http_turn_conflicting_owner",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=response_owner.session_id,
+        api_key_id="key-conflict",
+        instance_id="instance-b",
+        owner_epoch=response_owner.owner_epoch,
+        response_id="resp_conflicting_owner",
+        lease_ttl_seconds=120.0,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-conflicting-owner",
+            api_key_id="key-conflict",
+            turn_state="http_turn_conflicting_owner",
+            session_header=None,
+            previous_response_id="resp_conflicting_owner",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio
@@ -902,3 +971,307 @@ async def test_mark_instance_draining_keeps_current_owner_lease_active(
     assert lookup.owner_instance_id == "instance-a"
     assert lookup.lease_expires_at == claimed.lease_expires_at
     assert lookup.lease_is_active(now=utcnow()) is True
+
+
+@pytest.mark.asyncio
+async def test_startup_purges_owned_bridge_rows(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with async_session_factory() as session:
+        session.add(
+            StickySession(
+                key="parent-cache",
+                kind=StickySessionKind.PROMPT_CACHE,
+                account_id="acc-1",
+            )
+        )
+        await session.commit()
+
+    await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-restart",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="instance-a",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
+
+    assert deleted == 1
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="session_header",
+            session_key_value="sid-restart",
+            api_key_id=None,
+            turn_state=None,
+            session_header="sid-restart",
+            previous_response_id=None,
+        )
+        is None
+    )
+
+    async with async_session_factory() as session:
+        sticky = await session.get(
+            StickySession,
+            ("parent-cache", StickySessionKind.PROMPT_CACHE),
+        )
+        assert sticky is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_purges_ownerless_stale_rows(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    stale_time = utcnow() - timedelta(seconds=120)
+
+    async with async_session_factory() as session:
+        session.add(
+            HttpBridgeSessionRecord(
+                session_key_kind="session_header",
+                session_key_value="sid-stale",
+                session_key_hash="hash-stale",
+                api_key_scope="__anonymous__",
+                owner_instance_id=None,
+                owner_epoch=1,
+                lease_expires_at=stale_time,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id="acc-1",
+                model="gpt-5.4",
+                last_seen_at=stale_time,
+                closed_at=None,
+            )
+        )
+        await session.commit()
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="instance-a",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
+
+    assert deleted == 1
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="session_header",
+            session_key_value="sid-stale",
+            api_key_id=None,
+            turn_state=None,
+            session_header="sid-stale",
+            previous_response_id=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_preserves_ownerless_rows_without_retention_cutoff(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    stale_time = utcnow() - timedelta(hours=12)
+
+    async with async_session_factory() as session:
+        session.add(
+            HttpBridgeSessionRecord(
+                session_key_kind="session_header",
+                session_key_value="sid-ownerless-default",
+                session_key_hash="hash-ownerless-default",
+                api_key_scope="__anonymous__",
+                owner_instance_id=None,
+                owner_epoch=1,
+                lease_expires_at=stale_time,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id="acc-1",
+                model="gpt-5.4",
+                last_seen_at=stale_time,
+                closed_at=None,
+            )
+        )
+        await session.commit()
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+
+    assert deleted == 0
+    async with async_session_factory() as session:
+        row = await session.scalar(
+            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.session_key_value == "sid-ownerless-default")
+        )
+    assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_purge_batches_owned_rows(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    old_time = utcnow() - timedelta(minutes=5)
+
+    async with async_session_factory() as session:
+        for index in range(3):
+            session_id = f"sid-owned-batch-{index}"
+            session.add(
+                HttpBridgeSessionRecord(
+                    id=session_id,
+                    session_key_kind="session_header",
+                    session_key_value=session_id,
+                    session_key_hash=f"hash-owned-batch-{index}",
+                    api_key_scope="__anonymous__",
+                    owner_instance_id="instance-a",
+                    owner_epoch=1,
+                    lease_expires_at=old_time,
+                    state=HttpBridgeSessionState.ACTIVE,
+                    account_id="acc-1",
+                    model="gpt-5.4",
+                    last_seen_at=old_time,
+                    closed_at=None,
+                )
+            )
+            session.add(
+                HttpBridgeSessionAlias(
+                    session_id=session_id,
+                    alias_kind="session_header",
+                    alias_value=session_id,
+                    alias_hash=f"alias-owned-batch-{index}",
+                    api_key_scope="__anonymous__",
+                )
+            )
+        await session.commit()
+
+        repo = DurableBridgeRepository(session)
+        deleted = await repo.purge_owned_sessions_on_startup(instance_id="instance-a", batch_size=2)
+
+        assert deleted == 3
+        remaining = await session.execute(select(HttpBridgeSessionRecord.id))
+        assert remaining.scalars().all() == []
+        remaining_aliases = await session.execute(select(HttpBridgeSessionAlias.session_id))
+        assert remaining_aliases.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_startup_preserves_recent_ownerless_drain_rows(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-fresh-drain",
+        api_key_id=None,
+        instance_id="instance-draining",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_drain",
+        latest_response_id="resp_drain",
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        session_header="sid-fresh-drain",
+    )
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-draining",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+
+    assert released is not None
+    assert released.owner_instance_id is None
+    assert released.state == HttpBridgeSessionState.DRAINING
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+
+    assert deleted == 0
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-fresh-drain",
+        api_key_id=None,
+        turn_state=None,
+        session_header="sid-fresh-drain",
+        previous_response_id=None,
+    )
+    assert lookup is not None
+    assert lookup.session_id == claimed.session_id
+    assert lookup.state == HttpBridgeSessionState.DRAINING
+
+
+@pytest.mark.asyncio
+async def test_startup_rechecks_ownerless_stale_rows_before_delete(
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_time = utcnow() - timedelta(seconds=120)
+
+    async with async_session_factory() as session:
+        session.add(
+            HttpBridgeSessionRecord(
+                id="sid-race-claim",
+                session_key_kind="session_header",
+                session_key_value="sid-race-claim",
+                session_key_hash="hash-race-claim",
+                api_key_scope="__anonymous__",
+                owner_instance_id=None,
+                owner_epoch=1,
+                lease_expires_at=stale_time,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id="acc-1",
+                model="gpt-5.4",
+                last_seen_at=stale_time,
+                closed_at=None,
+            )
+        )
+        session.add(
+            HttpBridgeSessionAlias(
+                session_id="sid-race-claim",
+                alias_kind="session_header",
+                alias_value="sid-race-claim",
+                alias_hash="hash-race-claim-alias",
+                api_key_scope="__anonymous__",
+            )
+        )
+        await session.commit()
+
+        repo = DurableBridgeRepository(session)
+        original_execute = session.execute
+        selected_for_purge = False
+
+        async def execute_and_claim_after_candidate_select(statement, *args, **kwargs):
+            nonlocal selected_for_purge
+            result = await original_execute(statement, *args, **kwargs)
+            if not selected_for_purge and statement.is_select:
+                selected_for_purge = True
+                await original_execute(
+                    update(HttpBridgeSessionRecord)
+                    .where(HttpBridgeSessionRecord.id == "sid-race-claim")
+                    .values(
+                        owner_instance_id="instance-b",
+                        owner_epoch=2,
+                        lease_expires_at=utcnow() + timedelta(seconds=60),
+                        last_seen_at=utcnow(),
+                    )
+                )
+                await session.commit()
+            return result
+
+        monkeypatch.setattr(session, "execute", execute_and_claim_after_candidate_select)
+
+        deleted = await repo.purge_owned_sessions_on_startup(instance_id="instance-a")
+
+        assert deleted == 0
+        row = await session.get(HttpBridgeSessionRecord, "sid-race-claim", populate_existing=True)
+        assert row is not None
+        assert row.owner_instance_id == "instance-b"
+        aliases = await session.execute(
+            select(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id == "sid-race-claim")
+        )
+        assert aliases.scalar_one_or_none() is not None

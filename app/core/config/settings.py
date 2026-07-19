@@ -680,13 +680,20 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_firewall_proxy_trust(self) -> "Settings":
+        if self.firewall_trust_proxy_headers and not self.firewall_trusted_proxy_cidrs:
+            raise ValueError(
+                "firewall_trust_proxy_headers=true requires at least one entry in "
+                "firewall_trusted_proxy_cidrs; configure a trusted proxy CIDR or disable proxy header trust"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_dashboard_auth_mode(self) -> "Settings":
         if self.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER:
             return self
         if not self.firewall_trust_proxy_headers:
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
-        if not self.firewall_trusted_proxy_cidrs:
-            raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
         return self
 
     @model_validator(mode="after")

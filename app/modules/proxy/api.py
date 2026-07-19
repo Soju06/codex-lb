@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -174,8 +173,12 @@ from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
+    _could_be_blank_html_comment_line,
+    _is_reasoning_summary_interleavable_event,
+    _reasoning_summary_delta_key,
     _reset_propagated_capacity_startup_ready,
     _reset_propagated_capacity_startup_wait,
+    _strip_blank_html_comment_lines,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -236,7 +239,6 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
-_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n|\Z)")
 _REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
 _REASONING_SUMMARY_DONE_TYPES = frozenset(
     {
@@ -878,6 +880,7 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        forwarded_file_owner_account_id=forwarded_request_context.context.file_owner_account_id,
         forwarded_client_ip=forwarded_request_context.context.client_ip,
         # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
         # output, synthesize ``response.created``) MUST be applied by the
@@ -4251,6 +4254,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    forwarded_file_owner_account_id: str | None = None,
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     prohibit_fast_mode: bool = False,
@@ -4398,6 +4402,7 @@ async def _stream_responses(
             forwarded_legacy_signature=forwarded_legacy_signature,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
@@ -6856,46 +6861,6 @@ def _normalize_reasoning_output_item(item: Mapping[str, JsonValue]) -> dict[str,
     if changed:
         normalized["summary"] = normalized_summary
     return normalized
-
-
-def _strip_blank_html_comment_lines(text: str) -> str:
-    terminal_match = None
-    for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):
-        if match.end() == len(text):
-            terminal_match = match
-    cleaned, count = _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.subn("", text)
-    if count == 0:
-        return text
-    if terminal_match is not None:
-        return cleaned.rstrip("\r\n")
-    return cleaned
-
-
-def _reasoning_summary_delta_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None, int | None]:
-    item_id = payload.get("item_id")
-    output_index = payload.get("output_index")
-    summary_index = payload.get("summary_index")
-    return (
-        item_id if isinstance(item_id, str) else None,
-        output_index if isinstance(output_index, int) else None,
-        summary_index if isinstance(summary_index, int) else None,
-    )
-
-
-def _could_be_blank_html_comment_line(text: str) -> bool:
-    candidate = text.rsplit("\n", 1)[-1].lstrip(" \t")
-    if not candidate:
-        return False
-    if not candidate.startswith("<!--"):
-        return "<!--".startswith(candidate)
-    remainder = candidate[4:].lstrip()
-    if not remainder.startswith("-->"):
-        return "-->".startswith(remainder)
-    return not remainder[3:].strip(" \t\r")
-
-
-def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> bool:
-    return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
 
 
 async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:

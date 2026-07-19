@@ -905,6 +905,7 @@
   "reports.errors.options": "Failed to load model and user-agent options: {{error}}",
   "reports.errors.partial": "Some report data could not be loaded. Try reloading.",
   "reports.filters.endDate": "End date",
+  "reports.filters.invalidDateRange": "Start date must be on or before end date.",
   "reports.filters.startDate": "Start date",
   "reports.filters.userAgent": "UserAgent",
   "reports.page.subtitle": "Usage history by date range",

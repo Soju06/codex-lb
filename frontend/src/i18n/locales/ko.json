@@ -905,6 +905,7 @@
   "reports.errors.options": "Model 및 User Agent 옵션을 불러오지 못했습니다: {{error}}",
   "reports.errors.partial": "일부 report data를 불러오지 못했습니다. 다시 불러오세요.",
   "reports.filters.endDate": "종료일",
+  "reports.filters.invalidDateRange": "시작일은 종료일보다 빠르거나 같아야 합니다.",
   "reports.filters.startDate": "시작일",
   "reports.filters.userAgent": "User Agent",
   "reports.page.subtitle": "기간별 사용 기록",

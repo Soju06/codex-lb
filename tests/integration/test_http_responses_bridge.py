@@ -38,6 +38,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
     _reserve_http_bridge_unanchored_handoff,
 )
+from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.load_balancer import AccountSelection, CatalogOmissionQuotaAdmission
 from app.modules.usage.repository import AdditionalUsageRepository
 
@@ -5572,11 +5573,84 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
     _assert_created_text_delta_completed(first_events)
     _assert_created_text_delta_completed(second_events)
     assert len(connect_calls) == 1
-    assert connect_calls[0] == ("backend-http-session-1", proxy_module.StickySessionKind.CODEX_SESSION)
+    assert connect_calls[0] == (
+        _codex_session_selection_key("backend-http-session-1"),
+        proxy_module.StickySessionKind.CODEX_SESSION,
+    )
     assert len(fake_upstream.sent_text) == 2
     assert json.loads(fake_upstream.sent_text[1])["prompt_cache_key"] == "backend-http-prompt-b"
 
 
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_file_owner_overrides_soft_locality(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_file_owner",
+        "backend-http-bridge-file-owner@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_bridge_owner", account.id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    selection_calls: list[dict[str, object]] = []
+
+    async def fake_select_account(**kwargs: object) -> AccountSelection:
+        selection_calls.append(dict(kwargs))
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(service._load_balancer, "select_account", fake_select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers={"session_id": "bridge-soft-session"},
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Read the file."},
+                        {"type": "input_file", "file_id": "file_bridge_owner"},
+                    ],
+                }
+            ],
+            "prompt_cache_key": "bridge-soft-cache",
+            "stream": True,
+        },
+    )
+
+    _assert_created_text_delta_completed(events)
+    assert len(selection_calls) == 1
+    assert selection_calls[0]["account_ids"] is None
+    assert selection_calls[0]["required_account_id"] == account.id
+    assert selection_calls[0]["sticky_key"] is None
+    assert len(fake_upstream.sent_text) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("second_model", "expected_connection_count"),
     [
@@ -5584,7 +5658,6 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
         pytest.param("gpt-5.4", 2, id="model-transition-fork"),
     ],
 )
-@pytest.mark.asyncio
 async def test_backend_responses_http_emits_turn_state_header_and_reuses_when_compatible(
     async_client,
     monkeypatch,

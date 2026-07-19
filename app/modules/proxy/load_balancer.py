@@ -57,6 +57,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
+from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
     configured_account_concurrency_caps,
     get_cap_partition,
@@ -108,6 +109,8 @@ _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
 _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
+_AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
+_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
 
 AccountLeaseKind = Literal["response_create", "stream"]
 
@@ -226,6 +229,10 @@ class _SelectionInputs:
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
+    # Ownership ambiguity is resolved before transient additional-quota,
+    # exclusion, runtime-health, budget, and account-cap filters. Keep that
+    # stronger candidate pool alongside the effective routing pool.
+    continuity_owner_candidates: list[Account] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -235,6 +242,12 @@ class _SelectionInputs:
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+
+    @property
+    def effective_continuity_owner_candidates(self) -> list[Account]:
+        if self.continuity_owner_candidates is None:
+            return self.accounts
+        return self.continuity_owner_candidates
 
 
 SelectionInputs = _SelectionInputs
@@ -382,6 +395,10 @@ class LoadBalancer:
         *,
         sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
+        sticky_source: _CodexSessionSource | None = None,
+        legacy_sticky_key: str | None = None,
+        spill_bare_session_on_account_cap: bool = False,
+        require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
@@ -392,6 +409,7 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        required_account_id: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
         budget_threshold_pct: float = 95.0,
@@ -413,16 +431,25 @@ class LoadBalancer:
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
-            if require_security_work_authorized and selection_inputs.accounts:
+            if require_security_work_authorized:
+                # Ownership scope and routing availability are separate. Even
+                # an already-empty routing pool must have its owner candidates
+                # security-filtered before conversation ambiguity is decided.
+                authorized_owner_candidates = [
+                    account
+                    for account in selection_inputs.effective_continuity_owner_candidates
+                    if bool(account.security_work_authorized)
+                ]
                 authorized_accounts = [
                     account for account in selection_inputs.accounts if bool(account.security_work_authorized)
                 ]
-                if not authorized_accounts:
+                if selection_inputs.accounts and not authorized_accounts:
                     return _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
+                        continuity_owner_candidates=authorized_owner_candidates,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -433,6 +460,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
+                    continuity_owner_candidates=authorized_owner_candidates,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -453,6 +481,7 @@ class LoadBalancer:
                         latest_primary={},
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
+                        continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -463,6 +492,7 @@ class LoadBalancer:
                     latest_primary=selection_inputs.latest_primary,
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
+                    continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -487,19 +517,54 @@ class LoadBalancer:
         elif selection_inputs.error_code is not None:
             set_normal()
 
-        if selection_inputs.error_code is not None and not selection_inputs.accounts:
-            return AccountSelection(
-                account=None,
-                error_message=selection_inputs.error_message,
-                error_code=selection_inputs.error_code,
-            )
-
         selected_snapshot: Account | None = None
         error_message: str | None = None
         selected_states: list[AccountState] = []
         selected_account_map: dict[str, Account] = {}
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        legacy_existing_account_id: str | None = None
+        if sticky_source == "session_header" and legacy_sticky_key is not None:
+            async with self._repo_factory() as repos:
+                legacy_existing_account_id = await repos.sticky_sessions.get_account_id(
+                    legacy_sticky_key,
+                    kind=StickySessionKind.CODEX_SESSION,
+                    max_age_seconds=sticky_max_age_seconds,
+                )
+            if required_account_id is not None and (
+                legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
+            ):
+                # The required owner came from a file/response/bridge index,
+                # while the raw row may be legacy turn-state ownership. Neither
+                # source can be discarded or rewritten to resolve a conflict.
+                return AccountSelection(
+                    account=None,
+                    error_message="Account-owned continuity sources conflict; retry the logical turn",
+                    error_code="continuity_owner_conflict",
+                )
+        # Resolve uniqueness from the model/API-key/security-scoped pool before
+        # runtime health, budget, or cap filtering. Transient pressure cannot
+        # prove that another candidate does not own an upstream conversation.
+        if (
+            require_unambiguous_account
+            and sticky_key is None
+            and legacy_existing_account_id is None
+            and len(selection_inputs.effective_continuity_owner_candidates) != 1
+        ):
+            return AccountSelection(
+                account=None,
+                error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
+                error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
+            )
+        # Transient routing errors are secondary to ownership ambiguity. An
+        # empty additional-quota pool cannot prove which account owns a
+        # conversation that was ambiguous before that filter ran.
+        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+            return AccountSelection(
+                account=None,
+                error_message=selection_inputs.error_message,
+                error_code=selection_inputs.error_code,
+            )
         if sticky_key is None:
             attempt = 0
             suppress_recovery_probe_candidates = False
@@ -519,6 +584,17 @@ class LoadBalancer:
                         routing_policy_override=selection_inputs.routing_policy_override,
                         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                     )
+                    if required_account_id is not None:
+                        # Keep ownership validation on the full candidate pool,
+                        # then narrow only the effective routing states. This is
+                        # what prevents a preferred file owner from manufacturing
+                        # uniqueness for an unrelated `conversation` object.
+                        states = [state for state in states if state.account_id == required_account_id]
+                        account_map = {
+                            account_id: account
+                            for account_id, account in account_map.items()
+                            if account_id == required_account_id
+                        }
                     effective_routing_costs = (
                         routing_costs_by_account_id
                         if routing_costs_by_account_id is not None
@@ -824,6 +900,7 @@ class LoadBalancer:
             suppress_recovery_probe_candidates = False
             while True:
                 attempt += 1
+                sticky_existing_is_legacy = isinstance(legacy_existing_account_id, str)
                 if sticky_kind is not None:
                     async with self._runtime_lock:
                         pass
@@ -833,6 +910,12 @@ class LoadBalancer:
                             kind=sticky_kind,
                             max_age_seconds=sticky_max_age_seconds,
                         )
+                    if sticky_kind == StickySessionKind.CODEX_SESSION and sticky_existing_is_legacy:
+                        # Mixed-version replicas can create both rows on
+                        # different accounts. The raw row was loaded before
+                        # branch selection and always wins as possible hard
+                        # turn-state ownership.
+                        sticky_existing_account_id = legacy_existing_account_id
                 async with self._runtime_lock:
                     self._reclaim_stale_account_leases_locked()
                     self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -845,6 +928,13 @@ class LoadBalancer:
                         routing_policy_override=selection_inputs.routing_policy_override,
                         ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
                     )
+                    if required_account_id is not None:
+                        states = [state for state in states if state.account_id == required_account_id]
+                        account_map = {
+                            account_id: account
+                            for account_id, account in account_map.items()
+                            if account_id == required_account_id
+                        }
                     effective_routing_costs = (
                         routing_costs_by_account_id
                         if routing_costs_by_account_id is not None
@@ -854,55 +944,91 @@ class LoadBalancer:
                             now=datetime.now(timezone.utc),
                         )
                     )
-                    hard_sticky = sticky_kind == StickySessionKind.CODEX_SESSION and isinstance(
-                        sticky_existing_account_id, str
+                    # Key shape is deliberately irrelevant here. Only typed
+                    # source provenance created by the affinity parser can
+                    # grant mobility; otherwise a crafted hard turn-state key
+                    # could become spillable.
+                    bare_session_key = (
+                        sticky_kind == StickySessionKind.CODEX_SESSION
+                        and sticky_source == "session_header"
+                        and legacy_sticky_key is not None
+                        and not sticky_existing_is_legacy
                     )
-                    cap_eligible_states = _filter_states_for_account_caps(
-                        states,
-                        lease_kind=lease_kind,
-                        caps=caps,
-                        stream_reserve_slots=stream_reserve_slots,
+                    cap_spillover_allowed = (
+                        spill_bare_session_on_account_cap and lease_kind is not None and bare_session_key
                     )
-                    hard_sticky_fallback_cap_exhausted = False
-                    hard_sticky_owner_available = False
+                    hard_sticky = (
+                        sticky_kind == StickySessionKind.CODEX_SESSION
+                        and isinstance(sticky_existing_account_id, str)
+                        and not bare_session_key
+                    )
+                    if (
+                        hard_sticky
+                        and required_account_id is not None
+                        and sticky_existing_account_id != required_account_id
+                    ):
+                        return AccountSelection(
+                            account=None,
+                            error_message="Account-owned continuity sources conflict; retry the logical turn",
+                            error_code="continuity_owner_conflict",
+                        )
+                    # A resolved hard row proves ownership. Without one, use the
+                    # same pre-health/pre-cap pool as the no-sticky path above.
+                    if (
+                        require_unambiguous_account
+                        and not hard_sticky
+                        and len(selection_inputs.effective_continuity_owner_candidates) != 1
+                    ):
+                        return AccountSelection(
+                            account=None,
+                            error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
+                            error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
+                        )
                     if hard_sticky:
-                        # Keep only the established owner as a cap exception so
-                        # its later lease check fails closed without rebinding.
-                        # Every fallback must remain cap-eligible.
-                        cap_eligible_ids = {state.account_id for state in cap_eligible_states}
-                        fallback_states = [state for state in states if state.account_id != sticky_existing_account_id]
-                        hard_sticky_owner_available = _pool_has_available_account_without_backoff(
-                            (state for state in states if state.account_id == sticky_existing_account_id),
-                            traffic_class=traffic_class,
-                        )
-                        cap_eligible_fallback_states = [
-                            state for state in fallback_states if state.account_id in cap_eligible_ids
-                        ]
-                        fallback_available_before_caps = _pool_has_available_account_without_backoff(
-                            fallback_states,
-                            traffic_class=traffic_class,
-                        )
-                        fallback_available_after_caps = _pool_has_available_account_without_backoff(
-                            cap_eligible_fallback_states,
-                            traffic_class=traffic_class,
-                        )
-                        # Compare complete pools, not singleton candidates:
-                        # opportunistic eligibility depends on whether another
-                        # account can preserve foreground capacity. Classifying
-                        # each fallback alone would hide cap exhaustion whenever
-                        # two mutually-supporting candidates are both saturated.
-                        hard_sticky_fallback_cap_exhausted = (
-                            lease_kind is not None
-                            and fallback_available_before_caps
-                            and not fallback_available_after_caps
-                        )
-                        selection_states = [
-                            state
-                            for state in states
-                            if state.account_id == sticky_existing_account_id or state.account_id in cap_eligible_ids
-                        ]
+                        # A resolved hard Codex mapping is an ownership
+                        # constraint, not a preference. Scope, exclusions,
+                        # health, and caps may make it unavailable, but must
+                        # never delete or rebind it.
+                        selection_states = [state for state in states if state.account_id == sticky_existing_account_id]
+                    elif bare_session_key and isinstance(sticky_existing_account_id, str) and not cap_spillover_allowed:
+                        # Mobility was revoked by owner-bearing payload or
+                        # recovery stage. Keep the old cap exception for this
+                        # soft hint; the authoritative preferred-owner path
+                        # normally bypasses it.
+                        selection_states = states
                     else:
-                        selection_states = cap_eligible_states
+                        selection_states = _filter_states_for_account_caps(
+                            states,
+                            lease_kind=lease_kind,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                        )
+                    if cap_spillover_allowed and lease_kind == "stream":
+                        # Stream selection immediately precedes response-create
+                        # admission. Prefer an account that can satisfy both,
+                        # while preserving the later create-cap error when all
+                        # are full.
+                        response_create_states = _filter_states_for_account_caps(
+                            selection_states,
+                            lease_kind="response_create",
+                            caps=caps,
+                            stream_reserve_slots=0,
+                        )
+                        selection_states = response_create_states or selection_states
+                    preserve_existing_mapping = (
+                        bare_session_key
+                        and isinstance(sticky_existing_account_id, str)
+                        and (
+                            (
+                                cap_spillover_allowed
+                                and any(state.account_id == sticky_existing_account_id for state in states)
+                                and not any(
+                                    state.account_id == sticky_existing_account_id for state in selection_states
+                                )
+                            )
+                            or require_unambiguous_account
+                        )
+                    )
                     if suppress_recovery_probe_candidates:
                         selection_states = _filter_recovery_probe_candidates(
                             selection_states,
@@ -910,7 +1036,10 @@ class LoadBalancer:
                         )
                     probe_reservation: _ProbeReservation | None = None
                 sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
-                if not selection_states and states:
+                if hard_sticky and not selection_states:
+                    selection_error_code = "hard_affinity_saturated"
+                    result = SelectionResult(None, "Hard affinity owner account is unavailable")
+                elif not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
                     result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
                     logger.warning(
@@ -920,6 +1049,31 @@ class LoadBalancer:
                         len(states),
                     )
                     _record_account_cap_rejection(lease_kind)
+                elif hard_sticky:
+                    # Hard rows are ownership evidence. Select only from the
+                    # resolved owner state and never enter sticky fallback code,
+                    # which may delete or rebind soft mappings under pressure.
+                    result = _select_account_preferring_budget_safe(
+                        selection_states,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
+                        routing_strategy=routing_strategy,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
+                        budget_threshold_pct=budget_threshold_pct,
+                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                        traffic_class=traffic_class,
+                        ignore_standard_quota=False,
+                        routing_costs_by_account_id=effective_routing_costs,
+                    )
+                    if result.account is None:
+                        selection_error_code = "hard_affinity_saturated"
+                        result = SelectionResult(
+                            None,
+                            result.error_message or "Hard affinity owner account is unavailable",
+                        )
+                    else:
+                        selection_error_code = None
                 else:
                     selection_error_code = None
                     try:
@@ -940,6 +1094,7 @@ class LoadBalancer:
                                 relative_availability_top_k=relative_availability_top_k,
                                 sticky_repo=repos.sticky_sessions,
                                 sticky_existing_account_id=sticky_existing_account_id,
+                                preserve_existing_mapping_on_fallback=preserve_existing_mapping,
                                 traffic_class=traffic_class,
                                 ignore_standard_quota=False,
                                 routing_costs_by_account_id=effective_routing_costs,
@@ -949,29 +1104,6 @@ class LoadBalancer:
                         async with self._runtime_lock:
                             self._release_due_probe_reservation_locked(probe_reservation)
                         raise
-                    if hard_sticky_fallback_cap_exhausted and (
-                        result.account is None
-                        or result.account.account_id != sticky_existing_account_id
-                        or not hard_sticky_owner_available
-                    ):
-                        # The pinned owner was unavailable and every normally
-                        # usable fallback was saturated. A non-owner result here
-                        # can only be a backoff fallback from the post-cap pool
-                        # (including the owner itself if it is in backoff); it
-                        # must not bypass the stable local-cap outcome.
-                        selection_error_code = _account_cap_error_code(lease_kind)
-                        result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
-                        # Selection may have planned deletion/rebinding while
-                        # inspecting the unavailable owner. Discard that plan so
-                        # fail-closed cap pressure preserves hard ownership.
-                        sticky_outcome = _StickySelectionOutcome(selection=result)
-                        logger.warning(
-                            "Account cap exhausted during hard-sticky fallback lease_kind=%s reason=%s candidates=%s",
-                            lease_kind,
-                            selection_error_code,
-                            len(states),
-                        )
-                        _record_account_cap_rejection(lease_kind)
                 selected_account_map = account_map
                 selected_states = []
                 probe_reservation_invalidated = False
@@ -1544,13 +1676,19 @@ class LoadBalancer:
                 effective_limit_name,
                 additional_quota_routing_policies,
             )
-            accounts = _selectable_accounts(all_accounts)
+            scoped_accounts = all_accounts
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
-                accounts = [account for account in accounts if account.id in allowed_account_ids]
+                scoped_accounts = [account for account in scoped_accounts if account.id in allowed_account_ids]
+            accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
             if model and _mapped_model_has_registry_entry(model):
+                continuity_owner_candidates = _filter_accounts_for_model(
+                    scoped_accounts,
+                    model,
+                    service_tier=service_tier,
+                )
                 canonical_quota_can_override_account_catalog = (
                     additional_limit_name is None and mapped_limit_name is not None
                 )
@@ -1566,6 +1704,11 @@ class LoadBalancer:
                     model_catalog_omitted_account_ids = frozenset(
                         account.id for account in accounts if account.id not in general_model_account_ids
                     )
+            else:
+                # Administrative/runtime status affects routability, not who
+                # may own account-scoped upstream state. Capture this pool
+                # before PAUSED/REAUTH_REQUIRED/etc. can manufacture uniqueness.
+                continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
@@ -1573,6 +1716,9 @@ class LoadBalancer:
                         latest_primary={},
                         latest_secondary={},
                         latest_monthly={},
+                        continuity_owner_candidates=[
+                            _clone_account(account) for account in continuity_owner_candidates
+                        ],
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1586,6 +1732,23 @@ class LoadBalancer:
                         latest_primary={},
                         latest_secondary={},
                         latest_monthly={},
+                        continuity_owner_candidates=[],
+                        quota_planner_settings=quota_planner_settings,
+                        runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    )
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                    return selection_inputs
+                if continuity_owner_candidates:
+                    selection_inputs = _SelectionInputs(
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        latest_monthly={},
+                        continuity_owner_candidates=[
+                            _clone_account(account) for account in continuity_owner_candidates
+                        ],
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1598,6 +1761,7 @@ class LoadBalancer:
                     latest_primary={},
                     latest_secondary={},
                     latest_monthly={},
+                    continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=f"No accounts with a plan supporting model '{model}'",
@@ -1624,6 +1788,9 @@ class LoadBalancer:
                         latest_primary={},
                         latest_secondary={},
                         latest_monthly={},
+                        continuity_owner_candidates=[
+                            _clone_account(account) for account in continuity_owner_candidates
+                        ],
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=additional_filter.error_message,
@@ -1639,6 +1806,7 @@ class LoadBalancer:
                     latest_primary={},
                     latest_secondary={},
                     latest_monthly={},
+                    continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
@@ -1698,6 +1866,7 @@ class LoadBalancer:
                 latest_monthly={
                     account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
+                continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
@@ -1970,6 +2139,7 @@ class LoadBalancer:
         sticky_repo: StickySessionsRepository | None,
         routing_costs_by_account_id: RoutingCostsByAccount | None = None,
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+        preserve_existing_mapping_on_fallback: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
     ) -> _StickySelectionOutcome:
@@ -2017,7 +2187,7 @@ class LoadBalancer:
         # original account — and its warm OpenAI prompt cache — once it
         # recovers.  Only reallocate_sticky=True opts in to permanent
         # reassignment.
-        persist_fallback = True
+        persist_fallback = not preserve_existing_mapping_on_fallback
         apply_sticky_secondary_budget_threshold = False
 
         if existing:
@@ -2185,7 +2355,8 @@ class LoadBalancer:
                 # fallback so the session sticks to one account during
                 # the outage instead of bouncing across random fallbacks.
             else:
-                pending_mutation = _StickyMutation(account_id=None)
+                if not preserve_existing_mapping_on_fallback:
+                    pending_mutation = _StickyMutation(account_id=None)
 
         chosen = _select_account_preferring_budget_safe(
             states,
@@ -2203,6 +2374,16 @@ class LoadBalancer:
         )
         if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
             return finish_selection(chosen, persist_account_id=chosen.account.account_id)
+        if preserve_existing_mapping_on_fallback and chosen.account is not None and existing is not None:
+            # Spillover is deliberately request-local. The alternate may create
+            # its own hard response/file/bridge owner, but local cap pressure
+            # alone never turns this soft mapping into a distributed commit.
+            logger.info(
+                "internal_soft_affinity_spillover old_account_id=%s new_account_id=%s sticky_kind=%s",
+                existing,
+                chosen.account.account_id,
+                sticky_kind.value,
+            )
         return finish_selection(chosen)
 
     @staticmethod
@@ -3687,6 +3868,11 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             account_id: _clone_standard_usage_history(entry)
             for account_id, entry in selection_inputs.latest_monthly.items()
         },
+        continuity_owner_candidates=(
+            None
+            if selection_inputs.continuity_owner_candidates is None
+            else [_clone_account(account) for account in selection_inputs.continuity_owner_candidates]
+        ),
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(
             None

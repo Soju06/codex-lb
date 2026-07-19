@@ -106,6 +106,15 @@ const useDashboardProjectionsMock = vi.mocked(useDashboardProjections);
 const useRequestLogsMock = vi.mocked(useRequestLogs);
 const buildDashboardViewMock = vi.mocked(buildDashboardView);
 
+type RequestLogsQueryOverrides = {
+  data?: undefined;
+  error?: Error | null;
+  isFetching?: boolean;
+  isLoading?: boolean;
+  isPending?: boolean;
+  isSuccess?: boolean;
+};
+
 describe("DashboardPage", () => {
   beforeEach(() => {
     accountCardsSpy.mockReset();
@@ -124,7 +133,7 @@ describe("DashboardPage", () => {
     });
   });
 
-  function mockReadyDashboard() {
+  function mockReadyDashboard(logsQueryOverrides: RequestLogsQueryOverrides = {}) {
     const overview = createDashboardOverview();
 
     useAccountMutationsMock.mockReturnValue({
@@ -172,6 +181,11 @@ describe("DashboardPage", () => {
         data: { requests: [], total: 0, hasMore: false },
         isFetching: false,
         error: null,
+        isLoading: false,
+        isPending: false,
+        isSuccess: true,
+        refetch: vi.fn(),
+        ...logsQueryOverrides,
       },
       optionsQuery: {
         data: { accountIds: [], apiKeys: [], modelOptions: [], statuses: [] },
@@ -193,6 +207,44 @@ describe("DashboardPage", () => {
 
     return overview;
   }
+
+  it("keeps the page-wide skeleton while overview data is unavailable", () => {
+    mockReadyDashboard();
+    useDashboardMock.mockReturnValue({
+      data: undefined,
+      isFetching: true,
+      error: null,
+    } as ReturnType<typeof useDashboard>);
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("dashboard-skeleton")).toBeInTheDocument();
+    expect(screen.queryByTestId("stats-grid")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Accounts" })).not.toBeInTheDocument();
+  });
+
+  it("renders request-log loading inside its section without hiding overview content", () => {
+    mockReadyDashboard({
+      data: undefined,
+      error: null,
+      isFetching: true,
+      isLoading: true,
+      isPending: true,
+      isSuccess: false,
+    });
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.queryByTestId("dashboard-skeleton")).not.toBeInTheDocument();
+    expect(screen.getByTestId("stats-grid")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    const requestLogsSection = screen.getByRole("heading", { name: "Request Logs" }).closest("section");
+
+    expect(requestLogsSection).not.toBeNull();
+    expect(within(requestLogsSection as HTMLElement).getByText("Loading...")).toBeInTheDocument();
+    expect(screen.queryByTestId("request-filters")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("recent-requests-table")).not.toBeInTheDocument();
+  });
 
   it("renders the account summary line in the Accounts header using overview accounts", () => {
     const overview = mockReadyDashboard();

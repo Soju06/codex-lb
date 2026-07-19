@@ -10,6 +10,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_sticky_sessions_api.py::test_durable_bridge_owned_alias_registration_is_epoch_fenced \
 	tests/integration/test_proxy_api_extended.py::test_proxy_stream_usage_limit_returns_http_error \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql \
+	tests/integration/test_db_session_timezone.py \
 	tests/test_request_logs_options_api.py \
 	tests/integration/test_account_usage_rollup.py \
 	tests/integration/test_data_retention.py

@@ -132,7 +132,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
     async_session.add_all(
         [
             # Day one ignores missing TTFT and invalid TPS samples: TTFT [100, 200, 300], TPS [10].
-            # Reasoning tokens are not used for the existing output TPS metric.
+            # TPS excludes the two reasoning tokens from the valid sample.
             RequestLog(
                 account_id=account_id,
                 request_id="report-speed-even-1",
@@ -151,8 +151,8 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 requested_at=datetime(2026, 6, 1, 10, 0),
                 model="gpt-5.1",
                 status="success",
-                output_tokens=12,
-                reasoning_tokens=999,
+                output_tokens=14,
+                reasoning_tokens=2,
                 latency_ms=1500,
                 latency_first_token_ms=300,
                 latency_queue_ms=60,

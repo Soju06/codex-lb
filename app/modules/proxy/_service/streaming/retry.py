@@ -52,6 +52,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
 from app.modules.proxy.affinity import (
+    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
@@ -59,6 +60,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _is_account_model_unsupported_error,
@@ -311,6 +313,17 @@ class _StreamingRetryMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        turn_state_owner_account_id: str | None = None
+        turn_state = _sticky_key_from_turn_state_header(headers)
+        if turn_state is not None:
+            # HTTP and WebSocket transports share the bridge turn-state index;
+            # treating this as ordinary sticky input would cross replicas or
+            # accounts when the token was minted by an HTTP bridge session.
+            turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
+                turn_state=turn_state,
+                api_key=api_key,
+                fail_on_missing=not _is_synthesized_turn_state(turn_state),
+            )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = "session_header"
@@ -699,23 +712,17 @@ class _StreamingRetryMixin:
                             client_ip=client_ip,
                         )
                         return
-            file_required_preferred_account = False
-            if preferred_account_id is None:
-                # ``input_file.file_id`` references must land on the account
-                # that registered the upload; otherwise upstream rejects the
-                # request with not-found / 401. The helper itself enforces
-                # priority -- it returns ``None`` when stronger affinity
-                # signals (prompt_cache_key / session header / turn_state
-                # header) are present, so this never overrides them.
-                if rewritten_file_account_id is not None:
-                    preferred_account_id = rewritten_file_account_id
-                    file_required_preferred_account = True
-            if preferred_account_id is None:
-                resolved_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
-                if resolved_file_account_id is not None:
-                    file_preferred_account_id = resolved_file_account_id
-                    preferred_account_id = resolved_file_account_id
-                    file_required_preferred_account = True
+            # File and previous-response ownership are peers, not fallback
+            # preferences. Resolve both before selection so a conflict cannot
+            # be hidden by whichever source happened to run first. A hard turn
+            # state is checked against this required owner by the balancer.
+            preferred_account_id = resolve_required_account_id(
+                ("turn state", turn_state_owner_account_id),
+                ("previous response", preferred_account_id),
+                ("input file", rewritten_file_account_id),
+            )
+            require_preferred_account = require_preferred_account or turn_state_owner_account_id is not None
+            file_required_preferred_account = rewritten_file_account_id is not None
             for attempt in range(max_attempts):
                 remaining_budget = _facade()._remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
@@ -749,10 +756,7 @@ class _StreamingRetryMixin:
                             request_id=request_id,
                             kind="stream",
                             api_key=api_key,
-                            sticky_key=affinity.key,
-                            sticky_kind=affinity.kind,
-                            reallocate_sticky=affinity.reallocate_sticky,
-                            sticky_max_age_seconds=affinity.max_age_seconds,
+                            affinity_policy=affinity,
                             prefer_earlier_reset_accounts=prefer_earlier_reset,
                             prefer_earlier_reset_window=_facade()._prefer_earlier_reset_window(settings),
                             routing_strategy=routing_strategy,
@@ -763,7 +767,12 @@ class _StreamingRetryMixin:
                             require_security_work_authorized=require_security_work_authorized,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
-                            fallback_on_preferred_account_unavailable=not file_required_preferred_account,
+                            # Keep stored-object and file ownership strict. The
+                            # verified-fresh replay branch below removes its
+                            # anchor before it permits cross-account movement.
+                            fallback_on_preferred_account_unavailable=not (
+                                require_preferred_account or file_required_preferred_account
+                            ),
                         )
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)

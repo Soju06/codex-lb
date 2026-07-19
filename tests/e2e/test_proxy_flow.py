@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import app.modules.proxy.service as proxy_module
@@ -53,8 +55,15 @@ async def test_proxy_chat_completions_flow(
     assert payload["object"] == "chat.completion"
     assert payload["usage"]["total_tokens"] == 5
 
-    listed = await client.get("/api/api-keys/")
-    assert listed.status_code == 200
-    row = next(item for item in listed.json() if item["id"] == created["id"])
+    row = None
+    for _attempt in range(20):
+        listed = await client.get("/api/api-keys/")
+        assert listed.status_code == 200
+        row = next(item for item in listed.json() if item["id"] == created["id"])
+        if row["usageSummary"] is not None:
+            break
+        await asyncio.sleep(0.05)
+    assert row is not None
+    assert row["usageSummary"] is not None
     assert row["usageSummary"]["requestCount"] == 1
     assert row["usageSummary"]["totalTokens"] == 5

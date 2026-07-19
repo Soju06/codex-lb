@@ -2347,7 +2347,7 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
 
 
 @pytest.mark.asyncio
-async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(monkeypatch) -> None:
+async def test_paused_legacy_hard_owner_fails_closed_without_rebinding(monkeypatch) -> None:
     paused_team = _make_account("acc-team-paused", "shared@example.com")
     paused_team.plan_type = "team"
     paused_team.status = AccountStatus.PAUSED
@@ -2423,13 +2423,10 @@ async def test_load_selection_inputs_excludes_paused_accounts_from_sticky_pool(m
         paused_team.id,
         active_free.id,
     }
-    assert selection.account is not None
-    assert selection.account.id == active_free.id
-    # Rebinding is one atomic upsert; a delete-before-upsert would create an
-    # unnecessary unbound window for concurrent requests.
+    assert selection.account is None
+    assert selection.error_code == "hard_affinity_saturated"
     assert sticky_repo.deletes == []
-    assert all(row.account_id != paused_team.id for row in sticky_repo.upserts)
-    assert sticky_repo.upserts[-1].account_id == active_free.id
+    assert sticky_repo.upserts == []
 
 
 @pytest.mark.asyncio

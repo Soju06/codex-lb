@@ -45,12 +45,23 @@ def _is_sqlite_memory_url(url: str) -> bool:
     return _is_sqlite_url(url) and ":memory:" in url
 
 
-def _postgres_async_connect_args(url: str) -> dict[str, int] | None:
+def _postgres_async_connect_args(url: str) -> dict[str, object] | None:
     if not url.startswith("postgresql+asyncpg://"):
         return None
-    if not os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
-        return None
-    return {"prepared_statement_cache_size": 0}
+    # Pin the asyncpg session time zone to UTC. The application persists naive
+    # UTC datetimes (see app.core.utils.time.utcnow) into timestamptz columns.
+    # asyncpg binds a naive datetime using the connection's session time zone,
+    # so if that time zone follows the container's TZ (e.g. Europe/Amsterdam)
+    # PostgreSQL shifts every written timestamp away from real UTC. That skew is
+    # silent but corrupts every wall-clock comparison the coordinator relies on:
+    # ring-membership heartbeats look perpetually stale, leader election and the
+    # bridge-session cleanup stop running, and account/stream lease expiry is
+    # mis-evaluated. Forcing UTC keeps stored timestamps correct regardless of
+    # the container time zone.
+    connect_args: dict[str, object] = {"server_settings": {"timezone": "UTC"}}
+    if os.environ.get("CODEX_LB_TEST_DATABASE_URL"):
+        connect_args["prepared_statement_cache_size"] = 0
+    return connect_args
 
 
 def _postgres_async_engine_kwargs(url: str) -> dict[str, object]:

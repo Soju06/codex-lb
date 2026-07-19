@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { getReports } from "../api";
+import { isReportDateRangeValid } from "../date";
 
 type ReportsFilterState = {
   startDate: string | undefined;
@@ -14,6 +15,7 @@ export function useReports(
   timeZone: string | undefined,
 ) {
   return useQuery({
+    enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
     queryKey: ["reports", filters, timeZone],
     queryFn: () =>
       getReports({

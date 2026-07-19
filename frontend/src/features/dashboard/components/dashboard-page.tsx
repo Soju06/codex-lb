@@ -5,6 +5,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
+import { Button } from "@/components/ui/button";
+import { SpinnerBlock } from "@/components/ui/spinner";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
@@ -117,12 +119,12 @@ export function DashboardPage() {
 
   const view = useMemo(() => {
     void resolvedLanguage;
-    if (!overview || !logPage) {
+    if (!overview) {
       return null;
     }
     return buildDashboardView(
       overview,
-      logPage.requests,
+      logPage?.requests ?? [],
       {
         isDark,
         showAccountBurnrate,
@@ -177,7 +179,6 @@ export function DashboardPage() {
 
   const errorMessage =
     (dashboardQuery.error instanceof Error && dashboardQuery.error.message) ||
-    (logsQuery.error instanceof Error && logsQuery.error.message) ||
     (optionsQuery.error instanceof Error && optionsQuery.error.message) ||
     null;
 
@@ -270,6 +271,29 @@ export function DashboardPage() {
               <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("dashboard.requests.title")}</h2>
               <div className="h-px flex-1 bg-border" />
             </div>
+            {logsQuery.isPending && !logPage ? (
+              <div className="rounded-xl border bg-card py-8">
+                <SpinnerBlock />
+              </div>
+            ) : logsQuery.error ? (
+              <div className="space-y-3 rounded-xl border bg-card p-4">
+                <div role="alert">
+                  <AlertMessage variant="error">{logsQuery.error.message}</AlertMessage>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    void logsQuery.refetch();
+                  }}
+                  disabled={logsQuery.isFetching}
+                >
+                  {t("common.actions.retry")}
+                </Button>
+              </div>
+            ) : logPage ? (
+              <>
             <RequestFilters
               filters={filters}
               accountOptions={accountOptions}
@@ -308,6 +332,8 @@ export function DashboardPage() {
                 onOffsetChange={(offset) => updateFilters({ offset })}
               />
             </div>
+              </>
+            ) : null}
           </section>
         </>
       )}

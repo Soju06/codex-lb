@@ -45,6 +45,7 @@ class _WebSocketServiceProtocol(Protocol):
     _repo_factory: Any
     _reserve_websocket_api_key_usage: Any
     _resolve_file_account_for_responses: Any
+    _resolve_compact_turn_state_owner: Any
     _resolve_upstream_route_for_account: Any
     _resolve_websocket_previous_response_owner: Any
     _retry_websocket_connect_after_401: Any

@@ -504,6 +504,7 @@ async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, d
     assert entry["tokens"] == 1400
     assert entry["inputTokens"] == 1000
     assert entry["outputTokens"] == 400
+    assert entry["reasoningTokens"] == 400
     assert entry["cachedInputTokens"] == 100
     assert entry["reasoningEffort"] == "xhigh"
     expected = round(_cost(1000, 400, 100), 6)

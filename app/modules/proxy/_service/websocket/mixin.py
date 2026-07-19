@@ -3488,7 +3488,8 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
-                    penalize_account=message.error_code != "proxy_network_unavailable",
+                    penalize_account=message.error_code is not None
+                    and message.error_code != "proxy_network_unavailable",
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
                 if sequenced_downstream_replay_refused:

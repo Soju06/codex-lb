@@ -22857,7 +22857,7 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("routed", [False, True], ids=["direct-close", "routed-receive-error"])
-async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incomplete_and_penalized(
+async def test_relay_upstream_websocket_ordinary_receive_failure_is_account_neutral_stream_incomplete(
     monkeypatch,
     routed: bool,
 ):
@@ -22932,11 +22932,7 @@ async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incom
     assert list(pending_requests) == []
     terminal = json.loads(downstream.sent_text[-1])
     assert terminal["response"]["error"]["code"] == "stream_incomplete"
-    handle_stream_error.assert_awaited_once()
-    handle_stream_error_args = handle_stream_error.await_args
-    assert handle_stream_error_args is not None
-    assert handle_stream_error_args.args[0] is account
-    assert handle_stream_error_args.args[2] == "stream_incomplete"
+    handle_stream_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio

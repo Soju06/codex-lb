@@ -79,11 +79,14 @@ class DurableBridgeSessionCoordinator:
                 )
                 if snapshot is not None:
                     resolved_snapshots.append(snapshot)
-            resolved_identities = {(snapshot.id, snapshot.account_id) for snapshot in resolved_snapshots}
-            if len(resolved_identities) > 1:
-                # Turn-state/response/session aliases are independent hard
-                # evidence. Returning the first match would silently discard a
-                # conflicting durable owner based on source ordering.
+            resolved_account_ids = {
+                snapshot.account_id for snapshot in resolved_snapshots if snapshot.account_id is not None
+            }
+            if len(resolved_account_ids) > 1:
+                # Turn-state/response/session aliases are independent account
+                # evidence. Session rows can legitimately diverge during
+                # blue-green drain, but different accounts still mean that one
+                # upstream owner would be silently abandoned.
                 raise ProxyResponseError(
                     502,
                     openai_error(
@@ -93,6 +96,12 @@ class DurableBridgeSessionCoordinator:
                     ),
                 )
             if resolved_snapshots:
+                if resolved_account_ids:
+                    account_id = next(iter(resolved_account_ids))
+                    account_snapshot = next(
+                        snapshot for snapshot in resolved_snapshots if snapshot.account_id == account_id
+                    )
+                    return _to_lookup(account_snapshot)
                 return _to_lookup(resolved_snapshots[0])
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,

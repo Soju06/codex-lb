@@ -921,13 +921,15 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         return
 
     head_count = _compact_trim_prefix_count(token_counts)
-    preserved_indices = _compact_state_anchor_indices(input_value)
+    state_anchor_indices = _compact_state_anchor_indices(input_value)
+    side_effect_indices = _compact_side_effect_anchor_indices(input_value)
+    required_indices = set(state_anchor_indices)
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
-        preserved_indices,
+        required_indices,
         token_counts=token_counts,
         token_budget=sum(token_counts),
-        required_indices=preserved_indices,
+        required_indices=required_indices,
     )
     terminal_indices, terminal_is_required = _compact_terminal_required_indices(
         input_value,
@@ -961,7 +963,8 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             param="input",
             code="responses_compact_input_too_large",
         )
-    selected_indices = set(preserved_indices)
+    selected_indices = set(state_anchor_indices)
+    selected_indices.update(side_effect_indices)
     selected_indices.update(range(head_count))
     marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
@@ -987,6 +990,7 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_counts,
         selected_indices=selected_indices,
         required_indices=required_indices,
+        priority_indices=side_effect_indices,
     )
     trimmed_input = (
         input_value
@@ -1123,13 +1127,21 @@ def _compact_fit_selected_indices_to_wire_budget(
     *,
     selected_indices: set[int],
     required_indices: set[int],
+    priority_indices: set[int] | None = None,
 ) -> set[int]:
     """Drop best-effort middle context until the exact serialized input fits."""
 
     selected = set(selected_indices)
+    prioritized = priority_indices or set()
+
+    def optional_drop_key(index: int) -> tuple[int, int, int]:
+        if index in prioritized:
+            return (0, 0, -index)
+        return (1, min(index, len(input_value) - 1 - index), index)
+
     optional_indices = sorted(
         selected - required_indices,
-        key=lambda index: (min(index, len(input_value) - 1 - index), index),
+        key=optional_drop_key,
         reverse=True,
     )
     marker_budget = max(
@@ -1192,6 +1204,14 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
         if _is_preserved_non_message_directive(item_mapping):
             preserved_indices.add(index)
         if _compact_item_is_state_anchor(item_mapping):
+            preserved_indices.add(index)
+    return preserved_indices
+
+
+def _compact_side_effect_anchor_indices(input_value: list[JsonValue]) -> set[int]:
+    preserved_indices: set[int] = set()
+    for index, item in enumerate(input_value):
+        if is_json_mapping(item) and _compact_item_is_side_effect_anchor(item):
             preserved_indices.add(index)
     return preserved_indices
 
@@ -1309,6 +1329,15 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
             return True
     return False
+
+
+def _compact_item_is_side_effect_anchor(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    if item_type in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    if item_type not in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        return False
+    return _compact_tool_call_is_side_effect(item)
 
 
 def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:

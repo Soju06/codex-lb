@@ -64,6 +64,8 @@ class PreviousResponseOwnerRecord:
     account_id: str
     requested_at: datetime | None
     session_id: str | None
+    input_item_count: int | None
+    input_full_fingerprint: str | None
 
 
 class RequestLogsRepository:
@@ -106,7 +108,13 @@ class RequestLogsRepository:
             conditions: list[ColumnElement[bool]],
         ) -> PreviousResponseOwnerRecord | None:
             stmt = (
-                select(RequestLog.account_id, RequestLog.requested_at, RequestLog.session_id)
+                select(
+                    RequestLog.account_id,
+                    RequestLog.requested_at,
+                    RequestLog.session_id,
+                    RequestLog.input_item_count,
+                    RequestLog.input_full_fingerprint,
+                )
                 .where(and_(*conditions))
                 .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
                 .limit(1)
@@ -115,7 +123,7 @@ class RequestLogsRepository:
             row = result.one_or_none()
             if row is None:
                 return None
-            account_id, requested_at, owner_session_id = row
+            account_id, requested_at, owner_session_id, input_item_count, input_full_fingerprint = row
             if not isinstance(account_id, str):
                 return None
             stripped = account_id.strip()
@@ -128,6 +136,8 @@ class RequestLogsRepository:
                 account_id=stripped,
                 requested_at=requested_at if isinstance(requested_at, datetime) else None,
                 session_id=normalized_owner_session_id,
+                input_item_count=input_item_count if isinstance(input_item_count, int) else None,
+                input_full_fingerprint=(input_full_fingerprint if isinstance(input_full_fingerprint, str) else None),
             )
 
         session_id_value = session_id.strip() if isinstance(session_id, str) else ""
@@ -416,6 +426,8 @@ class RequestLogsRepository:
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
         archive_request_id: str | None = None,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
@@ -478,6 +490,8 @@ class RequestLogsRepository:
                 upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
                 upstream_proxy_fallback_used=upstream_proxy_fallback_used,
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
+                input_item_count=input_item_count,
+                input_full_fingerprint=input_full_fingerprint,
                 requested_at=requested_at or utcnow(),
             )
             log.cost_usd = (

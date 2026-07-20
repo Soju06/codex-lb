@@ -189,6 +189,8 @@ class _RequestLogMixin:
         useragent_group: str | None = None,
         client_ip: str | None = None,
         archive_request_id: str | None = None,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
     ) -> None:
         task = asyncio.create_task(
             self._persist_request_log(
@@ -236,6 +238,8 @@ class _RequestLogMixin:
                 useragent=useragent,
                 useragent_group=useragent_group,
                 client_ip=client_ip,
+                input_item_count=input_item_count,
+                input_full_fingerprint=input_full_fingerprint,
             ),
             name=f"proxy-request-log-{request_id}",
         )
@@ -409,6 +413,8 @@ class _RequestLogMixin:
         useragent: str | None = None,
         useragent_group: str | None = None,
         client_ip: str | None = None,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
     ) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
         try:
@@ -458,6 +464,8 @@ class _RequestLogMixin:
                     useragent=useragent,
                     useragent_group=useragent_group,
                     client_ip=client_ip,
+                    input_item_count=input_item_count,
+                    input_full_fingerprint=input_full_fingerprint,
                 )
         except Exception:
             logger.warning(

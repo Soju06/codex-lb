@@ -4100,6 +4100,8 @@ class _RequestLogsRecorder:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.response_owner_by_id: dict[tuple[str, str | None, str | None], str] = {}
+        self.response_owner_input_item_count: dict[tuple[str, str | None, str | None], int] = {}
+        self.response_owner_input_fingerprint: dict[tuple[str, str | None, str | None], str] = {}
         self.latest_response_by_session: dict[tuple[str, str | None], str] = {}
         self.lookup_calls: list[tuple[str, str | None, str | None]] = []
         self.session_lookup_calls: list[tuple[str, str | None]] = []
@@ -4125,14 +4127,19 @@ class _RequestLogsRecorder:
                 account_id=owner,
                 requested_at=None,
                 session_id=session_id,
+                input_item_count=self.response_owner_input_item_count.get(key),
+                input_full_fingerprint=self.response_owner_input_fingerprint.get(key),
             )
         if session_id is not None:
             fallback_owner = self.response_owner_by_id.get((response_id, api_key_id, None))
             if fallback_owner is not None:
+                fallback_key = (response_id, api_key_id, None)
                 return PreviousResponseOwnerRecord(
                     account_id=fallback_owner,
                     requested_at=None,
                     session_id=None,
+                    input_item_count=self.response_owner_input_item_count.get(fallback_key),
+                    input_full_fingerprint=self.response_owner_input_fingerprint.get(fallback_key),
                 )
         return None
 
@@ -27796,6 +27803,89 @@ def test_cross_transport_fresh_replay_rejects_unverified_client_full_resend():
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_durable_fingerprint_recovers_after_cold_continuity_cache(monkeypatch):
+    """A resumed conversation must recover even when the in-memory
+    continuity cache never saw the original completion (process restart,
+    eviction, or a different replica). The durable request-log row carries
+    the same input fingerprint, so owner resolution should warm the cache
+    from it and let the existing verified-fresh-replay recovery move off an
+    unavailable owner instead of failing closed."""
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_durable_owner")
+    replacement_account = _make_account("acc_durable_replacement")
+    session_id = "sid_durable_fingerprint"
+    previous_response_id = "resp_durable_owner"
+    initial_input: list[JsonValue] = [{"role": "user", "content": "first turn"}]
+    full_input: list[JsonValue] = [
+        *initial_input,
+        {"role": "user", "content": "fresh full resend"},
+    ]
+    request_logs.response_owner_by_id[(previous_response_id, None, session_id)] = owner_account.id
+    request_logs.response_owner_input_item_count[(previous_response_id, None, session_id)] = len(initial_input)
+    request_logs.response_owner_input_fingerprint[(previous_response_id, None, session_id)] = (
+        proxy_service._fingerprint_input_items(initial_input)
+    )
+    assert (session_id, None) not in service._websocket_continuity_index
+
+    selection_calls: list[dict[str, object]] = []
+    streamed_payloads: list[ResponsesRequest] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        if kwargs.get("required_account_id") == owner_account.id:
+            return AccountSelection(
+                account=None,
+                error_message="Hard affinity owner account is unavailable",
+                error_code="hard_affinity_saturated",
+            )
+        assert kwargs.get("required_account_id") is None
+        assert kwargs.get("exclude_account_ids") == {owner_account.id}
+        assert kwargs.get("reallocate_sticky") is True
+        return AccountSelection(account=replacement_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        streamed_payloads.append(payload)
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_durable_replay_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test durable fingerprint recovery",
+            "input": full_input,
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": session_id})]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert len(selection_calls) == 2
+    assert [streamed.previous_response_id for streamed in streamed_payloads] == [None]
+    assert streamed_payloads[0].input == full_input
+    assert request_logs.lookup_calls == [(previous_response_id, None, session_id)]
+    warmed_state = service._websocket_continuity_index[(session_id, None)]
+    assert warmed_state.last_completed_response_id == previous_response_id
+    assert warmed_state.last_completed_input_count == len(initial_input)
 
 
 @pytest.mark.asyncio

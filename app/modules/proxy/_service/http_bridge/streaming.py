@@ -136,6 +136,9 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.retry import (
+    _verified_cross_transport_fresh_replay,
+)
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -1037,6 +1040,59 @@ class _HTTPBridgeStreamingMixin:
                     session_header_fallback_key=session_header_fallback_key,
                 )
             except ProxyResponseError as exc:
+                if (
+                    _http_bridge_is_previous_response_owner_unavailable(exc)
+                    and not proxy_injected_previous_response_id
+                    and payload.previous_response_id is not None
+                ):
+                    # The client (not the proxy) anchored this request to a
+                    # previous_response_id, and that owner is unavailable. The
+                    # durable_full_resend_anchor branch below only covers the
+                    # proxy-injected reattach case, so this request would
+                    # otherwise always fail closed. Recover the same way the
+                    # direct-retry path does: only replay unanchored when the
+                    # durable request-log fingerprint proves the client's full
+                    # input is an exact, verified prefix match.
+                    client_fresh_replay_payload = _verified_cross_transport_fresh_replay(
+                        self,
+                        payload=payload,
+                        headers=headers,
+                        api_key=api_key,
+                    )
+                    if client_fresh_replay_payload is not None:
+                        _log_http_bridge_event(
+                            "owner_unavailable_fresh_resend",
+                            bridge_session_key,
+                            account_id=request_state.preferred_account_id,
+                            model=payload.model,
+                            detail="outcome=client_verified_fresh_full_resend",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(payload.model) if payload.model else None,
+                        )
+                        request_state, text_data = prepare_bridge_request(client_fresh_replay_payload)
+                        request_state.affinity_policy = affinity
+                        if downstream_turn_state is not None:
+                            request_state.session_id = _normalize_session_id(downstream_turn_state)
+                        request_state.transport = _REQUEST_TRANSPORT_HTTP
+                        request_state.request_stage = _http_bridge_request_stage(
+                            headers=headers,
+                            payload=client_fresh_replay_payload,
+                            durable_lookup=None,
+                        )
+                        request_state.preferred_account_id = resolve_required_account_id(
+                            ("replay owner", request_state.preferred_account_id),
+                            ("input file", rewritten_file_account_id),
+                        )
+                        file_required_preferred_account = rewritten_file_account_id is not None
+                        effective_payload = client_fresh_replay_payload
+                        untrimmed_effective_payload = client_fresh_replay_payload
+                        proxy_injected_previous_response_id = False
+                        previous_response_trimmed_input_count = None
+                        previous_response_trimmed_input_fingerprint = None
+                        durable_full_resend_anchor_count = None
+                        durable_full_resend_anchor_fingerprint = None
+                        durable_lookup = None
+                        continue
                 if not (
                     _http_bridge_is_previous_response_owner_unavailable(exc)
                     and proxy_injected_previous_response_id

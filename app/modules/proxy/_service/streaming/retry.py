@@ -109,7 +109,14 @@ def _verified_cross_transport_fresh_replay(
     headers: Mapping[str, str],
     api_key: ApiKeyData | None,
 ) -> ResponsesRequest | None:
-    """Return an unanchored body only when local WS continuity proves its prefix."""
+    """Return an unanchored body only when local continuity proves its prefix.
+
+    Purely in-memory: callers that want durable-storage-backed recovery must
+    first warm `proxy._websocket_continuity_index` (see
+    `_resolve_websocket_previous_response_owner`, which does so from the same
+    request-log row it already reads for owner resolution) and re-invoke this
+    check afterward.
+    """
     previous_response_id = payload.previous_response_id
     input_value = payload.input
     if previous_response_id is None or not isinstance(input_value, list):
@@ -668,6 +675,20 @@ class _StreamingRetryMixin:
                     surface="http_stream",
                 )
                 require_preferred_account = preferred_account_id is not None
+                if require_preferred_account and verified_fresh_replay_payload is None:
+                    # The owner lookup above may have just warmed the local
+                    # continuity cache from the durable request-log row (see
+                    # `_resolve_websocket_previous_response_owner`), which was
+                    # empty when the upfront check ran. Re-check now so a
+                    # verified fresh replay is available if this owner turns
+                    # out to be unavailable below, even on a cold cache /
+                    # different replica / restarted process.
+                    verified_fresh_replay_payload = _verified_cross_transport_fresh_replay(
+                        proxy,
+                        payload=payload,
+                        headers=headers,
+                        api_key=api_key,
+                    )
                 # `previous_response_id` is a stored-object continuation, so it
                 # remains hard owner-bound even when the request also carries a
                 # soft prompt-cache affinity key. A different account may have a

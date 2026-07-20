@@ -45,6 +45,7 @@ from app.core.openai.parsing import parse_sse_event_payload
 from app.core.openai.requests import (
     ResponsesRequest,
 )
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -1041,6 +1042,18 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             if latency_first_token_ms is None:
                 latency_first_token_ms = _finalize_ttft_latency_ms(ttft_reasoning_deltas, attempt_started_at)
+            # Durable counterpart of the websocket path's request_state.input_item_count/
+            # input_full_fingerprint: only meaningful (and only stored) for a
+            # completed response, so a later cross-replica previous-response
+            # owner lookup can verify a client's full-resend replay without
+            # depending on the in-process-only continuity cache.
+            completed_input_items = payload.input if status == "success" and isinstance(payload.input, list) else None
+            completed_input_item_count = len(completed_input_items) if completed_input_items is not None else None
+            completed_input_full_fingerprint = (
+                _facade()._fingerprint_input_items(cast(list[JsonValue], completed_input_items))
+                if completed_input_items is not None
+                else None
+            )
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier
@@ -1092,6 +1105,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 useragent=useragent,
                 useragent_group=useragent_group,
                 client_ip=client_ip,
+                input_item_count=completed_input_item_count,
+                input_full_fingerprint=completed_input_full_fingerprint,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",

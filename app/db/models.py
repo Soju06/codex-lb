@@ -317,6 +317,14 @@ class RequestLog(Base):
     upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_fallback_used: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     upstream_proxy_fail_closed_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Durable counterpart of the in-process-only `_WebSocketContinuityState`
+    # fingerprint used to verify a client's full-resend replay against what
+    # this response id actually completed with. Populated only for
+    # successful, completed responses so a cross-replica/post-restart
+    # previous-response owner lookup can still prove a replay is safe
+    # without depending on a bounded in-memory cache surviving that long.
+    input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",

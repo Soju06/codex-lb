@@ -3154,6 +3154,27 @@ class _WebSocketMixin:
             account_id=owner_record.account_id,
             session_id=session_id_value,
         )
+        continuity_cache_key = (session_id_value, api_key_id)
+        if (
+            session_id_value is not None
+            and owner_record.input_item_count is not None
+            and owner_record.input_full_fingerprint is not None
+            and continuity_cache_key not in proxy._websocket_continuity_index
+        ):
+            # This process never streamed the owning response itself (that's
+            # why the in-memory continuity cache missed), so warm it from the
+            # durable request-log row instead. That lets a verified fresh
+            # replay recover this same request even after a restart, an
+            # eviction, or a different replica than the one that originally
+            # completed it. Never clobber an existing entry: it may reflect a
+            # more recent completion this process *did* observe directly.
+            proxy._websocket_continuity_index[continuity_cache_key] = _WebSocketContinuityState(
+                last_completed_response_id=response_id,
+                last_completed_input_count=owner_record.input_item_count,
+                last_completed_input_prefix_fingerprint=owner_record.input_full_fingerprint,
+            )
+            while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:
+                proxy._websocket_continuity_index.pop(next(iter(proxy._websocket_continuity_index)))
         _record_lookup_metadata(
             source="request_logs",
             outcome="hit",
@@ -4478,6 +4499,8 @@ class _WebSocketMixin:
                 useragent_group=request_state.useragent_group,
                 client_ip=request_state.client_ip,
                 request_kind=request_state.request_kind,
+                input_item_count=(request_state.input_item_count if status == "success" else None),
+                input_full_fingerprint=(request_state.input_full_fingerprint if status == "success" else None),
             )
             _record_upstream_transport_decision(
                 downstream_transport=request_state.transport,
@@ -4783,6 +4806,8 @@ class _WebSocketMixin:
                 useragent_group=request_state.useragent_group,
                 client_ip=request_state.client_ip,
                 request_kind=request_state.request_kind,
+                input_item_count=(request_state.input_item_count if status == "success" else None),
+                input_full_fingerprint=(request_state.input_full_fingerprint if status == "success" else None),
             )
             _record_upstream_transport_decision(
                 downstream_transport=request_state.transport,

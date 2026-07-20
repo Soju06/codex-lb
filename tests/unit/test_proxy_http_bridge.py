@@ -18039,6 +18039,44 @@ async def test_retry_http_bridge_precreated_request_consumes_each_clean_close_on
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-fallback-account",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+        account_response_create_lease=cast(Any, object()),
+        precreated_replay_reason="account_model_unsupported",
+        precreated_replay_account_id="acc-rejected",
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-model-fallback", None),
+        key_value="bridge-model-fallback",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.account = cast(Any, SimpleNamespace(id="acc-rejected", status=AccountStatus.ACTIVE))
+    session.last_upstream_close_code = 1011
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {"acc-rejected"}
+    reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_send_network_failure_is_neutral_and_not_replayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

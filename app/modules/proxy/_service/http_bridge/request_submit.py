@@ -120,6 +120,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_request_error_overrides,
@@ -1529,7 +1530,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 if request_text is None:
                     return False
                 if not request_state.file_required_preferred_account:
-                    if hard_session_affinity:
+                    model_fallback_replay = (
+                        request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                    )
+                    if hard_session_affinity and not model_fallback_replay:
                         request_state.preferred_account_id = session.account.id
                     else:
                         request_state.preferred_account_id = None

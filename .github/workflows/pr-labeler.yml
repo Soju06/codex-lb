@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Apply path-based labels
-        uses: actions/labeler@f27b608878404679385c85cfa523b85ccb86e213
+        uses: actions/labeler@b8dd2d9be0f68b860e7dae5dae7d772984eacd6d
         with:
           configuration-path: .github/labeler.yml
           sync-labels: false

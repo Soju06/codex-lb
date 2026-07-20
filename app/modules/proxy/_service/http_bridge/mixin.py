@@ -2216,6 +2216,28 @@ class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixi
             if account is None:
                 await release_selected_account_lease()
                 if (
+                    selection.error_code == "no_accounts"
+                    and request_state.previous_response_id is None
+                    and request_state.precreated_replay_reason is None
+                    and session.account.id in excluded_account_ids
+                    and not hard_close_account_bound
+                    and required_preferred_account_id is None
+                    and forced_refresh_account_id is None
+                    and _remaining_budget_seconds(deadline) > 0
+                ):
+                    excluded_account_ids.discard(session.account.id)
+                    request_state.excluded_account_ids.discard(session.account.id)
+                    preferred_candidate_id = session.account.id
+                    retry_same_account_once = False
+                    logger.info(
+                        "HTTP bridge pre-created reattach exhausted alternate accounts; "
+                        "retrying current account once request_id=%s account_id=%s model=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        session.account.id,
+                        session.request_model,
+                    )
+                    continue
+                if (
                     reuse_current_account_lease
                     and not hard_close_account_bound
                     and required_preferred_account_id is None

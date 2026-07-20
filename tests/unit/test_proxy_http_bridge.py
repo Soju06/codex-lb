@@ -13183,6 +13183,104 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_precreated_replay_reuses_current_account_when_no_alternative_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-precreated-single-account",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        skip_request_log=True,
+        affinity_policy=proxy_service._AffinityPolicy(
+            key="http_turn_single",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+    )
+    account = cast(Any, SimpleNamespace(id="acc-only", status=AccountStatus.ACTIVE))
+    upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            close=AsyncMock(),
+            send_text=AsyncMock(),
+            response_header=lambda _name: None,
+        ),
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-single", None),
+        headers={"x-codex-session-id": "sid-single", "x-codex-turn-state": "http_turn_single"},
+        affinity=request_state.affinity_policy,
+        request_model="gpt-5.5",
+        account=account,
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+        upstream_turn_state="http_turn_single",
+        downstream_turn_state="http_turn_single",
+    )
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+    seen_excluded_account_ids: list[set[str]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        excluded = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded)
+        if account.id in excluded:
+            return proxy_service.AccountSelection(
+                account=None,
+                error_message="No available accounts",
+                error_code="no_accounts",
+            )
+        return proxy_service.AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(selected: object, **_kwargs: object) -> object:
+        return selected
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+    monkeypatch.setattr(
+        service,
+        "_acquire_account_response_create_lease_or_overload",
+        AsyncMock(return_value=object()),
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(release_account_lease=AsyncMock()))
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is True
+    assert seen_excluded_account_ids == [{account.id}, set()]
+    assert request_state.excluded_account_ids == set()
+    assert request_state.account_response_create_lease is not None
+    assert session.account is account
+    assert "x-codex-turn-state" not in session.headers
+    assert session.upstream_turn_state is None
+    assert session.downstream_turn_state is None
+    cast(Any, upstream).send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_masks_owner_pinned_quota_error_with_queued_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

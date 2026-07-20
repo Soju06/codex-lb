@@ -624,8 +624,14 @@ def _http_bridge_pending_state_is_stale(
         return False
     # Previous-response and turn-state identifiers preserve hard continuity
     # while the socket is live. Once it closes, that continuity is already lost.
+    # A silent-but-open upstream must not preserve continuity forever: with
+    # zero upstream activity the anchored request wedges the create gate and
+    # every follow-up on the session, so cap the anchored wait at 2x the
+    # stuck-gate threshold before allowing retirement.
     if not session_closed and (request_state.previous_response_id is not None or request_state.hard_continuity_anchor):
-        return False
+        anchored_wait_started_at = request_state.response_create_gate_wait_started_at or request_state.started_at
+        if max(0.0, now - anchored_wait_started_at) < threshold_seconds * 2.0:
+            return False
     if not request_state.response_create_gate_acquired or not request_state.awaiting_response_created:
         return False
     if request_state.response_id is not None or request_state.response_event_count > 0:

@@ -999,6 +999,43 @@ def test_http_bridge_pending_state_with_continuity_anchor_is_not_stale(
 @pytest.mark.parametrize(
     ("previous_response_id", "session_id", "hard_continuity_anchor"),
     [
+        ("resp-anchored-silent", None, False),
+        (None, "turn-anchored-silent", True),
+    ],
+)
+def test_http_bridge_pending_state_with_continuity_anchor_is_stale_after_extended_silence(
+    previous_response_id: str | None,
+    session_id: str | None,
+    hard_continuity_anchor: bool,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-anchored-silent-pending",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 601.0,
+        transport="http",
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        previous_response_id=previous_response_id,
+        session_id=session_id,
+        hard_continuity_anchor=hard_continuity_anchor,
+    )
+
+    assert (
+        http_bridge_helpers_module._http_bridge_pending_state_is_stale(
+            request_state,
+            now=time.monotonic(),
+            threshold_seconds=300.0,
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("previous_response_id", "session_id", "hard_continuity_anchor"),
+    [
         ("resp-closed-anchored", None, False),
         (None, "turn-closed-anchored", True),
     ],

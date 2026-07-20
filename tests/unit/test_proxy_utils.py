@@ -29955,6 +29955,18 @@ async def test_response_create_admission_stuck_gate_retire_ignores_draining_pend
         awaiting_response_created=True,
         response_create_gate_acquired=True,
     )
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="req_active_sibling",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        response_create_gate_acquired=True,
+        response_event_count=1,
+    )
     draining_request = proxy_service._WebSocketRequestState(
         request_id="req_draining_not_stale",
         model="gpt-5.1",
@@ -29976,17 +29988,19 @@ async def test_response_create_admission_stuck_gate_retire_ignores_draining_pend
         account=_make_account("acc_stuck_gate_draining"),
         upstream=AsyncMock(),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=deque([draining_request, stale_gate_holder]),
+        pending_requests=deque([draining_request, active_request, stale_gate_holder]),
         pending_lock=anyio.Lock(),
         response_create_gate=response_create_gate,
-        queued_request_count=1,
+        queued_request_count=2,
         last_used_at=0.0,
         idle_ttl_seconds=30.0,
     )
     retire_stale = AsyncMock()
+    fail_stale = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire_stale)
+    monkeypatch.setattr(service, "_fail_stale_http_bridge_pending_requests", fail_stale)
 
     try:
         with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -30000,8 +30014,10 @@ async def test_response_create_admission_stuck_gate_retire_ignores_draining_pend
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert _proxy_error_code(exc) == "response_create_gate_timeout"
-    retire_stale.assert_awaited_once_with(
+    retire_stale.assert_not_awaited()
+    fail_stale.assert_awaited_once_with(
         bridge_session,
+        [stale_gate_holder],
         detail="response_create_gate_timeout_stuck_pending",
     )
 

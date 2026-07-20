@@ -1290,6 +1290,63 @@ class _HTTPBridgeRequestSubmitMixin:
         await self._retire_http_bridge_after_drain_if_ready(session)
         return True
 
+    async def _fail_stale_http_bridge_pending_requests(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_states: list[_WebSocketRequestState],
+        *,
+        detail: str,
+    ) -> None:
+        stale_requests: deque[_WebSocketRequestState] = deque()
+        async with session.pending_lock:
+            for request_state in request_states:
+                if request_state not in session.pending_requests:
+                    continue
+                session.pending_requests.remove(request_state)
+                if _http_bridge_request_counts_against_queue(request_state):
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+                stale_requests.append(request_state)
+        if not stale_requests:
+            return
+        await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
+        await self._fail_pending_websocket_requests(
+            account=session.account,
+            account_id_value=session.account.id,
+            pending_requests=stale_requests,
+            pending_lock=session.pending_lock,
+            error_code="upstream_request_timeout",
+            error_message="HTTP bridge response-create gate holder timed out",
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+            penalize_account=False,
+        )
+
+    def _classify_http_bridge_stale_gate_holders(
+        self: Any,
+        pending_states: list[_WebSocketRequestState],
+        *,
+        now: float,
+        threshold_seconds: float,
+        session_closed: bool,
+    ) -> tuple[list[_WebSocketRequestState], bool]:
+        stale_states = [
+            state
+            for state in pending_states
+            if not state.draining_until_terminal
+            and self._http_bridge_pending_state_is_stale(
+                state,
+                now=now,
+                threshold_seconds=threshold_seconds,
+                session_closed=session_closed,
+            )
+        ]
+        active_states = [
+            state for state in pending_states if not state.draining_until_terminal and state not in stale_states
+        ]
+        if stale_states and active_states:
+            return stale_states, False
+        return [], bool(stale_states)
+
     async def _retire_http_bridge_after_drain_if_ready(self: Any, session: "_HTTPBridgeSession") -> bool:
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False

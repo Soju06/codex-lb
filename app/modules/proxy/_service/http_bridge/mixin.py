@@ -2217,7 +2217,14 @@ class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixi
                 await release_selected_account_lease()
                 if (
                     selection.error_code == "no_accounts"
-                    and request_state.previous_response_id is None
+                    and (
+                        request_state.previous_response_id is None
+                        or (
+                            request_state.proxy_injected_previous_response_id
+                            and request_state.fresh_upstream_request_is_retry_safe
+                            and request_state.fresh_upstream_request_text
+                        )
+                    )
                     and request_state.precreated_replay_reason is None
                     and session.account.id in excluded_account_ids
                     and not hard_close_account_bound

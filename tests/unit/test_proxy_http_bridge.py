@@ -843,7 +843,6 @@ async def test_response_create_gate_timeout_retires_old_precreated_request_after
     ),
     [
         (False, True, 100, 100, 1),
-        (True, False, 25, None, 1),
     ],
 )
 async def test_response_create_gate_timeout_does_not_retire_active_response_progress(
@@ -932,6 +931,34 @@ async def test_response_create_gate_timeout_does_not_retire_active_response_prog
     assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
     assert retire_calls == []
     assert session.closed is False
+
+
+def test_http_bridge_pending_state_with_events_but_no_created_is_stale() -> None:
+    # Reattached streams can deliver events whose response.created was lost
+    # (observed events=54, created=None in prod on 2026-07-20); the create
+    # gate only releases on response.created, so this shape must retire.
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-events-no-created",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 301.0,
+        transport="http",
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        latency_first_upstream_event_ms=25,
+        response_event_count=54,
+    )
+
+    assert (
+        http_bridge_helpers_module._http_bridge_pending_state_is_stale(
+            request_state,
+            now=time.monotonic(),
+            threshold_seconds=300.0,
+        )
+        is True
+    )
 
 
 def test_http_bridge_pending_state_with_first_event_latency_only_is_stale() -> None:

@@ -1453,7 +1453,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(
                     custom_tool_output,
                     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
                 ],
-                "reasoning": {"effort": "high"},
+                "reasoning": {"effort": "high", "context": "all_turns"},
                 "client_metadata": {
                     "x-codex-turn-metadata": (
                         '{"installation_id":"account-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
@@ -1731,6 +1731,7 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
             "instructions": "",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
             "client_metadata": {marker: "true"},
+            "reasoning": {"context": "last_turn", "effort": "high"},
             "stream": True,
         }
         if previous_response_id is not None:
@@ -1768,13 +1769,18 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
     sent_payloads = [json.loads(text) for text in fake_upstream.sent_text]
     assert len(sent_payloads) == 5
     assert cast(dict[str, object], sent_payloads[0]["client_metadata"])[marker] == "true"
+    assert sent_payloads[0]["reasoning"] == {"context": "all_turns"}
     assert cast(dict[str, object], sent_payloads[1]["client_metadata"])[marker] == "true"
+    assert sent_payloads[1]["reasoning"] == {"context": "all_turns", "effort": "high"}
     assert sent_payloads[1]["previous_response_id"] == "resp_ws_lite_1"
     assert marker not in cast(dict[str, object], sent_payloads[2].get("client_metadata", {}))
+    assert sent_payloads[2]["reasoning"] == {"context": "last_turn", "effort": "high"}
     assert sent_payloads[2]["previous_response_id"] == "resp_ws_other"
     assert marker not in cast(dict[str, object], sent_payloads[3].get("client_metadata", {}))
+    assert sent_payloads[3]["reasoning"] == {"context": "last_turn", "effort": "high"}
     assert "previous_response_id" not in sent_payloads[3]
     assert cast(dict[str, object], sent_payloads[4]["client_metadata"])[marker] == "true"
+    assert sent_payloads[4]["reasoning"] == {"context": "all_turns", "effort": "high"}
     assert sent_payloads[4]["previous_response_id"] == "resp_ws_lite_2"
 
 
@@ -1963,6 +1969,7 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
     first_payloads = [json.loads(text) for text in first_upstream.sent_text]
     assert len(first_payloads) == 3
     assert cast(dict[str, object], first_payloads[2]["client_metadata"])[marker] == "true"
+    assert first_payloads[2]["reasoning"] == {"context": "all_turns"}
     assert first_payloads[2]["previous_response_id"] == "resp_ws_lite_a2"
 
     recovered_payloads = [json.loads(text) for text in recovered_upstream.sent_text]
@@ -1971,9 +1978,11 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == [user_continue, assistant_ok, user_more]
     assert marker not in cast(dict[str, object], replay_payload.get("client_metadata", {}))
+    assert "reasoning" not in replay_payload
     after_replay_payload = recovered_payloads[1]
     assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
     assert marker not in cast(dict[str, object], after_replay_payload.get("client_metadata", {}))
+    assert "reasoning" not in after_replay_payload
 
 
 def test_backend_responses_websocket_body_lite_fresh_replay_keeps_marker_and_continuity(
@@ -2151,9 +2160,11 @@ def test_backend_responses_websocket_body_lite_fresh_replay_keeps_marker_and_con
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == body_lite_full_resend
     assert cast(dict[str, object], replay_payload["client_metadata"])[marker] == "true"
+    assert replay_payload["reasoning"] == {"context": "all_turns"}
     after_replay_payload = recovered_payloads[1]
     assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
     assert cast(dict[str, object], after_replay_payload["client_metadata"])[marker] == "true"
+    assert after_replay_payload["reasoning"] == {"context": "all_turns"}
 
 
 def test_backend_responses_websocket_lite_visible_replay_trusts_downstream_response_id(

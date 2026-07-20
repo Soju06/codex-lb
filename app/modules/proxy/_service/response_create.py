@@ -17,8 +17,11 @@ from app.core.clients.proxy import (
     CODEX_INSTALLATION_ID_HEADER,
     ImageFetchSession,
     ProxyResponseError,
+    _finalize_responses_lite_reasoning_context,
     _inline_content_images,
     _normalize_responses_lite_websocket_client_metadata,
+    _payload_has_responses_lite_websocket_marker,
+    _payload_uses_responses_lite,
     apply_codex_installation_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
@@ -141,6 +144,13 @@ def _response_create_text(
         upstream_payload["type"] = "response.create"
     if client_metadata:
         upstream_payload["client_metadata"] = client_metadata
+    _finalize_responses_lite_reasoning_context(
+        upstream_payload,
+        responses_lite=(
+            _payload_uses_responses_lite(upstream_payload)
+            or _payload_has_responses_lite_websocket_marker(upstream_payload)
+        ),
+    )
     return json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -159,6 +169,13 @@ def _response_create_text_with_size_guard(
         upstream_payload["type"] = "response.create"
     if client_metadata:
         upstream_payload["client_metadata"] = client_metadata
+    _finalize_responses_lite_reasoning_context(
+        upstream_payload,
+        responses_lite=(
+            _payload_uses_responses_lite(upstream_payload)
+            or _payload_has_responses_lite_websocket_marker(upstream_payload)
+        ),
+    )
     text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
     payload_size = len(text_data.encode("utf-8"))
     max_bytes = _upstream_response_create_max_bytes()

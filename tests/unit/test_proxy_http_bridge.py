@@ -5371,6 +5371,12 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
             "model": "gpt-5.4",
             "instructions": "hi",
             "input": input_items,
+            "reasoning": {
+                "context": "last_turn",
+                "effort": "high",
+                "summary": "auto",
+                "vendor_hint": 7,
+            },
         },
     )
     request_state = proxy_service._WebSocketRequestState(
@@ -5509,6 +5515,17 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
         "true",
         "true",
     ]
+    assert all(
+        frame["reasoning"]
+        == {
+            "context": "all_turns",
+            "effort": "high",
+            "summary": "auto",
+            "vendor_hint": 7,
+        }
+        for frame in prepared_frames
+    )
+    assert cast(dict[str, Any], payload.to_payload()["reasoning"])["context"] == "last_turn"
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,7 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.55,
             "cachedInputTokens": 2,
             "date": start_at.date().isoformat(),
@@ -100,6 +101,80 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "costUsd": 0.2,
             "requests": 1,
         },
+    ]
+
+
+async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_conversations", "reports-conversations@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-1",
+                    requested_at=datetime(2026, 6, 1, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="conv-api-span",
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-2",
+                    requested_at=datetime(2026, 6, 2, 10, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="conv-api-span",
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-null",
+                    requested_at=datetime(2026, 6, 2, 11, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id=None,
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-empty",
+                    requested_at=datetime(2026, 6, 2, 12, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="",
+                ),
+                RequestLog(
+                    account_id="acc_reports_conversations",
+                    request_id="report-api-conversation-whitespace",
+                    requested_at=datetime(2026, 6, 2, 13, 0),
+                    model="gpt-5.1",
+                    status="success",
+                    useragent_group="opencode",
+                    conversation_id="   ",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-02",
+            "account_id": "acc_reports_conversations",
+            "model": "gpt-5.1",
+            "useragent_group": "opencode",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["totalConversations"] == 1
+    assert [(row["date"], row["conversations"]) for row in payload["daily"]] == [
+        ("2026-06-01", 1),
+        ("2026-06-02", 1),
     ]
 
 
@@ -221,6 +296,7 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
     assert payload["daily"] == [
         {
             "activeAccounts": 0,
+            "conversations": 0,
             "costUsd": 0.42,
             "cachedInputTokens": 3,
             "date": start_at.date().isoformat(),
@@ -363,6 +439,7 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.5,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
@@ -612,6 +689,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.7,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
@@ -625,6 +703,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
         },
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 1.4,
             "cachedInputTokens": 0,
             "date": "2026-06-07",
@@ -713,6 +792,7 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.5,
             "cachedInputTokens": 0,
             "date": "2026-03-08",
@@ -1483,6 +1563,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
     assert payload["daily"] == [
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
@@ -1496,6 +1577,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
         },
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
             "date": "2026-06-02",
@@ -1509,6 +1591,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
         },
         {
             "activeAccounts": 1,
+            "conversations": 0,
             "costUsd": 0.0,
             "cachedInputTokens": 0,
             "date": "2026-06-03",

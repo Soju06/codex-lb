@@ -26,6 +26,7 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
 
 const BASE_ROW = {
   requests: 10,
+  conversations: 0,
   inputTokens: 1_000,
   outputTokens: 100,
   cachedInputTokens: 0,

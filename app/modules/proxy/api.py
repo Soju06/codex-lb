@@ -176,6 +176,7 @@ from app.modules.proxy._service.support import (
     _could_be_blank_html_comment_line,
     _is_reasoning_summary_interleavable_event,
     _reasoning_summary_delta_key,
+    _request_log_client_fields,
     _reset_propagated_capacity_startup_ready,
     _reset_propagated_capacity_startup_wait,
     _strip_blank_html_comment_lines,
@@ -5904,6 +5905,7 @@ async def _log_source_chat_completion(
     error_message: str | None = None,
     upstream_status_code: int | None = None,
 ) -> None:
+    conversation_id = _request_log_client_fields(request.headers)[2]
     try:
         async with get_background_session() as session:
             await RequestLogsRepository(session).add_log(
@@ -5929,6 +5931,7 @@ async def _log_source_chat_completion(
                 upstream_transport="openai_compatible_http",
                 source="model_source",
                 useragent=request.headers.get("user-agent"),
+                conversation_id=conversation_id,
                 client_ip=resolve_request_client_host(request),
             )
     except Exception:

@@ -10,7 +10,7 @@ from app.modules.request_logs.mappers import (
     to_request_log_entry,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.request_logs.schemas import RequestLogEntry
+from app.modules.request_logs.schemas import RequestLogConversation, RequestLogEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,7 @@ class RequestLogsPage:
     requests: list[RequestLogEntry]
     total: int
     has_more: bool
+    conversation: RequestLogConversation | None
 
 
 class RequestLogsService:
@@ -60,6 +61,7 @@ class RequestLogsService:
         search: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        conversation_id: str | None = None,
         account_ids: list[str] | None = None,
         api_key_ids: list[str] | None = None,
         model_options: list[RequestLogModelOption] | None = None,
@@ -71,12 +73,13 @@ class RequestLogsService:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
         )
-        logs, total = await self._repo.list_recent(
+        result = await self._repo.list_recent(
             limit=limit,
             offset=offset,
             search=search,
             since=since,
             until=until,
+            conversation_id=conversation_id,
             account_ids=account_ids,
             api_key_ids=api_key_ids,
             model_options=normalized_model_options,
@@ -87,6 +90,15 @@ class RequestLogsService:
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
         )
+        logs = result.logs
+        total = result.total
+        conversation = None
+        if conversation_id is not None:
+            assert result.aggregated_cost_usd is not None
+            conversation = RequestLogConversation(
+                request_count=total,
+                aggregated_cost_usd=result.aggregated_cost_usd,
+            )
         api_key_ids = [log.api_key_id for log in logs if log.api_key_id]
         api_key_name_by_id = await self._repo.get_api_key_names_by_ids(api_key_ids)
         requests = [
@@ -100,6 +112,7 @@ class RequestLogsService:
             requests=requests,
             total=total,
             has_more=offset + limit < total,
+            conversation=conversation,
         )
 
     async def list_filter_options(

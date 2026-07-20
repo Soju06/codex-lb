@@ -443,6 +443,12 @@ def _supported_optional_kwargs(
     return kwargs
 
 
+_CONVERSATION_HEADERS_BY_USERAGENT_PREFIX = (
+    ("opencode", ("x-opencode-session", "x-session-id", "x-session-affinity")),
+    ("codex", ("thread-id",)),
+)
+
+
 def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
     raw_useragent = next((value for key, value in headers.items() if key.lower() == "user-agent"), None)
     if raw_useragent is None:
@@ -453,6 +459,22 @@ def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | Non
     first_token = useragent.split(maxsplit=1)[0]
     useragent_group = first_token.split("/", 1)[0].strip() or None
     return useragent, useragent_group
+
+
+def _request_log_client_fields(
+    headers: Mapping[str, str],
+) -> tuple[str | None, str | None, str | None]:
+    useragent, useragent_group = _request_log_useragent_fields(headers)
+    normalized_useragent = (useragent or "").strip().casefold()
+    normalized_headers = {key.casefold(): value for key, value in headers.items()}
+    for prefix, header_names in _CONVERSATION_HEADERS_BY_USERAGENT_PREFIX:
+        if normalized_useragent.startswith(prefix):
+            for header_name in header_names:
+                value = normalized_headers.get(header_name)
+                if value and (conversation_id := value.strip()):
+                    return useragent, useragent_group, conversation_id
+            break
+    return useragent, useragent_group, None
 
 
 class _RetryableStreamError(Exception):
@@ -807,6 +829,7 @@ class _WebSocketRequestState:
     upstream_proxy_fail_closed_reason: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    conversation_id: str | None = None
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None

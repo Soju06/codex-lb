@@ -15,7 +15,7 @@ export type DailyDetailTableProps = {
 
 const DAILY_BREAKDOWN_SCROLL_HEIGHT_CLASS = "max-h-[17.5rem]";
 
-type SortKey = "date" | "requests" | "inputTokens" | "outputTokens" | "costUsd" | "activeAccounts";
+type SortKey = "date" | "requests" | "conversations" | "inputTokens" | "outputTokens" | "costUsd" | "activeAccounts";
 type SortDirection = "asc" | "desc";
 
 function formatTokens(v: number): string {
@@ -57,7 +57,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
         </Button>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full table-fixed text-xs">
+        <table className="w-full table-fixed text-xs min-w-[700px]">
           <ColumnGroup />
           <thead>
             <tr className="border-b text-left text-muted-foreground">
@@ -73,6 +73,12 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
                 isActive={sort.key === "requests"}
                 direction={sort.direction}
                 onClick={() => toggleSort("requests")}
+              />
+              <SortableHeader
+                label={t("reports.dailyBreakdown.columns.conversations")}
+                isActive={sort.key === "conversations"}
+                direction={sort.direction}
+                onClick={() => toggleSort("conversations")}
               />
               <SortableHeader
                 label={t("reports.dailyBreakdown.columns.inputTokens")}
@@ -105,7 +111,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
           data-testid="daily-breakdown-scroll-body"
           className={`${DAILY_BREAKDOWN_SCROLL_HEIGHT_CLASS} overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`}
         >
-          <table className="w-full table-fixed text-xs">
+          <table className="w-full table-fixed text-xs min-w-[700px]">
             <ColumnGroup />
             <tbody>
               {rows.map((row) => (
@@ -119,6 +125,9 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
                   </td>
                   <td className="py-2.5 pr-4 text-right text-foreground">
                     {row.requests}
+                  </td>
+                  <td className="py-2.5 pr-4 text-right text-foreground">
+                    {row.conversations}
                   </td>
                   <td className="py-2.5 pr-4 text-right text-foreground">
                     <span>{formatTokens(row.inputTokens)}</span>{" "}
@@ -190,10 +199,11 @@ function SortableHeader({
 function ColumnGroup() {
   return (
     <colgroup>
-      <col style={{ width: "18%" }} />
-      <col style={{ width: "14%" }} />
-      <col style={{ width: "20%" }} />
-      <col style={{ width: "20%" }} />
+      <col style={{ width: "16%" }} />
+      <col style={{ width: "12%" }} />
+      <col style={{ width: "12%" }} />
+      <col style={{ width: "16%" }} />
+      <col style={{ width: "16%" }} />
       <col style={{ width: "14%" }} />
       <col style={{ width: "14%" }} />
     </colgroup>
@@ -228,6 +238,7 @@ function exportCSV(rows: DailyReportRow[], t: TFunction) {
   const headers = [
     t("reports.dailyBreakdown.csvColumns.date"),
     t("reports.dailyBreakdown.csvColumns.requests"),
+    t("reports.dailyBreakdown.csvColumns.conversations"),
     t("reports.dailyBreakdown.csvColumns.inputTokens"),
     t("reports.dailyBreakdown.csvColumns.outputTokens"),
     t("reports.dailyBreakdown.csvColumns.cachedTokens"),
@@ -236,7 +247,7 @@ function exportCSV(rows: DailyReportRow[], t: TFunction) {
     t("reports.dailyBreakdown.csvColumns.errors"),
   ];
   const lines = rows.map((r) =>
-    [r.date, r.requests, r.inputTokens, r.outputTokens, r.cachedInputTokens, r.costUsd.toFixed(4), r.activeAccounts, r.errorCount].join(","),
+    [r.date, r.requests, r.conversations, r.inputTokens, r.outputTokens, r.cachedInputTokens, r.costUsd.toFixed(4), r.activeAccounts, r.errorCount].join(","),
   );
   const csv = [headers.join(","), ...lines].join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });

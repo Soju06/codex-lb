@@ -35,6 +35,7 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
     cost_breakdown = cost_breakdown_from_log(log_like, precision=6)
     return RequestLogEntry(
         requested_at=log.requested_at,
+        conversation_id=log.conversation_id,
         account_id=log.account_id,
         plan_type=log.plan_type,
         api_key_id=log.api_key_id,

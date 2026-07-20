@@ -573,7 +573,8 @@ from app.modules.proxy._service.support import (
     _PreparedWebSocketRequest,  # noqa: F401
     _record_response_event,  # noqa: F401
     _record_websocket_route_metadata,  # noqa: F401
-    _request_log_useragent_fields,
+    _request_log_client_fields,  # noqa: F401
+    _request_log_useragent_fields,  # noqa: F401
     _RequestLogFailureMetadata,
     _RetryableStreamError,  # noqa: F401
     _stream_settlement_error_payload,  # noqa: F401
@@ -992,7 +993,7 @@ class ProxyService(
         api_key: ApiKeyData | None = None,
     ) -> dict[str, JsonValue]:
         filtered = filter_inbound_headers(headers)
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -1274,6 +1275,7 @@ class ProxyService(
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
             )
 
     async def _acquire_request_state_response_create_admission(

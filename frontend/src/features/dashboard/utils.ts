@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Coins, DollarSign, Flame, type LucideIcon } from "lucide-react";
+import { Activity, AlertTriangle, Coins, DollarSign, Flame, MessageSquare, type LucideIcon } from "lucide-react";
 
 import i18n from "@/i18n";
 import type {
@@ -16,6 +16,7 @@ import {
   formatCachedTokensMeta,
   formatCompactNumber,
   formatCurrency,
+  formatNumber,
   formatRate,
   formatWindowMinutes,
 } from "@/utils/formatters";
@@ -815,6 +816,18 @@ export function buildDashboardView(
       trendColor: TREND_COLORS[2],
     },
   ];
+
+  const conversationCount = metrics?.conversations !== null && metrics?.conversations !== undefined ? metrics.conversations : null;
+  if (conversationCount !== null) {
+    stats.push({
+      label: t("dashboard.stats.conversations", { timeframe: timeframeLabel }),
+      value: formatNumber(conversationCount),
+      meta: t("dashboard.stats.distinctConversations", { count: conversationCount }),
+      icon: MessageSquare,
+      trend: [],
+      trendColor: TREND_COLORS[3],
+    });
+  }
 
   if (showAccountBurnrate) {
     stats.push({

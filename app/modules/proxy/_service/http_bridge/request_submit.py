@@ -122,7 +122,7 @@ from app.modules.proxy._service.support import (
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
     _HTTPBridgeSession,
-    _request_log_useragent_fields,
+    _request_log_client_fields,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketRequestState,
 )
@@ -277,7 +277,11 @@ class _HTTPBridgeRequestSubmitMixin:
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
-        request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        (
+            request_state.useragent,
+            request_state.useragent_group,
+            request_state.conversation_id,
+        ) = _request_log_client_fields(headers)
         request_state.client_ip = client_ip
         return request_state, text_data
 

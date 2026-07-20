@@ -67,6 +67,44 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_log_persists_normalized_conversation_id(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            request_id="req_conversation",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            conversation_id=" conv-a ",
+        )
+        empty = await repo.add_log(
+            account_id=None,
+            request_id="req_conversation_empty",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            conversation_id=" ",
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        empty_persisted = await session.scalar(select(RequestLog).where(RequestLog.id == empty.id))
+
+    assert persisted is not None
+    assert persisted.conversation_id == "conv-a"
+    assert empty_persisted is not None
+    assert empty_persisted.conversation_id is None
+
+
+@pytest.mark.asyncio
 async def test_add_log_does_not_recalculate_unpriced_model_source_cost(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

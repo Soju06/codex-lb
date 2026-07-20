@@ -50,7 +50,7 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ModelSource
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -61,6 +61,7 @@ from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import support as proxy_support
+from app.modules.proxy._service import warmup as proxy_warmup_service
 from app.modules.proxy._service.http_bridge import request_submit as proxy_http_bridge_request_submit
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy._service.support import (
@@ -1288,6 +1289,90 @@ def test_request_log_useragent_fields_handle_missing_and_blank_headers(
     headers: Mapping[str, str], expected: tuple[None, None]
 ) -> None:
     assert proxy_service._request_log_useragent_fields(headers) == expected
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"User-Agent": "codex/1.2", "thread-id": " conv-a "}, "conv-a"),
+        ({"user-agent": "CODEX/1.2", "Thread-Id": "conv-b"}, "conv-b"),
+        (
+            {"User-Agent": "opencode/1.0", "x-opencode-session": "primary", "x-session-id": "fallback"},
+            "primary",
+        ),
+        ({"User-Agent": "opencode/1.0", "x-opencode-session": " ", "X-Session-Id": "fallback"}, "fallback"),
+        ({"User-Agent": "opencode/1.0", "x-session-affinity": "affinity"}, "affinity"),
+        ({"User-Agent": "other/1.0", "thread-id": "ignored"}, None),
+        ({"thread-id": "ignored"}, None),
+    ],
+)
+def test_request_log_client_fields_detect_conversation(headers, expected):
+    assert proxy_service._request_log_client_fields(headers)[2] == expected
+
+
+@pytest.mark.asyncio
+async def test_warmup_persists_conversation_id_in_request_log(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_warmup_conversation")
+    snapshot = proxy_warmup_service._snapshot_warmup_account(account)
+
+    monkeypatch.setattr(service._encryptor, "decrypt", lambda _token: "access-token")
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=SimpleNamespace(id="warmup-conversation", usage=None)),
+    )
+
+    result = await service._submit_warmup_request(
+        account=snapshot,
+        api_key=None,
+        headers={"User-Agent": "opencode/1.0", "x-opencode-session": "conv-warmup"},
+        warmup_model="gpt-5.1",
+        prohibit_fast_mode=False,
+    )
+
+    assert result.success is True
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] == "conv-warmup"
+
+
+@pytest.mark.asyncio
+async def test_model_source_persists_conversation_id_without_changing_useragent_group(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _BackgroundSession:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _RequestLogs:
+        def __init__(self, _session):
+            pass
+
+        async def add_log(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api, "get_background_session", lambda: _BackgroundSession())
+    monkeypatch.setattr(proxy_api, "RequestLogsRepository", _RequestLogs)
+    monkeypatch.setattr(proxy_api, "resolve_request_client_host", lambda _request: "203.0.113.8")
+
+    await proxy_api._log_source_chat_completion(
+        cast(Request, SimpleNamespace(headers={"User-Agent": "codex/1.2", "thread-id": "conv-source"})),
+        source=cast(ModelSource, SimpleNamespace(id="source-conversation", kind="openai_compatible")),
+        api_key=None,
+        model="gpt-5.1",
+        status="success",
+    )
+
+    assert calls[0]["conversation_id"] == "conv-source"
+    assert calls[0].get("useragent_group") is None
 
 
 def test_build_upstream_headers_overrides_auth():
@@ -4261,7 +4346,7 @@ async def test_write_request_log_persists_failure_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_request_log_persists_useragent_fields() -> None:
+async def test_write_request_log_persists_conversation_id_with_useragent_fields() -> None:
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
@@ -4274,12 +4359,47 @@ async def test_write_request_log_persists_useragent_fields() -> None:
         status="success",
         useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
         useragent_group="opencode",
+        conversation_id="conv-request-log",
     )
     assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     call = request_logs.calls[0]
     assert call["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert call["useragent_group"] == "opencode"
+    assert call["conversation_id"] == "conv-request-log"
+
+
+@pytest.mark.asyncio
+async def test_conversation_id_is_null_for_unsupported_useragent_request_path(monkeypatch) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_unsupported_conversation")
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        proxy_service,
+        "core_codex_control_request",
+        AsyncMock(return_value=proxy_module.CodexControlResponse(status_code=200, body=b'{"ok":true}', headers={})),
+    )
+
+    response = await service.codex_control_request(
+        "control",
+        method="POST",
+        payload=None,
+        query_params={},
+        headers={"User-Agent": "other-client/1.0", "thread-id": "ignored"},
+    )
+
+    assert response.status_code == 200
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] is None
 
 
 def test_request_log_failure_metadata_does_not_tag_direct_http_errors_as_owner_forward() -> None:
@@ -4935,7 +5055,7 @@ def _install_two_account_selection(
 
 
 @pytest.mark.asyncio
-async def test_thread_goal_request_passes_dashboard_reset_window_to_selection(monkeypatch):
+async def test_thread_goal_request_persists_conversation_id_and_passes_dashboard_reset_window_to_selection(monkeypatch):
     settings = _make_proxy_settings()
     settings.prefer_earlier_reset_accounts = True
     settings.prefer_earlier_reset_window = "primary"
@@ -4958,11 +5078,17 @@ async def test_thread_goal_request_passes_dashboard_reset_window_to_selection(mo
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
     monkeypatch.setattr(proxy_service, "core_thread_goal_request", thread_goal_request)
 
-    response = await service.thread_goal_request("set", {}, {})
+    response = await service.thread_goal_request(
+        "set",
+        {},
+        {"User-Agent": "codex/1.2", "thread-id": "conv-thread-goal"},
+    )
 
     assert response == {"ok": True}
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] == "conv-thread-goal"
 
 
 @pytest.mark.asyncio
@@ -5059,7 +5185,9 @@ async def test_ensure_fresh_with_budget_or_auth_error_maps_refresh_failures_by_k
 
 
 @pytest.mark.asyncio
-async def test_codex_control_request_passes_dashboard_reset_window_to_selection(monkeypatch):
+async def test_codex_control_request_persists_conversation_id_and_passes_dashboard_reset_window_to_selection(
+    monkeypatch,
+):
     settings = _make_proxy_settings()
     settings.prefer_earlier_reset_accounts = True
     settings.prefer_earlier_reset_window = "primary"
@@ -5087,13 +5215,15 @@ async def test_codex_control_request_passes_dashboard_reset_window_to_selection(
         method="POST",
         payload=None,
         query_params={},
-        headers={},
+        headers={"User-Agent": "codex/1.2", "thread-id": "conv-control"},
     )
 
     assert response.status_code == 200
     assert response.body == b'{"ok":true}'
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] == "conv-control"
 
 
 class _JsonCompactResponse:
@@ -10692,7 +10822,7 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_persists_useragent_fields_in_request_log(monkeypatch) -> None:
+async def test_compact_responses_persists_conversation_id_with_useragent_fields_in_request_log(monkeypatch) -> None:
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -10723,13 +10853,18 @@ async def test_compact_responses_persists_useragent_fields_in_request_log(monkey
 
     await service.compact_responses(
         payload,
-        {"session_id": "sid-compact", "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+        {
+            "session_id": "sid-compact",
+            "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+            "x-session-id": "conv-compact",
+        },
         client_ip="203.0.113.7",
     )
     assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
+    assert request_logs.calls[0]["conversation_id"] == "conv-compact"
     assert request_logs.calls[0]["client_ip"] == "203.0.113.7"
 
 
@@ -14789,7 +14924,7 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
 
 
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_persists_useragent_fields_in_request_log(monkeypatch):
+async def test_connect_proxy_websocket_persists_conversation_id_with_useragent_fields_in_request_log(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
@@ -14817,7 +14952,10 @@ async def test_connect_proxy_websocket_persists_useragent_fields_in_request_log(
 
     websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
     await service._connect_proxy_websocket(
-        {"user-agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+        {
+            "user-agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+            "x-opencode-session": "conv-websocket",
+        },
         sticky_key=None,
         sticky_kind=None,
         prefer_earlier_reset=False,
@@ -14831,6 +14969,36 @@ async def test_connect_proxy_websocket_persists_useragent_fields_in_request_log(
 
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
+    assert request_logs.calls[0]["conversation_id"] == "conv-websocket"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_persists_request_state_conversation_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_pending_conversation",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        conversation_id="conv-pending-websocket",
+    )
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    await service._fail_pending_websocket_requests(
+        account_id_value="acc_pending_conversation",
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="client_disconnected",
+        error_message="client disconnected",
+        api_key=None,
+        penalize_account=False,
+    )
+
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] == "conv-pending-websocket"
 
 
 @pytest.mark.asyncio
@@ -24824,7 +24992,7 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_preserves_useragent_on_preflight_timeout(monkeypatch):
+async def test_stream_with_retry_preserves_conversation_id_on_preflight_timeout(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
@@ -24840,7 +25008,10 @@ async def test_stream_with_retry_preserves_useragent_on_preflight_timeout(monkey
         chunk
         async for chunk in service._stream_with_retry(
             payload,
-            {"user-agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+            {
+                "user-agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+                "x-session-id": "conv-preflight",
+            },
             codex_session_affinity=False,
             propagate_http_errors=False,
             openai_cache_affinity=False,
@@ -24857,6 +25028,7 @@ async def test_stream_with_retry_preserves_useragent_on_preflight_timeout(monkey
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
+    assert request_logs.calls[0]["conversation_id"] == "conv-preflight"
 
 
 @pytest.mark.asyncio
@@ -26572,7 +26744,7 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_stream_refresh_timeout_before_visible_output_fails_over(monkeypatch):
+async def test_stream_refresh_timeout_before_visible_output_fails_over_with_conversation_id(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -26609,7 +26781,13 @@ async def test_stream_refresh_timeout_before_visible_output_fails_over(monkeypat
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
-    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {"User-Agent": "codex/1.2", "thread-id": "conv-http-normal"},
+        )
+    ]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
@@ -26619,6 +26797,7 @@ async def test_stream_refresh_timeout_before_visible_output_fails_over(monkeypat
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["account_id"] == account_b.id
     assert request_logs.calls[-1]["status"] == "success"
+    assert request_logs.calls[-1]["conversation_id"] == "conv-http-normal"
 
 
 @pytest.mark.asyncio
@@ -26713,7 +26892,7 @@ async def test_stream_early_route_failure_logs_resolved_route_metadata(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_transcribe_early_route_failure_logs_resolved_route_metadata(monkeypatch):
+async def test_transcribe_persists_conversation_id_and_resolved_route_metadata(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -26751,7 +26930,7 @@ async def test_transcribe_early_route_failure_logs_resolved_route_metadata(monke
             filename="audio.wav",
             content_type="audio/wav",
             prompt=None,
-            headers={},
+            headers={"User-Agent": "opencode/1.0", "x-session-affinity": "conv-transcribe"},
         )
 
     assert await service.drain_persistence_tasks(timeout_seconds=1)
@@ -26760,6 +26939,7 @@ async def test_transcribe_early_route_failure_logs_resolved_route_metadata(monke
     assert log["upstream_proxy_pool_id"] == "pool_1"
     assert log["upstream_proxy_endpoint_id"] == "ep_1"
     assert log["upstream_proxy_fallback_used"] is False
+    assert log["conversation_id"] == "conv-transcribe"
 
 
 @pytest.mark.asyncio
@@ -31947,7 +32127,7 @@ async def test_transcribe_refresh_connection_reset_fails_over(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_files_create_refresh_connection_reset_fails_over(monkeypatch):
+async def test_files_create_persists_conversation_id_on_refresh_connection_reset_failover(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_a = _make_account("acc_files_create_refresh_a")
@@ -31979,7 +32159,10 @@ async def test_files_create_refresh_connection_reset_fails_over(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "core_create_file", fake_create_file)
 
-    response = await service.create_file({"filename": "a.txt"}, {"session_id": "sid-files-create"})
+    response = await service.create_file(
+        {"filename": "a.txt"},
+        {"User-Agent": "codex/1.2", "thread-id": "conv-file"},
+    )
 
     assert response == {"file_id": "file_ok"}
     assert seen_excluded_account_ids == [set(), {account_a.id}]
@@ -31988,6 +32171,7 @@ async def test_files_create_refresh_connection_reset_fails_over(monkeypatch):
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+    assert request_logs.calls[0]["conversation_id"] == "conv-file"
 
 
 @pytest.mark.asyncio
@@ -32309,13 +32493,14 @@ def test_prepare_response_bridge_request_state_keeps_repeated_first_attempt_tool
     assert upstream_input[3]["call_id"] == "call_repeat"
 
 
-def test_prepare_http_bridge_request_persists_useragent_on_request_state():
+def test_prepare_http_bridge_request_persists_conversation_id_with_useragent_on_request_state():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
     headers: Mapping[str, str] = {
         "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
         "session_id": "sid-bridge-useragent",
+        "x-session-affinity": "conv-bridge",
     }
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hello", "input": []})
 
@@ -32328,6 +32513,42 @@ def test_prepare_http_bridge_request_persists_useragent_on_request_state():
 
     assert request_state.useragent == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_state.useragent_group == "opencode"
+    assert request_state.conversation_id == "conv-bridge"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_finalization_persists_request_state_conversation_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_bridge_conversation_finalize")
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hello", "input": []})
+    request_state, _text_data = service._prepare_http_bridge_request(
+        payload,
+        {
+            "User-Agent": "opencode/1.15.13",
+            "x-session-affinity": "conv-bridge-finalize",
+        },
+        api_key=None,
+        api_key_reservation=None,
+    )
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    await service._finalize_websocket_request_state(
+        request_state,
+        account=account,
+        account_id_value=account.id,
+        event=None,
+        event_type="response.completed",
+        payload={"type": "response.completed", "response": {"id": "resp-bridge-finalize"}},
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert request_state.conversation_id == "conv-bridge-finalize"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] == "conv-bridge-finalize"
 
 
 def test_prepare_http_bridge_request_kind_uses_headers_over_payload_metadata():

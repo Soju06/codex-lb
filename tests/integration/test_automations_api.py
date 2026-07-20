@@ -450,7 +450,7 @@ async def test_automations_run_history_keeps_claimed_model_snapshot(async_client
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
-        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        recent_logs = (await request_logs_repository.list_recent(limit=200, since=started_at)).logs
         matching_logs = [
             log
             for log in recent_logs
@@ -518,7 +518,7 @@ async def test_automations_run_now_aliases_ultra_reasoning_to_max_on_wire(async_
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
-        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        recent_logs = (await request_logs_repository.list_recent(limit=200, since=started_at)).logs
         matching_logs = [
             log
             for log in recent_logs
@@ -577,7 +577,7 @@ async def test_automations_api_accepts_server_default_timezone(async_client, mon
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
-        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        recent_logs = (await request_logs_repository.list_recent(limit=200, since=started_at)).logs
         matching_logs = [
             log
             for log in recent_logs
@@ -1176,7 +1176,7 @@ async def test_automations_run_now_all_accounts_executes_all_accounts_with_delay
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
-        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        recent_logs = (await request_logs_repository.list_recent(limit=200, since=started_at)).logs
         observed_after_run_now = {
             log.account_id for log in recent_logs if log.transport == "automation" and log.model == "gpt-5.3-codex"
         }
@@ -1189,7 +1189,7 @@ async def test_automations_run_now_all_accounts_executes_all_accounts_with_delay
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
-        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        recent_logs = (await request_logs_repository.list_recent(limit=200, since=started_at)).logs
         observed = {
             log.account_id for log in recent_logs if log.transport == "automation" and log.model == "gpt-5.3-codex"
         }
@@ -1260,7 +1260,7 @@ async def test_automations_run_now_reactivates_elapsed_rate_limited_account(asyn
         assert refreshed.blocked_at is None
 
         request_logs_repository = RequestLogsRepository(session)
-        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        recent_logs = (await request_logs_repository.list_recent(limit=200, since=started_at)).logs
         observed = {
             log.account_id for log in recent_logs if log.transport == "automation" and log.model == "gpt-5.3-codex"
         }

@@ -69,7 +69,7 @@ async def test_get_reports_rejects_inverted_defaulted_range_before_repository_wo
 
 
 @pytest.mark.asyncio
-async def test_get_reports_serializes_useragent_breakdown_and_model_request_counts() -> None:
+async def test_get_reports_serializes_conversation_and_breakdown_request_counts() -> None:
     repo = SimpleNamespace(
         aggregate_summary=AsyncMock(
             side_effect=[
@@ -79,6 +79,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                     total_output_tokens=6,
                     total_cached_tokens=2,
                     total_requests=2,
+                    conversation_count=1,
                     total_errors=0,
                     active_accounts=1,
                 ),
@@ -88,6 +89,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                     total_output_tokens=2,
                     total_cached_tokens=0,
                     total_requests=1,
+                    conversation_count=0,
                     total_errors=0,
                     active_accounts=1,
                 ),
@@ -98,6 +100,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                 SimpleNamespace(
                     date="2026-06-01",
                     requests=2,
+                    conversation_count=1,
                     input_tokens=12,
                     output_tokens=6,
                     cached_input_tokens=2,
@@ -166,9 +169,11 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
     repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode")
 
     assert result.daily[0].median_ttft_ms == 123.46
+    assert result.daily[0].conversations == 1
     assert result.daily[0].median_tps == 78.9
     assert result.daily[0].median_queue_ms == 45.68
     assert result.by_model[0].model == "gpt-5.1"
+    assert result.summary.total_conversations == 1
     assert result.by_model[0].requests == 2
     assert result.by_useragent[0].useragent == "opencode"
     assert result.by_useragent[0].requests == 2

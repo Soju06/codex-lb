@@ -17,6 +17,7 @@ const EMPTY_REPORT: ReportsResponse = {
     totalCachedTokens: 0,
     totalRequests: 0,
     totalErrors: 0,
+    totalConversations: 0,
     activeAccounts: 0,
     avgCostPerDay: 0,
     avgRequestsPerDay: 0,

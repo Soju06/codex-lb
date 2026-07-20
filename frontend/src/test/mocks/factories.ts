@@ -367,6 +367,7 @@ export function createRequestLogEntry(
 		useragent: null,
 		useragentGroup: null,
 		clientIp: null,
+		conversationId: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,

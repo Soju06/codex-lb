@@ -51,7 +51,9 @@ async def test_list_recent_returns_rows_and_total(db_setup):
                 requested_at=now - timedelta(minutes=i),
             )
 
-        logs, total = await repo.list_recent(limit=3, offset=0)
+        result = await repo.list_recent(limit=3, offset=0)
+        logs = result.logs
+        total = result.total
         assert len(logs) == 3
         assert total == 5
         assert logs[0].plan_type == "plus"
@@ -78,8 +80,12 @@ async def test_list_recent_pagination_total_stays_consistent(db_setup):
                 requested_at=now - timedelta(minutes=i),
             )
 
-        page1_logs, page1_total = await repo.list_recent(limit=3, offset=0)
-        page2_logs, page2_total = await repo.list_recent(limit=3, offset=3)
+        page1 = await repo.list_recent(limit=3, offset=0)
+        page2 = await repo.list_recent(limit=3, offset=3)
+        page1_logs = page1.logs
+        page1_total = page1.total
+        page2_logs = page2.logs
+        page2_total = page2.total
         assert len(page1_logs) == 3
         assert len(page2_logs) == 3
         assert page1_total == 10
@@ -90,7 +96,9 @@ async def test_list_recent_pagination_total_stays_consistent(db_setup):
 async def test_list_recent_empty_returns_zero_total(db_setup):
     async with SessionLocal() as session:
         repo = RequestLogsRepository(session)
-        logs, total = await repo.list_recent(limit=10)
+        result = await repo.list_recent(limit=10)
+        logs = result.logs
+        total = result.total
         assert logs == []
         assert total == 0
 
@@ -116,7 +124,9 @@ async def test_list_recent_offset_past_end_preserves_total(db_setup):
                 requested_at=now - timedelta(minutes=i),
             )
 
-        logs, total = await repo.list_recent(limit=3, offset=10)
+        result = await repo.list_recent(limit=3, offset=10)
+        logs = result.logs
+        total = result.total
         assert logs == []
         assert total == 4
 
@@ -148,7 +158,9 @@ async def test_list_recent_without_search_avoids_related_joins(db_setup):
             )
 
             statements.clear()
-            logs, total = await repo.list_recent(limit=3, offset=0)
+            result = await repo.list_recent(limit=3, offset=0)
+            logs = result.logs
+            total = result.total
 
         assert len(logs) == 1
         assert total == 1
@@ -188,7 +200,9 @@ async def test_list_recent_uses_separate_count_instead_of_window_count(db_setup)
                 )
 
             statements.clear()
-            logs, total = await repo.list_recent(limit=3, offset=0)
+            result = await repo.list_recent(limit=3, offset=0)
+            logs = result.logs
+            total = result.total
 
         assert len(logs) == 3
         assert total == 5
@@ -227,7 +241,9 @@ async def test_list_recent_with_search_keeps_related_joins(db_setup):
             )
 
             statements.clear()
-            logs, total = await repo.list_recent(limit=3, offset=0, search="example.com")
+            result = await repo.list_recent(limit=3, offset=0, search="example.com")
+            logs = result.logs
+            total = result.total
 
         assert len(logs) == 1
         assert total == 1
@@ -237,3 +253,36 @@ async def test_list_recent_with_search_keeps_related_joins(db_setup):
         assert any("JOIN api_keys" in statement for statement in select_statements)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+
+@pytest.mark.asyncio
+async def test_list_recent_count_cache_key_includes_conversation_id(db_setup, monkeypatch):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for request_id, conversation_id in (
+            ("req_cache_conv_a_1", "conv-a"),
+            ("req_cache_conv_a_2", "conv-a"),
+            ("req_cache_conv_b", "conv-b"),
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                conversation_id=conversation_id,
+            )
+
+        result_a = await repo.list_recent(conversation_id="conv-a")
+        result_b = await repo.list_recent(conversation_id="conv-b")
+
+    logs_repository_module._clear_recent_count_cache()
+    assert result_a.total == 2
+    assert result_b.total == 1

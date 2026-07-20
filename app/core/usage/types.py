@@ -133,6 +133,7 @@ class RequestActivityAggregate:
     output_tokens: int
     cached_input_tokens: int
     cost_usd: float
+    conversation_count: int = 0
 
 
 @dataclass(frozen=True)

@@ -776,3 +776,250 @@ async def test_request_logs_filters_by_api_key_id(async_client, db_setup):
     assert payload[0]["requestId"] == "req_key_filter_2"
     assert payload[0]["apiKeyId"] == "key_filter_b"
     assert payload[0]["apiKeyName"] == "Beta Key"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_conversation_filter_aggregates_all_matching_rows(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_conv_target", "conv-target@example.com"))
+        await accounts_repo.upsert(_make_account("acc_conv_other", "conv-other@example.com"))
+        session.add_all(
+            [
+                ApiKey(
+                    id="key_conv_target",
+                    name="Conversation Target",
+                    key_hash="hash_key_conv_target",
+                    key_prefix="sk-target",
+                ),
+                ApiKey(
+                    id="key_conv_other",
+                    name="Conversation Other",
+                    key_hash="hash_key_conv_other",
+                    key_prefix="sk-other",
+                ),
+            ]
+        )
+        await session.commit()
+
+        rows = [
+            # Two rows match every active filter; pagination must split these.
+            (
+                "req_conv_target_old",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.1",
+                "success",
+                20,
+                "conv-target-search",
+                1.0,
+            ),
+            (
+                "req_conv_target_new",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.1",
+                "success",
+                10,
+                "conv-target-search",
+                2.0,
+            ),
+            # Each following row differs from the target only on one active filter.
+            (
+                "req_conv_status_other",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.1",
+                "error",
+                5,
+                "conv-target-search",
+                3.0,
+            ),
+            (
+                "req_conv_model_other",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.2",
+                "success",
+                6,
+                "conv-target-search",
+                4.0,
+            ),
+            (
+                "req_conv_time_other",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.1",
+                "success",
+                40,
+                "conv-target-search",
+                5.0,
+            ),
+            (
+                "req_conv_account_other",
+                "conv-a",
+                "acc_conv_other",
+                "key_conv_target",
+                "gpt-5.1",
+                "success",
+                7,
+                "conv-target-search",
+                6.0,
+            ),
+            (
+                "req_conv_key_other",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_other",
+                "gpt-5.1",
+                "success",
+                8,
+                "conv-target-search",
+                7.0,
+            ),
+            (
+                "req_conv_search_other",
+                "conv-a",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.1",
+                "success",
+                9,
+                "conv-other-search",
+                8.0,
+            ),
+            (
+                "req_conv_b",
+                "conv-b",
+                "acc_conv_target",
+                "key_conv_target",
+                "gpt-5.1",
+                "success",
+                1,
+                "conv-target-search",
+                9.0,
+            ),
+        ]
+        for (
+            request_id,
+            conversation_id,
+            account_id,
+            api_key_id,
+            model,
+            status,
+            minutes_ago,
+            source,
+            cost_usd,
+        ) in rows:
+            await logs_repo.add_log(
+                account_id=account_id,
+                request_id=request_id,
+                model=model,
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status=status,
+                error_code=None if status == "success" else "upstream_error",
+                requested_at=now - timedelta(minutes=minutes_ago),
+                conversation_id=conversation_id,
+                api_key_id=api_key_id,
+                source=source,
+                cost_usd=cost_usd,
+            )
+
+    since = (now - timedelta(minutes=25)).isoformat()
+    query = (
+        f"conversation_id=conv-a&status=ok&model=gpt-5.1&since={since}"
+        "&accountId=acc_conv_target&apiKeyId=key_conv_target&search=conv-target-search&limit=1"
+    )
+    response = await async_client.get(f"/api/request-logs?{query}")
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["requestId"] for entry in body["requests"]] == ["req_conv_target_new"]
+    assert body["requests"][0]["conversationId"] == "conv-a"
+    assert body["total"] == 2
+    assert body["conversation"] == {"requestCount": 2, "aggregatedCostUsd": 3.0}
+    assert set(body["conversation"]) == {"requestCount", "aggregatedCostUsd"}
+
+    second_page = await async_client.get(f"/api/request-logs?{query}&offset=1")
+    assert second_page.status_code == 200
+    second_body = second_page.json()
+    assert [entry["requestId"] for entry in second_body["requests"]] == ["req_conv_target_old"]
+    assert second_body["conversation"] == body["conversation"]
+    assert second_body["total"] == body["total"]
+
+    no_matches = await async_client.get("/api/request-logs?conversation_id=conv-a&status=quota")
+    assert no_matches.status_code == 200
+    assert no_matches.json()["requests"] == []
+    assert no_matches.json()["total"] == 0
+    assert no_matches.json()["conversation"] == {"requestCount": 0, "aggregatedCostUsd": 0.0}
+
+    other_conversation = await async_client.get("/api/request-logs?conversation_id=conv-b")
+    assert other_conversation.status_code == 200
+    assert other_conversation.json()["total"] == 1
+    assert other_conversation.json()["conversation"] == {"requestCount": 1, "aggregatedCostUsd": 9.0}
+
+    unfiltered = await async_client.get("/api/request-logs")
+    assert unfiltered.status_code == 200
+    assert unfiltered.json()["conversation"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_logs_conversation_summary_does_not_mix_cached_count_with_fresh_cost(
+    async_client, db_setup, monkeypatch
+):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_conv_snapshot_old",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            conversation_id="conv-snapshot",
+            cost_usd=1.25,
+        )
+
+    first = await async_client.get("/api/request-logs?conversation_id=conv-snapshot&limit=1")
+    assert first.status_code == 200
+    assert first.json()["total"] == 1
+    assert first.json()["conversation"] == {"requestCount": 1, "aggregatedCostUsd": 1.25}
+    assert first.json()["hasMore"] is False
+
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_conv_snapshot_new",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            conversation_id="conv-snapshot",
+            cost_usd=8.75,
+        )
+
+    second = await async_client.get("/api/request-logs?conversation_id=conv-snapshot&limit=1")
+    assert second.status_code == 200
+    body = second.json()
+    assert body["total"] == 2
+    assert body["conversation"] == {"requestCount": 2, "aggregatedCostUsd": 10.0}
+    assert body["hasMore"] is True
+    assert [entry["requestId"] for entry in body["requests"]] == ["req_conv_snapshot_new"]
+    logs_repository_module._clear_recent_count_cache()

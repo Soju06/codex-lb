@@ -8,7 +8,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
@@ -147,6 +147,106 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     # At least one trend point should have non-zero request count
     request_values = [p["v"] for p in trends["requests"]]
     assert any(v > 0 for v in request_values)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_timeframe(async_client, db_setup):
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_dash_conversations", "dash-conversations@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-1",
+                    requested_at=now - timedelta(minutes=5),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-2",
+                    requested_at=now - timedelta(minutes=4),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-3",
+                    requested_at=now - timedelta(minutes=3),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-b",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-null",
+                    requested_at=now - timedelta(minutes=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id=None,
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-empty",
+                    requested_at=now - timedelta(minutes=1),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-whitespace",
+                    requested_at=now,
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="   ",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-tab",
+                    requested_at=now,
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="\t",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-newline",
+                    requested_at=now,
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="\n",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-warmup",
+                    requested_at=now - timedelta(minutes=1),
+                    model="gpt-5.1",
+                    status="success",
+                    request_kind="warmup",
+                    conversation_id="conv-warmup",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-old",
+                    requested_at=now - timedelta(days=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-old",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["metrics"]["conversations"] == 2
 
 
 @pytest.mark.asyncio

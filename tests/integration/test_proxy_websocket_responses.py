@@ -1281,7 +1281,7 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
         ),
     ],
 )
-def test_backend_responses_websocket_proxies_upstream_and_persists_log(
+def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     app_instance, monkeypatch, output_event_type: str, output_event_fields: dict[str, object]
 ):
     upstream_messages = [
@@ -1420,6 +1420,8 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(
                 "Authorization": "Bearer external-token",
                 "chatgpt-account-id": "external-account",
                 "session_id": "thread-ws-1",
+                "user-agent": "opencode/1.0",
+                "x-opencode-session": "conv-ws-response-create",
                 "openai-beta": "responses_websockets=2026-02-06",
             },
         ) as websocket:
@@ -1478,6 +1480,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
     assert log["status"] == "success"
+    assert log["conversation_id"] == "conv-ws-response-create"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
     latency_first_upstream_event_ms = log["latency_first_upstream_event_ms"]

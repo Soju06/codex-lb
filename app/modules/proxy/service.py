@@ -947,16 +947,12 @@ class ProxyService(
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
+        self._http_bridge_quarantine_until: dict[_HTTPBridgeSessionKey, float] = {}
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
-        # In-memory pin from upstream-issued file_id -> codex-lb account_id.
-        # Used so ``finalize_file`` for a given ``file_id`` is routed to
-        # the same account that handled ``create_file``. Cross-instance
-        # routing is best-effort: if the finalize request lands on a
-        # different replica with no pin, we fall back to a fresh load-
-        # balancer selection. The TTL is short enough (5 min) that we
-        # never hold stale pins after the upstream upload window closes.
+        # Best-effort in-memory pin keeps finalize_file on create_file's account.
+        # Its five-minute TTL bounds stale pins across replicas.
         self._file_account_pins: dict[str, _FilePinEntry] = {}
         self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()

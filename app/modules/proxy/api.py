@@ -4444,6 +4444,7 @@ async def _stream_responses(
             startup_error,
             headers=rate_limit_headers,
         )
+    lifecycle_stream = stream
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,
@@ -4460,11 +4461,15 @@ async def _stream_responses(
             request_id=get_request_id(),
             route_family="responses",
         )
+    response_stream = inject_sse_keepalives(
+        stream,
+        get_settings().sse_keepalive_interval_seconds,
+        keepalive_frame=keepalive_frame,
+    )
     return StreamingResponse(
-        inject_sse_keepalives(
-            stream,
-            get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=keepalive_frame,
+        _close_response_stream_on_exit(
+            response_stream,
+            lifecycle_stream=lifecycle_stream,
         ),
         media_type="text/event-stream",
         headers={
@@ -4474,6 +4479,113 @@ async def _stream_responses(
             **rate_limit_headers,
         },
     )
+
+
+async def _close_async_iterator(stream: AsyncIterator[str]) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if not callable(aclose):
+        return
+    try:
+        await aclose()
+    except Exception:
+        logger.warning("Failed to close responses stream iterator", exc_info=True)
+
+
+async def _close_response_stream_on_exit(
+    stream: AsyncIterator[str],
+    *,
+    lifecycle_stream: AsyncIterator[str],
+) -> AsyncIterator[str]:
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        await _close_async_iterator(stream)
+        if lifecycle_stream is not stream:
+            await _close_async_iterator(lifecycle_stream)
+
+
+class _BufferedStreamIterator:
+    def __init__(self, items: Iterable[str], stream: AsyncIterator[str]) -> None:
+        self._items = tuple(items)
+        self._index = 0
+        self._stream = stream
+        self._closed = False
+
+    def __aiter__(self) -> _BufferedStreamIterator:
+        return self
+
+    async def __anext__(self) -> str:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._index < len(self._items):
+            item = self._items[self._index]
+            self._index += 1
+            return item
+        try:
+            return await self._stream.__anext__()
+        except StopAsyncIteration:
+            self._closed = True
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await _close_async_iterator(self._stream)
+
+
+class _FirstTaskStreamIterator:
+    def __init__(self, first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> None:
+        self._first_task = first_task
+        self._stream = stream
+        self._first_pending = True
+        self._closed = False
+
+    def __aiter__(self) -> _FirstTaskStreamIterator:
+        return self
+
+    async def __anext__(self) -> str:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._first_pending:
+            self._first_pending = False
+            try:
+                return await self._first_task
+            except StopAsyncIteration:
+                self._closed = True
+                raise
+            except BaseException:
+                if not self._first_task.done():
+                    self._first_task.cancel()
+                await asyncio.gather(self._first_task, return_exceptions=True)
+                raise
+        try:
+            return await self._stream.__anext__()
+        except StopAsyncIteration:
+            self._closed = True
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if not self._first_task.done():
+            self._first_task.cancel()
+        await asyncio.gather(self._first_task, return_exceptions=True)
+        await _close_async_iterator(self._stream)
+
+
+def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    return _BufferedStreamIterator(() if first is None else (first,), stream)
+
+
+def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    return _BufferedStreamIterator(items, stream)
+
+
+def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    return _FirstTaskStreamIterator(first_task, stream)
 
 
 def _strip_internal_bridge_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -4951,13 +5063,6 @@ def _request_state_str(request: Request, name: str) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
-
-
-async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    if first is not None:
-        yield first
-    async for line in stream:
-        yield line
 
 
 async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
@@ -5462,29 +5567,6 @@ async def _probe_chat_stream_startup_error(
             continue
         return _prepend_items(buffered, stream), None
     return _prepend_items(buffered, stream), None
-
-
-async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    for item in items:
-        yield item
-    async for line in stream:
-        yield line
-
-
-async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    try:
-        first = await first_task
-    except StopAsyncIteration:
-        return
-    finally:
-        # If the wrapping stream is closed before the first item is consumed
-        # (client disconnect, request teardown), cancel the still-running probe
-        # task so it does not hold the upstream connection open.
-        if not first_task.done():
-            first_task.cancel()
-    yield first
-    async for line in stream:
-        yield line
 
 
 async def _prepend_initial_sse_heartbeat(

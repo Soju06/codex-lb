@@ -1479,6 +1479,7 @@ class _HTTPBridgeMixin(
             self._http_bridge_sessions.clear()
             self._http_bridge_inflight_sessions.clear()
             self._http_bridge_previous_response_index.clear()
+            self._http_bridge_quarantine_until.clear()
         shutdown_error = ProxyResponseError(
             503,
             openai_error(

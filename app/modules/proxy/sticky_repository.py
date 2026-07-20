@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, StickySession, StickySessionKind
+from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
@@ -242,6 +242,44 @@ class StickySessionsRepository:
         stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt.returning(StickySession.key))
+            deleted = len(result.scalars().all())
+            await self._session.commit()
+        return deleted
+
+    async def purge_stale_hard_codex_session_mappings(self, cutoff: datetime) -> int:
+        """Drop CODEX_SESSION mappings pinned to a durably unusable owner.
+
+        A hard `codex_session` mapping is never rebound by ordinary selection
+        (see load_balancer.py's hard_sticky branch) even once its owner is
+        rate-limited/quota-exceeded/paused, because that pin can represent
+        live, unverifiable session state that isn't safe to move mid-flight.
+        That correctly protects a transient blip, but leaves the mapping
+        stuck forever if the owner never recovers.
+
+        Gating on ``Account.reset_at``/``blocked_at`` was tried and rejected:
+        in practice ``reset_at`` is frequently absent (upstream simply hasn't
+        reported fresh quota data), and ``blocked_at`` is explicitly cleared
+        to ``None`` whenever an account is paused — neither field reliably
+        answers "how long has this been broken" across all three unavailable
+        statuses. ``StickySession.updated_at`` does: it only advances when
+        the mapping is actually (re)used, so it already reflects "how long
+        since this session last worked" without needing per-status account
+        bookkeeping. Only once BOTH the owner is non-active AND the mapping
+        itself hasn't been touched since well before ``cutoff`` (deliberately
+        much later than any ordinary quota-reset window) do we give up on it
+        — by deleting the mapping, never by rebinding it, so the next request
+        simply re-resolves fresh.
+        """
+        unavailable_account_ids = select(Account.id).where(
+            Account.status.in_((AccountStatus.PAUSED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED))
+        )
+        stmt = delete(StickySession).where(
+            StickySession.kind == StickySessionKind.CODEX_SESSION,
+            StickySession.updated_at < to_utc_naive(cutoff),
+            StickySession.account_id.in_(unavailable_account_ids),
+        )
         async with sqlite_writer_section():
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())

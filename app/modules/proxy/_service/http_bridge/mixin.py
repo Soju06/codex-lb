@@ -2216,7 +2216,10 @@ class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixi
             if account is None:
                 await release_selected_account_lease()
                 if (
-                    (selection.error_code == "no_accounts" or selection.error_message == "No available accounts")
+                    (
+                        selection.error_code == "no_accounts"
+                        or (selection.error_message or "").startswith("No available accounts")
+                    )
                     and (
                         request_state.previous_response_id is None
                         or (

@@ -13243,7 +13243,10 @@ async def test_http_bridge_precreated_replay_reuses_current_account_when_no_alte
         if account.id in excluded:
             return proxy_service.AccountSelection(
                 account=None,
-                error_message="No available accounts",
+                error_message=(
+                    "No available accounts. Service is operating in degraded mode: "
+                    "all upstream accounts are unavailable"
+                ),
             )
         return proxy_service.AccountSelection(account=account, error_message=None)
 
@@ -13345,7 +13348,10 @@ async def test_http_bridge_precreated_proxy_anchor_reuses_current_account_when_n
         if account.id in excluded:
             return proxy_service.AccountSelection(
                 account=None,
-                error_message="No available accounts",
+                error_message=(
+                    "No available accounts. Service is operating in degraded mode: "
+                    "all upstream accounts are unavailable"
+                ),
             )
         return proxy_service.AccountSelection(account=account, error_message=None)
 

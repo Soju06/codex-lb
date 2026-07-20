@@ -15155,6 +15155,63 @@ async def test_http_bridge_startup_timeout_preserves_request_api_key_attribution
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_startup_timeout_preserves_precreated_retry_terminal_error(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_startup_retry_terminal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        upstream_sent_at=0.0,
+        awaiting_response_created=True,
+        transport="http",
+        event_queue=asyncio.Queue(),
+        error_code_override="no_accounts",
+        error_message_override="No available accounts",
+        error_type_override="server_error",
+        error_http_status_override=503,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-startup-terminal", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=_make_account("acc_bridge_startup_terminal"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    expired = await service._fail_response_created_timeout_requests(
+        session,
+        request_ids=frozenset({request_state.request_id}),
+        timeout_seconds=0.0,
+        error_code="response_created_timeout",
+        error_message="Upstream did not create a response within the startup window",
+    )
+
+    assert expired == (request_state,)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["error_code"] == "no_accounts"
+    assert request_logs.calls[0]["error_message"] == "No available accounts"
+    event_block = await request_state.event_queue.get()
+    assert event_block is not None
+    assert '"code":"no_accounts"' in event_block
+    assert "response_created_timeout" not in event_block
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

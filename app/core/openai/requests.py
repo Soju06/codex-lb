@@ -44,6 +44,36 @@ _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", 
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
+_COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES = frozenset({"apply_patch_call", "apply_patch_call_output"})
+_COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES = frozenset(
+    {
+        "apply_patch",
+        "close_agent",
+        "create_goal",
+        "exec_command",
+        "request_user_input",
+        "resume_agent",
+        "send_input",
+        "spawn_agent",
+        "update_goal",
+        "update_plan",
+        "wait_agent",
+        "write_stdin",
+    }
+)
+_COMPACT_SIDE_EFFECT_TOOL_NAMES = frozenset(
+    {
+        "multi_tool_use.parallel",
+        *_COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES,
+        *(f"functions.{name}" for name in _COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES),
+    }
+)
+_COMPACT_PARALLEL_SIDE_EFFECT_RECIPIENT_NAMES = frozenset(
+    {
+        "multi_tool_use.parallel",
+        *(f"functions.{name}" for name in _COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES),
+    }
+)
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -919,8 +949,9 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         return
 
     head_count = _compact_trim_prefix_count(token_counts)
-    preserved_indices = _compact_state_anchor_indices(input_value)
-    required_indices = set(preserved_indices)
+    state_anchor_indices = _compact_state_anchor_indices(input_value)
+    side_effect_indices = _compact_side_effect_anchor_indices(input_value)
+    required_indices = set(state_anchor_indices)
     if input_value:
         required_indices.add(len(input_value) - 1)
     required_indices = _compact_reconciled_tool_call_indices(
@@ -939,7 +970,8 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             param="input",
             code="responses_compact_input_too_large",
         )
-    selected_indices = set(preserved_indices)
+    selected_indices = set(state_anchor_indices)
+    selected_indices.update(side_effect_indices)
     selected_indices.update(range(head_count))
     marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
@@ -965,6 +997,7 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_counts,
         selected_indices=selected_indices,
         required_indices=required_indices,
+        priority_indices=side_effect_indices,
     )
     trimmed_input = (
         input_value
@@ -989,13 +1022,21 @@ def _compact_fit_selected_indices_to_wire_budget(
     *,
     selected_indices: set[int],
     required_indices: set[int],
+    priority_indices: set[int] | None = None,
 ) -> set[int]:
     """Drop best-effort middle context until the exact serialized input fits."""
 
     selected = set(selected_indices)
+    prioritized = priority_indices or set()
+
+    def optional_drop_key(index: int) -> tuple[int, int, int]:
+        if index in prioritized:
+            return (0, 0, -index)
+        return (1, min(index, len(input_value) - 1 - index), index)
+
     optional_indices = sorted(
         selected - required_indices,
-        key=lambda index: (min(index, len(input_value) - 1 - index), index),
+        key=optional_drop_key,
         reverse=True,
     )
     marker_budget = max(
@@ -1058,6 +1099,14 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
         if _is_preserved_non_message_directive(item_mapping):
             preserved_indices.add(index)
         if _compact_item_is_state_anchor(item_mapping):
+            preserved_indices.add(index)
+    return preserved_indices
+
+
+def _compact_side_effect_anchor_indices(input_value: list[JsonValue]) -> set[int]:
+    preserved_indices: set[int] = set()
+    for index, item in enumerate(input_value):
+        if is_json_mapping(item) and _compact_item_is_side_effect_anchor(item):
             preserved_indices.add(index)
     return preserved_indices
 
@@ -1173,6 +1222,39 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         if stripped.startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
             return True
         if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
+            return True
+    return False
+
+
+def _compact_item_is_side_effect_anchor(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    if item_type in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    if item_type not in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        return False
+    name = item.get("name")
+    if not isinstance(name, str):
+        return False
+    argument_field = "arguments" if item_type == "function_call" else "input"
+    argument_value = item.get(argument_field)
+    if not isinstance(argument_value, str):
+        return False
+    if name != "multi_tool_use.parallel":
+        return name in _COMPACT_SIDE_EFFECT_TOOL_NAMES
+    try:
+        decoded_arguments = json.loads(argument_value)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(decoded_arguments, dict):
+        return False
+    tool_uses = decoded_arguments.get("tool_uses")
+    if not isinstance(tool_uses, list):
+        return False
+    for tool_use in cast(list[JsonValue], tool_uses):
+        if not isinstance(tool_use, dict):
+            continue
+        recipient_name = tool_use.get("recipient_name")
+        if isinstance(recipient_name, str) and recipient_name in _COMPACT_PARALLEL_SIDE_EFFECT_RECIPIENT_NAMES:
             return True
     return False
 

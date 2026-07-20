@@ -1558,10 +1558,97 @@ def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     assert unrelated_output not in dumped_input
 
 
+def test_compact_trimming_preserves_historical_side_effect_tool_pair():
+    pr_create_call = {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "call-gitea-pr-create",
+        "arguments": json.dumps(
+            {
+                "cmd": "tea-cli pulls create --repo postgis/postgis --head Komzpa:fix/docs-solid-renderer-6105",
+                "workdir": "/home/kom/proj/ai_pr/postgis-docs-solid-renderer-6105",
+            }
+        ),
+    }
+    pr_create_output = {
+        "type": "function_call_output",
+        "call_id": "call-gitea-pr-create",
+        "output": "Created pull request https://gitea.osgeo.org/postgis/postgis/pulls/478",
+    }
+    input_items = [
+        {"role": "user", "content": "open a PostGIS Gitea PR"},
+        {"role": "assistant", "content": "pre-side-effect filler " + "x" * 260_000},
+        pr_create_call,
+        pr_create_output,
+        {"role": "assistant", "content": "post-side-effect filler " + "y" * 260_000},
+        {"role": "user", "content": "continue after compaction"},
+    ]
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": input_items,
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert pr_create_call in dumped_input
+    assert pr_create_output in dumped_input
+    assert input_items[1] not in dumped_input
+    assert input_items[4] not in dumped_input
+
+
+def test_compact_trimming_drops_old_side_effect_pairs_when_anchor_set_exceeds_budget():
+    input_items: list[JsonValue] = [{"role": "user", "content": "initial request"}]
+    old_side_effect_pairs: list[tuple[JsonValue, JsonValue]] = []
+    for index in range(14):
+        call = {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": f"call-side-effect-{index}",
+            "arguments": json.dumps({"cmd": f"long-running-command-{index}"}),
+        }
+        output = {
+            "type": "function_call_output",
+            "call_id": f"call-side-effect-{index}",
+            "output": "historical side effect output " + str(index) + " " + "x" * 32_000,
+        }
+        old_side_effect_pairs.append((call, output))
+        input_items.extend([call, output])
+    latest_call = {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "call-latest-side-effect",
+        "arguments": json.dumps({"cmd": "git status --short"}),
+    }
+    latest_output = {
+        "type": "function_call_output",
+        "call_id": "call-latest-side-effect",
+        "output": "clean",
+    }
+    latest_request = {"role": "user", "content": "continue after compaction"}
+    input_items.extend([latest_call, latest_output, latest_request])
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": input_items,
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert latest_call in dumped_input
+    assert latest_output in dumped_input
+    assert latest_request in dumped_input
+    assert any(call not in dumped_input and output not in dumped_input for call, output in old_side_effect_pairs)
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
 def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
     historical_call = {
         "type": "function_call",
-        "name": "exec",
+        "name": "read_file",
         "call_id": "call-reused",
         "arguments": "{}",
     }

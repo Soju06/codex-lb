@@ -100,7 +100,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS),
             )
         try:
-            await self._durable_bridge.persist_retry_circuit(
+            persisted = await self._durable_bridge.persist_retry_circuit(
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
@@ -111,6 +111,13 @@ class _HTTPBridgeRetryCircuitMixin:
                 failure_threshold=threshold,
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
             )
+            if persisted is not None:
+                state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
+                state.cooldown_until = max(
+                    state.cooldown_until,
+                    now_monotonic + max(0.0, persisted.cooldown_until_epoch - now_wall),
+                )
+                state.last_detail = persisted.last_detail or state.last_detail
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
         except Exception:
             logger.warning(
@@ -172,7 +179,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
     ) -> None:
-        if session.key.strength != "hard" or detail not in {"stream_incomplete", "clean_close"}:
+        if session.key.strength != "hard" or detail not in {"stream_incomplete", "clean_close", "stream_idle_timeout"}:
             return
 
         await self._load_http_bridge_retry_circuit(session)

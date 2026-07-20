@@ -2606,6 +2606,10 @@ class _HTTPBridgeStreamingMixin:
                                         yielded_any = False
                                         continue
                                     if not retried:
+                                        await self._record_http_bridge_retry_circuit_failure(
+                                            session,
+                                            detail="stream_idle_timeout",
+                                        )
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                         logger.info(

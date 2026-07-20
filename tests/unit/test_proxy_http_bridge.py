@@ -18418,6 +18418,44 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_refreshes_conflict_merged_persisted_state() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-conflict-merged-circuit")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        ),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
+
+    retry_circuits = cast(Any, service)._http_bridge_retry_circuits
+    assert retry_circuits[hard_session.key].consecutive_failures == 2
+    assert retry_circuits[hard_session.key].cooldown_until > time.monotonic()
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_counts_stream_idle_timeout() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-idle-timeout-circuit")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
+
+    assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key].consecutive_failures == 1
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_ignores_soft_affinity_and_other_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

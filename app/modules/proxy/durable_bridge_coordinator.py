@@ -190,9 +190,10 @@ class DurableBridgeSessionCoordinator:
         updated_at_epoch: float,
         failure_threshold: int = 1,
         conflict_cooldown_until_epoch: float | None = None,
-    ) -> None:
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
         async with self._session() as session:
-            await DurableBridgeRepository(session).upsert_retry_circuit(
+            repository = DurableBridgeRepository(session)
+            await repository.upsert_retry_circuit(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
@@ -202,6 +203,11 @@ class DurableBridgeSessionCoordinator:
                 updated_at_epoch=updated_at_epoch,
                 failure_threshold=failure_threshold,
                 conflict_cooldown_until_epoch=conflict_cooldown_until_epoch,
+            )
+            return await repository.get_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
             )
 
     async def clear_retry_circuit(

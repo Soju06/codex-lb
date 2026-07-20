@@ -1266,6 +1266,20 @@ def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
     )
 
 
+def test_request_log_useragent_fields_preserves_codex_desktop_product_name() -> None:
+    useragent = "  Codex Desktop/0.142.4 (Mac OS 26.5.2; arm64) unknown (Codex Desktop; 26.623.70822)  "
+
+    assert proxy_service._request_log_useragent_fields({"User-Agent": useragent}) == (
+        useragent.strip(),
+        "Codex Desktop",
+    )
+    slashless_useragent = "  Codex Desktop Preview  "
+    assert proxy_service._request_log_useragent_fields({"User-Agent": slashless_useragent}) == (
+        slashless_useragent.strip(),
+        slashless_useragent.strip(),
+    )
+
+
 def test_request_log_useragent_fields_accept_lowercase_header_name() -> None:
     assert proxy_service._request_log_useragent_fields(
         {

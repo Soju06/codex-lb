@@ -450,8 +450,7 @@ def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | Non
     useragent = raw_useragent.strip()
     if not useragent:
         return None, None
-    first_token = useragent.split(maxsplit=1)[0]
-    useragent_group = first_token.split("/", 1)[0].strip() or None
+    useragent_group = useragent.split("/", 1)[0].strip() or None
     return useragent, useragent_group
 
 

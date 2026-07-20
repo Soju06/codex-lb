@@ -1159,3 +1159,73 @@ async def test_dashboard_retention_settings_migration_upgrade_and_downgrade(tmp_
         assert set(column_names) <= await _dashboard_columns(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_request_log_useragent_group_migration_normalizes_existing_rows(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'request-log-useragent-groups.sqlite'}"
+    parent_revision = "20260717_000000_optimize_dashboard_hot_path_indexes"
+    target_revision = "20260720_000000_normalize_request_log_useragent_groups"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO request_logs (
+                        request_id, model, status, useragent, useragent_group
+                    ) VALUES
+                        ('slash-delimited', 'gpt-5.4-mini', 'success',
+                         '  opencode/1.15.13 ai-sdk/provider-utils  ', 'stale-slash'),
+                        ('codex-desktop', 'gpt-5.4-mini', 'success',
+                         ' Codex Desktop/0.142.4 (Mac OS 26.5.2; arm64) ', 'Codex'),
+                        ('slashless', 'gpt-5.4-mini', 'success',
+                         '  Codex Desktop Preview  ', 'stale-slashless'),
+                        ('blank', 'gpt-5.4-mini', 'success', '   ', 'stale-blank'),
+                        ('null', 'gpt-5.4-mini', 'success', NULL, 'stale-null'),
+                        ('control-surrounding', 'gpt-5.4-mini', 'success',
+                         char(9) || char(10) || 'opencode/1.15.13' || char(11) || char(13),
+                         'stale-control-surrounding'),
+                        ('control-only', 'gpt-5.4-mini', 'success',
+                         char(9) || char(10) || char(11) || char(12) || char(13), 'stale-control-only'),
+                        ('empty-prefix', 'gpt-5.4-mini', 'success', ' /1.0 ', 'stale-empty-prefix')
+                    """
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+
+        async def _groups():
+            async with session_factory() as session:
+                rows = await session.execute(text("SELECT request_id, useragent_group FROM request_logs ORDER BY id"))
+                return rows.all()
+
+        normalized = await _groups()
+        assert normalized == [
+            ("slash-delimited", "opencode"),
+            ("codex-desktop", "Codex Desktop"),
+            ("slashless", "Codex Desktop Preview"),
+            ("blank", None),
+            ("null", None),
+            ("control-surrounding", "opencode"),
+            ("control-only", None),
+            ("empty-prefix", None),
+        ]
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert await _groups() == normalized
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+        assert await _groups() == normalized
+    finally:
+        await engine.dispose()

@@ -84,11 +84,9 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
 )
-from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_CODE
 from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
-from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.upstream_proxy.resolver import (
@@ -565,9 +563,13 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
     _finalize_ttft_reasoning_deltas,  # noqa: F401
+    _http_error_status_from_payload,  # noqa: F401
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_account_neutral_error_code,
+    _is_local_account_cap_code,  # noqa: F401
     _is_ttft_event,  # noqa: F401
+    _openai_error_envelope_from_response_failed_payload,  # noqa: F401
     _PreparedWebSocketRequest,  # noqa: F401
     _record_response_event,  # noqa: F401
     _record_websocket_route_metadata,  # noqa: F401
@@ -2038,70 +2040,6 @@ class ProxyService(
             code,
             http_status=exc.status_code,
         )
-
-
-def _is_account_neutral_error_code(code: str | None) -> bool:
-    return is_local_overload_error_code(code) or code in {
-        PROCESS_NETWORK_UNAVAILABLE_CODE,
-        "proxy_unavailable",
-        "responses_compact_input_too_large",
-    }
-
-
-def _is_local_account_cap_code(code: str | None) -> bool:
-    return code in {"account_response_create_cap", "account_stream_cap"}
-
-
-def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
-    if not isinstance(payload, dict):
-        return None
-    for status_field in ("status", "status_code"):
-        status = payload.get(status_field)
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
-    return None
-
-
-def _openai_error_envelope_from_response_failed_payload(
-    payload: dict[str, JsonValue] | None,
-) -> OpenAIErrorEnvelope:
-    default_envelope = openai_error("upstream_error", "Upstream error")
-    if not isinstance(payload, dict):
-        return default_envelope
-    response_payload = payload.get("response")
-    if not isinstance(response_payload, dict):
-        return default_envelope
-    error_payload = response_payload.get("error")
-    if not isinstance(error_payload, dict):
-        return default_envelope
-
-    message_value = error_payload.get("message")
-    if isinstance(message_value, str) and message_value.strip():
-        message = message_value.strip()
-    else:
-        message = "Upstream error"
-
-    code_value = error_payload.get("code")
-    code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else "upstream_error"
-
-    type_value = error_payload.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
-
-    envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
-    error_detail = envelope["error"]
-    plan_type = error_payload.get("plan_type")
-    if plan_type is not None:
-        error_detail["plan_type"] = str(plan_type)
-    resets_at = error_payload.get("resets_at")
-    if isinstance(resets_at, int | float):
-        error_detail["resets_at"] = resets_at
-    resets_in = error_payload.get("resets_in_seconds")
-    if isinstance(resets_in, int | float):
-        error_detail["resets_in_seconds"] = resets_in
-    return envelope
 
 
 def _is_previous_response_not_found_message(message: str | None) -> bool:

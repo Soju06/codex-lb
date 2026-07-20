@@ -13244,7 +13244,6 @@ async def test_http_bridge_precreated_replay_reuses_current_account_when_no_alte
             return proxy_service.AccountSelection(
                 account=None,
                 error_message="No available accounts",
-                error_code="no_accounts",
             )
         return proxy_service.AccountSelection(account=account, error_message=None)
 
@@ -13347,7 +13346,6 @@ async def test_http_bridge_precreated_proxy_anchor_reuses_current_account_when_n
             return proxy_service.AccountSelection(
                 account=None,
                 error_message="No available accounts",
-                error_code="no_accounts",
             )
         return proxy_service.AccountSelection(account=account, error_message=None)
 

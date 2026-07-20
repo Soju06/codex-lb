@@ -632,8 +632,11 @@ def _http_bridge_pending_state_is_stale(
         anchored_wait_started_at = request_state.response_create_gate_wait_started_at or request_state.started_at
         if max(0.0, now - anchored_wait_started_at) < threshold_seconds * 2.0:
             return False
-    if not request_state.response_create_gate_acquired or not request_state.awaiting_response_created:
-        return False
+    # Do not require the gate/awaiting flags: retry and reader re-enqueue
+    # paths re-register states whose admission flags were already cleared,
+    # and leaning on them starves the watchdog entirely (observed prod
+    # wedges 2026-07-20). Zero upstream activity past the threshold is the
+    # authoritative no-progress signal.
     if request_state.response_id is not None or request_state.response_event_count > 0:
         return False
     if request_state.latency_response_created_ms is not None:

@@ -1334,6 +1334,36 @@ class ProxyService(
                     )
                     for state in stale_candidate_states
                 )
+                if not should_retire_stuck_session and any(
+                    max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
+                ):
+                    # A gate waiter starved past the stuck threshold without the
+                    # watchdog firing: dump every pending state's verdict inputs
+                    # so the blocking condition is identifiable from prod logs.
+                    logger.warning(
+                        "http_bridge_stuck_watchdog_skipped session_closed=%s candidates=%s states=%s",
+                        bridge_session.closed,
+                        len(stale_candidate_states),
+                        "; ".join(
+                            (
+                                f"id={state.request_log_id or state.request_id}"
+                                f" transport={state.transport}"
+                                f" skip_log={state.skip_request_log}"
+                                f" draining={state.draining_until_terminal}"
+                                f" prev_resp={state.previous_response_id is not None}"
+                                f" hard_anchor={state.hard_continuity_anchor}"
+                                f" gate_acq={state.response_create_gate_acquired}"
+                                f" awaiting={state.awaiting_response_created}"
+                                f" resp_id={state.response_id is not None}"
+                                f" events={state.response_event_count}"
+                                f" created_ms={state.latency_response_created_ms}"
+                                f" dsvis={state.downstream_visible}"
+                                f" age={max(0.0, now - state.started_at):.0f}"
+                                f" gate_wait_age={max(0.0, now - state.response_create_gate_wait_started_at) if state.response_create_gate_wait_started_at is not None else None}"
+                            )
+                            for state in pending_states
+                        ),
+                    )
             _log_http_bridge_startup_wait_timeout(
                 stage="response_create_gate",
                 timeout_seconds=timeout_seconds,

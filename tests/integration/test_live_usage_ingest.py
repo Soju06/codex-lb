@@ -234,6 +234,51 @@ async def test_live_ingestor_normalizes_monthly_only_snapshots(db_setup) -> None
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_normalizes_team_monthly_like_snapshot_with_placeholder(db_setup) -> None:
+    del db_setup
+    account_id = "acc_live_team_monthly"
+    async with SessionLocal() as session:
+        account = _make_account(account_id, "live-team-monthly@example.com")
+        account.plan_type = "team"
+        await AccountsRepository(session).upsert(account)
+
+    now_epoch = int(utcnow().timestamp())
+    snapshot = LiveRateLimitSnapshot(
+        primary=LiveUsageWindow(used_percent=96.0, window_minutes=43_800, reset_at=now_epoch + 30 * 24 * 3600),
+        secondary=LiveUsageWindow(used_percent=0.0, window_minutes=0, reset_at=None),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=6.5,
+    )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        ingestor.publish(snapshot, account_id=account_id)
+        deadline = asyncio.get_event_loop().time() + 5.0
+        monthly = None
+        while monthly is None and asyncio.get_event_loop().time() < deadline:
+            async with SessionLocal() as session:
+                repo = UsageRepository(session)
+                monthly = await repo.latest_entry_for_account(account_id, window="monthly")
+            if monthly is None:
+                await asyncio.sleep(0.05)
+        async with SessionLocal() as session:
+            repo = UsageRepository(session)
+            primary = await repo.latest_entry_for_account(account_id, window="primary")
+            secondary = await repo.latest_entry_for_account(account_id, window="secondary")
+    finally:
+        await ingestor.stop()
+
+    assert monthly is not None
+    assert monthly.used_percent == pytest.approx(96.0)
+    assert monthly.window_minutes == 43_800
+    assert monthly.credits_balance == pytest.approx(6.5)
+    assert primary is None
+    assert secondary is None
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

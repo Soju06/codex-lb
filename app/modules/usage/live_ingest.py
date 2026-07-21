@@ -36,15 +36,38 @@ class _QueuedSnapshot:
     snapshot: LiveRateLimitSnapshot
 
 
+def _is_zero_duration_live_placeholder(window: LiveUsageWindow | None) -> bool:
+    return (
+        window is not None
+        and float(window.used_percent) == 0.0
+        and (window.reset_at is None or window.reset_at <= 0)
+        and window.window_minutes is not None
+        and window.window_minutes <= 0
+    )
+
+
+def _normalize_live_windows(
+    snapshot: LiveRateLimitSnapshot,
+) -> tuple[LiveUsageWindow | None, LiveUsageWindow | None, LiveUsageWindow | None]:
+    primary = None if _is_zero_duration_live_placeholder(snapshot.primary) else snapshot.primary
+    secondary = None if _is_zero_duration_live_placeholder(snapshot.secondary) else snapshot.secondary
+    monthly: LiveUsageWindow | None = None
+    if primary is not None and usage_core.is_monthly_window_minutes(primary.window_minutes):
+        monthly, primary = primary, None
+    return primary, secondary, monthly
+
+
 def _fingerprint(snapshot: LiveRateLimitSnapshot) -> tuple[object, ...]:
     def window_key(window: LiveUsageWindow | None) -> tuple[object, ...] | None:
         if window is None:
             return None
         return (round(window.used_percent, 2), window.window_minutes, window.reset_at)
 
+    primary, secondary, monthly = _normalize_live_windows(snapshot)
     return (
-        window_key(snapshot.primary),
-        window_key(snapshot.secondary),
+        window_key(primary),
+        window_key(secondary),
+        window_key(monthly),
         snapshot.credits_has,
         snapshot.credits_unlimited,
         snapshot.credits_balance,
@@ -150,18 +173,7 @@ class LiveUsageIngestor:
             return
 
         snapshot = item.snapshot
-        primary = snapshot.primary
-        secondary = snapshot.secondary
-        monthly: LiveUsageWindow | None = None
-        # Mirror the poller's write-time normalization: a lone primary window
-        # with the monthly duration is the monthly-only free-plan shape and
-        # belongs in the monthly slot, not the primary one.
-        if (
-            primary is not None
-            and secondary is None
-            and primary.window_minutes == usage_core.DEFAULT_WINDOW_MINUTES_MONTHLY
-        ):
-            monthly, primary = primary, None
+        primary, secondary, monthly = _normalize_live_windows(snapshot)
         async with get_background_session() as session:
             repo = UsageRepository(session)
             if primary is not None:
@@ -181,7 +193,7 @@ class LiveUsageIngestor:
                 # Mirror the poller: credits normally ride the primary row.
                 # A secondary-only snapshot (e.g. the short window is not
                 # being reported) must still carry the fresh credit state.
-                secondary_carries_credits = primary is None
+                secondary_carries_credits = primary is None and monthly is None
                 await repo.add_entry(
                     account_id=account_id,
                     used_percent=float(secondary.used_percent),

@@ -1667,6 +1667,48 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_stores_team_monthly_like_window_and_ignores_zero_secondary(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 96.0,
+                        "reset_at": 1_800_000_000,
+                        "limit_window_seconds": 43_800 * 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 0.0,
+                        "reset_after_seconds": 0,
+                        "limit_window_seconds": 0,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_team_monthly", "workspace_team")
+    account.plan_type = "team"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert [(entry.window, entry.window_minutes, entry.used_percent) for entry in usage_repo.entries] == [
+        ("monthly", 43_800, 96.0)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

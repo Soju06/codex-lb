@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import cast
 
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts import mappers
 from app.modules.accounts.mappers import _effective_status_from_usage, _normalize_account_routing_policy
@@ -170,3 +172,74 @@ def test_normalize_account_routing_policy() -> None:
     assert _normalize_account_routing_policy("preserve") == "preserve"
     assert _normalize_account_routing_policy("legacy") == "normal"
     assert _normalize_account_routing_policy(None) == "normal"
+
+
+def test_account_summary_promotes_authoritative_team_monthly_like_primary() -> None:
+    recorded_at = datetime(2026, 7, 21, 0, 0, 0)
+    account = _account(AccountStatus.ACTIVE)
+    account.plan_type = "team"
+    monthly_like_primary = _primary_usage(
+        used_percent=96.0,
+        reset_at=1_800_000_000,
+        window_minutes=43_800,
+        recorded_at=recorded_at,
+    )
+    secondary_placeholder = _secondary_usage(
+        used_percent=0.0,
+        reset_at=None,
+        window_minutes=0,
+        recorded_at=recorded_at + timedelta(milliseconds=10),
+    )
+
+    summary = mappers._account_to_summary(
+        account,
+        monthly_like_primary,
+        secondary_placeholder,
+        None,
+        None,
+        None,
+        None,
+        cast(TokenEncryptor, object()),
+        include_auth=False,
+    )
+
+    assert summary.usage is not None
+    assert summary.usage.primary_remaining_percent is None
+    assert summary.usage.secondary_remaining_percent is None
+    assert summary.usage.monthly_remaining_percent == 4.0
+    assert summary.window_minutes_primary is None
+    assert summary.window_minutes_secondary is None
+    assert summary.window_minutes_monthly == 43_800
+
+
+def test_account_summary_drops_stale_monthly_row_after_newer_paid_plan_windows() -> None:
+    recorded_at = datetime(2026, 7, 21, 0, 0, 0)
+    account = _account(AccountStatus.ACTIVE)
+    account.plan_type = "team"
+    stale_monthly = UsageHistory(
+        account_id=account.id,
+        window="monthly",
+        used_percent=96.0,
+        reset_at=1_800_000_000,
+        window_minutes=43_800,
+        recorded_at=recorded_at,
+    )
+    fresh_primary = _primary_usage(recorded_at=recorded_at + timedelta(minutes=1))
+    fresh_secondary = _secondary_usage(recorded_at=recorded_at + timedelta(minutes=1))
+
+    summary = mappers._account_to_summary(
+        account,
+        fresh_primary,
+        fresh_secondary,
+        stale_monthly,
+        None,
+        None,
+        None,
+        cast(TokenEncryptor, object()),
+        include_auth=False,
+    )
+
+    assert summary.usage is not None
+    assert summary.usage.primary_remaining_percent == 60.0
+    assert summary.usage.secondary_remaining_percent == 0.0
+    assert summary.usage.monthly_remaining_percent is None

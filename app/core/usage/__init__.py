@@ -55,6 +55,8 @@ SIBLING_FETCH_MARGIN_SECONDS = 5.0
 DEFAULT_WINDOW_MINUTES_PRIMARY = 300
 DEFAULT_WINDOW_MINUTES_SECONDARY = 10080
 DEFAULT_WINDOW_MINUTES_MONTHLY = 43200
+MONTHLY_LIKE_WINDOW_MINUTES_MIN = 28 * 24 * 60
+MONTHLY_LIKE_WINDOW_MINUTES_MAX = 32 * 24 * 60
 
 
 @dataclass(frozen=True)
@@ -79,13 +81,11 @@ def normalize_rate_limit_windows(
     primary_window: UsageWindow | None,
     secondary_window: UsageWindow | None,
 ) -> NormalizedRateLimitWindows:
-    if (
-        primary_window is not None
-        and primary_window.limit_window_seconds == DEFAULT_WINDOW_MINUTES_MONTHLY * 60
-        and secondary_window is None
-    ):
-        return NormalizedRateLimitWindows(primary=None, secondary=None, monthly=primary_window)
-    return NormalizedRateLimitWindows(primary=primary_window, secondary=secondary_window, monthly=None)
+    primary = None if _is_zero_duration_rate_limit_placeholder(primary_window) else primary_window
+    secondary = None if _is_zero_duration_rate_limit_placeholder(secondary_window) else secondary_window
+    if primary is not None and is_monthly_window_seconds(primary.limit_window_seconds):
+        return NormalizedRateLimitWindows(primary=None, secondary=secondary, monthly=primary)
+    return NormalizedRateLimitWindows(primary=primary, secondary=secondary, monthly=None)
 
 
 def _empty_cost() -> UsageCostSummary:
@@ -223,10 +223,24 @@ def is_weekly_window_minutes(window_minutes: int | None) -> bool:
 def is_monthly_window_minutes(window_minutes: int | None) -> bool:
     if window_minutes is None:
         return False
-    monthly_default = default_window_minutes("monthly")
-    if monthly_default is None:
+    return MONTHLY_LIKE_WINDOW_MINUTES_MIN <= window_minutes <= MONTHLY_LIKE_WINDOW_MINUTES_MAX
+
+
+def is_monthly_window_seconds(window_seconds: int | None) -> bool:
+    if window_seconds is None:
         return False
-    return window_minutes == monthly_default
+    return MONTHLY_LIKE_WINDOW_MINUTES_MIN * 60 <= window_seconds <= MONTHLY_LIKE_WINDOW_MINUTES_MAX * 60
+
+
+def is_zero_duration_usage_placeholder(row: UsageWindowRow | None) -> bool:
+    return (
+        row is not None
+        and row.used_percent is not None
+        and float(row.used_percent) == 0.0
+        and (row.reset_at is None or row.reset_at <= 0)
+        and row.window_minutes is not None
+        and row.window_minutes <= 0
+    )
 
 
 def is_primary_window_minutes(window_minutes: int | None) -> bool:
@@ -309,6 +323,18 @@ def _is_no_data_placeholder(row: UsageWindowRow) -> bool:
     """
     has_window = row.window_minutes is not None and row.window_minutes > 0
     return not has_window and row.reset_at is None
+
+
+def _is_zero_duration_rate_limit_placeholder(window: UsageWindow | None) -> bool:
+    return (
+        window is not None
+        and window.used_percent is not None
+        and float(window.used_percent) == 0.0
+        and (window.reset_at is None or window.reset_at <= 0)
+        and (window.reset_after_seconds is None or window.reset_after_seconds <= 0)
+        and window.limit_window_seconds is not None
+        and window.limit_window_seconds <= 0
+    )
 
 
 def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:

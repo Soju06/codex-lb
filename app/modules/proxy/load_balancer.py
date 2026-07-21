@@ -2073,16 +2073,18 @@ def _build_states(
     account_map: dict[str, Account] = {}
 
     for account in accounts:
+        primary_entry = latest_primary.get(account.id)
         secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
         if account.id not in ignore_standard_quota_account_ids:
             secondary_entry = _select_long_window_entry(
                 account=account,
+                primary_entry=primary_entry,
                 monthly_entry=latest_monthly.get(account.id),
                 secondary_entry=secondary_entry,
             )
         state = _state_from_account(
             account=account,
-            primary_entry=latest_primary.get(account.id),
+            primary_entry=primary_entry,
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
@@ -2276,22 +2278,38 @@ def _state_from_account(
     runtime: RuntimeState,
 ) -> AccountState:
     routing_policy = _normalize_account_routing_policy(getattr(account, "routing_policy", None))
+    if primary_entry is not None and usage_core.is_zero_duration_usage_placeholder(
+        usage_history_to_window_row(primary_entry)
+    ):
+        primary_entry = None
+    if secondary_entry is not None and usage_core.is_zero_duration_usage_placeholder(
+        usage_history_to_window_row(secondary_entry)
+    ):
+        secondary_entry = None
     primary_used = primary_entry.used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
-    if (
-        effective_secondary_entry is not None
-        and effective_secondary_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
-    ):
-        effective_secondary_entry = None
+    status_primary_entry = primary_entry
     primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
     secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
-    # Weekly-only accounts may not emit a dedicated secondary row; treat the
-    # weekly primary row as quota-window input for balancer decisions. When
-    # both rows exist, prefer the newer weekly snapshot.
-    if primary_row is not None and usage_core.should_use_weekly_primary(primary_row, secondary_row):
+    # Duration is authoritative for legacy/mis-slotted rows. Monthly-like and
+    # weekly-only primary rows are long-window signals, never short 5h usage.
+    if (
+        primary_entry is not None
+        and primary_row is not None
+        and usage_core.is_monthly_window_minutes(primary_row.window_minutes)
+    ):
+        if effective_secondary_entry is None or (
+            usage_core.is_monthly_window_minutes(effective_secondary_entry.window_minutes)
+            and not _usage_entry_meaningfully_newer(effective_secondary_entry, primary_entry)
+        ):
+            effective_secondary_entry = primary_entry
+        primary_used = None
+        primary_reset = None
+        primary_window_minutes = None
+        status_primary_entry = None
+    elif primary_row is not None and usage_core.should_use_weekly_primary(primary_row, secondary_row):
         effective_secondary_entry = primary_entry
         primary_used = None
         primary_reset = None
@@ -2376,7 +2394,7 @@ def _state_from_account(
             # not prove this replica observed the current one.
             early_freshness_entry = _rate_limited_freshness_entry(
                 account=account,
-                primary_entry=primary_entry,
+                primary_entry=status_primary_entry,
                 long_window_entry=effective_secondary_entry,
             )
             if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
@@ -2394,7 +2412,7 @@ def _state_from_account(
                     and not usage_core.is_primary_window_minutes(primary_window_minutes)
                     and long_window_quota_available
                 )
-                or (primary_entry is None and long_window_quota_available)
+                or (status_primary_entry is None and long_window_quota_available)
             )
         )
     ):
@@ -2489,7 +2507,7 @@ def _state_from_account(
         elif account.status == AccountStatus.RATE_LIMITED:
             freshness_entry = _rate_limited_freshness_entry(
                 account=account,
-                primary_entry=primary_entry,
+                primary_entry=status_primary_entry,
                 long_window_entry=effective_secondary_entry,
             )
         else:
@@ -2503,7 +2521,7 @@ def _state_from_account(
     if rejected_persisted_rate_limit_reset:
         rejected_reset_freshness_entry = _rate_limited_freshness_entry(
             account=account,
-            primary_entry=primary_entry,
+            primary_entry=status_primary_entry,
             long_window_entry=effective_secondary_entry,
         )
         # One healthy window must not conceal exhaustion in another applicable
@@ -2546,6 +2564,14 @@ def _state_from_account(
         credits_balance=credits_balance,
         infer_status_from_usage=False,
     )
+    if (
+        primary_used is None
+        and effective_secondary_entry is not None
+        and usage_core.is_monthly_window_minutes(effective_secondary_entry.window_minutes)
+    ):
+        # Monthly-only accounts expose pressure through the long-window field;
+        # never mirror that value into the short-window routing signal.
+        used_percent = None
     if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
         status = AccountStatus.RATE_LIMITED
     if rejected_persisted_rate_limit_reset and not rejected_reset_recovery_evidence:
@@ -2596,7 +2622,10 @@ def _state_from_account(
     )
     leased_token_pressure_pct = 0.0
     long_window_key = "secondary"
-    if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
+    if effective_secondary_entry is not None and (
+        effective_secondary_entry.window == "monthly"
+        or usage_core.is_monthly_window_minutes(effective_secondary_entry.window_minutes)
+    ):
         long_window_key = "monthly"
     capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
@@ -2708,10 +2737,40 @@ def _select_long_window_entry(
     account: Account,
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+    primary_entry: UsageHistory | AdditionalUsageHistory | None = None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
-    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+    if monthly_entry is None:
+        return secondary_entry
+    if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
         return monthly_entry
-    return secondary_entry
+    if not usage_core.is_monthly_window_minutes(monthly_entry.window_minutes):
+        return secondary_entry
+    for candidate in (primary_entry, secondary_entry):
+        if candidate is None:
+            continue
+        candidate_row = usage_history_to_window_row(candidate)
+        if usage_core.is_zero_duration_usage_placeholder(candidate_row):
+            continue
+        if usage_core.is_monthly_window_minutes(candidate_row.window_minutes):
+            continue
+        if not _usage_entry_meaningfully_newer(monthly_entry, candidate):
+            return secondary_entry
+    return monthly_entry
+
+
+def _usage_entry_meaningfully_newer(candidate: _UsageWindowEntry, reference: _UsageWindowEntry) -> bool:
+    candidate_recorded_at = _usage_entry_recorded_at_utc(candidate)
+    reference_recorded_at = _usage_entry_recorded_at_utc(reference)
+    return (candidate_recorded_at - reference_recorded_at).total_seconds() > _SIBLING_FETCH_MARGIN_SECONDS
+
+
+def _usage_entry_recorded_at_utc(entry: _UsageWindowEntry) -> datetime:
+    recorded_at = entry.recorded_at
+    if recorded_at is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if recorded_at.tzinfo is None:
+        return recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_at.astimezone(timezone.utc)
 
 
 def _rate_limited_freshness_entry(
@@ -2720,10 +2779,8 @@ def _rate_limited_freshness_entry(
     primary_entry: _UsageWindowEntry | None,
     long_window_entry: _UsageWindowEntry | None,
 ) -> _UsageWindowEntry | None:
-    if (
-        long_window_entry is not None
-        and long_window_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+    if long_window_entry is not None and (
+        long_window_entry.window == "monthly" or usage_core.is_monthly_window_minutes(long_window_entry.window_minutes)
     ):
         return long_window_entry
     if primary_entry is None:

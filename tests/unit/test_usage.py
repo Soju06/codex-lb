@@ -8,6 +8,7 @@ from app.core.usage import (
     SIBLING_FETCH_MARGIN_SECONDS,
     _should_prefer_primary_row,
     capacity_for_plan,
+    is_monthly_window_minutes,
     normalize_rate_limit_windows,
     normalize_usage_window,
     normalize_weekly_only_rows,
@@ -136,6 +137,36 @@ def test_normalize_rate_limit_windows_promotes_monthly_primary_without_secondary
     )
 
     normalized = normalize_rate_limit_windows(primary, None)
+
+    assert normalized.primary is None
+    assert normalized.secondary is None
+    assert normalized.monthly is primary
+
+
+@pytest.mark.parametrize("window_minutes", [40_320, 43_200, 43_800, 46_080])
+def test_is_monthly_window_minutes_accepts_calendar_month_like_durations(window_minutes: int) -> None:
+    assert is_monthly_window_minutes(window_minutes) is True
+
+
+@pytest.mark.parametrize("window_minutes", [None, 10_080, 40_319, 46_081])
+def test_is_monthly_window_minutes_rejects_non_monthly_durations(window_minutes: int | None) -> None:
+    assert is_monthly_window_minutes(window_minutes) is False
+
+
+def test_normalize_rate_limit_windows_promotes_team_monthly_primary_with_zero_secondary_placeholder() -> None:
+    primary = UsageWindow(
+        used_percent=96.0,
+        limit_window_seconds=43_800 * 60,
+        reset_at=1_800_000_000,
+    )
+    secondary_placeholder = UsageWindow(
+        used_percent=0.0,
+        limit_window_seconds=0,
+        reset_at=0,
+        reset_after_seconds=0,
+    )
+
+    normalized = normalize_rate_limit_windows(primary, secondary_placeholder)
 
     assert normalized.primary is None
     assert normalized.secondary is None

@@ -1001,6 +1001,44 @@ async def test_accounts_list_exposes_monthly_only_free_quota(async_client, db_se
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_exposes_monthly_like_team_primary_as_monthly(async_client, db_setup):
+    recorded_at = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_team_monthly", "team-monthly@example.com", plan_type="team"))
+        await usage_repo.add_entry(
+            "acc_team_monthly",
+            96.0,
+            window="primary",
+            reset_at=int(recorded_at.timestamp()) + 30 * 24 * 3600,
+            window_minutes=43_800,
+            recorded_at=recorded_at,
+        )
+        await usage_repo.add_entry(
+            "acc_team_monthly",
+            0.0,
+            window="secondary",
+            reset_at=None,
+            window_minutes=0,
+            recorded_at=recorded_at + timedelta(milliseconds=10),
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts = {item["accountId"]: item for item in response.json()["accounts"]}
+
+    account = accounts["acc_team_monthly"]
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] is None
+    assert account["usage"]["monthlyRemainingPercent"] == pytest.approx(4.0)
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] is None
+    assert account["windowMinutesMonthly"] == 43_800
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_hides_expired_primary_window(async_client, db_setup):
     now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
     async with SessionLocal() as session:

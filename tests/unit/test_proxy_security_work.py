@@ -880,14 +880,18 @@ async def test_http_bridge_security_retry_never_marks_or_migrates_file_pinned_ow
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_security_retry_after_response_created_is_not_replayed(
+async def test_http_bridge_security_retry_after_response_created_replays_with_original_downstream_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     regular_account = _make_account("acc_http_security_created_regular")
+    authorized_account = _make_account("acc_http_security_created_authorized")
+    authorized_account.security_work_authorized = True
     session = _make_bridge_session()
     session.account = regular_account
     session.durable_session_id = "durable-security-created"
+    retry_upstream = SimpleNamespace(send_text=AsyncMock())
     request_state = proxy_service._WebSocketRequestState(
         request_id="http-security-created",
         model="gpt-5.6-sol",
@@ -901,26 +905,185 @@ async def test_http_bridge_security_retry_after_response_created_is_not_replayed
         response_event_count=1,
         downstream_visible=False,
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
+        deferred_reasoning_downstream_texts=['data: {"type":"response.output_item.added"}\n\n'],
     )
     session.pending_requests.append(request_state)
     session.queued_request_count = 1
     mark_durable = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
     monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", mark_durable)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=object()))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
 
-    reconnect = AsyncMock()
+    async def reconnect(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        require_security_work_authorized: bool,
+    ) -> None:
+        assert target_session is session
+        assert require_security_work_authorized is True
+        target_session.account = authorized_account
+        target_session.upstream = cast(UpstreamResponsesWebSocket, retry_upstream)
+
+    reconnect_mock = AsyncMock(side_effect=reconnect)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect_mock)
+
+    retried = await service._retry_http_bridge_security_work_request(session, request_state)
+
+    assert retried is True
+    mark_durable.assert_awaited_once_with(session_id="durable-security-created")
+    reconnect_mock.assert_awaited_once()
+    retry_upstream.send_text.assert_awaited_once_with(request_state.request_text)
+    assert request_state.response_id is None
+    assert request_state.response_event_count == 0
+    assert request_state.upstream_model_output_seen is False
+    assert request_state.replay_downstream_response_id == "resp-created-before-cyber-denial"
+    assert request_state.suppress_next_created_downstream is True
+    assert request_state.deferred_reasoning_downstream_texts == []
+    assert request_state.require_security_work_authorized is True
+    assert session.requires_security_work_authorized is True
+    assert session.account is authorized_account
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_security_retry_reconnect_failure_does_not_restore_reasoning_prelude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_http_security_retry_reconnect_regular")
+    session = _make_bridge_session()
+    session.account = regular_account
+    session.durable_session_id = "durable-security-retry-reconnect"
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-security-retry-reconnect",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        response_id="resp-security-retry-reconnect",
+        awaiting_response_created=False,
+        response_event_count=1,
+        downstream_visible=False,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
+        deferred_reasoning_downstream_texts=['data: {"type":"response.output_item.added"}\n\n'],
+    )
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    mark_durable = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
+    reconnect = AsyncMock(side_effect=RuntimeError("replacement connect failed"))
+    monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", mark_durable)
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
 
     retried = await service._retry_http_bridge_security_work_request(session, request_state)
 
     assert retried is False
-    mark_durable.assert_not_awaited()
-    reconnect.assert_not_awaited()
-    assert request_state.response_id == "resp-created-before-cyber-denial"
-    assert request_state.replay_downstream_response_id is None
-    assert request_state.suppress_next_created_downstream is False
-    assert request_state.require_security_work_authorized is False
-    assert session.requires_security_work_authorized is False
-    assert session.account is regular_account
+    reconnect.assert_awaited_once()
+    assert request_state.deferred_reasoning_downstream_texts == []
+    assert request_state.require_security_work_authorized is True
+    assert session.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_security_retry_buffers_reasoning_prelude_before_cyber_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_http_security_reasoning_regular")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-security-reasoning-prelude",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
+        security_lineage_id="root-http-security-reasoning-prelude",
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    session.account = regular_account
+    session.durable_session_id = "durable-security-reasoning-prelude"
+    persist_lineage = AsyncMock()
+    persist_durable = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
+    retry_security_work = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", persist_lineage)
+    monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", persist_durable)
+    monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.created",
+                "sequence_number": 1,
+                "response": {"id": "resp-http-security-reasoning-prelude"},
+            },
+            separators=(",", ":"),
+        ),
+    )
+    assert request_state.event_queue is not None
+    created_block = await request_state.event_queue.get()
+    assert created_block is not None
+    assert "response.created" in created_block
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "sequence_number": 2,
+                "response_id": "resp-http-security-reasoning-prelude",
+                "item": {"id": "rs_live_like", "type": "reasoning", "summary": []},
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.event_queue.empty()
+    assert request_state.response_event_count == 1
+    assert request_state.upstream_model_output_seen is False
+    assert len(request_state.deferred_reasoning_downstream_texts) == 1
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-http-security-reasoning-prelude",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    warning_block = await request_state.event_queue.get()
+    assert warning_block is not None
+    warning = json.loads(warning_block.split("data: ", 1)[1])
+    assert warning["type"] == "codex_lb.warning"
+    assert warning["warning"]["code"] == "security_work_authorization_required"
+    assert warning["warning"]["action"] == "retry_security_work_authorized"
+    assert request_state.event_queue.empty()
+    assert request_state.deferred_reasoning_downstream_texts == []
+    persist_lineage.assert_awaited_once_with(
+        "root-http-security-reasoning-prelude",
+        account_id=regular_account.id,
+        api_key_id=None,
+    )
+    persist_durable.assert_awaited_once_with(session_id="durable-security-reasoning-prelude")
+    retry_security_work.assert_awaited_once_with(
+        session,
+        request_state,
+        durable_security_requirement_persisted=True,
+    )
 
 
 @pytest.mark.asyncio

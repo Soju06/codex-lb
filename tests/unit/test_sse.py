@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 
@@ -50,10 +51,38 @@ async def test_inject_sse_keepalives_no_pings_when_source_is_fast():
 
 @pytest.mark.asyncio
 async def test_inject_sse_keepalives_emits_pings_on_idle_gap():
-    out = [chunk async for chunk in inject_sse_keepalives(_slow_agen(["a\n\n"], delay=0.25), 0.05)]
+    callbacks: list[str] = []
+    out = [
+        chunk
+        async for chunk in inject_sse_keepalives(
+            _slow_agen(["a\n\n"], delay=0.25),
+            0.05,
+            on_keepalive=lambda: callbacks.append("sent"),
+        )
+    ]
     assert out[-1] == "a\n\n"
     assert SSE_KEEPALIVE_FRAME in out
     assert out.count(SSE_KEEPALIVE_FRAME) >= 2
+    assert len(callbacks) == out.count(SSE_KEEPALIVE_FRAME)
+
+
+@pytest.mark.asyncio
+async def test_inject_sse_keepalives_cancels_idle_source_when_downstream_closes():
+    source_cancelled = asyncio.Event()
+
+    async def source() -> AsyncIterator[str]:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            source_cancelled.set()
+        yield ""  # pragma: no cover - keeps this a pending async generator
+
+    stream = inject_sse_keepalives(source(), 0.01)
+    assert await anext(stream) == SSE_KEEPALIVE_FRAME
+
+    await cast(Any, stream).aclose()
+
+    assert source_cancelled.is_set()
 
 
 @pytest.mark.asyncio

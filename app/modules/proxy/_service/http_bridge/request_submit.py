@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from collections import deque
 from typing import Any, Literal, Mapping, TypeVar, cast
 from uuid import uuid4
@@ -116,6 +117,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_request_error_overrides,
@@ -162,6 +164,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
     _owner_lookup_session_id_from_headers,
+    _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import (
@@ -174,6 +177,9 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+_HTTP_BRIDGE_CLEAN_CLOSE_RETRY_MAX_COUNT = 1
+_HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -248,6 +254,20 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
 
 
 class _HTTPBridgeRequestSubmitMixin:
+    @staticmethod
+    def _http_bridge_clean_close_retry_max_count() -> int:
+        configured = _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_MAX_COUNT
+        # Keep this recovery bounded even if an unsafe higher value is supplied.
+        return max(0, min(1, configured))
+
+    @staticmethod
+    def _http_bridge_clean_close_retry_jitter_seconds() -> float:
+        maximum = max(
+            0.0,
+            float(_HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS),
+        )
+        return random.uniform(0.0, maximum) if maximum > 0 else 0.0
+
     def _prepare_http_bridge_request(
         self: Any,
         payload: ResponsesRequest,
@@ -347,6 +367,10 @@ class _HTTPBridgeRequestSubmitMixin:
             request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
+            hard_continuity_anchor=(
+                payload.previous_response_id is not None
+                or _sticky_key_from_turn_state_header(headers or {}) is not None
+            ),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             request_kind=request_kind,
@@ -1091,7 +1115,12 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         *,
         detail: str,
+        retry_circuit_detail: str | None = None,
     ) -> None:
+        await self._record_http_bridge_retry_circuit_failure(
+            session,
+            detail=retry_circuit_detail or detail,
+        )
         session.closed = True
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
@@ -1206,13 +1235,41 @@ class _HTTPBridgeRequestSubmitMixin:
             logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
             return False
 
-    async def _retry_http_bridge_precreated_request(self: Any, session: "_HTTPBridgeSession") -> bool:
+    async def _retry_http_bridge_precreated_request(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        restart_reader: bool = False,
+    ) -> bool:
+        if not await self._http_bridge_precreated_retry_allowed(session):
+            return False
+        clean_close_retry_max_count = self._http_bridge_clean_close_retry_max_count()
+
+        def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
+            if _websocket_request_can_replay_before_visible_output(request_state):
+                return True
+            if (
+                clean_close_retry_max_count <= 0
+                or request_state.replay_count != 1
+                or request_state.response_event_count != 0
+                or request_state.clean_close_replay_count >= clean_close_retry_max_count
+                or _classify_upstream_close(
+                    session.last_upstream_close_code,
+                    response_events_seen=request_state.response_event_count,
+                )
+                != "clean"
+            ):
+                return False
+            return _websocket_request_can_replay_before_visible_output(
+                request_state,
+                allow_clean_close_retry=True,
+            )
+
         async with session.pending_lock:
             retryable_requests = [
                 request_state
                 for request_state in session.pending_requests
-                if not request_state.draining_until_terminal
-                and _websocket_request_can_replay_before_visible_output(request_state)
+                if not request_state.draining_until_terminal and request_is_retryable(request_state)
             ]
             if len(retryable_requests) != 1:
                 return False
@@ -1232,13 +1289,28 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.last_upstream_close_code,
                 response_events_seen=request_state.response_event_count,
             )
-            if close_classification == "rejected":
-                request_state.error_code_override = "upstream_rejected_input"
-                request_state.error_http_status_override = 502
-                request_state.error_message_override = (
-                    "Upstream rejected the request before response.created "
-                    f"(close_code={session.last_upstream_close_code})"
-                )
+            close_generation = session.last_upstream_close_generation
+            hard_session_affinity = session.key.strength == "hard"
+            clean_close_hard_continuation = (
+                close_classification == "clean"
+                and hard_session_affinity
+                and request_state.previous_response_id is not None
+            )
+            clean_close_hard_continuity_anchor = (
+                close_classification == "clean" and hard_session_affinity and request_state.hard_continuity_anchor
+            )
+            clean_close_retry_for_current_close = (
+                close_classification == "clean"
+                and request_state.clean_close_retry_close_generation != close_generation
+                and not request_state.clean_close_retry_in_progress
+            )
+            additional_clean_close_retry = (
+                clean_close_retry_for_current_close
+                and request_state.replay_count == 1
+                and request_state.response_event_count == 0
+                and request_state.clean_close_replay_count < clean_close_retry_max_count
+            )
+            if request_state.replay_count >= 1 and not additional_clean_close_retry:
                 return False
             if request_state.previous_response_id is not None:
                 require_preferred_reconnect = False
@@ -1261,23 +1333,48 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    request_state.excluded_account_ids.add(session.account.id)
+                    if not hard_session_affinity:
+                        request_state.excluded_account_ids.add(session.account.id)
             else:
                 require_preferred_reconnect = False
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
                 if not request_state.file_required_preferred_account:
-                    request_state.preferred_account_id = None
-                    request_state.excluded_account_ids.add(session.account.id)
+                    model_fallback_replay = (
+                        request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                    )
+                    if hard_session_affinity and not model_fallback_replay:
+                        request_state.preferred_account_id = session.account.id
+                    else:
+                        request_state.preferred_account_id = None
+                        request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None
                 session.headers = {
                     key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
                 }
+            if close_classification == "clean":
+                if not clean_close_retry_for_current_close:
+                    return False
+                request_state.clean_close_retry_in_progress = True
+                request_state.clean_close_retry_close_generation = close_generation
+            if additional_clean_close_retry:
+                request_state.clean_close_replay_count += 1
+        retry_jitter_seconds = (
+            self._http_bridge_clean_close_retry_jitter_seconds() if additional_clean_close_retry else 0.0
+        )
+        if retry_jitter_seconds > 0:
+            logger.info(
+                "HTTP bridge clean-close retry jitter request_id=%s sleep_seconds=%.3f",
+                request_state.request_id,
+                retry_jitter_seconds,
+            )
+            await asyncio.sleep(retry_jitter_seconds)
+        retry_event = "retry_precreated_clean_close" if additional_clean_close_retry else "retry_precreated"
         _log_http_bridge_event(
-            "retry_precreated",
+            retry_event,
             session.key,
             account_id=session.account.id,
             model=session.request_model,
@@ -1285,15 +1382,31 @@ class _HTTPBridgeRequestSubmitMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        reconnect_reader_kwargs = {"restart_reader": True} if restart_reader else {}
         try:
             if require_preferred_reconnect:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
                     require_preferred_account=True,
+                    **reconnect_reader_kwargs,
+                )
+            elif clean_close_hard_continuation or clean_close_hard_continuity_anchor:
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    # Continuity anchors (previous_response_id and turn-state)
+                    # are account-bound. Do not migrate them while recovering a
+                    # clean handoff close.
+                    require_same_account=True,
+                    **reconnect_reader_kwargs,
                 )
             else:
-                await self._reconnect_http_bridge_session(session, request_state=request_state)
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    **reconnect_reader_kwargs,
+                )
             if request_state.account_response_create_lease is None:
                 current_settings = await _service_get_settings_cache().get()
                 request_state.account_response_create_lease = (
@@ -1328,6 +1441,8 @@ class _HTTPBridgeRequestSubmitMixin:
             else:
                 logger.warning("HTTP bridge pre-created retry failed", exc_info=True)
             return False
+        finally:
+            request_state.clean_close_retry_in_progress = False
 
     async def _retry_http_bridge_precreated_auth_request(
         self: Any,

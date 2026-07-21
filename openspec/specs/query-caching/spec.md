@@ -285,6 +285,20 @@ semantics.
 - **THEN** the distinct conversation count is `1`
 - **AND** null and blank IDs do not create an unknown conversation bucket
 
+### Requirement: Dashboard conversation trends aggregate by bucket
+
+The dashboard conversation trend query MUST group by the configured time bucket
+and count distinct non-empty normalized conversation IDs within each bucket. It
+MUST exclude warmup traffic and MUST NOT use model or service-tier grouping that
+could cause one conversation to be counted more than once in a bucket.
+
+#### Scenario: One conversation across model groups counts once per bucket
+
+- **GIVEN** a bucket contains two non-warmup request logs for `conv-a` under
+  different models and one log for `conv-b`
+- **WHEN** the dashboard conversation trend aggregate is calculated
+- **THEN** that bucket's conversation count is `2`
+
 ### Requirement: Additional usage latest reads avoid SQLite window scans
 
 Additional usage latest-per-account reads on SQLite MUST avoid `row_number()` window-function scans over the full `additional_usage_history` table. They MUST select matching accounts, then use indexed latest-row lookups ordered by `recorded_at DESC, used_percent DESC, id DESC` while preserving canonical quota-key and alias matching semantics. Non-SQLite dialects MAY keep the set-based window-function query.

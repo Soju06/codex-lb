@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -102,6 +102,42 @@ async def test_add_log_persists_normalized_conversation_id(db_setup) -> None:
     assert persisted.conversation_id == "conv-a"
     assert empty_persisted is not None
     assert empty_persisted.conversation_id is None
+
+
+@pytest.mark.asyncio
+async def test_aggregate_conversations_by_bucket_deduplicates_model_service_groups_and_excludes_warmups(
+    db_setup,
+) -> None:
+    del db_setup
+    since = datetime(2026, 7, 21, 0, 0, 0)
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for request_id, model, service_tier, conversation_id, request_kind in (
+            ("conversation_bucket_1", "gpt-5.1", None, "conv-a", "normal"),
+            ("conversation_bucket_2", "gpt-5.2", "priority", " conv-a ", "normal"),
+            ("conversation_bucket_3", "gpt-5.1", None, "conv-b", "normal"),
+            ("conversation_bucket_warmup", "gpt-5.1", None, "conv-warmup", "warmup"),
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model=model,
+                service_tier=service_tier,
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                conversation_id=conversation_id,
+                request_kind=request_kind,
+                requested_at=since + timedelta(minutes=5),
+            )
+
+        buckets = await repo.aggregate_conversations_by_bucket(since, bucket_seconds=3600)
+
+    assert [(bucket.bucket_epoch, bucket.conversation_count) for bucket in buckets] == [
+        (int(since.replace(tzinfo=timezone.utc).timestamp()), 2),
+    ]
 
 
 @pytest.mark.asyncio

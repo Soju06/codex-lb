@@ -53,9 +53,6 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       id: "conversations",
       label: t("reports.summary.conversations"),
       value: formatNumber(summary.totalConversations),
-      sub: t("reports.summary.conversationsSub", {
-        conversations: summary.totalConversations,
-      }),
     },
   ];
 
@@ -80,7 +77,7 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
               </div>
             ) : null}
           </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">{card.sub}</div>
+          {card.sub ? <div className="mt-0.5 text-xs text-muted-foreground">{card.sub}</div> : null}
         </div>
       ))}
     </div>

@@ -1507,7 +1507,7 @@ MUST clear only the conversation filter and reset pagination. When the filtered
 API response includes conversation metadata, the dashboard MUST render a
 summary box between the filter row and request-log table with the form:
 
-`The conversation ${id} runs ${count} request(s) for ${formattedCost}`
+`The conversation ${id} runs ${count} request(s), cost = ${formattedCost}`. The ID, count, and cost MUST be separate styled inline-code values without literal backticks.
 
 If at least one other non-conversation filter is active, the summary MUST append
 an inline suffix describing those active filters and MUST omit the conversation
@@ -1553,7 +1553,8 @@ Cost and Error Rate, counting distinct non-empty conversation IDs in the
 selected timeframe. Report summary metrics MUST include a Conversations card
 immediately after Requests, counting distinct non-empty IDs across the complete
 filtered report range. A conversation spanning multiple days MUST count once in
-each applicable daily row and once in the report-wide total.
+each applicable daily row and once in the report-wide total. Neither card MUST
+render a `{count} distinct` secondary label.
 
 #### Scenario: Dashboard count deduplicates IDs
 
@@ -1571,6 +1572,31 @@ each applicable daily row and once in the report-wide total.
 - **THEN** the summary counts two distinct conversations overall
 - **AND** each applicable daily row counts the spanning conversation once
 - **AND** the Conversations summary card is immediately after Requests
+
+### Requirement: Dashboard conversation trends are bucketed distinctly
+
+The dashboard overview response MUST expose `trends.conversations` with one
+point for each configured timeframe bucket. Each point MUST count distinct,
+non-empty conversation IDs within that bucket, and a conversation repeated
+across models or service tiers in one bucket MUST count once. Missing buckets
+MUST be zero. The Conversations card MUST use this series, while its summary
+total MUST remain the exact timeframe aggregate rather than a sum of trend
+points.
+
+#### Scenario: Conversation trend de-duplicates model groups
+
+- **GIVEN** one bucket contains the same conversation ID under two models and a
+  second distinct conversation ID under one model
+- **WHEN** the dashboard overview trends are rendered
+- **THEN** the populated bucket's conversation point is `2`
+- **AND** the series contains one point per configured bucket
+
+#### Scenario: Empty conversation buckets are zero-filled
+
+- **GIVEN** the selected dashboard timeframe has no valid conversation IDs in
+  one or more buckets
+- **WHEN** the dashboard overview response is built
+- **THEN** each empty bucket's conversation point is `0`
 
 ### Requirement: Report conversation columns sort and export
 

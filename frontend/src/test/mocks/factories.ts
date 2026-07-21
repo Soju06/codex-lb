@@ -304,6 +304,7 @@ export function createDashboardOverview(
 			tokens: createTrendPoints(1600, timeframe.bucketCount, timeframe.bucketSeconds),
 			cost: createTrendPoints(0.065, timeframe.bucketCount, timeframe.bucketSeconds),
 			errorRate: createTrendPoints(0.03, timeframe.bucketCount, timeframe.bucketSeconds),
+			conversations: createTrendPoints(1, timeframe.bucketCount, timeframe.bucketSeconds),
 		},
 		depletionPrimary: {
 			risk: 0.55,

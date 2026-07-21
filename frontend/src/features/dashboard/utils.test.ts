@@ -1326,6 +1326,7 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
     const convStat = view.stats.find((s) => s.label.includes("Conversations"));
     expect(convStat?.value).toBe("1,200");
+    expect(convStat?.meta).toBeUndefined();
   });
 
   it("formats Conversations stat above 1000 as grouped integer, not as '1.2K'", () => {

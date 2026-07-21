@@ -422,11 +422,21 @@ describe("DashboardPage", () => {
 
     renderWithProviders(<DashboardPage />);
 
-    // Summary sentence contains count and cost
-    const summaryEl = screen.getByText(/The conversation conv_page_summary/i);
+    // Summary sentence contains count and cost — text split by Trans/code elements
+    const summaryEls = screen.getAllByText((_, el) => el?.textContent?.includes("The conversation conv_page_summary") ?? false);
+    const summaryEl = summaryEls[summaryEls.length - 1];
     expect(summaryEl).toBeInTheDocument();
-    expect(summaryEl.textContent).toMatch(/42/);
-    expect(summaryEl.textContent).toMatch(/\$3\.14/);
+
+    // Rendered text contains cost = with no literal backticks
+    expect(summaryEl.textContent).toMatch(/\bcost = /);
+    expect(summaryEl.textContent).not.toMatch(/`cost =`/);
+
+    // Exactly three <code> elements with expected values
+    const codeElements = summaryEl.querySelectorAll("code");
+    expect(codeElements).toHaveLength(3);
+    expect(codeElements[0].textContent).toBe("conv_page_summary");
+    expect(codeElements[1].textContent).toBe("42");
+    expect(codeElements[2].textContent).toBe("$3.14");
 
     // Prove summary is between filters and table via DOM order
     const requestLogsSection = screen.getByRole("heading", { name: "Request Logs" }).closest("section");
@@ -512,7 +522,8 @@ describe("DashboardPage", () => {
 
     renderWithProviders(<DashboardPage />);
 
-    const summaryEl = screen.getByText(/The conversation conv_safety/i);
+    const summaryEls = screen.getAllByText((_, el) => el?.textContent?.includes("The conversation conv_safety") ?? false);
+    const summaryEl = summaryEls[summaryEls.length - 1];
     // Must never leak raw internal IDs
     expect(summaryEl.textContent).not.toMatch(/acc_missing/);
     expect(summaryEl.textContent).not.toMatch(/key_missing/);
@@ -581,11 +592,11 @@ describe("DashboardPage", () => {
 
     renderWithProviders(<DashboardPage />);
 
-    const summaryEl = screen.getByText(/The conversation conv_no_suffix/i);
+    const summaryEl = screen.getByText((_, el) => el?.tagName === "P" && (el?.textContent?.includes("The conversation conv_no_suffix") ?? false));
     expect(summaryEl).toBeInTheDocument();
     // No filter suffix separator
     expect(summaryEl.textContent).not.toMatch(/filters:/i);
-    expect(summaryEl.textContent).toMatch(/7 request\(s\) for \$0\.05/);
+    expect(summaryEl.textContent).toMatch(/request\(s\), cost =/);
   });
 
   it("dismiss button clears conversationId and resets offset, preserving other filters", () => {

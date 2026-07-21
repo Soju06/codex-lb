@@ -108,15 +108,22 @@ header continue normally and store a null conversation ID.
 11. When the filtered API response contains `conversation`, insert a summary
     box between the filter row and request-log table. It renders:
 
-    `The conversation ${id} runs ${count} request(s) for ${formattedCost}`
+    `The conversation ${id} runs ${count} request(s), cost = ${formattedCost}`
+
+    The conversation ID, request count, and formatted cost MUST render as
+    styled inline-code values without literal backtick characters.
 
     An inline suffix lists the other active filters, for example
     `— filters: 7d; statuses: error; model: gpt-5`. The conversation filter is
     not repeated in the suffix.
 
 12. Dashboard overview metrics count distinct, non-empty conversation IDs in
-    the selected timeframe. The Conversations card appears between Est. API
-    Cost and Error Rate.
+    the selected timeframe. The overview response also exposes a
+    `trends.conversations` series with one distinct-count point per configured
+    bucket, zero-filled for empty buckets. The Conversations card appears
+    between Est. API Cost and Error Rate and uses that series. The summary total
+    remains the exact timeframe aggregate and is not calculated by summing trend
+    points.
 
 13. Report summary metrics count distinct, non-empty conversation IDs over the
     complete filtered report range. The Conversations card appears immediately

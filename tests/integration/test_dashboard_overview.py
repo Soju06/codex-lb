@@ -108,6 +108,7 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
             latency_ms=50,
             status="success",
             error_code=None,
+            conversation_id="conv-dash",
             requested_at=now - timedelta(minutes=1),
         )
 
@@ -143,15 +144,23 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
     assert len(trends["tokens"]) == 28
     assert len(trends["cost"]) == 28
     assert len(trends["errorRate"]) == 28
+    assert len(trends["conversations"]) == 28
 
     # At least one trend point should have non-zero request count
     request_values = [p["v"] for p in trends["requests"]]
     assert any(v > 0 for v in request_values)
+    conversation_values = [p["v"] for p in trends["conversations"]]
+    assert any(v > 0 for v in conversation_values)
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_timeframe(async_client, db_setup):
-    now = utcnow().replace(microsecond=0)
+async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_timeframe(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = datetime(2026, 4, 3, 10, 37, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -181,6 +190,14 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
                     model="gpt-5.1",
                     status="success",
                     conversation_id="conv-b",
+                ),
+                RequestLog(
+                    account_id="acc_dash_conversations",
+                    request_id="dash-conversation-repeat-other-bucket",
+                    requested_at=now - timedelta(hours=1, minutes=5),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
                 ),
                 RequestLog(
                     account_id="acc_dash_conversations",
@@ -246,7 +263,13 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
 
     assert response.status_code == 200
-    assert response.json()["summary"]["metrics"]["conversations"] == 2
+    payload = response.json()
+    assert payload["summary"]["metrics"]["conversations"] == 2
+
+    populated_conversation_values = [point["v"] for point in payload["trends"]["conversations"] if point["v"] > 0]
+    assert populated_conversation_values == [1.0, 2.0]
+    assert max(populated_conversation_values) == 2.0
+    assert sum(point["v"] for point in payload["trends"]["conversations"]) == 3.0
 
 
 @pytest.mark.asyncio
@@ -903,6 +926,7 @@ async def test_dashboard_overview_respects_selected_timeframe(
             latency_ms=50,
             status="success",
             error_code=None,
+            conversation_id="conv-timeframe-recent",
             requested_at=now - timedelta(hours=3),
         )
         await logs_repo.add_log(
@@ -914,6 +938,7 @@ async def test_dashboard_overview_respects_selected_timeframe(
             latency_ms=50,
             status="error",
             error_code="rate_limit_exceeded",
+            conversation_id="conv-timeframe-old",
             requested_at=now - timedelta(days=2),
         )
 
@@ -923,8 +948,10 @@ async def test_dashboard_overview_respects_selected_timeframe(
 
     assert payload["timeframe"]["key"] == timeframe
     assert payload["timeframe"]["bucketCount"] == expected_bucket_count
-    assert len(payload["trends"]["requests"]) == expected_bucket_count
+    assert all(len(series) == expected_bucket_count for series in payload["trends"].values())
+    assert any(point["v"] > 0 for point in payload["trends"]["conversations"])
     assert payload["summary"]["metrics"]["requests"] == expected_requests
+    assert payload["summary"]["metrics"]["conversations"] == expected_requests
     if timeframe == "1d":
         assert payload["summary"]["metrics"]["errorCount"] == 0
         assert payload["summary"]["metrics"]["topError"] is None

@@ -822,9 +822,8 @@ export function buildDashboardView(
     stats.push({
       label: t("dashboard.stats.conversations", { timeframe: timeframeLabel }),
       value: formatNumber(conversationCount),
-      meta: t("dashboard.stats.distinctConversations", { count: conversationCount }),
       icon: MessageSquare,
-      trend: [],
+      trend: trendPointsToValues(trends.conversations),
       trendColor: TREND_COLORS[3],
     });
   }

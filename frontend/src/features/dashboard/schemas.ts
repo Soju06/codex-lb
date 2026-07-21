@@ -80,6 +80,7 @@ const MetricsTrendsSchema = z.object({
   tokens: z.array(TrendPointSchema),
   cost: z.array(TrendPointSchema),
   errorRate: z.array(TrendPointSchema),
+  conversations: z.array(TrendPointSchema).optional().default([]),
 });
 
 export const DepletionSchema = z.object({

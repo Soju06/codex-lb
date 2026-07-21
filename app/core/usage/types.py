@@ -126,6 +126,12 @@ class BucketModelAggregate:
 
 
 @dataclass(frozen=True)
+class BucketConversationAggregate:
+    bucket_epoch: int
+    conversation_count: int
+
+
+@dataclass(frozen=True)
 class RequestActivityAggregate:
     request_count: int
     error_count: int

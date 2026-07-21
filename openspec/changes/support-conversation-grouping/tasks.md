@@ -520,7 +520,7 @@ React 19, TypeScript, Zod, TanStack Query, Vitest, Tailwind CSS, i18next.
   between Statuses and Reset; its accessible dismiss button clears only the ID
   and offset. Insert a semantic card row between filters and the table using:
 
-  `The conversation {id} runs {count} request(s) for {cost} — filters: {active filters}`
+  `The conversation {id} runs {count} request(s), cost = {cost} — filters: {active filters}` with ID, count, and cost rendered as styled inline-code values.
 
   Omit the suffix when no non-conversation filters are active. Show full IDs in
   tooltips/accessibility text when visual truncation is required.
@@ -692,3 +692,64 @@ React 19, TypeScript, Zod, TanStack Query, Vitest, Tailwind CSS, i18next.
   `support-conversation-grouping`, re-run `openspec validate --specs`, and mark
   every completed checkbox in this file. Do not archive until verification is
   complete and the user requests finalization.
+
+
+---
+
+### Task 9: Add dashboard conversation trendline and formatted summary copy
+
+**Files:**
+- Modify: `app/core/usage/types.py`
+- Modify: `app/modules/request_logs/repository.py`
+- Modify: `app/modules/dashboard/repository.py`
+- Modify: `app/modules/dashboard/service.py`
+- Modify: `app/modules/usage/builders.py`
+- Modify: `app/modules/usage/schemas.py`
+- Modify: `frontend/src/features/dashboard/schemas.ts`
+- Modify: `frontend/src/features/dashboard/utils.ts`
+- Modify: `frontend/src/features/dashboard/components/dashboard-page.tsx`
+- Modify: `frontend/src/features/reports/components/reports-summary-cards.tsx`
+- Modify: `frontend/src/i18n/locales/en.json`
+- Modify: `frontend/src/i18n/locales/ko.json`
+- Modify: `frontend/src/i18n/locales/zh-CN.json`
+- Test: `tests/unit/test_request_logs_repository.py`
+- Test: `tests/unit/test_dashboard_trends.py`
+- Test: `tests/integration/test_dashboard_overview.py`
+- Test: `frontend/src/features/dashboard/components/dashboard-page.test.tsx`
+- Test: `frontend/src/features/dashboard/utils.test.ts`
+- Test: `frontend/src/features/reports/components/reports-summary-cards.test.tsx`
+
+**Interfaces:**
+- Consumes: persisted normalized conversation IDs and existing dashboard
+  timeframe bucket configuration.
+- Produces: `MetricsTrends.conversations`, a dashboard Conversations sparkline,
+  and a summary sentence with separate inline-code ID/count/cost values.
+
+- [x] **Step 1: Verify failing regression tests were observed before production edits**
+
+  Confirm the backend and frontend specialists recorded red tests for the missing
+  bucket aggregate, empty dashboard trend, duplicate copy, and plain summary
+  format before their production changes. If a red-test record is unavailable,
+  reproduce one focused failure before proceeding.
+
+- [x] **Step 2: Verify backend trend behavior**
+
+  Run the repository, builder, and dashboard integration tests. Confirm the
+  conversation trend has the configured bucket length, de-duplicates IDs across
+  models/service tiers, excludes warmups/blanks, zero-fills missing buckets, and
+  does not replace the exact summary total.
+
+- [x] **Step 3: Verify frontend presentation behavior**
+
+  Run dashboard/report component tests and inspect the rendered summary DOM.
+  Confirm the Conversations card has a trend and no `distinct` metadata, the
+  report card has no `distinct` subtitle, and the summary contains exactly three
+  `code` elements in ID/count/cost order with `cost =` punctuation and no literal
+  backticks.
+
+- [x] **Step 4: Validate and close this task**
+
+  Run `openspec validate --specs`, focused backend/frontend tests, frontend
+  typecheck/lint, `git diff --check`, and the final diff review. Mark this task's
+  steps complete only when every command passes. Do not archive the change in
+  this task.

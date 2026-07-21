@@ -160,7 +160,7 @@ describe("ReportsSummaryCards", () => {
     expect(conversationsCard).toBeInTheDocument();
     expect(within(conversationsCard).getByText("Conversations")).toBeInTheDocument();
     expect(within(conversationsCard).getByText("42")).toBeInTheDocument();
-    expect(within(conversationsCard).getByText("42 distinct")).toBeInTheDocument();
+    expect(within(conversationsCard).queryByText("42 distinct")).not.toBeInTheDocument();
     const requestsCard = screen.getByTestId("report-summary-card-requests");
     expect(requestsCard.nextElementSibling).toBe(conversationsCard);
   });

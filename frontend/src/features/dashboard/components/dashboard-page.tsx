@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
@@ -234,19 +234,32 @@ export function DashboardPage() {
       suffixParts.push(`"${filters.search}"`);
     }
 
+    const codeClass = "rounded bg-muted px-1 py-0.5 text-xs font-mono";
+
     if (suffixParts.length > 0) {
-      return t("dashboard.conversation.summaryWithFilters", {
-        id: filters.conversationId,
-        count,
-        cost,
-        filters: suffixParts.join(", "),
-      });
+      return (
+        <Trans
+          i18nKey="dashboard.conversation.summaryWithFilters"
+          values={{ id: filters.conversationId, count, cost, filters: suffixParts.join(", ") }}
+          components={[
+            <code key="id" className={codeClass} />,
+            <code key="count" className={codeClass} />,
+            <code key="cost" className={codeClass} />,
+          ]}
+        />
+      );
     }
-    return t("dashboard.conversation.summary", {
-      id: filters.conversationId,
-      count,
-      cost,
-    });
+    return (
+      <Trans
+        i18nKey="dashboard.conversation.summary"
+        values={{ id: filters.conversationId, count, cost }}
+        components={[
+          <code key="id" className={codeClass} />,
+          <code key="count" className={codeClass} />,
+          <code key="cost" className={codeClass} />,
+        ]}
+      />
+    );
   }, [logPage?.conversation, filters, t, accountOptions, apiKeyOptions, modelOptions, blurred]);
 
   const statusOptions = useMemo(

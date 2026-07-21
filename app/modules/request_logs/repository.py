@@ -13,7 +13,12 @@ from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
-from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
+from app.core.usage.types import (
+    BucketConversationAggregate,
+    BucketModelAggregate,
+    RequestActivityAggregate,
+    UsageSummaryLogsAggregate,
+)
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestKind, RequestLog
@@ -89,6 +94,15 @@ class RequestLogsRepository:
             _CONVERSATION_WHITESPACE,
         )
         return func.nullif(trimmed, "")
+
+    def _bucket_epoch_expr(self, bucket_seconds: int) -> ColumnElement:
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            return func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+        # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
+        epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+        return cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(
@@ -173,14 +187,7 @@ class RequestLogsRepository:
         since: datetime,
         bucket_seconds: int = 21600,
     ) -> list[BucketModelAggregate]:
-        bind = self._session.get_bind()
-        dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-        else:
-            # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_expr = self._bucket_epoch_expr(bucket_seconds)
         bucket_col = bucket_expr.label("bucket_epoch")
 
         stmt = (
@@ -214,6 +221,36 @@ class RequestLogsRepository:
                 cached_input_tokens=int(row.cached_input_tokens),
                 reasoning_tokens=int(row.reasoning_tokens),
                 cost_usd=float(row.cost_usd or 0.0),
+            )
+            for row in result.all()
+        ]
+
+    async def aggregate_conversations_by_bucket(
+        self,
+        since: datetime,
+        bucket_seconds: int = 21600,
+    ) -> list[BucketConversationAggregate]:
+        bucket_expr = self._bucket_epoch_expr(bucket_seconds)
+        bucket_col = bucket_expr.label("bucket_epoch")
+        conversation_id = self._conversation_id_expr()
+        stmt = (
+            select(
+                bucket_col,
+                func.count(func.distinct(conversation_id)).label("conversation_count"),
+            )
+            .where(
+                RequestLog.requested_at >= since,
+                self._exclude_warmup_clause(),
+                conversation_id.is_not(None),
+            )
+            .group_by(bucket_col)
+            .order_by(bucket_col)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            BucketConversationAggregate(
+                bucket_epoch=int(row.bucket_epoch),
+                conversation_count=int(row.conversation_count),
             )
             for row in result.all()
         ]

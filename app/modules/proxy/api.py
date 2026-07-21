@@ -42,7 +42,7 @@ from app.core.auth.dependencies import (
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, _is_native_codex_request
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ResetCreditFetchError,
@@ -422,16 +422,20 @@ def _has_openai_responses_shape(payload: V1ResponsesRequest | Mapping[str, JsonV
     )
 
 
-def _is_openai_sdk_request(
-    request: Request,
-    payload: V1ResponsesRequest | Mapping[str, JsonValue] | None = None,
-) -> bool:
+def _has_explicit_openai_sdk_marker(request: Request) -> bool:
     for header_name in request.headers:
         normalized_header = header_name.lower()
         if normalized_header.startswith("x-stainless-"):
             return True
     user_agent = request.headers.get("user-agent", "").lower()
-    if "openai" in user_agent:
+    return "openai" in user_agent
+
+
+def _is_openai_sdk_request(
+    request: Request,
+    payload: V1ResponsesRequest | Mapping[str, JsonValue] | None = None,
+) -> bool:
+    if _has_explicit_openai_sdk_marker(request):
         return True
     if payload is None or not _has_openai_responses_shape(payload):
         return False
@@ -627,7 +631,9 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    explicit_openai_sdk_marker = _has_explicit_openai_sdk_marker(request)
     openai_sdk_request = _is_openai_sdk_request(request, payload)
+    native_codex_heartbeat = _is_native_codex_request(request.headers) and not explicit_openai_sdk_marker
     openai_compat_payload = _has_openai_responses_shape(payload)
     try:
         responses_payload = normalize_responses_request_payload(
@@ -689,6 +695,7 @@ async def responses(
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
         enforce_openai_sdk_contract=openai_sdk_request,
+        native_codex_heartbeat=native_codex_heartbeat,
     )
 
 
@@ -4257,6 +4264,7 @@ async def _stream_responses(
     forwarded_file_owner_account_id: str | None = None,
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
@@ -4452,8 +4460,9 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
-    keepalive_frame = CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME
-    if not enforce_openai_sdk_contract:
+    use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
+    if use_codex_keepalive:
         stream = _prepend_initial_sse_heartbeat(
             stream,
             keepalive_frame,

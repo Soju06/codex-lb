@@ -36,6 +36,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
@@ -92,6 +93,167 @@ def _make_bridge_session(
         queued_request_count=queued_request_count,
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
+    )
+
+
+def _make_eventless_http_bridge_owner(
+    *,
+    request_id: str = "req-eventless-owner",
+    sent_at: float = 100.0,
+) -> proxy_service._WebSocketRequestState:
+    return proxy_service._WebSocketRequestState(
+        request_id=request_id,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=-10_000.0,
+        transport="http",
+        response_create_gate=asyncio.Semaphore(0),
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        response_create_sent_at=sent_at,
+        event_queue=asyncio.Queue(),
+    )
+
+
+def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
+    request_state = _make_eventless_http_bridge_owner()
+
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == 340.0
+    )
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=30.0,
+        )
+        == 130.0
+    )
+
+    request_state.latency_first_upstream_event_ms = 25
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == 340.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("response_id", "resp-created"),
+        ("latency_response_created_ms", 12),
+        ("response_event_count", 1),
+        ("downstream_visible", True),
+        ("last_downstream_sequence_number", 0),
+        ("awaiting_response_created", False),
+        ("response_create_gate_acquired", False),
+        ("response_create_gate", None),
+        ("response_create_sent_at", None),
+    ],
+)
+def test_http_bridge_eventless_precreated_deadline_requires_narrow_owner_evidence(
+    field_name: str,
+    field_value: object,
+) -> None:
+    request_state = _make_eventless_http_bridge_owner()
+    setattr(request_state, field_name, field_value)
+
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_send_replaces_timestamp_and_wakes_existing_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = _make_eventless_http_bridge_owner(sent_at=1.0)
+    session = _make_bridge_session()
+    seen_sent_ats: list[float | None] = []
+
+    async def send_text(_text: str) -> None:
+        seen_sent_ats.append(request_state.response_create_sent_at)
+
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    monotonic_values = iter((100.0, 200.0))
+    monotonic = lambda: next(monotonic_values)  # noqa: E731
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=monotonic),
+    )
+
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        "first",
+    )
+    session.upstream_reader_wakeup.clear()
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        "second",
+    )
+
+    assert seen_sent_ats == [100.0, 200.0]
+    assert request_state.response_create_sent_at == 200.0
+    assert session.upstream_reader_wakeup.is_set() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("send failed"), asyncio.CancelledError()])
+async def test_http_bridge_failed_send_disarms_eventless_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    request_state = _make_eventless_http_bridge_owner(sent_at=1.0)
+    session = _make_bridge_session()
+
+    async def send_text(_text: str) -> None:
+        assert request_state.response_create_sent_at == 100.0
+        raise failure
+
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: 100.0),
+    )
+    session.upstream_reader_wakeup.clear()
+
+    with pytest.raises(type(failure)):
+        await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+            session,
+            request_state,
+            "request",
+        )
+
+    assert request_state.response_create_sent_at is None
+    assert session.upstream_reader_wakeup.is_set() is True
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        is None
     )
 
 
@@ -3793,6 +3955,7 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        response_create_sent_at=1.0,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(
@@ -3812,6 +3975,7 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
     assert selection_kwargs[0]["service_tier"] == "priority"
     assert selection_kwargs[0]["preferred_account_id"] == session.account.id
     assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert request_state.response_create_sent_at is None
 
 
 @pytest.mark.asyncio
@@ -14850,6 +15014,259 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_scop
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("leading_telemetry", [False, True], ids=["silent", "leading-telemetry"])
+async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without_keepalives(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    leading_telemetry: bool,
+) -> None:
+    class _TrackingUpstream:
+        def __init__(self) -> None:
+            self.first_receive_started = asyncio.Event()
+            self.telemetry_ready = asyncio.Event()
+            self.receive_calls = 0
+            self.active_receives = 0
+            self.max_active_receives = 0
+            self.receive_cancellations = 0
+            self.closed = False
+            self.sent_texts: list[str] = []
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            self.receive_calls += 1
+            receive_number = self.receive_calls
+            self.active_receives += 1
+            self.max_active_receives = max(self.max_active_receives, self.active_receives)
+            self.first_receive_started.set()
+            try:
+                if leading_telemetry and receive_number == 1:
+                    await self.telemetry_ready.wait()
+                    return UpstreamWebSocketMessage(
+                        kind="text",
+                        text=json.dumps(
+                            {
+                                "type": "codex.rate_limits",
+                                "plan_type": "pro",
+                                "rate_limits": {"allowed": True, "limit_reached": False},
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+            except asyncio.CancelledError:
+                self.receive_cancellations += 1
+                raise
+            finally:
+                self.active_receives -= 1
+
+        async def send_text(self, text: str) -> None:
+            self.sent_texts.append(text)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _TrackingUpstream()
+    session = _make_bridge_session(key_value=f"eventless-{leading_telemetry}")
+    session.upstream = cast(UpstreamResponsesWebSocket, upstream)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        sse_keepalive_interval_seconds=0.0,
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    retry_precreated = AsyncMock(return_value=False)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    write_request_log = AsyncMock()
+    monkeypatch.setattr(service, "_write_request_log", write_request_log)
+    record_stuck_retire = Mock()
+    monkeypatch.setattr(proxy_service, "_record_http_bridge_stuck_retire", record_stuck_retire)
+    original_fail_reader = service._fail_http_bridge_reader_and_maybe_retire
+    fail_reader = AsyncMock(wraps=original_fail_reader)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    await asyncio.wait_for(upstream.first_receive_started.wait(), timeout=0.5)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    owner = _make_eventless_http_bridge_owner(request_id="req-lone-eventless", sent_at=0.0)
+    owner.started_at = time.monotonic() - 30.0
+    owner.response_create_sent_at = None
+    owner.response_create_gate = gate
+    owner.event_queue = owner_queue
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    owner.preferred_account_id = "acc-bridge"
+    owner.excluded_account_ids.add("acc-excluded")
+    sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    sibling = proxy_service._WebSocketRequestState(
+        request_id="req-created-sibling",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        response_id="resp-created-sibling",
+        event_queue=sibling_queue,
+    )
+    async with session.pending_lock:
+        session.pending_requests.extend((owner, sibling))
+        session.queued_request_count = 2
+
+    with caplog.at_level(logging.WARNING):
+        await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+            session,
+            owner,
+            owner.request_text,
+        )
+        if leading_telemetry:
+            upstream.telemetry_ready.set()
+        await asyncio.wait_for(reader_task, timeout=1.0)
+
+    for event_queue in (owner_queue, sibling_queue):
+        event_blocks: list[str] = []
+        while (event_block := await asyncio.wait_for(event_queue.get(), timeout=0.1)) is not None:
+            event_blocks.append(event_block)
+        terminal_blocks = [block for block in event_blocks if '"code":"upstream_request_timeout"' in block]
+        assert len(terminal_blocks) == 1
+        assert event_queue.empty() is True
+
+    assert upstream.sent_texts == [owner.request_text]
+    assert upstream.max_active_receives == 1
+    assert upstream.receive_cancellations == 1
+    assert upstream.closed is True
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    assert session.closed is True
+    assert session.key not in service._http_bridge_sessions
+    assert gate.locked() is False
+    assert owner.response_create_sent_at is not None
+    assert owner.response_create_sent_at > owner.started_at
+    assert owner.failure_phase_override == "upstream"
+    assert owner.failure_detail_override == "missing_response_created_timeout"
+    assert sibling.failure_detail_override == "missing_response_created_timeout"
+    assert owner.preferred_account_id == "acc-bridge"
+    assert owner.excluded_account_ids == {"acc-excluded"}
+    assert owner.replay_count == 0
+    assert owner.response_event_count == 0
+    if leading_telemetry:
+        assert owner.latency_first_upstream_event_ms is not None
+    retry_precreated.assert_not_awaited()
+    assert write_request_log.await_count == 2
+    assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
+    fail_reader.assert_awaited_once()
+    assert fail_reader.await_args.kwargs["penalize_account"] is False
+    assert fail_reader.await_args.kwargs["force_retire"] is True
+    record_stuck_retire.assert_called_once_with(
+        reason="missing_response_created_timeout",
+        session=session,
+    )
+    assert "http_bridge_event event=missing_response_created_timeout" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_timeout_yields_to_locked_send_failure_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ControlledLifecycleLock:
+        def __init__(self) -> None:
+            self.first_waiting = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.enter_count = 0
+
+        async def __aenter__(self) -> "_ControlledLifecycleLock":
+            self.enter_count += 1
+            if self.enter_count == 1:
+                self.first_waiting.set()
+                await self.release_first.wait()
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    class _ClosingUpstream:
+        def __init__(self) -> None:
+            self.release_receive = asyncio.Event()
+            self.closed = False
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            await self.release_receive.wait()
+            return UpstreamWebSocketMessage(
+                kind="close",
+                close_code=1006,
+                error="send failed",
+                error_code="proxy_network_unavailable",
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+            self.release_receive.set()
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _ClosingUpstream()
+    lifecycle_lock = _ControlledLifecycleLock()
+    session = _make_bridge_session(key_value="eventless-send-failure-race")
+    session.upstream = cast(UpstreamResponsesWebSocket, upstream)
+    session.lifecycle_lock = cast(Any, lifecycle_lock)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.01,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    record_stuck_retire = Mock()
+    monkeypatch.setattr(proxy_service, "_record_http_bridge_stuck_retire", record_stuck_retire)
+    original_fail_reader = service._fail_http_bridge_reader_and_maybe_retire
+    fail_reader = AsyncMock(wraps=original_fail_reader)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    owner = _make_eventless_http_bridge_owner(
+        request_id="req-send-failure-race",
+        sent_at=time.monotonic() - 1.0,
+    )
+    owner.response_create_gate = gate
+    owner.event_queue = event_queue
+    async with session.pending_lock:
+        session.pending_requests.append(owner)
+        session.queued_request_count = 1
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    await asyncio.wait_for(lifecycle_lock.first_waiting.wait(), timeout=0.5)
+
+    # The submitter owns the real lifecycle lock at this point. Its failed
+    # send disarms the timestamp and closes the session before releasing it.
+    session.closed = True
+    owner.response_create_sent_at = None
+    lifecycle_lock.release_first.set()
+    upstream.release_receive.set()
+    await asyncio.wait_for(reader_task, timeout=1.0)
+
+    event_blocks: list[str] = []
+    while (event_block := await asyncio.wait_for(event_queue.get(), timeout=0.1)) is not None:
+        event_blocks.append(event_block)
+    assert len(event_blocks) == 1
+    assert "missing_response_created_timeout" not in event_blocks[0]
+    assert owner.failure_detail_override is None
+    record_stuck_retire.assert_not_called()
+    assert fail_reader.await_count == 1
+    fail_reader_await_args = fail_reader.await_args
+    assert fail_reader_await_args is not None
+    assert fail_reader_await_args.kwargs.get("force_retire") is not True
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reader_marks_session_closed_before_reconnect_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -15411,6 +15828,35 @@ async def test_http_bridge_reader_failure_keeps_waiter_count_when_draining_reque
 
     assert retired is False
     assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_timeout_force_retires_with_admission_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="eventless-force-retire")
+    session.admission_waiter_count = 1
+    fail_pending = AsyncMock()
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    retired = await service._fail_http_bridge_reader_and_maybe_retire(
+        session,
+        error_code="upstream_request_timeout",
+        error_message="missing response.created",
+        penalize_account=False,
+        retire_detail="missing_response_created_timeout",
+        force_retire=True,
+    )
+
+    assert retired is True
+    assert session.closed is True
+    retire.assert_awaited_once_with(session, detail="missing_response_created_timeout")
+    fail_pending_await_args = fail_pending.await_args
+    assert fail_pending_await_args is not None
+    assert fail_pending_await_args.kwargs["penalize_account"] is False
 
 
 @pytest.mark.asyncio

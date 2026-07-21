@@ -2102,6 +2102,10 @@ class _HTTPBridgeMixin(
         require_same_account: bool = False,
         require_preferred_account: bool = False,
     ) -> None:
+        # A replacement reader can start before its caller resends the request.
+        # Clear the prior attempt first so an expired send timestamp cannot
+        # retire the fresh socket before the next real send re-arms it.
+        request_state.response_create_sent_at = None
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None

@@ -709,6 +709,10 @@ class _WebSocketRequestState:
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None
+    # Monotonic time immediately before the current upstream response.create
+    # send. Retries replace this value so admission wait and prior attempts do
+    # not age a fresh send into the eventless owner deadline.
+    response_create_sent_at: float | None = None
     bridge_queue_wait_started_at: float | None = None
     # Monotonic deadline of the original bridge request budget. Retry and
     # recovery paths re-prepare request states with a fresh started_at, so
@@ -855,6 +859,9 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    # Wakes a reader that began an unbounded receive before the first request
+    # was enqueued. The reader keeps one receive task alive across wakeups.
+    upstream_reader_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
     unanchored_reservation_id: str | None = None
     admission_waiter_count: int = 0
     request_service_tier: str | None = None

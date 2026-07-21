@@ -201,7 +201,17 @@ async def _send_http_bridge_request_text_with_archive_id(
 ) -> None:
     token = set_request_id(request_state.archive_request_id)
     try:
-        await session.upstream.send_text(text_data)
+        request_state.response_create_sent_at = _service_time().monotonic()
+        session.upstream_reader_wakeup.set()
+        try:
+            await session.upstream.send_text(text_data)
+        except BaseException:
+            # A failed or cancelled send is settled by its caller. Disarm the
+            # owner watchdog before lifecycle ownership is released so the
+            # reader cannot race that cleanup and settle the request twice.
+            request_state.response_create_sent_at = None
+            session.upstream_reader_wakeup.set()
+            raise
     finally:
         reset_request_id(token)
 
@@ -896,7 +906,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     async with session.pending_lock:
                         session.pending_requests.append(warmup_state)
                     request_enqueued = True
-                    await session.upstream.send_text(warmup_text)
+                    await _send_http_bridge_request_text_with_archive_id(session, warmup_state, warmup_text)
                 while True:
                     try:
                         event_block = await asyncio.wait_for(

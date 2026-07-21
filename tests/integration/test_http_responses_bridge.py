@@ -1604,13 +1604,16 @@ async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(asy
 
     session.last_used_at = time.monotonic() - 300.0
     async with service._http_bridge_lock:
-        service._prune_http_bridge_sessions_locked()
+        stale_sessions = service._prune_http_bridge_sessions_locked()
         assert key in service._http_bridge_sessions
+    assert stale_sessions == []
 
     session.last_used_at = time.monotonic() - 601.0
     async with service._http_bridge_lock:
-        service._prune_http_bridge_sessions_locked()
+        stale_sessions = service._prune_http_bridge_sessions_locked()
         assert key not in service._http_bridge_sessions
+    for stale_session in stale_sessions:
+        await service._close_http_bridge_session(stale_session)
 
 
 @pytest.mark.asyncio
@@ -3785,6 +3788,11 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
     async def blocking_reader_task() -> None:
         await _wait_for_event(blocker)
 
+    original_reader = bridge_session.upstream_reader
+    assert original_reader is not None
+    original_reader.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await original_reader
     blocking_reader = asyncio.create_task(blocking_reader_task())
     bridge_session.upstream_reader = blocking_reader
 
@@ -10622,7 +10630,11 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
     service = get_proxy_service_for_app(app_instance)
     async with service._http_bridge_lock:
         session = next(iter(service._http_bridge_sessions.values()))
-        session.upstream = cast(proxy_module.UpstreamResponsesWebSocket, failing_upstream)
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamResponsesWebSocket, failing_upstream),
+        )
 
     second = await async_client.post(
         "/v1/responses",

@@ -2175,6 +2175,64 @@ def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatc
     assert state.capacity_credits == usage_core.capacity_for_plan("plus", "secondary")
 
 
+def test_select_long_window_keeps_authoritative_team_monthly_like_usage(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monthly = _make_test_usage(
+        window="monthly",
+        used_percent=96.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43_800,
+    )
+    placeholder = _make_test_usage(
+        window="secondary",
+        used_percent=0.0,
+        reset_at=None,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=0,
+    )
+
+    selected_entry = _select_long_window_entry(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="team"),
+        monthly_entry=monthly,
+        secondary_entry=placeholder,
+    )
+
+    assert selected_entry is monthly
+
+
+def test_state_from_account_treats_team_monthly_like_primary_as_long_window(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="team"),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=96.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=43_800,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=0.0,
+            reset_at=None,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=0,
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.used_percent is None
+    assert state.primary_window_minutes is None
+    assert state.secondary_used_percent == 96.0
+    assert state.secondary_reset_at == future_reset
+
+
 def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)

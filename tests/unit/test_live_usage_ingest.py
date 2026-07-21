@@ -30,6 +30,22 @@ def _snapshot(primary_used: float = 25.0, reset_at: int = 1_700_000_300) -> Live
     )
 
 
+def test_normalize_live_windows_promotes_team_monthly_like_primary_and_drops_placeholder() -> None:
+    snapshot = LiveRateLimitSnapshot(
+        primary=LiveUsageWindow(used_percent=96.0, window_minutes=43_800, reset_at=1_800_000_000),
+        secondary=LiveUsageWindow(used_percent=0.0, window_minutes=0, reset_at=None),
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=None,
+    )
+
+    primary, secondary, monthly = live_ingest._normalize_live_windows(snapshot)
+
+    assert primary is None
+    assert secondary is None
+    assert monthly is snapshot.primary
+
+
 def test_parse_rate_limit_headers_reads_both_windows_and_credits() -> None:
     headers = {
         "X-Codex-Primary-Used-Percent": "25.5",

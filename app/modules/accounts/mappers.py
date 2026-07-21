@@ -114,12 +114,23 @@ def _account_to_summary(
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
-    effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
+    (
+        effective_primary_usage,
+        effective_secondary_usage,
+        monthly_usage,
+        observed_monthly_authoritative,
+        monthly_promoted_from_primary,
+    ) = _effective_usage_windows(
         primary_usage,
         secondary_usage,
+        monthly_usage,
     )
 
-    if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
+    if (
+        monthly_usage is not None
+        and usage_core.capacity_for_plan(plan_type, "monthly") is None
+        and not observed_monthly_authoritative
+    ):
         monthly_usage = None
     monthly_used_percent = _normalize_used_percent(monthly_usage)
     monthly_remaining_percent = usage_core.remaining_percent_from_used(monthly_used_percent)
@@ -127,11 +138,6 @@ def _account_to_summary(
         effective_primary_usage = None
         effective_secondary_usage = None
 
-    weekly_only_usage = (
-        effective_primary_usage is None
-        and primary_usage is not None
-        and usage_core.is_weekly_window_minutes(primary_usage.window_minutes)
-    )
     # Keep account payload aligned with UI semantics: weekly-only plans expose
     # their quota as secondary/7d and omit primary/5h fields.
     primary_used_percent = _normalize_used_percent(effective_primary_usage)
@@ -153,7 +159,9 @@ def _account_to_summary(
     status_runtime_reset = float(account.reset_at) if account.reset_at else None
     status_seed = account.status
     allow_missing_runtime_reset_recovery = False
-    long_quota_usage = monthly_usage or effective_secondary_usage
+    status_monthly_usage = None if monthly_promoted_from_primary else monthly_usage
+    status_monthly_used_percent = None if monthly_promoted_from_primary else monthly_used_percent
+    long_quota_usage = status_monthly_usage or effective_secondary_usage
     long_quota_available = (
         long_quota_usage is not None
         and _usage_entry_is_recent_enough(long_quota_usage.recorded_at)
@@ -165,7 +173,7 @@ def _account_to_summary(
             effective_primary_usage.window_minutes
             if effective_primary_usage is not None
             else primary_usage.window_minutes
-            if weekly_only_usage and primary_usage is not None
+            if primary_usage is not None
             else None
         )
         zero_capacity_primary_known_non_primary = (
@@ -230,8 +238,8 @@ def _account_to_summary(
         primary_used_percent=status_primary_used_percent,
         secondary_usage=effective_secondary_usage,
         secondary_used_percent=secondary_used_percent,
-        monthly_usage=monthly_usage,
-        monthly_used_percent=monthly_used_percent,
+        monthly_usage=status_monthly_usage,
+        monthly_used_percent=status_monthly_used_percent,
         runtime_reset=status_runtime_reset,
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
@@ -422,18 +430,74 @@ def _display_window_expired(entry: UsageHistory | None, now_epoch: int) -> bool:
 def _effective_usage_windows(
     primary_usage: UsageHistory | None,
     secondary_usage: UsageHistory | None,
-) -> tuple[UsageHistory | None, UsageHistory | None]:
+    monthly_usage: UsageHistory | None = None,
+) -> tuple[UsageHistory | None, UsageHistory | None, UsageHistory | None, bool, bool]:
+    primary_usage = _usage_without_zero_duration_placeholder(primary_usage)
+    secondary_usage = _usage_without_zero_duration_placeholder(secondary_usage)
+    monthly_usage = _usage_without_zero_duration_placeholder(monthly_usage)
+
+    monthly_promoted_from_primary = False
+    if primary_usage is not None and usage_core.is_monthly_window_minutes(primary_usage.window_minutes):
+        if secondary_usage is None or usage_core.is_monthly_window_minutes(secondary_usage.window_minutes):
+            if monthly_usage is None or not _usage_entry_meaningfully_newer(monthly_usage, primary_usage):
+                monthly_usage = primary_usage
+                monthly_promoted_from_primary = True
+        primary_usage = None
+
+    observed_monthly_authoritative = (
+        monthly_usage is not None
+        and usage_core.is_monthly_window_minutes(monthly_usage.window_minutes)
+        and all(
+            entry is None or _usage_entry_meaningfully_newer(monthly_usage, entry)
+            for entry in (primary_usage, secondary_usage)
+        )
+    )
+
     if primary_usage is None:
-        return None, secondary_usage
+        return (
+            None,
+            secondary_usage,
+            monthly_usage,
+            observed_monthly_authoritative,
+            monthly_promoted_from_primary,
+        )
     if not usage_core.is_weekly_window_minutes(primary_usage.window_minutes):
-        return primary_usage, secondary_usage
+        return (
+            primary_usage,
+            secondary_usage,
+            monthly_usage,
+            observed_monthly_authoritative,
+            monthly_promoted_from_primary,
+        )
     if secondary_usage is None:
-        return None, primary_usage
+        return None, primary_usage, monthly_usage, observed_monthly_authoritative, monthly_promoted_from_primary
     if usage_core.should_use_weekly_primary(
         usage_history_to_window_row(primary_usage), usage_history_to_window_row(secondary_usage)
     ):
-        return None, primary_usage
-    return None, secondary_usage
+        return None, primary_usage, monthly_usage, observed_monthly_authoritative, monthly_promoted_from_primary
+    return None, secondary_usage, monthly_usage, observed_monthly_authoritative, monthly_promoted_from_primary
+
+
+def _usage_without_zero_duration_placeholder(entry: UsageHistory | None) -> UsageHistory | None:
+    if entry is None or not usage_core.is_zero_duration_usage_placeholder(usage_history_to_window_row(entry)):
+        return entry
+    return None
+
+
+def _usage_entry_meaningfully_newer(candidate: UsageHistory, reference: UsageHistory) -> bool:
+    candidate_recorded_at = _normalized_usage_recorded_at(candidate.recorded_at)
+    reference_recorded_at = _normalized_usage_recorded_at(reference.recorded_at)
+    if candidate_recorded_at is None or reference_recorded_at is None:
+        return False
+    return (candidate_recorded_at - reference_recorded_at).total_seconds() > usage_core.SIBLING_FETCH_MARGIN_SECONDS
+
+
+def _normalized_usage_recorded_at(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAuthStatus:

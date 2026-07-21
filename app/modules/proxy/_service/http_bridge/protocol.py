@@ -23,6 +23,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
     _http_bridge_inflight_sessions: Any
     _http_bridge_turn_state_index: Any
     _http_bridge_previous_response_index: Any
+    _http_bridge_quarantine_until: Any
     _sessions: Any
     _session_lock: Any
     _pending_lock: Any

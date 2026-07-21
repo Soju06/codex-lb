@@ -293,6 +293,8 @@ class Settings(BaseSettings):
     openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
+    http_responses_session_bridge_response_created_timeout_seconds: float = Field(default=5.0, gt=0)
+    http_responses_session_bridge_quarantine_seconds: float = Field(default=60.0, ge=0)
     http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False

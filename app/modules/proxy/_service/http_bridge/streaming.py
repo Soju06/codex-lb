@@ -221,6 +221,81 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
+def _http_bridge_quarantine_remaining_seconds(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+) -> float:
+    now = _service_time().monotonic()
+    quarantine_by_key = service._http_bridge_quarantine_until
+    expired_keys = [candidate for candidate, deadline in quarantine_by_key.items() if deadline <= now]
+    for expired_key in expired_keys:
+        quarantine_by_key.pop(expired_key, None)
+    quarantine_until = quarantine_by_key.get(key)
+    if quarantine_until is None:
+        return 0.0
+    return quarantine_until - now
+
+
+async def _quarantine_silent_http_bridge_session(
+    service: Any,
+    session: _HTTPBridgeSession,
+    *,
+    request_state: _WebSocketRequestState,
+) -> None:
+    if session.closed:
+        return
+    session.closed = True
+    settings = _service_get_settings()
+    quarantine_seconds = max(
+        0.0,
+        float(
+            getattr(
+                settings,
+                "http_responses_session_bridge_quarantine_seconds",
+                60.0,
+            )
+        ),
+    )
+    if quarantine_seconds > 0:
+        quarantine_by_key = service._http_bridge_quarantine_until
+        quarantine_by_key[session.key] = _service_time().monotonic() + quarantine_seconds
+        max_entries = max(
+            1,
+            int(getattr(settings, "http_responses_session_bridge_max_sessions", 256)),
+        )
+        overflow = len(quarantine_by_key) - max_entries
+        if overflow > 0:
+            earliest_keys = sorted(
+                quarantine_by_key,
+                key=quarantine_by_key.__getitem__,
+            )[:overflow]
+            for earliest_key in earliest_keys:
+                quarantine_by_key.pop(earliest_key, None)
+    error_message = (
+        "HTTP bridge did not receive response.created in time; the next retry for this session will use HTTP"
+    )
+    async with session.pending_lock:
+        pending_states = list(session.pending_requests)
+    for pending_state in pending_states:
+        pending_state.error_code_override = "upstream_unavailable"
+        pending_state.error_message_override = error_message
+    _log_http_bridge_event(
+        "response_created_timeout",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        pending_count=len(pending_states),
+        detail=(f"request_id={request_state.request_id}, quarantine_seconds={quarantine_seconds:.3f}"),
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="response_created_timeout",
+    )
+    await service._close_http_bridge_session(session)
+
+
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
     error = exc.payload.get("error") if isinstance(exc.payload, dict) else None
     if not isinstance(error, dict):
@@ -626,35 +701,37 @@ class _HTTPBridgeStreamingMixin:
             return
 
         request_scope_id = ensure_request_scope_id()
+        bridge_events = self._stream_via_http_bridge(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            suppress_text_done_events=suppress_text_done_events,
+            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+            max_sessions=runtime_config.max_sessions,
+            queue_limit=runtime_config.queue_limit,
+            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+            downstream_turn_state=downstream_turn_state,
+            forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_legacy_signature=forwarded_legacy_signature,
+            proxy_api_authorization=proxy_api_authorization,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
+            rewritten_file_account_id=rewritten_file_account_id,
+            client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
         try:
-            async for line in self._stream_via_http_bridge(
-                payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=propagate_http_errors,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                suppress_text_done_events=suppress_text_done_events,
-                idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-                codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-                max_sessions=runtime_config.max_sessions,
-                queue_limit=runtime_config.queue_limit,
-                prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-                downstream_turn_state=downstream_turn_state,
-                forwarded_request=forwarded_request,
-                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-                forwarded_legacy_signature=forwarded_legacy_signature,
-                proxy_api_authorization=proxy_api_authorization,
-                forwarded_affinity_kind=forwarded_affinity_kind,
-                forwarded_affinity_key=forwarded_affinity_key,
-                rewritten_file_account_id=rewritten_file_account_id,
-                client_ip=client_ip,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            ):
+            async for line in bridge_events:
                 yield line
         finally:
             with anyio.CancelScope(shield=True):
+                await bridge_events.aclose()
                 await _release_http_bridge_unanchored_handoffs_for_request(
                     self,
                     request_scope_id=request_scope_id,
@@ -687,7 +764,6 @@ class _HTTPBridgeStreamingMixin:
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
-        del suppress_text_done_events
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -767,6 +843,38 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
+        quarantine_remaining_seconds = _http_bridge_quarantine_remaining_seconds(
+            self,
+            bridge_session_key,
+        )
+        if quarantine_remaining_seconds > 0:
+            _log_http_bridge_event(
+                "quarantine_http_fallback",
+                bridge_session_key,
+                account_id=None,
+                model=payload.model,
+                detail=f"remaining_seconds={quarantine_remaining_seconds:.3f}",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+            )
+            stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
+            async for line in stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
+                upstream_stream_transport_override="http",
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
+            return
         session_header_fallback_key = (
             _make_http_bridge_session_header_fallback_key(
                 headers=headers,
@@ -852,6 +960,39 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup.canonical_key,
                 bridge_session_key.api_key_id,
             )
+            quarantine_remaining_seconds = _http_bridge_quarantine_remaining_seconds(
+                self,
+                bridge_session_key,
+            )
+            if quarantine_remaining_seconds > 0:
+                _log_http_bridge_event(
+                    "quarantine_http_fallback",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail=f"remaining_seconds={quarantine_remaining_seconds:.3f}",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                    owner_check_applied=True,
+                )
+                stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
+                async for line in stream_with_retry(
+                    payload,
+                    headers,
+                    codex_session_affinity=codex_session_affinity,
+                    propagate_http_errors=propagate_http_errors,
+                    openai_cache_affinity=openai_cache_affinity,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    suppress_text_done_events=suppress_text_done_events,
+                    request_transport=_REQUEST_TRANSPORT_HTTP,
+                    rewritten_file_account_id=rewritten_file_account_id,
+                    upstream_stream_transport_override="http",
+                    client_ip=client_ip,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                ):
+                    yield line
+                return
             live_local_session_exists = await self._http_bridge_has_live_local_session(
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
@@ -2118,9 +2259,34 @@ class _HTTPBridgeStreamingMixin:
             keepalive_sent = False
             keepalive_count = 0
             while True:
-                keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
+                settings = _service_get_settings()
+                keepalive_interval = getattr(settings, "sse_keepalive_interval_seconds", 10.0)
+                response_created_wait_timeout: float | None = None
+                response_create_sent_at = request_state.response_create_sent_at
+                if (
+                    request_state.awaiting_response_created
+                    and request_state.response_event_count == 0
+                    and response_create_sent_at is not None
+                ):
+                    response_created_timeout_seconds = float(
+                        getattr(
+                            settings,
+                            "http_responses_session_bridge_response_created_timeout_seconds",
+                            5.0,
+                        )
+                    )
+                    response_created_wait_timeout = max(
+                        0.0,
+                        response_create_sent_at + response_created_timeout_seconds - _service_time().monotonic(),
+                    )
+                if response_created_wait_timeout == 0:
+                    await _quarantine_silent_http_bridge_session(
+                        self,
+                        session,
+                        request_state=request_state,
+                    )
+                    event_block = await event_queue.get()
                 if keepalive_interval > 0:
-                    settings = _service_get_settings()
                     stream_keepalive_max_count = _stream_keepalive_max_count()
                     stream_idle_timeout_seconds = getattr(
                         settings,
@@ -2134,10 +2300,34 @@ class _HTTPBridgeStreamingMixin:
                     wait_timeout = keepalive_interval
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _http_bridge_startup_keepalive_grace_seconds())
+                    if response_created_wait_timeout is not None:
+                        wait_timeout = min(wait_timeout, response_created_wait_timeout)
                     try:
-                        event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
+                        if response_created_wait_timeout != 0:
+                            event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
-                        if request_state.account_capacity_waiting:
+                        response_created_deadline_elapsed = (
+                            request_state.awaiting_response_created
+                            and request_state.response_event_count == 0
+                            and request_state.response_create_sent_at is not None
+                            and _service_time().monotonic()
+                            >= request_state.response_create_sent_at
+                            + float(
+                                getattr(
+                                    settings,
+                                    "http_responses_session_bridge_response_created_timeout_seconds",
+                                    5.0,
+                                )
+                            )
+                        )
+                        if response_created_deadline_elapsed:
+                            await _quarantine_silent_http_bridge_session(
+                                self,
+                                session,
+                                request_state=request_state,
+                            )
+                            event_block = await event_queue.get()
+                        elif request_state.account_capacity_waiting:
                             keepalive_count = 0
                             keepalive_sent = True
                             yielded_any = True
@@ -2167,9 +2357,10 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                             continue
-                        keepalive_count += 1
-                        downstream_response_id = _websocket_downstream_response_id(request_state)
-                        if keepalive_count > max_keepalive_count:
+                        else:
+                            keepalive_count += 1
+                            downstream_response_id = _websocket_downstream_response_id(request_state)
+                        if not response_created_deadline_elapsed and keepalive_count > max_keepalive_count:
                             logger.info(
                                 "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
                                 "max_keepalive_count=%s",
@@ -2188,11 +2379,18 @@ class _HTTPBridgeStreamingMixin:
                                 )
                             )
                             break
-                        if propagate_http_errors and request_state.response_id is None:
+                        if (
+                            not response_created_deadline_elapsed
+                            and propagate_http_errors
+                            and request_state.response_id is None
+                        ):
                             continue
-                        keepalive_sent = True
-                        yielded_any = True
-                        if request_state.response_id or request_state.replay_downstream_response_id:
+                        if not response_created_deadline_elapsed:
+                            keepalive_sent = True
+                            yielded_any = True
+                        if not response_created_deadline_elapsed and (
+                            request_state.response_id or request_state.replay_downstream_response_id
+                        ):
                             yield format_sse_event(
                                 cast(
                                     Mapping[str, JsonValue],
@@ -2205,11 +2403,27 @@ class _HTTPBridgeStreamingMixin:
                                     },
                                 )
                             )
-                        else:
+                        elif not response_created_deadline_elapsed:
                             yield _codex_keepalive_frame()
-                        continue
+                        if not response_created_deadline_elapsed:
+                            continue
                 else:
-                    event_block = await event_queue.get()
+                    if response_created_wait_timeout is None or response_created_wait_timeout == 0:
+                        if response_created_wait_timeout is None:
+                            event_block = await event_queue.get()
+                    else:
+                        try:
+                            event_block = await asyncio.wait_for(
+                                event_queue.get(),
+                                timeout=response_created_wait_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            await _quarantine_silent_http_bridge_session(
+                                self,
+                                session,
+                                request_state=request_state,
+                            )
+                            event_block = await event_queue.get()
                 if event_block is None:
                     break
                 keepalive_count = 0

@@ -202,6 +202,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     token = set_request_id(request_state.archive_request_id)
     try:
         await session.upstream.send_text(text_data)
+        request_state.response_create_sent_at = _service_time().monotonic()
     finally:
         reset_request_id(token)
 

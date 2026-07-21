@@ -8,7 +8,7 @@ from typing import Any, TypeVar, cast
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
-from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
+from app.core.clients.proxy import (  # noqa: F401
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -82,6 +82,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_time,
     _upstream_websocket_disconnect_message,
     _websocket_auth_request_can_switch_account,
+    _websocket_downstream_response_id,
     _websocket_event_error_code,
     _websocket_event_error_message,
     _websocket_event_error_param,
@@ -111,6 +112,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_precreated_replay_fallback,
+    _clear_websocket_request_error_overrides,
     _event_type_from_payload,
     _HTTPBridgeSession,
     _record_response_event,
@@ -153,6 +155,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
 )
+from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
@@ -167,22 +170,11 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
-_REQUEST_TRANSPORT_HTTP = "http"
-_UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
-_WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
-_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
     "codex-lb is retrying on an account marked as authorized for security work."
 )
-_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
-    "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
-)
-_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-_HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
 def _archive_http_bridge_upstream_text(
@@ -890,14 +882,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
-                status_request_state.error_http_status_override = 502
-                (
-                    _downstream_text,
-                    event_block,
-                    event,
-                    payload,
-                    event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                if is_http_bridge_account_neutral_replay(
+                    kind=session.key.affinity_kind,
+                    key=session.key.affinity_key,
+                ):
+                    _clear_websocket_request_error_overrides(status_request_state)
+                else:
+                    status_request_state.error_http_status_override = 502
+                    (
+                        _downstream_text,
+                        event_block,
+                        event,
+                        payload,
+                        event_type,
+                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
         elif owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
             await self._handle_stream_error(
                 session.account,
@@ -1066,6 +1064,45 @@ class _HTTPBridgeUpstreamEventsMixin:
             and completed_usage.output_tokens == 0
         )
 
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and event_type == "response.completed"
+            and not completed_empty_prewarm
+        ):
+            alias_registered = await self._register_http_bridge_previous_response_id(
+                session,
+                response_id,
+                input_item_count=(
+                    matched_request_state.input_item_count if matched_request_state.input_item_count > 0 else None
+                ),
+                input_full_fingerprint=(
+                    matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
+                ),
+            )
+            if not alias_registered and is_http_bridge_account_neutral_replay(
+                kind=session.key.affinity_kind,
+                key=session.key.affinity_key,
+            ):
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                matched_request_state.error_http_status_override = 502
+                payload = cast(
+                    dict[str, JsonValue],
+                    dict(
+                        response_failed_event(
+                            "bridge_continuity_persistence_failed",
+                            "Recovered response continuity could not be persisted; retry the request.",
+                            response_id=_websocket_downstream_response_id(matched_request_state),
+                        )
+                    ),
+                )
+                event_block = format_sse_event(payload)
+                event = parse_sse_event_payload(payload)
+                event_type = "response.failed"
+                completed_usage = None
+                completed_empty_prewarm = False
+
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated
@@ -1125,27 +1162,6 @@ class _HTTPBridgeUpstreamEventsMixin:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if (
-            response_id is not None
-            and matched_request_state is not None
-            and event_type == "response.completed"
-            and not completed_empty_prewarm
-        ):
-            await self._register_http_bridge_previous_response_id(
-                session,
-                response_id,
-                input_item_count=(
-                    matched_request_state.input_item_count
-                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
-                    else None
-                ),
-                input_full_fingerprint=(
-                    matched_request_state.input_full_fingerprint
-                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
-                    else None
-                ),
-            )
-
         if terminal_request_state is not None and settlement_event_type in {"response.failed", "error"}:
             if settlement_event_type == "error":
                 error = settlement_event.error if settlement_event else None
@@ -1158,7 +1174,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
                 can_retry_security_work = (
-                    not session.account.security_work_authorized
+                    not is_http_bridge_account_neutral_replay(
+                        kind=session.key.affinity_kind,
+                        key=session.key.affinity_key,
+                    )
+                    and not session.account.security_work_authorized
                     and not has_other_pending_requests
                     and terminal_request_state.response_id is None
                     and terminal_request_state.replay_count < 1

@@ -148,6 +148,8 @@ _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
 _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
 OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
+CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
+CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
 
@@ -225,6 +227,26 @@ class _SelectionInputs(SelectionInputsProtocol):
         if self.continuity_owner_candidates is None:
             return self.accounts
         return self.continuity_owner_candidates
+
+
+def _required_continuity_owner_failure(
+    selection_inputs: _SelectionInputs,
+    *,
+    required_account_id: str,
+) -> tuple[str, str] | None:
+    if selection_inputs.error_code is not None:
+        return None
+    eligible_ids = {account.id for account in selection_inputs.effective_continuity_owner_candidates} | {
+        account.id for account in selection_inputs.accounts
+    }
+    if required_account_id in eligible_ids:
+        return None
+    runtime_accounts = (
+        selection_inputs.accounts if selection_inputs.runtime_accounts is None else selection_inputs.runtime_accounts
+    )
+    if required_account_id not in {account.id for account in runtime_accounts}:
+        return CONTINUITY_OWNER_UNAVAILABLE, "Required continuity owner account no longer exists"
+    return CONTINUITY_OWNER_POLICY_CONFLICT, "Required continuity owner is outside the eligible account policy"
 
 
 SelectionInputs = _SelectionInputs
@@ -387,6 +409,8 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         required_account_id: str | None = None,
+        required_account_is_ownership_constraint: bool = False,
+        required_continuity_owner: bool = False,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
         budget_threshold_pct: float = 95.0,
@@ -398,8 +422,13 @@ class LoadBalancer:
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
     ) -> AccountSelection:
+        if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
+            raise ValueError("required account ownership flags require required_account_id")
+
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
+        owner_restricted_selection = required_account_is_ownership_constraint or required_continuity_owner
+        sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
 
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
@@ -482,6 +511,22 @@ class LoadBalancer:
                         selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
                 )
+            if required_continuity_owner:
+                assert required_account_id is not None
+                failure = _required_continuity_owner_failure(
+                    selection_inputs,
+                    required_account_id=required_account_id,
+                )
+                if failure is not None:
+                    error_code, error_message = failure
+                    return replace(
+                        selection_inputs,
+                        accounts=[],
+                        latest_primary={},
+                        latest_secondary={},
+                        error_message=error_message,
+                        error_code=error_code,
+                    )
             return selection_inputs
 
         selection_inputs = await load_selection_inputs()
@@ -489,10 +534,22 @@ class LoadBalancer:
         circuit_breaker_open = _is_upstream_circuit_breaker_open()
         if circuit_breaker_open:
             set_degraded("upstream circuit breaker is open")
-        elif selection_inputs.accounts:
+        elif (
+            not owner_restricted_selection
+            and not sticky_selection_may_resolve_owner
+            and (selection_inputs.accounts or selection_inputs.error_code is not None)
+        ):
             set_normal()
-        elif selection_inputs.error_code is not None:
-            set_normal()
+
+        if selection_inputs.error_code in {
+            CONTINUITY_OWNER_UNAVAILABLE,
+            CONTINUITY_OWNER_POLICY_CONFLICT,
+        }:
+            return AccountSelection(
+                account=None,
+                error_message=selection_inputs.error_message,
+                error_code=selection_inputs.error_code,
+            )
 
         selected_snapshot: Account | None = None
         error_message: str | None = None
@@ -628,16 +685,38 @@ class LoadBalancer:
             )
 
         if selected_snapshot is None:
-            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
+            owner_restricted_selection = owner_restricted_selection or selection_error_code == "hard_affinity_saturated"
+            opportunistic_policy_blocked = (
+                traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
+                and error_message is not None
+                and error_message.startswith("opportunistic burn window closed")
+            )
+            if opportunistic_policy_blocked:
                 return AccountSelection(
                     account=None,
                     error_message=error_message,
                     error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
                 )
-            if error_message == "No available accounts":
+            if required_continuity_owner and selection_error_code in (None, "hard_affinity_saturated"):
+                selection_error_code = CONTINUITY_OWNER_UNAVAILABLE
+            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and not required_continuity_owner:
+                return AccountSelection(
+                    account=None,
+                    error_message=error_message,
+                    error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+                )
+            if error_message == "No available accounts" and not owner_restricted_selection:
                 set_degraded("all upstream accounts are unavailable")
                 error_message = _format_degraded_error_message(error_message)
+            elif (
+                not owner_restricted_selection
+                and not circuit_breaker_open
+                and (selection_inputs.accounts or selection_inputs.error_code is not None)
+            ):
+                set_normal()
             return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+        if not circuit_breaker_open:
+            set_normal()
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
             selected_snapshot.id,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from hashlib import sha256
 
 from sqlalchemy import Row, and_, case, delete, or_, select, text, update
@@ -14,6 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
 from app.db.session import sqlite_writer_section
+from app.modules.proxy.continuity import (
+    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
+    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
+    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS,
+    is_http_bridge_account_neutral_replay,
+)
 
 _ANONYMOUS_API_KEY_SCOPE = "__anonymous__"
 REQUIRED_DURABLE_BRIDGE_TABLES = (
@@ -22,6 +29,29 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
 )
 _PURGE_CLOSED_BATCH_SIZE = 500
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+
+
+class DurableBridgeAliasRegistration(StrEnum):
+    REGISTERED = "registered"
+    OWNER_FENCED = "owner_fenced"
+    ALIAS_PROTECTED = "alias_protected"
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeAliasRegistrationReceipt:
+    """Rollback data for a continuity alias published before dispatch."""
+
+    status: DurableBridgeAliasRegistration
+    session_id: str
+    api_key_scope: str
+    alias_kind: str
+    alias_value: str
+    instance_id: str
+    owner_epoch: int
+    previous_alias_session_id: str | None
+    previous_alias_owner_epoch: int | None
+    previous_alias_account_id: str | None
+    previous_latest_turn_state: str | None
 
 
 def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
@@ -429,22 +459,57 @@ class DurableBridgeRepository:
                 )
             startup_purge_filter = or_(*purge_predicates)
             result = await self._session.execute(
-                select(HttpBridgeSessionRecord.id)
+                select(
+                    HttpBridgeSessionRecord.id,
+                    HttpBridgeSessionRecord.session_key_kind,
+                    HttpBridgeSessionRecord.session_key_value,
+                    HttpBridgeSessionRecord.owner_instance_id,
+                    HttpBridgeSessionRecord.last_seen_at,
+                )
                 .where(startup_purge_filter)
                 .order_by(HttpBridgeSessionRecord.last_seen_at.asc())
                 .limit(batch_size)
             )
-            session_ids = list(result.scalars().all())
+            candidates = list(result.all())
+            session_ids = [candidate.id for candidate in candidates]
             if not session_ids:
                 return deleted_count
-            async with sqlite_writer_section():
-                deleted = await self._session.execute(
-                    delete(HttpBridgeSessionRecord)
-                    .where(HttpBridgeSessionRecord.id.in_(session_ids))
-                    .where(startup_purge_filter)
-                    .returning(HttpBridgeSessionRecord.id)
+            retained_recovery_ids = {
+                candidate.id
+                for candidate in candidates
+                if candidate.owner_instance_id == instance_id
+                and (ownerless_cutoff is None or to_utc_naive(candidate.last_seen_at) >= to_utc_naive(ownerless_cutoff))
+                and is_http_bridge_account_neutral_replay(
+                    kind=candidate.session_key_kind,
+                    key=candidate.session_key_value,
                 )
-                deleted_ids = list(deleted.scalars().all())
+            }
+            async with sqlite_writer_section():
+                if retained_recovery_ids:
+                    await self._session.execute(
+                        update(HttpBridgeSessionRecord)
+                        .where(
+                            HttpBridgeSessionRecord.id.in_(retained_recovery_ids),
+                            HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                        )
+                        .values(
+                            owner_instance_id=None,
+                            lease_expires_at=now,
+                            state=HttpBridgeSessionState.DRAINING,
+                            closed_at=None,
+                        )
+                    )
+                deletable_ids = [session_id for session_id in session_ids if session_id not in retained_recovery_ids]
+                if deletable_ids:
+                    deleted = await self._session.execute(
+                        delete(HttpBridgeSessionRecord)
+                        .where(HttpBridgeSessionRecord.id.in_(deletable_ids))
+                        .where(startup_purge_filter)
+                        .returning(HttpBridgeSessionRecord.id)
+                    )
+                    deleted_ids = list(deleted.scalars().all())
+                else:
+                    deleted_ids = []
                 if deleted_ids:
                     await self._session.execute(
                         delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(deleted_ids))
@@ -563,7 +628,7 @@ class DurableBridgeRepository:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
-    ) -> bool:
+    ) -> DurableBridgeAliasRegistration:
         """Register continuity only while the caller still owns the durable row."""
 
         async with sqlite_writer_section():
@@ -591,17 +656,265 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
                 )
                 .values(**session_values)
-                .returning(HttpBridgeSessionRecord.id)
+                .returning(
+                    HttpBridgeSessionRecord.id,
+                    HttpBridgeSessionRecord.session_key_kind,
+                    HttpBridgeSessionRecord.session_key_value,
+                )
             )
-            if fenced_update.scalar_one_or_none() is None:
-                return False
+            target = fenced_update.one_or_none()
+            if target is None:
+                return DurableBridgeAliasRegistration.OWNER_FENCED
 
-            await self._execute_alias_upsert(
+            registered = await self._execute_alias_upsert(
                 session_id=session_id,
                 alias_kind=alias_kind,
                 alias_value=alias_value,
                 api_key_scope=api_key_scope,
+                target_account_neutral_replay=is_http_bridge_account_neutral_replay(
+                    kind=target.session_key_kind,
+                    key=target.session_key_value,
+                ),
             )
+            if not registered:
+                await self._session.rollback()
+                return DurableBridgeAliasRegistration.ALIAS_PROTECTED
+            await self._session.commit()
+        return DurableBridgeAliasRegistration.REGISTERED
+
+    async def register_reversible_turn_state_alias(
+        self,
+        *,
+        session_id: str,
+        api_key_scope: str,
+        instance_id: str,
+        owner_epoch: int,
+        turn_state: str,
+        lease_ttl_seconds: float,
+    ) -> DurableBridgeAliasRegistrationReceipt:
+        """Publish a pre-dispatch turn alias with enough state for exact rollback."""
+
+        alias_kind = "turn_state"
+        async with sqlite_writer_section():
+            now = utcnow()
+            # The first UPDATE both fences ownership and acquires the target-row
+            # lock (and SQLite's writer lock) before prior alias state is read.
+            fenced_lock = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .values(
+                    lease_expires_at=now + timedelta(seconds=max(1.0, lease_ttl_seconds)),
+                    last_seen_at=now,
+                )
+                .returning(
+                    HttpBridgeSessionRecord.id,
+                    HttpBridgeSessionRecord.session_key_kind,
+                    HttpBridgeSessionRecord.session_key_value,
+                    HttpBridgeSessionRecord.latest_turn_state,
+                )
+            )
+            target = fenced_lock.one_or_none()
+            if target is None:
+                await self._session.rollback()
+                return DurableBridgeAliasRegistrationReceipt(
+                    status=DurableBridgeAliasRegistration.OWNER_FENCED,
+                    session_id=session_id,
+                    api_key_scope=api_key_scope,
+                    alias_kind=alias_kind,
+                    alias_value=turn_state,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    previous_alias_session_id=None,
+                    previous_alias_owner_epoch=None,
+                    previous_alias_account_id=None,
+                    previous_latest_turn_state=None,
+                )
+
+            previous_latest_turn_state = target.latest_turn_state
+            previous_alias_session_id = await self._session.scalar(
+                select(HttpBridgeSessionAlias.session_id)
+                .where(
+                    HttpBridgeSessionAlias.alias_kind == alias_kind,
+                    HttpBridgeSessionAlias.alias_hash == durable_bridge_hash(turn_state),
+                    HttpBridgeSessionAlias.alias_value == turn_state,
+                    HttpBridgeSessionAlias.api_key_scope == api_key_scope,
+                )
+                .with_for_update()
+            )
+            previous_alias_owner_epoch = None
+            previous_alias_account_id = None
+            if previous_alias_session_id is not None:
+                previous_alias_owner = (
+                    await self._session.execute(
+                        select(
+                            HttpBridgeSessionRecord.owner_epoch,
+                            HttpBridgeSessionRecord.account_id,
+                        ).where(HttpBridgeSessionRecord.id == previous_alias_session_id)
+                    )
+                ).one_or_none()
+                if previous_alias_owner is not None:
+                    previous_alias_owner_epoch = previous_alias_owner.owner_epoch
+                    previous_alias_account_id = previous_alias_owner.account_id
+            await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(HttpBridgeSessionRecord.id == session_id)
+                .values(latest_turn_state=turn_state)
+            )
+            registered = await self._execute_alias_upsert(
+                session_id=session_id,
+                alias_kind=alias_kind,
+                alias_value=turn_state,
+                api_key_scope=api_key_scope,
+                target_account_neutral_replay=is_http_bridge_account_neutral_replay(
+                    kind=target.session_key_kind,
+                    key=target.session_key_value,
+                ),
+            )
+            if not registered:
+                await self._session.rollback()
+                return DurableBridgeAliasRegistrationReceipt(
+                    status=DurableBridgeAliasRegistration.ALIAS_PROTECTED,
+                    session_id=session_id,
+                    api_key_scope=api_key_scope,
+                    alias_kind=alias_kind,
+                    alias_value=turn_state,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    previous_alias_session_id=previous_alias_session_id,
+                    previous_alias_owner_epoch=previous_alias_owner_epoch,
+                    previous_alias_account_id=previous_alias_account_id,
+                    previous_latest_turn_state=previous_latest_turn_state,
+                )
+            await self._session.commit()
+
+        return DurableBridgeAliasRegistrationReceipt(
+            status=DurableBridgeAliasRegistration.REGISTERED,
+            session_id=session_id,
+            api_key_scope=api_key_scope,
+            alias_kind=alias_kind,
+            alias_value=turn_state,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            previous_alias_session_id=previous_alias_session_id,
+            previous_alias_owner_epoch=previous_alias_owner_epoch,
+            previous_alias_account_id=previous_alias_account_id,
+            previous_latest_turn_state=previous_latest_turn_state,
+        )
+
+    async def rollback_reversible_turn_state_alias(
+        self,
+        *,
+        receipt: DurableBridgeAliasRegistrationReceipt,
+    ) -> bool:
+        """Undo a registered pre-dispatch alias while the same owner is fenced in."""
+
+        if receipt.status != DurableBridgeAliasRegistration.REGISTERED:
+            return False
+
+        async with sqlite_writer_section():
+            previous_session_valid = False
+            dialect = self._session.get_bind().dialect.name
+            if dialect == "postgresql":
+                session_ids = {receipt.session_id}
+                if receipt.previous_alias_session_id is not None:
+                    session_ids.add(receipt.previous_alias_session_id)
+                locked_records = (
+                    (
+                        await self._session.execute(
+                            select(HttpBridgeSessionRecord)
+                            .where(HttpBridgeSessionRecord.id.in_(session_ids))
+                            .order_by(HttpBridgeSessionRecord.id)
+                            .with_for_update()
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                records_by_id = {record.id: record for record in locked_records}
+                target_record = records_by_id.get(receipt.session_id)
+                if (
+                    target_record is None
+                    or target_record.api_key_scope != receipt.api_key_scope
+                    or target_record.owner_instance_id != receipt.instance_id
+                    or target_record.owner_epoch != receipt.owner_epoch
+                ):
+                    await self._session.rollback()
+                    return False
+                previous_record = (
+                    records_by_id.get(receipt.previous_alias_session_id)
+                    if receipt.previous_alias_session_id is not None
+                    else None
+                )
+                previous_session_valid = previous_record is not None and (
+                    previous_record.owner_epoch == receipt.previous_alias_owner_epoch
+                    and previous_record.account_id == receipt.previous_alias_account_id
+                )
+
+            fenced_restore = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == receipt.session_id,
+                    HttpBridgeSessionRecord.api_key_scope == receipt.api_key_scope,
+                    HttpBridgeSessionRecord.owner_instance_id == receipt.instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == receipt.owner_epoch,
+                )
+                .values(
+                    latest_turn_state=case(
+                        (
+                            HttpBridgeSessionRecord.latest_turn_state == receipt.alias_value,
+                            receipt.previous_latest_turn_state,
+                        ),
+                        else_=HttpBridgeSessionRecord.latest_turn_state,
+                    )
+                )
+                .returning(HttpBridgeSessionRecord.id)
+            )
+            if fenced_restore.scalar_one_or_none() is None:
+                await self._session.rollback()
+                return False
+
+            if dialect != "postgresql" and receipt.previous_alias_session_id is not None:
+                previous_record = (
+                    await self._session.execute(
+                        select(
+                            HttpBridgeSessionRecord.owner_epoch,
+                            HttpBridgeSessionRecord.account_id,
+                        ).where(HttpBridgeSessionRecord.id == receipt.previous_alias_session_id)
+                    )
+                ).one_or_none()
+                previous_session_valid = previous_record is not None and (
+                    previous_record.owner_epoch == receipt.previous_alias_owner_epoch
+                    and previous_record.account_id == receipt.previous_alias_account_id
+                )
+
+            alias_predicate = (
+                HttpBridgeSessionAlias.session_id == receipt.session_id,
+                HttpBridgeSessionAlias.alias_kind == receipt.alias_kind,
+                HttpBridgeSessionAlias.alias_hash == durable_bridge_hash(receipt.alias_value),
+                HttpBridgeSessionAlias.alias_value == receipt.alias_value,
+                HttpBridgeSessionAlias.api_key_scope == receipt.api_key_scope,
+            )
+            current_alias_session_id = await self._session.scalar(
+                select(HttpBridgeSessionAlias.session_id).where(*alias_predicate).with_for_update()
+            )
+            if current_alias_session_id == receipt.session_id:
+                previous_session_id = receipt.previous_alias_session_id
+                if previous_session_id is None:
+                    await self._session.execute(delete(HttpBridgeSessionAlias).where(*alias_predicate))
+                elif previous_session_id != receipt.session_id:
+                    if not previous_session_valid:
+                        await self._session.execute(delete(HttpBridgeSessionAlias).where(*alias_predicate))
+                    else:
+                        await self._session.execute(
+                            update(HttpBridgeSessionAlias)
+                            .where(*alias_predicate)
+                            .values(session_id=previous_session_id, updated_at=utcnow())
+                        )
             await self._session.commit()
         return True
 
@@ -612,8 +925,10 @@ class DurableBridgeRepository:
         alias_kind: str,
         alias_value: str,
         api_key_scope: str,
-    ) -> None:
+        target_account_neutral_replay: bool | None = None,
+    ) -> bool:
         dialect = self._session.get_bind().dialect.name
+        now = utcnow()
         values = {
             "session_id": session_id,
             "alias_kind": alias_kind,
@@ -621,6 +936,42 @@ class DurableBridgeRepository:
             "alias_hash": durable_bridge_hash(alias_value),
             "api_key_scope": api_key_scope,
         }
+        existing_target_is_account_neutral_replay = HttpBridgeSessionAlias.session_id.in_(
+            select(HttpBridgeSessionRecord.id).where(
+                HttpBridgeSessionRecord.session_key_kind == HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
+                HttpBridgeSessionRecord.session_key_value.like(f"{HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX}%"),
+                HttpBridgeSessionRecord.session_key_value != HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
+            )
+        )
+        existing_target_is_rebindable = HttpBridgeSessionAlias.session_id.in_(
+            select(HttpBridgeSessionRecord.id).where(
+                HttpBridgeSessionRecord.session_key_kind.in_(HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS),
+            )
+        )
+        existing_target_is_replaceable_recovery = HttpBridgeSessionAlias.session_id.in_(
+            select(HttpBridgeSessionRecord.id).where(
+                HttpBridgeSessionRecord.session_key_kind == HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
+                HttpBridgeSessionRecord.session_key_value.like(f"{HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX}%"),
+                HttpBridgeSessionRecord.session_key_value != HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
+                or_(
+                    HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                    HttpBridgeSessionRecord.lease_expires_at.is_(None),
+                    HttpBridgeSessionRecord.lease_expires_at <= now,
+                ),
+            )
+        )
+        conflict_where = None
+        if target_account_neutral_replay is True:
+            conflict_where = or_(
+                HttpBridgeSessionAlias.session_id == session_id,
+                existing_target_is_replaceable_recovery,
+                existing_target_is_rebindable,
+            )
+        elif target_account_neutral_replay is False:
+            conflict_where = or_(
+                HttpBridgeSessionAlias.session_id == session_id,
+                ~existing_target_is_account_neutral_replay,
+            )
         if dialect == "postgresql":
             statement = (
                 pg_insert(HttpBridgeSessionAlias)
@@ -634,9 +985,11 @@ class DurableBridgeRepository:
                     set_={
                         "session_id": session_id,
                         "alias_value": alias_value,
-                        "updated_at": utcnow(),
+                        "updated_at": now,
                     },
+                    where=conflict_where,
                 )
+                .returning(HttpBridgeSessionAlias.session_id)
             )
         elif dialect == "sqlite":
             statement = (
@@ -651,13 +1004,16 @@ class DurableBridgeRepository:
                     set_={
                         "session_id": session_id,
                         "alias_value": alias_value,
-                        "updated_at": utcnow(),
+                        "updated_at": now,
                     },
+                    where=conflict_where,
                 )
+                .returning(HttpBridgeSessionAlias.session_id)
             )
         else:
             raise RuntimeError(f"DurableBridgeRepository alias upsert unsupported for dialect={dialect!r}")
-        await self._session.execute(statement)
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none() is not None
 
     async def _clear_aliases_for_session(self, session_id: str) -> None:
         await self._session.execute(

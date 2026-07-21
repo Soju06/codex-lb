@@ -118,15 +118,9 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
-from app.modules.proxy._service.api_key_usage import (
-    _ApiKeyUsageMixin,
-)
-from app.modules.proxy._service.codex_control import (
-    _CodexControlMixin,
-)
-from app.modules.proxy._service.compact import (
-    _CompactMixin,
-)
+from app.modules.proxy._service.api_key_usage import _ApiKeyUsageMixin
+from app.modules.proxy._service.codex_control import _CodexControlMixin
+from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
     _service_tier_from_compact_payload as _service_tier_from_compact_payload,
 )
@@ -136,12 +130,8 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
-from app.modules.proxy._service.file_ops import (
-    _FileOpsMixin,
-)
-from app.modules.proxy._service.http_bridge import (
-    _HTTPBridgeMixin,
-)
+from app.modules.proxy._service.file_ops import _FileOpsMixin
+from app.modules.proxy._service.http_bridge import _HTTPBridgeMixin
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -320,21 +310,13 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
-from app.modules.proxy._service.observability import (
-    _hash_identifier as _hash_identifier,
-)
-from app.modules.proxy._service.observability import (
-    _hash_identifier_or_none as _hash_identifier_or_none,
-)
-from app.modules.proxy._service.observability import (
-    _interesting_header_keys as _interesting_header_keys,
-)
+from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
+from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
+from app.modules.proxy._service.observability import _interesting_header_keys as _interesting_header_keys
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )
-from app.modules.proxy._service.observability import (
-    _maybe_log_proxy_request_shape as _maybe_log_proxy_request_shape,
-)
+from app.modules.proxy._service.observability import _maybe_log_proxy_request_shape as _maybe_log_proxy_request_shape
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
@@ -344,18 +326,10 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
-from app.modules.proxy._service.observability import (
-    _summarize_input as _summarize_input,
-)
-from app.modules.proxy._service.observability import (
-    _tools_hash as _tools_hash,
-)
-from app.modules.proxy._service.observability import (
-    _truncate_identifier as _truncate_identifier,
-)
-from app.modules.proxy._service.observability import (
-    continuity_fail_closed_total as continuity_fail_closed_total,
-)
+from app.modules.proxy._service.observability import _summarize_input as _summarize_input
+from app.modules.proxy._service.observability import _tools_hash as _tools_hash
+from app.modules.proxy._service.observability import _truncate_identifier as _truncate_identifier
+from app.modules.proxy._service.observability import continuity_fail_closed_total as continuity_fail_closed_total
 from app.modules.proxy._service.observability import (
     continuity_owner_resolution_total as continuity_owner_resolution_total,
 )
@@ -1714,6 +1688,7 @@ class ProxyService(
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
+        preferred_account_is_continuity_owner: bool = False,
         require_security_work_authorized: bool = False,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
@@ -1775,8 +1750,13 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
+                required_continuity_preferred_account = (
+                    required_preferred_account and preferred_account_is_continuity_owner
+                )
                 single_account_routing_id: str | None = None
-                if _routing_strategy(settings) == "single_account" and not required_preferred_account:
+                if _routing_strategy(settings) == "single_account" and (
+                    not required_preferred_account or required_continuity_preferred_account
+                ):
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
                         return AccountSelection(
@@ -1801,8 +1781,16 @@ class ProxyService(
                 preferred_eligible = (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
-                    and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
-                    and (single_account_routing_id is None or preferred_account_id == single_account_routing_id)
+                    and (
+                        scoped_account_ids is None
+                        or preferred_account_id in scoped_account_ids
+                        or required_continuity_preferred_account
+                    )
+                    and (
+                        single_account_routing_id is None
+                        or preferred_account_id == single_account_routing_id
+                        or required_continuity_preferred_account
+                    )
                 )
                 if preferred_account_id is not None and not preferred_eligible:
                     logger.warning(
@@ -1845,8 +1833,14 @@ class ProxyService(
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
-                        account_ids=scoped_account_ids,
+                        account_ids=(
+                            {single_account_routing_id}
+                            if required_continuity_preferred_account and single_account_routing_id is not None
+                            else scoped_account_ids
+                        ),
                         required_account_id=preferred_account_id,
+                        required_account_is_ownership_constraint=required_preferred_account,
+                        required_continuity_owner=(required_continuity_preferred_account),
                         require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),

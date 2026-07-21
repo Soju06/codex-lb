@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, select, update
@@ -17,8 +21,17 @@ from app.db.models import (
     StickySession,
     StickySessionKind,
 )
+from app.modules.proxy.continuity import (
+    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
+    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
+    is_http_bridge_account_neutral_replay,
+    make_http_bridge_account_neutral_replay_key,
+)
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
+from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeAliasRegistration,
+    DurableBridgeRepository,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -119,6 +132,162 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
 
 
 @pytest.mark.asyncio
+async def test_reversible_recovery_turn_state_registration_restores_previous_owner(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    predecessor = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-recovery-predecessor",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-a",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=predecessor.session_id,
+            api_key_id=None,
+            instance_id="instance-a",
+            owner_epoch=predecessor.owner_epoch,
+            turn_state="http_turn_reversible",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+
+    recovery_kind, recovery_key = make_http_bridge_account_neutral_replay_key("reversible")
+    recovery = await coordinator.claim_live_session(
+        session_key_kind=recovery_kind,
+        session_key_value=recovery_key,
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-b",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="http_turn_recovery_previous",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    receipt = await coordinator.register_recovery_turn_state(
+        session_id=recovery.session_id,
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_epoch=recovery.owner_epoch,
+        turn_state="http_turn_reversible",
+        lease_ttl_seconds=120.0,
+    )
+
+    assert receipt.status == DurableBridgeAliasRegistration.REGISTERED
+    rebound = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_reversible",
+        api_key_id=None,
+    )
+    assert rebound is not None
+    assert rebound.session_id == recovery.session_id
+    assert rebound.latest_turn_state == "http_turn_reversible"
+
+    rolled_back = await coordinator.rollback_recovery_turn_state_registration(
+        receipt=receipt,
+    )
+
+    assert rolled_back is True
+    restored = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_reversible",
+        api_key_id=None,
+    )
+    assert restored is not None
+    assert restored.session_id == predecessor.session_id
+    recovery_after_rollback = await coordinator.lookup_sessions(session_ids=[recovery.session_id])
+    assert recovery_after_rollback[0].latest_turn_state == "http_turn_recovery_previous"
+
+
+@pytest.mark.asyncio
+async def test_reversible_recovery_rollback_does_not_restore_reclaimed_predecessor(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    predecessor = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-reclaimed-predecessor",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-a",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=predecessor.session_id,
+            api_key_id=None,
+            instance_id="instance-a",
+            owner_epoch=predecessor.owner_epoch,
+            turn_state="http_turn_reclaimed",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+    recovery_kind, recovery_key = make_http_bridge_account_neutral_replay_key("reclaimed")
+    recovery = await coordinator.claim_live_session(
+        session_key_kind=recovery_kind,
+        session_key_value=recovery_key,
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-b",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    receipt = await coordinator.register_recovery_turn_state(
+        session_id=recovery.session_id,
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_epoch=recovery.owner_epoch,
+        turn_state="http_turn_reclaimed",
+        lease_ttl_seconds=120.0,
+    )
+    assert receipt.status == DurableBridgeAliasRegistration.REGISTERED
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-reclaimed-predecessor",
+        api_key_id=None,
+        instance_id="instance-c",
+        lease_ttl_seconds=120.0,
+        account_id="acc-c",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+        force_owner_epoch_advance=True,
+    )
+    assert reclaimed.owner_epoch > predecessor.owner_epoch
+    assert reclaimed.account_id == "acc-c"
+
+    assert await coordinator.rollback_recovery_turn_state_registration(receipt=receipt) is True
+    assert (
+        await coordinator.lookup_turn_state_target(
+            turn_state="http_turn_reclaimed",
+            api_key_id=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_aliases(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
@@ -173,6 +342,682 @@ async def test_durable_bridge_lookup_rejects_conflicting_turn_and_response_alias
             turn_state="http_turn_conflicting_owner",
             session_header=None,
             previous_response_id="resp_conflicting_owner",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_next_turn_prefers_verified_replay_over_shared_session_header(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("replay-1")
+    shared_session = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-shared",
+        api_key_id="key-replay",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-retired",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=shared_session.session_id,
+        api_key_id="key-replay",
+        session_header="sid-shared",
+    )
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id="key-replay",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=replay.session_id,
+        api_key_id="key-replay",
+        instance_id="instance-b",
+        owner_epoch=replay.owner_epoch,
+        turn_state="http_turn_replay",
+        lease_ttl_seconds=120.0,
+    )
+
+    next_turn = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_replay",
+        api_key_id="key-replay",
+        turn_state="http_turn_replay",
+        session_header="sid-shared",
+        previous_response_id=None,
+    )
+    session_only = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-shared",
+        api_key_id="key-replay",
+        turn_state=None,
+        session_header="sid-shared",
+        previous_response_id=None,
+    )
+
+    assert next_turn is not None
+    assert next_turn.session_id == replay.session_id
+    assert is_http_bridge_account_neutral_replay(
+        kind=next_turn.canonical_kind,
+        key=next_turn.canonical_key,
+    )
+    assert session_only is not None
+    assert session_only.session_id == shared_session.session_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("predecessor_kind", ["prompt_cache", "session_header", "turn_state_header"])
+async def test_durable_verified_replay_alias_cannot_be_stolen_by_predecessor(
+    coordinator: DurableBridgeSessionCoordinator,
+    predecessor_kind: str,
+) -> None:
+    predecessor = await coordinator.claim_live_session(
+        session_key_kind=predecessor_kind,
+        session_key_value=f"old-{predecessor_kind}",
+        api_key_id="key-alias-fence",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-old",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=predecessor.session_id,
+            api_key_id="key-alias-fence",
+            instance_id="instance-a",
+            owner_epoch=predecessor.owner_epoch,
+            turn_state="http_turn_fenced_replay",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(f"fenced-{predecessor_kind}")
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id="key-alias-fence",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert (
+        await coordinator.register_turn_state(
+            session_id=replay.session_id,
+            api_key_id="key-alias-fence",
+            instance_id="instance-b",
+            owner_epoch=replay.owner_epoch,
+            turn_state="http_turn_fenced_replay",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=predecessor.session_id,
+            api_key_id="key-alias-fence",
+            instance_id="instance-a",
+            owner_epoch=predecessor.owner_epoch,
+            turn_state="http_turn_fenced_replay",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.ALIAS_PROTECTED
+    )
+
+    resolved = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_fenced_replay",
+        api_key_id="key-alias-fence",
+        turn_state="http_turn_fenced_replay",
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert resolved is not None
+    assert resolved.session_id == replay.session_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_recovery_lanes_publish_only_one_active_turn_owner(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    coordinators = [DurableBridgeSessionCoordinator(async_session_factory) for _ in range(2)]
+    claims = []
+    for index, coordinator in enumerate(coordinators):
+        replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(f"concurrent-{index}")
+        claims.append(
+            await coordinator.claim_live_session(
+                session_key_kind=replay_kind,
+                session_key_value=replay_key,
+                api_key_id="key-concurrent-recovery",
+                instance_id=f"instance-{index}",
+                lease_ttl_seconds=120.0,
+                account_id=f"acc-{index}",
+                model="gpt-5.4",
+                service_tier=None,
+                latest_turn_state=None,
+                latest_response_id=None,
+                allow_takeover=True,
+            )
+        )
+
+    async def register(index: int) -> DurableBridgeAliasRegistration:
+        claim = claims[index]
+        return await coordinators[index].register_turn_state(
+            session_id=claim.session_id,
+            api_key_id="key-concurrent-recovery",
+            instance_id=f"instance-{index}",
+            owner_epoch=claim.owner_epoch,
+            turn_state="http_turn_concurrent_recovery",
+            lease_ttl_seconds=120.0,
+        )
+
+    results = await asyncio.gather(register(0), register(1))
+
+    assert results.count(DurableBridgeAliasRegistration.REGISTERED) == 1
+    assert results.count(DurableBridgeAliasRegistration.ALIAS_PROTECTED) == 1
+    winner_index = results.index(DurableBridgeAliasRegistration.REGISTERED)
+    resolved = await coordinators[0].lookup_turn_state_target(
+        turn_state="http_turn_concurrent_recovery",
+        api_key_id="key-concurrent-recovery",
+    )
+    assert resolved is not None
+    assert resolved.session_id == claims[winner_index].session_id
+
+
+@pytest.mark.asyncio
+async def test_recovery_lane_replaces_alias_with_nonnull_owner_and_null_lease(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    old_kind, old_key = make_http_bridge_account_neutral_replay_key("null-lease-old")
+    old_recovery = await coordinator.claim_live_session(
+        session_key_kind=old_kind,
+        session_key_value=old_key,
+        api_key_id="key-null-lease",
+        instance_id="instance-old",
+        lease_ttl_seconds=120.0,
+        account_id="acc-old",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=old_recovery.session_id,
+            api_key_id="key-null-lease",
+            instance_id="instance-old",
+            owner_epoch=old_recovery.owner_epoch,
+            turn_state="http_turn_null_lease",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == old_recovery.session_id)
+            .values(lease_expires_at=None)
+        )
+        await session.commit()
+
+    new_kind, new_key = make_http_bridge_account_neutral_replay_key("null-lease-new")
+    new_recovery = await coordinator.claim_live_session(
+        session_key_kind=new_kind,
+        session_key_value=new_key,
+        api_key_id="key-null-lease",
+        instance_id="instance-new",
+        lease_ttl_seconds=120.0,
+        account_id="acc-new",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    result = await coordinator.register_turn_state(
+        session_id=new_recovery.session_id,
+        api_key_id="key-null-lease",
+        instance_id="instance-new",
+        owner_epoch=new_recovery.owner_epoch,
+        turn_state="http_turn_null_lease",
+        lease_ttl_seconds=120.0,
+    )
+
+    assert result == DurableBridgeAliasRegistration.REGISTERED
+    resolved = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_null_lease",
+        api_key_id="key-null-lease",
+    )
+    assert resolved is not None
+    assert resolved.session_id == new_recovery.session_id
+
+
+@pytest.mark.asyncio
+async def test_durable_bare_replay_prefix_does_not_receive_alias_protection(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    malformed = await coordinator.claim_live_session(
+        session_key_kind=HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
+        session_key_value=HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
+        api_key_id=None,
+        instance_id="instance-malformed",
+        lease_ttl_seconds=120.0,
+        account_id="acc-malformed",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=malformed.session_id,
+            api_key_id=None,
+            instance_id="instance-malformed",
+            owner_epoch=malformed.owner_epoch,
+            turn_state="http_turn_bare_replay_prefix",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+    ordinary = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-valid-ordinary",
+        api_key_id=None,
+        instance_id="instance-ordinary",
+        lease_ttl_seconds=120.0,
+        account_id="acc-ordinary",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert (
+        await coordinator.register_turn_state(
+            session_id=ordinary.session_id,
+            api_key_id=None,
+            instance_id="instance-ordinary",
+            owner_epoch=ordinary.owner_epoch,
+            turn_state="http_turn_bare_replay_prefix",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+
+    resolved = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_bare_replay_prefix",
+        api_key_id=None,
+    )
+    assert resolved is not None
+    assert resolved.session_id == ordinary.session_id
+
+
+@pytest.mark.asyncio
+async def test_durable_verified_replay_alias_does_not_replace_unrelated_internal_lane(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    internal = await coordinator.claim_live_session(
+        session_key_kind="internal_request_parallel",
+        session_key_value="unrelated-internal-lane",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-internal",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    assert (
+        await coordinator.register_turn_state(
+            session_id=internal.session_id,
+            api_key_id=None,
+            instance_id="instance-a",
+            owner_epoch=internal.owner_epoch,
+            turn_state="http_turn_internal_conflict",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.REGISTERED
+    )
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("internal-conflict")
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert (
+        await coordinator.register_turn_state(
+            session_id=replay.session_id,
+            api_key_id=None,
+            instance_id="instance-b",
+            owner_epoch=replay.owner_epoch,
+            turn_state="http_turn_internal_conflict",
+            lease_ttl_seconds=120.0,
+        )
+        == DurableBridgeAliasRegistration.ALIAS_PROTECTED
+    )
+
+    resolved = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_internal_conflict",
+        api_key_id=None,
+        turn_state="http_turn_internal_conflict",
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert resolved is not None
+    assert resolved.session_id == internal.session_id
+
+
+@pytest.mark.asyncio
+async def test_durable_replay_alias_policy_is_scoped_to_conflicting_row(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    decoy = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-unrelated-rebindable",
+        api_key_id="key-row-scope",
+        instance_id="instance-decoy",
+        lease_ttl_seconds=120.0,
+        account_id="acc-decoy",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=decoy.session_id,
+        api_key_id="key-row-scope",
+        instance_id="instance-decoy",
+        owner_epoch=decoy.owner_epoch,
+        turn_state="http_turn_unrelated_rebindable",
+        lease_ttl_seconds=120.0,
+    )
+    protected = await coordinator.claim_live_session(
+        session_key_kind="internal_request_parallel",
+        session_key_value="protected-internal-lane",
+        api_key_id="key-row-scope",
+        instance_id="instance-protected",
+        lease_ttl_seconds=120.0,
+        account_id="acc-protected",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=protected.session_id,
+        api_key_id="key-row-scope",
+        instance_id="instance-protected",
+        owner_epoch=protected.owner_epoch,
+        turn_state="http_turn_cross_row_protected",
+        lease_ttl_seconds=120.0,
+    )
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("cross-row-protected")
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id="key-row-scope",
+        instance_id="instance-replay",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    result = await coordinator.register_turn_state(
+        session_id=replay.session_id,
+        api_key_id="key-row-scope",
+        instance_id="instance-replay",
+        owner_epoch=replay.owner_epoch,
+        turn_state="http_turn_cross_row_protected",
+        lease_ttl_seconds=120.0,
+    )
+
+    assert result == DurableBridgeAliasRegistration.ALIAS_PROTECTED
+    resolved = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_cross_row_protected",
+        api_key_id="key-row-scope",
+    )
+    assert resolved is not None
+    assert resolved.session_id == protected.session_id
+
+
+@pytest.mark.asyncio
+async def test_durable_ordinary_rebind_ignores_unrelated_replay_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("unrelated-replay")
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id="key-row-scope-inverse",
+        instance_id="instance-replay",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=replay.session_id,
+        api_key_id="key-row-scope-inverse",
+        instance_id="instance-replay",
+        owner_epoch=replay.owner_epoch,
+        turn_state="http_turn_unrelated_replay",
+        lease_ttl_seconds=120.0,
+    )
+    first = await coordinator.claim_live_session(
+        session_key_kind="internal_unanchored_parallel",
+        session_key_value="first-ordinary-owner",
+        api_key_id="key-row-scope-inverse",
+        instance_id="instance-first",
+        lease_ttl_seconds=120.0,
+        account_id="acc-first",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=first.session_id,
+        api_key_id="key-row-scope-inverse",
+        instance_id="instance-first",
+        owner_epoch=first.owner_epoch,
+        turn_state="http_turn_ordinary_rebind",
+        lease_ttl_seconds=120.0,
+    )
+    second = await coordinator.claim_live_session(
+        session_key_kind="internal_unanchored_parallel",
+        session_key_value="second-ordinary-owner",
+        api_key_id="key-row-scope-inverse",
+        instance_id="instance-second",
+        lease_ttl_seconds=120.0,
+        account_id="acc-second",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    result = await coordinator.register_turn_state(
+        session_id=second.session_id,
+        api_key_id="key-row-scope-inverse",
+        instance_id="instance-second",
+        owner_epoch=second.owner_epoch,
+        turn_state="http_turn_ordinary_rebind",
+        lease_ttl_seconds=120.0,
+    )
+
+    assert result == DurableBridgeAliasRegistration.REGISTERED
+    resolved = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_ordinary_rebind",
+        api_key_id="key-row-scope-inverse",
+    )
+    assert resolved is not None
+    assert resolved.session_id == second.session_id
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_ordinary_unanchored_key_does_not_override_shared_session_header(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    shared_session = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-shared-ordinary",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=shared_session.session_id,
+        api_key_id=None,
+        session_header="sid-shared-ordinary",
+    )
+    ordinary = await coordinator.claim_live_session(
+        session_key_kind="internal_unanchored_parallel",
+        session_key_value="a" * 64,
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-ordinary",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=ordinary.session_id,
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_epoch=ordinary.owner_epoch,
+        turn_state="http_turn_ordinary",
+        lease_ttl_seconds=120.0,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await coordinator.lookup_request_targets(
+            session_key_kind="turn_state_header",
+            session_key_value="http_turn_ordinary",
+            api_key_id=None,
+            turn_state="http_turn_ordinary",
+            session_header="sid-shared-ordinary",
+            previous_response_id=None,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_verified_replay_does_not_hide_specific_alias_conflict(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("replay-conflict")
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    response_owner = await coordinator.claim_live_session(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_response_owner",
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-response",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=replay.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=replay.owner_epoch,
+        turn_state="http_turn_replay_conflict",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=response_owner.session_id,
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_epoch=response_owner.owner_epoch,
+        response_id="resp_other_owner",
+        lease_ttl_seconds=120.0,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="request-conflict",
+            api_key_id=None,
+            turn_state="http_turn_replay_conflict",
+            session_header=None,
+            previous_response_id="resp_other_owner",
         )
 
     assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
@@ -294,8 +1139,8 @@ async def test_durable_bridge_stale_owner_cannot_register_turn_state_after_epoch
         lease_ttl_seconds=120.0,
     )
 
-    assert stale_registered is False
-    assert current_registered is True
+    assert stale_registered == DurableBridgeAliasRegistration.OWNER_FENCED
+    assert current_registered == DurableBridgeAliasRegistration.REGISTERED
     assert await coordinator.lookup_turn_state_target(turn_state="http_turn_stale_owner", api_key_id=None) is None
     assert await coordinator.lookup_turn_state_target(turn_state="http_turn_current_owner", api_key_id=None) is not None
 
@@ -1026,6 +1871,176 @@ async def test_startup_purges_owned_bridge_rows(
             ("parent-cache", StickySessionKind.PROMPT_CACHE),
         )
         assert sticky is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_retains_verified_replay_alias_as_ownerless_restart_proof(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    shared = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-shared-restart",
+        api_key_id=None,
+        instance_id="instance-shared",
+        lease_ttl_seconds=120.0,
+        account_id="acc-retired",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=shared.session_id,
+        api_key_id=None,
+        session_header="sid-shared-restart",
+    )
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("restart-proof")
+    replay = await coordinator.claim_live_session(
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        api_key_id=None,
+        instance_id="instance-restarting",
+        lease_ttl_seconds=120.0,
+        account_id="acc-recovered",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp-recovered",
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=replay.session_id,
+        api_key_id=None,
+        instance_id="instance-restarting",
+        owner_epoch=replay.owner_epoch,
+        turn_state="http_turn_recovered",
+        lease_ttl_seconds=120.0,
+    )
+    retained_time = utcnow() - timedelta(seconds=30)
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == replay.session_id)
+            .values(last_seen_at=retained_time)
+        )
+        await session.commit()
+
+    stale_kind, stale_key = make_http_bridge_account_neutral_replay_key("stale-restart-proof")
+    stale_replay = await coordinator.claim_live_session(
+        session_key_kind=stale_kind,
+        session_key_value=stale_key,
+        api_key_id=None,
+        instance_id="instance-restarting",
+        lease_ttl_seconds=120.0,
+        account_id="acc-stale-recovered",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    stale_time = utcnow() - timedelta(minutes=5)
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == stale_replay.session_id)
+            .values(last_seen_at=stale_time, lease_expires_at=stale_time)
+        )
+        await session.commit()
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="instance-restarting",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
+
+    assert deleted == 1
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind=stale_kind,
+            session_key_value=stale_key,
+            api_key_id=None,
+            turn_state=None,
+            session_header=None,
+            previous_response_id=None,
+        )
+        is None
+    )
+    after_restart = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_recovered",
+        api_key_id=None,
+        turn_state="http_turn_recovered",
+        session_header="sid-shared-restart",
+        previous_response_id=None,
+    )
+    assert after_restart is not None
+    assert after_restart.session_id == replay.session_id
+    assert after_restart.owner_instance_id is None
+    assert after_restart.state == HttpBridgeSessionState.DRAINING
+    async with async_session_factory() as session:
+        retained_record = await session.scalar(
+            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == replay.session_id)
+        )
+    assert retained_record is not None
+    assert retained_record.last_seen_at == retained_time
+    assert retained_record.lease_expires_at is not None
+    assert retained_record.lease_expires_at <= utcnow()
+
+    stale_time = utcnow() - timedelta(minutes=5)
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == replay.session_id)
+            .values(last_seen_at=stale_time, lease_expires_at=stale_time)
+        )
+        await session.commit()
+
+    stale_deleted = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="instance-other",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
+
+    assert stale_deleted == 1
+    after_retention = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_recovered",
+        api_key_id=None,
+        turn_state="http_turn_recovered",
+        session_header="sid-shared-restart",
+        previous_response_id=None,
+    )
+    assert after_retention is not None
+    assert after_retention.session_id == shared.session_id
+
+
+@pytest.mark.asyncio
+async def test_startup_retention_normalizes_aware_postgres_timestamps() -> None:
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("aware-startup-proof")
+    candidate = SimpleNamespace(
+        id="durable-aware-startup-proof",
+        session_key_kind=replay_kind,
+        session_key_value=replay_key,
+        owner_instance_id="instance-a",
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    selected = SimpleNamespace(all=lambda: [candidate])
+    exhausted = SimpleNamespace(all=lambda: [])
+    session = SimpleNamespace(
+        execute=AsyncMock(side_effect=[selected, SimpleNamespace(), exhausted]),
+        commit=AsyncMock(),
+    )
+    repository = DurableBridgeRepository(cast(AsyncSession, session))
+
+    deleted = await repository.purge_owned_sessions_on_startup(
+        instance_id="instance-a",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
+
+    assert deleted == 0
+    assert session.execute.await_count == 3
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

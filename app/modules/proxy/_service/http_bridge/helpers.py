@@ -166,8 +166,16 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
+from app.modules.proxy.continuity import (
+    is_http_bridge_account_neutral_replay,
+    make_http_bridge_account_neutral_replay_key,
+)
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
+)
+from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeAliasRegistration,
+    DurableBridgeAliasRegistrationReceipt,
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -658,6 +666,8 @@ async def _close_http_bridge_session_bounded(
     *,
     reason: str,
 ) -> None:
+    if session.upstream_reader is asyncio.current_task():
+        session.upstream_reader = None
     close_task = asyncio.create_task(
         service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
@@ -780,11 +790,20 @@ def _http_bridge_incompatible_model_fork_key(
         return None
     if key.affinity_kind == "internal_model_parallel":
         return None
+    recovery_fork = is_http_bridge_account_neutral_replay(
+        kind=key.affinity_kind,
+        key=key.affinity_key,
+    )
+    fork_value = sha256(
+        f"{key.affinity_kind}\0{key.affinity_key}\0{request_model or ''}\0{request_scope_id}".encode()
+    ).hexdigest()
+    if recovery_fork:
+        fork_kind, fork_value = make_http_bridge_account_neutral_replay_key(fork_value)
+    else:
+        fork_kind = "internal_model_parallel"
     fork_key = _HTTPBridgeSessionKey(
-        "internal_model_parallel",
-        sha256(
-            f"{key.affinity_kind}\0{key.affinity_key}\0{request_model or ''}\0{request_scope_id}".encode()
-        ).hexdigest(),
+        fork_kind,
+        fork_value,
         key.api_key_id,
     )
     _log_http_bridge_event(
@@ -999,16 +1018,19 @@ def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -
     return (turn_state, api_key_id)
 
 
-def _http_bridge_turn_state_alias_has_live_owner(
+def _http_bridge_live_turn_state_alias_owner(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
     turn_state: str,
-) -> bool:
+) -> _HTTPBridgeSession | None:
     alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
     existing_key = service._http_bridge_turn_state_index.get(alias_key)
     if existing_key is None or existing_key == session.key:
-        return False
-    return not _http_bridge_alias_target_is_stale(service._http_bridge_sessions.get(existing_key))
+        return None
+    existing_session = service._http_bridge_sessions.get(existing_key)
+    if _http_bridge_alias_target_is_stale(existing_session):
+        return None
+    return existing_session
 
 
 def _register_http_bridge_turn_state_aliases_locked(
@@ -1016,13 +1038,32 @@ def _register_http_bridge_turn_state_aliases_locked(
     session: _HTTPBridgeSession,
 ) -> None:
     for alias in session.downstream_turn_state_aliases:
-        service._http_bridge_turn_state_index[_http_bridge_turn_state_alias_key(alias, session.key.api_key_id)] = (
-            session.key
-        )
+        alias_key = _http_bridge_turn_state_alias_key(alias, session.key.api_key_id)
+        existing_key = service._http_bridge_turn_state_index.get(alias_key)
+        if existing_key is not None and existing_key != session.key:
+            existing_session = service._http_bridge_sessions.get(existing_key)
+            if not _http_bridge_alias_target_is_stale(existing_session):
+                continue
+        service._http_bridge_turn_state_index[alias_key] = session.key
 
 
 def _http_bridge_previous_response_alias_key(response_id: str, api_key_id: str | None) -> tuple[str, str | None]:
     return (response_id.strip(), api_key_id)
+
+
+def _http_bridge_live_previous_response_alias_owner(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    response_id: str,
+) -> _HTTPBridgeSession | None:
+    alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+    existing_key = service._http_bridge_previous_response_index.get(alias_key)
+    if existing_key is None or existing_key == session.key:
+        return None
+    existing_session = service._http_bridge_sessions.get(existing_key)
+    if _http_bridge_alias_target_is_stale(existing_session):
+        return None
+    return existing_session
 
 
 def _http_bridge_session_allows_api_key(session: "_HTTPBridgeSession", api_key: ApiKeyData | None) -> bool:
@@ -1432,46 +1473,70 @@ async def _persist_http_bridge_turn_state_alias(
     registration_generation: int,
     instance_id: str,
     lease_ttl_seconds: float,
-) -> None:
+    local_alias_was_published: bool = True,
+    reversible: bool = False,
+) -> tuple[DurableBridgeAliasRegistration | None, DurableBridgeAliasRegistrationReceipt | None]:
     owner_epoch = session.durable_owner_epoch
     try:
-        registered = await service._durable_bridge.register_turn_state(
-            session_id=session.durable_session_id,
-            api_key_id=session.key.api_key_id,
-            instance_id=instance_id,
-            owner_epoch=owner_epoch,
-            turn_state=turn_state,
-            lease_ttl_seconds=lease_ttl_seconds,
-        )
+        receipt = None
+        if reversible:
+            receipt = await service._durable_bridge.register_recovery_turn_state(
+                session_id=session.durable_session_id,
+                api_key_id=session.key.api_key_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                turn_state=turn_state,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
+            registered = receipt.status
+        else:
+            registered = await service._durable_bridge.register_turn_state(
+                session_id=session.durable_session_id,
+                api_key_id=session.key.api_key_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                turn_state=turn_state,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
     except Exception:
         logger.warning("Failed to persist durable HTTP bridge turn-state alias", exc_info=True)
-        return
-    if registered is not False:
-        return
+        if not local_alias_was_published:
+            async with service._http_bridge_lock:
+                if session.turn_state_alias_registration_generations.get(turn_state) == registration_generation:
+                    session.turn_state_alias_registration_generations.pop(turn_state, None)
+        return None, None
+    if registered == DurableBridgeAliasRegistration.REGISTERED:
+        return registered, receipt
 
     fenced_out_session: _HTTPBridgeSession | None = None
     async with service._http_bridge_lock:
         if session.turn_state_alias_registration_generations.get(turn_state) != registration_generation:
-            return
+            return None, receipt
         session.turn_state_alias_registration_generations.pop(turn_state, None)
-        session.downstream_turn_state_aliases.discard(turn_state)
-        if session.downstream_turn_state == turn_state:
-            session.downstream_turn_state = None
-        alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
-        current_session = service._http_bridge_sessions.get(session.key)
-        current_generation_owns_alias = (
-            current_session is not None
-            and current_session is not session
-            and turn_state in current_session.downstream_turn_state_aliases
-        )
-        if not current_generation_owns_alias and service._http_bridge_turn_state_index.get(alias_key) == session.key:
-            service._http_bridge_turn_state_index.pop(alias_key, None)
-        fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
-            service,
-            session,
-            owner_epoch_at_write=owner_epoch,
-        )
+        if local_alias_was_published:
+            session.downstream_turn_state_aliases.discard(turn_state)
+            if session.downstream_turn_state == turn_state:
+                session.downstream_turn_state = None
+            alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+            current_session = service._http_bridge_sessions.get(session.key)
+            current_generation_owns_alias = (
+                current_session is not None
+                and current_session is not session
+                and turn_state in current_session.downstream_turn_state_aliases
+            )
+            if (
+                not current_generation_owns_alias
+                and service._http_bridge_turn_state_index.get(alias_key) == session.key
+            ):
+                service._http_bridge_turn_state_index.pop(alias_key, None)
+        if registered == DurableBridgeAliasRegistration.OWNER_FENCED:
+            fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
+                service,
+                session,
+                owner_epoch_at_write=owner_epoch,
+            )
     _schedule_fenced_out_http_bridge_session_close(service, fenced_out_session, detail="turn_state_alias_fenced_out")
+    return registered, receipt
 
 
 async def _persist_http_bridge_previous_response_alias(
@@ -1484,7 +1549,8 @@ async def _persist_http_bridge_previous_response_alias(
     input_full_fingerprint: str | None,
     instance_id: str,
     lease_ttl_seconds: float,
-) -> None:
+    local_alias_was_published: bool = True,
+) -> DurableBridgeAliasRegistration | None:
     owner_epoch = session.durable_owner_epoch
     try:
         registered = await service._durable_bridge.register_previous_response_id(
@@ -1499,36 +1565,43 @@ async def _persist_http_bridge_previous_response_alias(
         )
     except Exception:
         logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
-        return
-    if registered is not False:
-        return
+        if not local_alias_was_published:
+            async with service._http_bridge_lock:
+                if session.previous_response_alias_registration_generations.get(response_id) == registration_generation:
+                    session.previous_response_alias_registration_generations.pop(response_id, None)
+        return None
+    if registered == DurableBridgeAliasRegistration.REGISTERED:
+        return registered
 
     fenced_out_session: _HTTPBridgeSession | None = None
     async with service._http_bridge_lock:
         if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
             return
         session.previous_response_alias_registration_generations.pop(response_id, None)
-        session.previous_response_ids.discard(response_id)
-        alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
-        current_session = service._http_bridge_sessions.get(session.key)
-        current_generation_owns_alias = (
-            current_session is not None
-            and current_session is not session
-            and response_id in current_session.previous_response_ids
-        )
-        if (
-            not current_generation_owns_alias
-            and service._http_bridge_previous_response_index.get(alias_key) == session.key
-        ):
-            service._http_bridge_previous_response_index.pop(alias_key, None)
-        fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
-            service,
-            session,
-            owner_epoch_at_write=owner_epoch,
-        )
+        if local_alias_was_published:
+            session.previous_response_ids.discard(response_id)
+            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+            current_session = service._http_bridge_sessions.get(session.key)
+            current_generation_owns_alias = (
+                current_session is not None
+                and current_session is not session
+                and response_id in current_session.previous_response_ids
+            )
+            if (
+                not current_generation_owns_alias
+                and service._http_bridge_previous_response_index.get(alias_key) == session.key
+            ):
+                service._http_bridge_previous_response_index.pop(alias_key, None)
+        if registered == DurableBridgeAliasRegistration.OWNER_FENCED:
+            fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
+                service,
+                session,
+                owner_epoch_at_write=owner_epoch,
+            )
     _schedule_fenced_out_http_bridge_session_close(
         service, fenced_out_session, detail="previous_response_alias_fenced_out"
     )
+    return registered
 
 
 def _evict_fenced_out_http_bridge_session_locked(
@@ -1575,6 +1648,31 @@ def _schedule_fenced_out_http_bridge_session_close(
     service._schedule_http_bridge_session_closes([session], reason="durable_fenced_out")
 
 
+def _fail_closed_http_bridge_recovery_lease(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    detail: str,
+) -> ProxyResponseError:
+    detached = service._detach_http_bridge_session_locked(session.key, expected_session=session)
+    session.closed = True
+    service._schedule_http_bridge_session_closes([detached or session], reason="durable_recovery_unavailable")
+    _log_http_bridge_event(
+        "recovery_lease_unavailable",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=detail,
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        owner_check_applied=True,
+    )
+    return ProxyResponseError(
+        502,
+        _http_bridge_owner_lookup_unavailable_error_envelope(),
+    )
+
+
 async def _renew_durable_http_bridge_lease(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
@@ -1586,7 +1684,17 @@ async def _renew_durable_http_bridge_lease(
     instance/epoch (fenced out).
     """
 
+    account_neutral_recovery = is_http_bridge_account_neutral_replay(
+        kind=session.key.affinity_kind,
+        key=session.key.affinity_key,
+    )
     if session.durable_session_id is None or session.durable_owner_epoch is None:
+        if account_neutral_recovery:
+            raise _fail_closed_http_bridge_recovery_lease(
+                service,
+                session,
+                detail="outcome=missing_durable_identity",
+            )
         return
     current_instance = _service_get_settings().http_responses_session_bridge_instance_id
     try:
@@ -1599,10 +1707,22 @@ async def _renew_durable_http_bridge_lease(
             latest_turn_state=session.downstream_turn_state,
             latest_response_id=None,
         )
-    except Exception:
+    except Exception as exc:
+        if account_neutral_recovery:
+            raise _fail_closed_http_bridge_recovery_lease(
+                service,
+                session,
+                detail="outcome=renew_error",
+            ) from exc
         logger.warning("Failed to renew durable HTTP bridge session lease", exc_info=True)
         return
     if lookup is None:
+        if account_neutral_recovery:
+            raise _fail_closed_http_bridge_recovery_lease(
+                service,
+                session,
+                detail="outcome=durable_row_missing",
+            )
         return
     if lookup.owner_instance_id == current_instance and lookup.owner_epoch == session.durable_owner_epoch:
         return
@@ -1910,14 +2030,7 @@ def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError)
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
-    return (
-        error.get("code")
-        in {
-            "previous_response_owner_unavailable",
-            "upstream_unavailable",
-        }
-        and error.get("message") == "Previous response owner account is unavailable; retry later."
-    )
+    return error.get("code") == "previous_response_owner_unavailable"
 
 
 def _http_bridge_should_attempt_soft_affinity_reroute(

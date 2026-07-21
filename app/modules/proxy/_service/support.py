@@ -867,6 +867,7 @@ class _HTTPBridgeSession:
     request_service_tier: str | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    recovery_alias_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False

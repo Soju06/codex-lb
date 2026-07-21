@@ -1,5 +1,2 @@
-version: 1
-changes:
-  - id: purge-stale-bridge-sessions-on-startup
-    type: fix
-    status: active
+schema: spec-driven
+created: 2026-07-18

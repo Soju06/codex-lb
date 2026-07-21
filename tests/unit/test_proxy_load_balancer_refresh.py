@@ -1136,7 +1136,12 @@ async def test_select_account_uses_canonical_quota_key_for_upstream_limit_alias(
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        required_account_id=account.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+    )
 
     assert selection.account is not None
     assert selection.account.id == account.id

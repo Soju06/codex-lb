@@ -96,6 +96,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
+    _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _signal_propagated_capacity_startup_ready,
 )
@@ -135,6 +136,11 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
 )
+from app.modules.proxy.continuity import (
+    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS,
+    is_http_bridge_account_neutral_replay,
+    without_http_bridge_session_affinity_headers,
+)
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
 )
@@ -145,23 +151,48 @@ from app.modules.proxy.http_bridge_forwarding import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
-_TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
-_REQUEST_TRANSPORT_HTTP = "http"
-_UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
-_WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
-_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
-_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
-_SECURITY_WORK_RETRY_MESSAGE = (
-    "Upstream flagged this request as possible cybersecurity work. "
-    "codex-lb is retrying on an account marked as authorized for security work."
-)
-_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
-    "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
-)
-_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-_HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+
+
+def _durable_recovery_supersedes_local_session(
+    durable_lookup: DurableBridgeLookup | None,
+    session: _HTTPBridgeSession,
+) -> bool:
+    if durable_lookup is None or not is_http_bridge_account_neutral_replay(
+        kind=durable_lookup.canonical_kind,
+        key=durable_lookup.canonical_key,
+    ):
+        return False
+    if session.durable_session_id == durable_lookup.session_id:
+        return False
+    return session.key.affinity_kind in HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS or (
+        is_http_bridge_account_neutral_replay(
+            kind=session.key.affinity_kind,
+            key=session.key.affinity_key,
+        )
+    )
+
+
+def _drop_superseded_local_recovery_aliases_locked(
+    service: Any,
+    session: _HTTPBridgeSession,
+    *,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+) -> None:
+    if incoming_turn_state is not None:
+        alias_key = _http_bridge_turn_state_alias_key(incoming_turn_state, session.key.api_key_id)
+        if service._http_bridge_turn_state_index.get(alias_key) == session.key:
+            service._http_bridge_turn_state_index.pop(alias_key, None)
+            session.downstream_turn_state_aliases.discard(incoming_turn_state)
+            session.turn_state_alias_registration_generations.pop(incoming_turn_state, None)
+            if session.downstream_turn_state == incoming_turn_state:
+                session.downstream_turn_state = None
+    if previous_response_id is not None:
+        alias_key = _http_bridge_previous_response_alias_key(previous_response_id, session.key.api_key_id)
+        if service._http_bridge_previous_response_index.get(alias_key) == session.key:
+            service._http_bridge_previous_response_index.pop(alias_key, None)
+            session.previous_response_ids.discard(previous_response_id)
+            session.previous_response_alias_registration_generations.pop(previous_response_id, None)
 
 
 class _HTTPBridgeOwnerForwardingMixin:
@@ -171,6 +202,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         key: "_HTTPBridgeSessionKey",
         incoming_turn_state: str | None,
         api_key: ApiKeyData | None,
+        durable_lookup: DurableBridgeLookup | None = None,
     ) -> bool:
         api_key_id = api_key.id if api_key is not None else None
         async with self._http_bridge_lock:
@@ -184,6 +216,14 @@ class _HTTPBridgeOwnerForwardingMixin:
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
                 if session is None or session.closed or not _http_bridge_session_account_active(session):
+                    continue
+                if _durable_recovery_supersedes_local_session(durable_lookup, session):
+                    _drop_superseded_local_recovery_aliases_locked(
+                        self,
+                        session,
+                        incoming_turn_state=incoming_turn_state,
+                        previous_response_id=None,
+                    )
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
@@ -204,6 +244,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         incoming_turn_state: str | None,
         previous_response_id: str,
         api_key: ApiKeyData | None,
+        durable_lookup: DurableBridgeLookup | None = None,
     ) -> str | None:
         api_key_id = api_key.id if api_key is not None else None
         candidate_keys: list[_HTTPBridgeSessionKey] = [key]
@@ -222,6 +263,14 @@ class _HTTPBridgeOwnerForwardingMixin:
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
                 if session is None or session.closed or not _http_bridge_session_account_active(session):
+                    continue
+                if _durable_recovery_supersedes_local_session(durable_lookup, session):
+                    _drop_superseded_local_recovery_aliases_locked(
+                        self,
+                        session,
+                        incoming_turn_state=incoming_turn_state,
+                        previous_response_id=previous_response_id,
+                    )
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
@@ -298,6 +347,13 @@ class _HTTPBridgeOwnerForwardingMixin:
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(_service_get_settings())
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
+        recovery_forward = is_http_bridge_account_neutral_replay(
+            kind=owner_forward.key.affinity_kind,
+            key=owner_forward.key.affinity_key,
+        )
+        if recovery_forward:
+            headers = without_http_bridge_session_affinity_headers(headers)
+            incoming_turn_state = None
         forwarded_turn_state = incoming_turn_state or downstream_turn_state
         # file_owner_account_id is an origin-side ownership proof, not a route
         # hint. The forwarding signer binds it before another replica may skip
@@ -309,9 +365,12 @@ class _HTTPBridgeOwnerForwardingMixin:
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
             original_request_unanchored=(
-                owner_forward.key.affinity_kind in {"session_header", "internal_unanchored_parallel"}
-                and incoming_turn_state is None
-                and payload.previous_response_id is None
+                recovery_forward
+                or (
+                    owner_forward.key.affinity_kind in {"session_header", "internal_unanchored_parallel"}
+                    and incoming_turn_state is None
+                    and payload.previous_response_id is None
+                )
             ),
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,

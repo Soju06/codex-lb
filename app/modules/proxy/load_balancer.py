@@ -163,6 +163,10 @@ class AccountSelection:
 class _ModelAccountFilterResult:
     accounts: list[Account]
     general_model_account_ids: frozenset[str] | None
+    # Tier actually applied to the filter, after dropping tiers the model does
+    # not advertise. Set only when the tier narrowed the pool, so an empty
+    # result can say the tier excluded the accounts rather than the model.
+    applied_service_tier: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +360,10 @@ class LoadBalancer:
         relative_availability_top_k: int = 5,
         model: str | None = None,
         service_tier: str | None = None,
+        # True only when ``service_tier`` comes from an API key's enforced tier
+        # rather than the client's own request. See the fallback in
+        # ``_filter_accounts_for_model_with_catalog_evidence``.
+        service_tier_enforced: bool = False,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         required_account_id: str | None = None,
@@ -377,6 +385,7 @@ class LoadBalancer:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
+                service_tier_enforced=service_tier_enforced,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
@@ -801,6 +810,7 @@ class LoadBalancer:
         *,
         model: str | None,
         service_tier: str | None = None,
+        service_tier_enforced: bool = False,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
@@ -817,6 +827,9 @@ class LoadBalancer:
         cache_key = (
             model,
             service_tier,
+            # Enforced and client-requested tiers resolve different account
+            # pools for the same tier string, so they must not share an entry.
+            service_tier_enforced,
             additional_limit_name,
             additional_quota_routing_policies_cache_key,
             None if account_ids is None else tuple(sorted(set(account_ids))),
@@ -856,11 +869,13 @@ class LoadBalancer:
             accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
+            applied_service_tier: str | None = None
             if model and _mapped_model_has_registry_entry(model):
                 continuity_owner_candidates = _filter_accounts_for_model(
                     scoped_accounts,
                     model,
                     service_tier=service_tier,
+                    service_tier_enforced=service_tier_enforced,
                 )
                 canonical_quota_can_override_account_catalog = (
                     additional_limit_name is None and mapped_limit_name is not None
@@ -869,10 +884,12 @@ class LoadBalancer:
                     pre_model_filter_accounts,
                     model,
                     service_tier=service_tier,
+                    service_tier_enforced=service_tier_enforced,
                     additional_quota_can_override_account_catalog=canonical_quota_can_override_account_catalog,
                 )
                 accounts = model_filter.accounts
                 general_model_account_ids = model_filter.general_model_account_ids
+                applied_service_tier = model_filter.applied_service_tier
                 if canonical_quota_can_override_account_catalog and general_model_account_ids is not None:
                     model_catalog_omitted_account_ids = frozenset(
                         account.id for account in accounts if account.id not in general_model_account_ids
@@ -937,7 +954,11 @@ class LoadBalancer:
                     continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
-                    error_message=f"No accounts with a plan supporting model '{model}'",
+                    error_message=(
+                        f"No accounts with a plan supporting model '{model}' at service tier '{applied_service_tier}'"
+                        if applied_service_tier is not None
+                        else f"No accounts with a plan supporting model '{model}'"
+                    ),
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
                 await self._selection_inputs_cache.set(
@@ -2302,11 +2323,23 @@ def _usage_refresh_interval_seconds() -> int:
     return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
+def _model_advertises_service_tier(registry: object, model: str, service_tier: str) -> bool:
+    """Ask the registry whether ``model`` lists ``service_tier`` at all.
+
+    Registries that predate the lookup answer ``True`` so behavior is unchanged.
+    """
+    advertises = getattr(registry, "model_advertises_service_tier", None)
+    if not callable(advertises):
+        return True
+    return bool(advertises(model, service_tier))
+
+
 def _filter_accounts_for_model_with_catalog_evidence(
     accounts: list[Account],
     model: str,
     *,
     service_tier: str | None = None,
+    service_tier_enforced: bool = False,
     additional_quota_can_override_account_catalog: bool = False,
 ) -> _ModelAccountFilterResult:
     registry = get_model_registry()
@@ -2328,6 +2361,22 @@ def _filter_accounts_for_model_with_catalog_evidence(
 
     normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
     effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
+    if (
+        service_tier_enforced
+        and effective_service_tier is not None
+        and not _model_advertises_service_tier(registry, model, effective_service_tier)
+    ):
+        # An API-key-enforced tier is an account-wide operator default, not a
+        # per-request ask. When the model never advertises the tier, no account
+        # can carry it, so enforcing it here would filter every account out and
+        # report the model as unsupported even though it is routable at its
+        # default tier. Drop the tier constraint instead of the accounts.
+        #
+        # A tier the CLIENT asked for explicitly is left alone: rejecting an
+        # unadvertised tier is deliberate (see the quota-override rejection
+        # behavior added in #1248), because that caller asked for something
+        # specific and silently downgrading would hide it.
+        effective_service_tier = None
     if effective_service_tier is not None:
         allowed_account_ids = (
             registry.account_ids_for_model_service_tier(model, effective_service_tier)
@@ -2350,6 +2399,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
             return _ModelAccountFilterResult(
                 accounts=model_accounts,
                 general_model_account_ids=general_model_account_ids,
+                applied_service_tier=effective_service_tier,
             )
         allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
     else:
@@ -2361,6 +2411,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
     return _ModelAccountFilterResult(
         accounts=model_accounts,
         general_model_account_ids=general_model_account_ids,
+        applied_service_tier=effective_service_tier,
     )
 
 
@@ -2369,11 +2420,13 @@ def _filter_accounts_for_model(
     model: str,
     *,
     service_tier: str | None = None,
+    service_tier_enforced: bool = False,
 ) -> list[Account]:
     return _filter_accounts_for_model_with_catalog_evidence(
         accounts,
         model,
         service_tier=service_tier,
+        service_tier_enforced=service_tier_enforced,
     ).accounts
 
 

@@ -2,10 +2,10 @@
 
 Request logs currently capture the inbound user-agent and client IP but do not
 retain a conversation identifier. Codex exposes its conversation through the
-`thread-id` request header. OpenCode exposes it through
-`x-opencode-session`, with `x-session-id` and `x-session-affinity` as ordered
-fallbacks. Both HTTP and WebSocket request paths already carry request metadata
-to the shared request-log persistence layer.
+`thread-id` request header. OpenCode exposes its parent conversation through
+`x-parent-session-id`, with `x-opencode-session`, `x-session-id`, and
+`x-session-affinity` as ordered fallbacks. Both HTTP and WebSocket request paths
+already carry request metadata to the shared request-log persistence layer.
 
 Conversation grouping must support filtering and cost aggregation without
 changing request routing or forwarding behavior. Detection therefore remains
@@ -42,7 +42,7 @@ header continue normally and store a null conversation ID.
    user-agent metadata helper. Each rule contains a user-agent prefix and an
    ordered list of conversation headers:
 
-   - `opencode` -> `x-opencode-session`, `x-session-id`,
+   - `opencode` -> `x-parent-session-id`, `x-opencode-session`, `x-session-id`,
      `x-session-affinity`
    - `codex` -> `thread-id`
 

@@ -5,8 +5,8 @@
 The proxy request-log metadata helper MUST detect a conversation ID only for
 the first matching user-agent rule in this ordered table:
 
-- `opencode` uses `x-opencode-session`, then `x-session-id`, then
-  `x-session-affinity`.
+- `opencode` uses `x-parent-session-id`, then `x-opencode-session`, then
+  `x-session-id`, then `x-session-affinity`.
 - `codex` uses `thread-id`.
 
 User-agent prefix matching MUST ignore surrounding whitespace and case. Header
@@ -14,6 +14,8 @@ name matching MUST be case-insensitive. The helper MUST use the first configured
 header whose value is non-empty after trimming surrounding whitespace, and MUST
 preserve the remaining conversation ID exactly. Detection MUST NOT reject,
 rewrite, route, or otherwise alter the proxied request.
+If `x-parent-session-id` is blank, detection MUST fall through to the next
+configured header rather than producing a null conversation ID.
 
 #### Scenario: Codex uses thread-id
 
@@ -24,10 +26,18 @@ rewrite, route, or otherwise alter the proxied request.
 #### Scenario: OpenCode uses ordered fallback headers
 
 - **GIVEN** a request has user-agent `opencode/1.0`, an empty
-  `x-opencode-session`, `x-session-id: fallback`, and
-  `x-session-affinity: affinity`
+  `x-parent-session-id`, an empty `x-opencode-session`, `x-session-id: fallback`,
+  and `x-session-affinity: affinity`
 - **WHEN** request-log client metadata is derived
 - **THEN** the conversation ID is `fallback`
+
+#### Scenario: OpenCode parent session takes precedence
+
+- **GIVEN** a request has user-agent `opencode/1.0`,
+  `x-parent-session-id: parent`, `x-opencode-session: child`,
+  `x-session-id: fallback`, and `x-session-affinity: affinity`
+- **WHEN** request-log client metadata is derived
+- **THEN** the conversation ID is `parent`
 
 #### Scenario: Prefix and header matching ignore case
 

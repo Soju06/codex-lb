@@ -1300,6 +1300,42 @@ def test_request_log_useragent_fields_handle_missing_and_blank_headers(
             {"User-Agent": "opencode/1.0", "x-opencode-session": "primary", "x-session-id": "fallback"},
             "primary",
         ),
+        (
+            {
+                "User-Agent": "opencode/1.0",
+                "x-parent-session-id": "parent",
+                "x-opencode-session": "child",
+                "x-session-id": "fallback",
+                "x-session-affinity": "affinity",
+            },
+            "parent",
+        ),
+        (
+            {
+                "User-Agent": "opencode/1.0",
+                "X-Parent-Session-Id": " parent ",
+                "x-opencode-session": "child",
+            },
+            "parent",
+        ),
+        (
+            {
+                "User-Agent": "opencode/1.0",
+                "x-parent-session-id": "  ",
+                "x-opencode-session": "child",
+                "x-session-id": "fallback",
+            },
+            "child",
+        ),
+        (
+            {
+                "User-Agent": "opencode/1.0",
+                "x-parent-session-id": "  ",
+                "x-opencode-session": " ",
+                "x-session-id": "fallback",
+            },
+            "fallback",
+        ),
         ({"User-Agent": "opencode/1.0", "x-opencode-session": " ", "X-Session-Id": "fallback"}, "fallback"),
         ({"User-Agent": "opencode/1.0", "x-session-affinity": "affinity"}, "affinity"),
         ({"User-Agent": "other/1.0", "thread-id": "ignored"}, None),
@@ -9494,6 +9530,12 @@ def test_sticky_key_from_session_header_accepts_aliases_in_priority_order():
             }
         )
         == "sid_1"
+    )
+    assert (
+        proxy_service._sticky_key_from_session_header(
+            {"x-parent-session-id": "parent", "session_id": "route"}
+        )
+        == "route"
     )
 
 

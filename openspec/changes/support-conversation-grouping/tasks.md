@@ -25,8 +25,8 @@ React 19, TypeScript, Zod, TanStack Query, Vitest, Tailwind CSS, i18next.
   approved behavior contract.
 - Match trimmed user-agent prefixes and header names case-insensitively; trim
   only surrounding conversation-ID whitespace.
-- OpenCode header precedence is `x-opencode-session`, `x-session-id`, then
-  `x-session-affinity`; Codex uses `thread-id`.
+- OpenCode header precedence is `x-parent-session-id`, `x-opencode-session`,
+  `x-session-id`, then `x-session-affinity`; Codex uses `thread-id`.
 - Unsupported harnesses and missing/empty configured headers persist null.
 - Count distinct non-empty IDs; do not create an unknown bucket or scope an ID
   by harness.
@@ -123,8 +123,9 @@ React 19, TypeScript, Zod, TanStack Query, Vitest, Tailwind CSS, i18next.
       [
           ({"User-Agent": "codex/1.2", "thread-id": " conv-a "}, "conv-a"),
           ({"user-agent": "CODEX/1.2", "Thread-Id": "conv-b"}, "conv-b"),
+          ({"User-Agent": "opencode/1.0", "x-parent-session-id": "parent", "x-opencode-session": "child", "x-session-id": "fallback", "x-session-affinity": "affinity"}, "parent"),
           ({"User-Agent": "opencode/1.0", "x-opencode-session": "primary", "x-session-id": "fallback"}, "primary"),
-          ({"User-Agent": "opencode/1.0", "x-opencode-session": " ", "X-Session-Id": "fallback"}, "fallback"),
+          ({"User-Agent": "opencode/1.0", "x-parent-session-id": " ", "x-opencode-session": " ", "X-Session-Id": "fallback"}, "fallback"),
           ({"User-Agent": "opencode/1.0", "x-session-affinity": "affinity"}, "affinity"),
           ({"User-Agent": "other/1.0", "thread-id": "ignored"}, None),
           ({"thread-id": "ignored"}, None),
@@ -146,7 +147,7 @@ React 19, TypeScript, Zod, TanStack Query, Vitest, Tailwind CSS, i18next.
 
   ```python
   _CONVERSATION_HEADERS_BY_USERAGENT_PREFIX = (
-      ("opencode", ("x-opencode-session", "x-session-id", "x-session-affinity")),
+      ("opencode", ("x-parent-session-id", "x-opencode-session", "x-session-id", "x-session-affinity")),
       ("codex", ("thread-id",)),
   )
 

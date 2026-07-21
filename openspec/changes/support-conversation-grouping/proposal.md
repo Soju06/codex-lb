@@ -8,8 +8,9 @@ measure distinct conversations in dashboard and report statistics.
 ## What Changes
 
 - Detect Codex conversation IDs from `thread-id` and OpenCode IDs from the
-  ordered `x-opencode-session`, `x-session-id`, and `x-session-affinity`
-  headers, without changing proxy routing or forwarded headers.
+  ordered `x-parent-session-id`, `x-opencode-session`, `x-session-id`, and
+  `x-session-affinity` headers, without changing proxy routing or forwarded
+  headers.
 - Persist the detected ID as a nullable, indexed request-log field through all
   HTTP and WebSocket request-log paths.
 - Add conversation filtering and pagination-independent request-count and cost

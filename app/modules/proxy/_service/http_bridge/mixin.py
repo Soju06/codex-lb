@@ -115,6 +115,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
     _raise_http_bridge_incompatible_admission_handoff,
+    _reclaim_idle_http_bridge_stream_lease,
     _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
@@ -1864,6 +1865,11 @@ class _HTTPBridgeMixin(
         retry_same_account_once = preferred_account_id is not None
         preferred_candidate_id = preferred_account_id
         selected_account_lease: AccountLease | None = None
+        scoped_account_ids: set[str] | None = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
         while True:
             select_kwargs = {
                 "request_id": request_state.request_log_id or request_state.request_id,
@@ -1888,6 +1894,16 @@ class _HTTPBridgeMixin(
             if account is None:
                 await self._load_balancer.release_account_lease(selected_account_lease)
                 selected_account_lease = None
+                if selection.error_code == "account_stream_cap" and await _reclaim_idle_http_bridge_stream_lease(
+                    self,
+                    capacity_blocked_account_ids=selection.capacity_blocked_account_ids,
+                    preferred_account_id=preferred_candidate_id,
+                    require_preferred_account=(
+                        require_preferred_account or not fallback_on_preferred_account_unavailable
+                    ),
+                    scoped_account_ids=scoped_account_ids,
+                ):
+                    continue
                 _record_same_account_takeover(
                     preferred_account_id=preferred_account_id,
                     selected_account_id=None,

@@ -163,6 +163,7 @@ class AccountSelection:
     error_code: str | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+    capacity_blocked_account_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +488,7 @@ class LoadBalancer:
         selected_account_map: dict[str, Account] = {}
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        capacity_blocked_account_ids: frozenset[str] = frozenset()
         legacy_existing_account_id: str | None = None
         if sticky_source == "session_header" and legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
@@ -533,6 +535,7 @@ class LoadBalancer:
             attempt = 0
             while True:
                 attempt += 1
+                capacity_blocked_account_ids = frozenset()
                 async with self._runtime_lock:
                     self._reclaim_stale_account_leases_locked()
                     self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -573,6 +576,18 @@ class LoadBalancer:
                     )
                     if not selection_states and states:
                         selection_error_code = _account_cap_error_code(lease_kind)
+                        capacity_blocked_account_ids = _capacity_reclaim_candidate_ids(
+                            states,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            prefer_earlier_reset_window=prefer_earlier_reset_window,
+                            routing_strategy=routing_strategy,
+                            relative_availability_power=relative_availability_power,
+                            relative_availability_top_k=relative_availability_top_k,
+                            budget_threshold_pct=budget_threshold_pct,
+                            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                            traffic_class=traffic_class,
+                            routing_costs_by_account_id=effective_routing_costs,
+                        )
                         error_message = _account_cap_error_message(lease_kind, caps)
                         result = SelectionResult(None, error_message)
                         logger.warning(
@@ -729,6 +744,7 @@ class LoadBalancer:
             attempt = 0
             while True:
                 attempt += 1
+                capacity_blocked_account_ids = frozenset()
                 async with self._runtime_lock:
                     self._reclaim_stale_account_leases_locked()
                     self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -855,6 +871,18 @@ class LoadBalancer:
                     result = SelectionResult(None, "Hard affinity owner account is unavailable")
                 elif not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
+                    capacity_blocked_account_ids = _capacity_reclaim_candidate_ids(
+                        states,
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
+                        routing_strategy=routing_strategy,
+                        relative_availability_power=relative_availability_power,
+                        relative_availability_top_k=relative_availability_top_k,
+                        budget_threshold_pct=budget_threshold_pct,
+                        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                        traffic_class=traffic_class,
+                        routing_costs_by_account_id=effective_routing_costs,
+                    )
                     result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
                     logger.warning(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
@@ -950,6 +978,7 @@ class LoadBalancer:
                                 ):
                                     selected_snapshot = None
                                     selection_error_code = _account_cap_error_code(lease_kind)
+                                    capacity_blocked_account_ids = frozenset({selected.id})
                                     error_message = _account_cap_error_message(lease_kind, caps)
                                 else:
                                     selected_lease = self._acquire_account_lease_locked(
@@ -1029,7 +1058,12 @@ class LoadBalancer:
             if error_message == "No available accounts":
                 set_degraded("all upstream accounts are unavailable")
                 error_message = _format_degraded_error_message(error_message)
-            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+            return AccountSelection(
+                account=None,
+                error_message=error_message,
+                error_code=selection_error_code,
+                capacity_blocked_account_ids=capacity_blocked_account_ids,
+            )
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
             selected_snapshot.id,
@@ -2129,6 +2163,40 @@ def _filter_states_for_account_caps(
                 continue
         filtered.append(state)
     return filtered
+
+
+def _capacity_reclaim_candidate_ids(
+    states: Iterable[AccountState],
+    *,
+    prefer_earlier_reset: bool,
+    prefer_earlier_reset_window: ResetPreferenceWindow,
+    routing_strategy: RoutingStrategy,
+    relative_availability_power: float,
+    relative_availability_top_k: int,
+    budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float,
+    traffic_class: TrafficClass,
+    routing_costs_by_account_id: RoutingCostsByAccount | None,
+) -> frozenset[str]:
+    """Return a selector-proven account whose local lease may be reclaimed."""
+
+    probe = _select_account_preferring_budget_safe(
+        [replace(state) for state in states],
+        prefer_earlier_reset=prefer_earlier_reset,
+        prefer_earlier_reset_window=prefer_earlier_reset_window,
+        routing_strategy=routing_strategy,
+        relative_availability_power=relative_availability_power,
+        relative_availability_top_k=relative_availability_top_k,
+        deterministic_probe=True,
+        budget_threshold_pct=budget_threshold_pct,
+        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+        traffic_class=traffic_class,
+        ignore_standard_quota=False,
+        routing_costs_by_account_id=routing_costs_by_account_id,
+    )
+    if probe.account is None:
+        return frozenset()
+    return frozenset({probe.account.account_id})
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:

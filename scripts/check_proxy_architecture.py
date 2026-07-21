@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import ast
 import sys
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +69,10 @@ REQUIRED_SERVICE_FACADE_NAMES = {
     "_REQUEST_TRANSPORT_WEBSOCKET",
     "_WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS",
     "_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS",
+    "_http_error_status_from_payload",
+    "_is_account_neutral_error_code",
+    "_is_local_account_cap_code",
+    "_openai_error_envelope_from_response_failed_payload",
 }
 
 ALLOWED_SERVICE_INTERNAL_IMPORTS = {
@@ -100,8 +106,22 @@ ALLOWED_SERVICE_IMPORT_DOMAINS_BY_DOMAIN = {
 }
 
 
+ArchitectureCheck = Callable[[], None]
+
+
+def _relative_path(path: Path) -> Path:
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
 def _parse(path: Path) -> ast.Module:
-    return ast.parse(path.read_text(), filename=str(path))
+    try:
+        return ast.parse(path.read_text(), filename=str(path))
+    except SyntaxError as exc:
+        location = f" at line {exc.lineno}" if exc.lineno is not None else ""
+        raise AssertionError(f"{_relative_path(path)} could not be parsed: {exc.msg}{location}") from None
 
 
 def _line_count(path: Path) -> int:
@@ -249,7 +269,7 @@ def _imported_service_domain(imported_module: str) -> str | None:
 
 
 def _check_no_cross_domain_service_imports() -> None:
-    for path in SERVICE_PACKAGE_DIR.rglob("*.py"):
+    for path in sorted(SERVICE_PACKAGE_DIR.rglob("*.py")):
         if path.name == "__init__.py" or path == SERVICE_PACKAGE_DIR / "support.py":
             continue
         current_domain = _service_domain(path)
@@ -270,25 +290,71 @@ def _check_no_cross_domain_service_imports() -> None:
             )
 
 
-def main() -> int:
+def _parse_for_checks(path: Path) -> tuple[ast.Module | None, str | None]:
     try:
-        service_module = _parse(SERVICE_PATH)
-        load_balancer_module = _parse(LOAD_BALANCER_PATH)
-        _check_service_line_count()
-        _check_load_balancer_line_count()
-        _check_http_bridge_mixin_line_count()
-        _check_streaming_mixin_line_count()
-        _check_proxy_service_method_size(service_module)
-        _check_load_balancer_select_account_size(load_balancer_module)
-        _check_service_facade_surface(service_module)
-        _check_service_does_not_import_shims(service_module)
-        _check_required_service_packages()
-        _check_required_service_modules()
-        _assert_shim_only(PROXY_DIR / "_support.py")
-        _assert_shim_only(PROXY_DIR / "_warmup.py")
-        _check_no_cross_domain_service_imports()
+        return _parse(path), None
     except AssertionError as exc:
-        print(f"proxy architecture check failed: {exc}", file=sys.stderr)
+        return None, str(exc)
+
+
+def _raise_assertion(message: str) -> None:
+    raise AssertionError(message)
+
+
+def _architecture_checks() -> list[ArchitectureCheck]:
+    service_module, service_parse_failure = _parse_for_checks(SERVICE_PATH)
+    load_balancer_module, load_balancer_parse_failure = _parse_for_checks(LOAD_BALANCER_PATH)
+
+    checks: list[ArchitectureCheck] = [
+        _check_service_line_count,
+        _check_load_balancer_line_count,
+        _check_http_bridge_mixin_line_count,
+        _check_streaming_mixin_line_count,
+    ]
+    if service_module is None:
+        assert service_parse_failure is not None
+        checks.append(partial(_raise_assertion, service_parse_failure))
+    else:
+        checks.append(partial(_check_proxy_service_method_size, service_module))
+    if load_balancer_module is None:
+        assert load_balancer_parse_failure is not None
+        checks.append(partial(_raise_assertion, load_balancer_parse_failure))
+    else:
+        checks.append(partial(_check_load_balancer_select_account_size, load_balancer_module))
+    if service_module is not None:
+        checks.extend(
+            (
+                partial(_check_service_facade_surface, service_module),
+                partial(_check_service_does_not_import_shims, service_module),
+            )
+        )
+    checks.extend(
+        (
+            _check_required_service_packages,
+            _check_required_service_modules,
+            partial(_assert_shim_only, PROXY_DIR / "_support.py"),
+            partial(_assert_shim_only, PROXY_DIR / "_warmup.py"),
+            _check_no_cross_domain_service_imports,
+        )
+    )
+    return checks
+
+
+def _collect_failures(checks: list[ArchitectureCheck]) -> list[str]:
+    failures: list[str] = []
+    for check in checks:
+        try:
+            check()
+        except AssertionError as exc:
+            failures.append(str(exc))
+    return failures
+
+
+def main() -> int:
+    failures = _collect_failures(_architecture_checks())
+    if failures:
+        for failure in failures:
+            print(f"proxy architecture check failed: {failure}", file=sys.stderr)
         return 1
 
     print("proxy architecture checks passed")

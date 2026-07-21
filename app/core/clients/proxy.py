@@ -1708,7 +1708,8 @@ async def _open_upstream_websocket(
             transport = conn.transport
             assert transport is not None
             reader = WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
-            conn_proto.set_parser(WebSocketReader(reader, max_msg_size), reader)
+            parser = WebSocketReader(reader, max_msg_size, compress=False, decode_text=True)
+            conn_proto.set_parser(parser, reader)
             writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
         except BaseException as exc:
             if circuit_breaker is not None and not _cb_recorded and isinstance(exc, Exception):

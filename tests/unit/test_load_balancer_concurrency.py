@@ -431,6 +431,7 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
 
     assert capped.account is None
     assert capped.error_code == "account_stream_cap"
+    assert capped.capacity_blocked_account_ids == frozenset({account.id})
     assert capped.error_message == (
         "Account stream capacity is exhausted; per-account limit is 8. "
         "Increase the dashboard stream limit or wait for active streams to finish."

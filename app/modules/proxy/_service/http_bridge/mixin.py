@@ -115,6 +115,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
     _raise_http_bridge_incompatible_admission_handoff,
+    _reclaim_idle_http_bridge_stream_lease,
     _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
@@ -1888,6 +1889,15 @@ class _HTTPBridgeMixin(
             if account is None:
                 await self._load_balancer.release_account_lease(selected_account_lease)
                 selected_account_lease = None
+                if selection.error_code == "account_stream_cap" and await _reclaim_idle_http_bridge_stream_lease(
+                    self,
+                    capacity_blocked_account_ids=selection.capacity_blocked_account_ids,
+                    preferred_account_id=preferred_candidate_id,
+                    require_preferred_account=(
+                        require_preferred_account or not fallback_on_preferred_account_unavailable
+                    ),
+                ):
+                    continue
                 _record_same_account_takeover(
                     preferred_account_id=preferred_account_id,
                     selected_account_id=None,

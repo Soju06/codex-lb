@@ -1763,6 +1763,89 @@ def _http_bridge_eviction_priority(session: _HTTPBridgeSession) -> tuple[int, fl
     return (0 if not session.codex_session else 1, session.last_used_at)
 
 
+async def _reclaim_idle_http_bridge_stream_lease(
+    service: _HTTPBridgeServiceProtocol,
+    *,
+    capacity_blocked_account_ids: frozenset[str],
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+) -> bool:
+    """Close one idle bridge that is holding an eligible account stream lease."""
+
+    if not capacity_blocked_account_ids or (require_preferred_account and preferred_account_id is None):
+        return False
+
+    detached: _HTTPBridgeSession | None = None
+    detached_key: _HTTPBridgeSessionKey | None = None
+    async with service._http_bridge_lock:
+        candidates: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
+        for candidate_key, candidate_session in service._http_bridge_sessions.items():
+            account_lease = candidate_session.account_lease
+            if account_lease is None or account_lease.kind != "stream":
+                continue
+            if not _http_bridge_session_account_active(candidate_session):
+                continue
+            if candidate_session.account.id not in capacity_blocked_account_ids:
+                continue
+            if (
+                require_preferred_account
+                and preferred_account_id is not None
+                and candidate_session.account.id != preferred_account_id
+            ):
+                continue
+            if _http_bridge_session_has_admission_waiter(candidate_session):
+                continue
+            if getattr(candidate_session, "unanchored_reservation_id", None) is not None:
+                continue
+            if (
+                not candidate_session.closed
+                and candidate_session.last_completed_response_id is None
+                and not candidate_session.previous_response_ids
+            ):
+                # A newly-created bridge can be between connect and submit even
+                # before the handoff reservation is visible. It is not idle
+                # capacity yet and must not be reclaimed.
+                continue
+            pending_count = _http_bridge_pending_count_nowait(
+                candidate_session,
+                context="account_stream_cap_reclaim_scan",
+            )
+            if pending_count is None or pending_count:
+                continue
+            candidates.append((candidate_key, candidate_session))
+
+        if preferred_account_id is not None and not require_preferred_account:
+            preferred_candidates = [
+                candidate for candidate in candidates if candidate[1].account.id == preferred_account_id
+            ]
+            if preferred_candidates:
+                candidates = preferred_candidates
+
+        if candidates:
+            detached_key, candidate_session = min(
+                candidates,
+                key=lambda item: _http_bridge_eviction_priority(item[1]),
+            )
+            detached = service._detach_http_bridge_session_locked(
+                detached_key,
+                expected_session=candidate_session,
+            )
+
+    if detached is None or detached_key is None:
+        return False
+
+    _log_http_bridge_event(
+        "evict_account_stream_cap_idle",
+        detached_key,
+        account_id=detached.account.id,
+        model=detached.request_model,
+        cache_key_family=detached_key.affinity_kind,
+        model_class=_extract_model_class(detached.request_model) if detached.request_model else None,
+    )
+    await service._close_http_bridge_session_bounded(detached, reason="account_stream_cap_reclaim")
+    return True
+
+
 def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     try:
         payload = json.loads(text_data)
@@ -2174,6 +2257,7 @@ for _helper_name in (
     "_http_bridge_requires_cluster_registration",
     "_effective_http_bridge_idle_ttl_seconds",
     "_http_bridge_eviction_priority",
+    "_reclaim_idle_http_bridge_stream_lease",
     "_build_http_bridge_prewarm_text",
     "_http_bridge_prewarm_enabled",
     "_record_http_bridge_prewarm_outcome",

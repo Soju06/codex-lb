@@ -3769,6 +3769,252 @@ async def test_create_http_bridge_session_passes_dashboard_reset_window_to_selec
 
 
 @pytest.mark.asyncio
+async def test_create_http_bridge_session_reclaims_idle_stream_lease_on_account_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    idle_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-idle-cap", None)
+    idle = _make_bridge_session(key=idle_key, key_value="sid-idle-cap")
+    idle.account = cast(Any, SimpleNamespace(id="acc-idle-cap", status=AccountStatus.ACTIVE, plan_type="plus"))
+    idle.last_completed_response_id = "resp-idle-cap"
+    idle.account_lease = await service._load_balancer.acquire_account_lease(idle.account.id, kind="stream")
+    assert idle.account_lease is not None
+    service._http_bridge_sessions[idle_key] = idle
+
+    selected_account = cast(
+        Any,
+        SimpleNamespace(id=idle.account.id, status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    selected_lease: proxy_service.AccountLease | None = None
+    call_order: list[str] = []
+
+    async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
+        nonlocal selected_lease
+        call_order.append("select")
+        if call_order.count("select") == 1:
+            assert await service._load_balancer.account_pressure_snapshot(idle.account.id) == (0, 1, 0.0)
+            return proxy_service.AccountSelection(
+                account=None,
+                error_message="Account stream capacity is exhausted",
+                error_code="account_stream_cap",
+                capacity_blocked_account_ids=frozenset({idle.account.id}),
+            )
+        assert await service._load_balancer.account_pressure_snapshot(idle.account.id) == (0, 0, 0.0)
+        selected_lease = await service._load_balancer.acquire_account_lease(selected_account.id, kind="stream")
+        assert selected_lease is not None
+        return proxy_service.AccountSelection(
+            account=selected_account,
+            error_message=None,
+            lease=selected_lease,
+        )
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    async def open_upstream(_account: object, _headers: dict[str, str], **_: object) -> UpstreamResponsesWebSocket:
+        return cast(UpstreamResponsesWebSocket, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+
+    async def fake_relay(_session: proxy_service._HTTPBridgeSession) -> None:
+        return None
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", fake_relay)
+
+    created = await service._create_http_bridge_session(
+        proxy_service._HTTPBridgeSessionKey("session_header", "sid-replacement", None),
+        headers={"x-codex-session-id": "sid-replacement"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-replacement",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+    )
+
+    if created.upstream_reader is not None:
+        await created.upstream_reader
+    assert call_order == ["select", "select"]
+    assert idle_key not in service._http_bridge_sessions
+    assert idle.account_lease is None
+    assert created.account.id == idle.account.id
+    assert created.account_lease is selected_lease
+    await service._close_http_bridge_session(created)
+    assert await service._load_balancer.account_pressure_snapshot(idle.account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_does_not_reclaim_active_stream_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="req-active-cap",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    active_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-active-cap", None)
+    active = _make_bridge_session(
+        key=active_key,
+        key_value="sid-active-cap",
+        pending_requests=deque([pending_request]),
+    )
+    active.account = cast(Any, SimpleNamespace(id="acc-active-cap", status=AccountStatus.ACTIVE, plan_type="plus"))
+    active.last_completed_response_id = "resp-active-cap"
+    active.account_lease = proxy_service.AccountLease(
+        lease_id="lease-active-cap",
+        account_id=active.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    service._http_bridge_sessions[active_key] = active
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_for_stream",
+        AsyncMock(
+            return_value=proxy_service.AccountSelection(
+                account=None,
+                error_message="Account stream capacity is exhausted",
+                error_code="account_stream_cap",
+                capacity_blocked_account_ids=frozenset({active.account.id}),
+            )
+        ),
+    )
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_session)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-active-replacement", None),
+            headers={"x-codex-session-id": "sid-active-replacement"},
+            affinity=proxy_service._AffinityPolicy(
+                key="sid-active-replacement",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_stream_cap"
+    assert service._http_bridge_sessions[active_key] is active
+    close_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard", ["selector_eligibility", "api_key_scope", "required_preferred_account"])
+async def test_create_http_bridge_session_reclaim_preserves_account_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+    guard: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    idle_key = proxy_service._HTTPBridgeSessionKey("session_header", f"sid-{guard}", None)
+    idle = _make_bridge_session(key=idle_key, key_value=f"sid-{guard}")
+    idle.account = cast(Any, SimpleNamespace(id="acc-outside", status=AccountStatus.ACTIVE, plan_type="plus"))
+    idle.last_completed_response_id = f"resp-{guard}"
+    idle.account_lease = proxy_service.AccountLease(
+        lease_id=f"lease-{guard}",
+        account_id=idle.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    service._http_bridge_sessions[idle_key] = idle
+
+    api_key = _make_api_key(key_id="key-scoped", assigned_account_ids=["acc-allowed"])
+    preferred_account_id = None
+    require_preferred_account = False
+    blocked_account_id = "acc-eligible"
+    if guard == "api_key_scope":
+        blocked_account_id = "acc-allowed"
+    elif guard == "required_preferred_account":
+        api_key = None
+        preferred_account_id = "acc-required"
+        require_preferred_account = True
+        blocked_account_id = preferred_account_id
+    else:
+        api_key = None
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_for_stream",
+        AsyncMock(
+            return_value=proxy_service.AccountSelection(
+                account=None,
+                error_message="Account stream capacity is exhausted",
+                error_code="account_stream_cap",
+                capacity_blocked_account_ids=frozenset({blocked_account_id}),
+            )
+        ),
+    )
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_session)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", f"sid-new-{guard}", None),
+            headers={"x-codex-session-id": f"sid-new-{guard}"},
+            affinity=proxy_service._AffinityPolicy(
+                key=f"sid-new-{guard}",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=api_key,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            preferred_account_id=preferred_account_id,
+            require_preferred_account=require_preferred_account,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_stream_cap"
+    assert service._http_bridge_sessions[idle_key] is idle
+    close_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

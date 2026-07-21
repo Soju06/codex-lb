@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 
 import { CodexLogo } from "@/components/brand/codex-logo";
 import { LanguageToggle, LanguageToggleMobile } from "@/components/layout/language-toggle";
@@ -90,14 +90,17 @@ export function AppHeader({
     >
       <div className="mx-auto flex w-full max-w-[1500px] items-center justify-between gap-4">
         {/* Brand */}
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <Link
+          to="/dashboard"
+          className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg no-underline transition-colors hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-primary/5">
             <CodexLogo size={20} className="text-primary" />
           </div>
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold tracking-tight">Codex LB</p>
           </div>
-        </div>
+        </Link>
 
         {/* Desktop nav pills */}
         <nav className="hidden items-center rounded-lg border border-border/50 bg-muted/40 p-0.5 sm:flex">

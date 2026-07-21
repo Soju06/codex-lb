@@ -158,7 +158,7 @@ describe("ReportsSummaryCards", () => {
     );
     const conversationsCard = screen.getByTestId("report-summary-card-conversations");
     expect(conversationsCard).toBeInTheDocument();
-    expect(within(conversationsCard).getByText("Conversations")).toBeInTheDocument();
+    expect(within(conversationsCard).getByText("Active Conversations")).toBeInTheDocument();
     expect(within(conversationsCard).getByText("42")).toBeInTheDocument();
     expect(within(conversationsCard).queryByText("42 distinct")).not.toBeInTheDocument();
     const requestsCard = screen.getByTestId("report-summary-card-requests");

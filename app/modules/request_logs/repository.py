@@ -267,6 +267,7 @@ class RequestLogsRepository:
             cached_input_tokens=int(row.cached_input_tokens),
             cost_usd=float(row.cost_usd or 0.0),
             conversation_count=int(row.conversation_count or 0),
+            conversation_request_count=int(row.conversation_request_count or 0),
         )
 
     async def aggregate_activity_between(self, since: datetime, until: datetime) -> RequestActivityAggregate:
@@ -281,6 +282,7 @@ class RequestLogsRepository:
             cached_input_tokens=int(row.cached_input_tokens),
             cost_usd=float(row.cost_usd or 0.0),
             conversation_count=int(row.conversation_count or 0),
+            conversation_request_count=int(row.conversation_request_count or 0),
         )
 
     def _aggregate_activity_stmt(self, since: datetime, until: datetime | None = None):
@@ -295,6 +297,7 @@ class RequestLogsRepository:
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             func.count(func.distinct(self._conversation_id_expr())).label("conversation_count"),
+            func.count(self._conversation_id_expr()).label("conversation_request_count"),
         ).where(
             RequestLog.requested_at >= since,
             self._exclude_warmup_clause(),

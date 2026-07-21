@@ -265,6 +265,7 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
     assert response.status_code == 200
     payload = response.json()
     assert payload["summary"]["metrics"]["conversations"] == 2
+    assert payload["summary"]["metrics"]["conversationRequests"] == 4
 
     populated_conversation_values = [point["v"] for point in payload["trends"]["conversations"] if point["v"] > 0]
     assert populated_conversation_values == [1.0, 2.0]

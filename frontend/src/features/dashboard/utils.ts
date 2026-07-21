@@ -819,9 +819,17 @@ export function buildDashboardView(
 
   const conversationCount = metrics?.conversations !== null && metrics?.conversations !== undefined ? metrics.conversations : null;
   if (conversationCount !== null) {
+    const averageRequestsPerConversation =
+      conversationCount > 0
+        ? ((metrics?.conversationRequests ?? 0) / conversationCount).toFixed(1)
+        : "—";
+
     stats.push({
       label: t("dashboard.stats.conversations", { timeframe: timeframeLabel }),
       value: formatNumber(conversationCount),
+      meta: t("dashboard.stats.avgRequestsPerConversation", {
+        value: averageRequestsPerConversation,
+      }),
       icon: MessageSquare,
       trend: trendPointsToValues(trends.conversations),
       trendColor: TREND_COLORS[3],

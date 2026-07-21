@@ -271,6 +271,7 @@ export function createDashboardOverview(
 				errorRate: 0.028,
 				errorCount: 6,
 				topError: "rate_limit_exceeded",
+				conversationRequests: 0,
 			},
 		},
 		windows: {

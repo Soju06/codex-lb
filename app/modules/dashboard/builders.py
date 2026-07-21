@@ -99,6 +99,7 @@ def build_dashboard_overview_summary(
                 "error_count": activity_metrics.error_count,
                 "top_error": activity_metrics.top_error,
                 "conversations": activity_metrics.conversation_count,
+                "conversation_requests": activity_metrics.conversation_request_count,
             }
         ),
         comparison=comparison,

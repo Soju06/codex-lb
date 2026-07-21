@@ -52,6 +52,7 @@ class ActivityMetricsSummary:
     error_count: int | None = None
     top_error: str | None = None
     conversation_count: int = 0
+    conversation_request_count: int = 0
 
 
 def align_bucket_window_start(
@@ -197,6 +198,7 @@ def build_activity_summaries(
             error_count=aggregate.error_count,
             top_error=top_error,
             conversation_count=aggregate.conversation_count,
+            conversation_request_count=aggregate.conversation_request_count,
         ),
         ActivityCostSummary(
             currency="USD",

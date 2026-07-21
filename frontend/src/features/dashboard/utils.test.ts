@@ -804,6 +804,7 @@ describe("buildDashboardView", () => {
         metrics: {
           requests: 228,
           conversations: 0,
+          conversationRequests: 0,
           tokens: 45000,
           cachedInputTokens: 8200,
           errorRate: 0.028,
@@ -887,6 +888,7 @@ describe("buildDashboardView", () => {
         metrics: {
           requests: 228,
           conversations: 0,
+          conversationRequests: 0,
           tokens: 45000,
           cachedInputTokens: 8200,
           errorRate: 0.028,
@@ -1006,6 +1008,7 @@ describe("buildDashboardView", () => {
           metrics: {
             requests: 228,
             conversations: 0,
+            conversationRequests: 0,
             tokens: 45000,
             cachedInputTokens: 8200,
             errorRate: 0.028,
@@ -1048,6 +1051,7 @@ describe("buildDashboardView", () => {
           metrics: {
             requests: 228,
             conversations: 0,
+            conversationRequests: 0,
             tokens: 45000,
             cachedInputTokens: 8200,
             errorRate: 0.028,
@@ -1075,6 +1079,7 @@ describe("buildDashboardView", () => {
           metrics: {
             requests: 1500,
             conversations: 0,
+            conversationRequests: 0,
             tokens: 450,
             cachedInputTokens: 0,
             errorRate: 0.028,
@@ -1116,6 +1121,7 @@ describe("buildDashboardView", () => {
           metrics: {
             requests: 1001,
             conversations: 0,
+            conversationRequests: 0,
             tokens: 999,
             cachedInputTokens: 0,
             errorRate: 0.028,
@@ -1209,6 +1215,7 @@ describe("buildDashboardView", () => {
         cost: { currency: "USD", totalUsd: 12.5 },
         metrics: {
           requests: 500,
+          conversationRequests: 0,
           tokens: 2000,
           cachedInputTokens: 300,
           errorRate: 0.02,
@@ -1256,6 +1263,7 @@ describe("buildDashboardView", () => {
         cost: { currency: "USD", totalUsd: 12.5 },
         metrics: {
           requests: 500,
+          conversationRequests: 0,
           tokens: 2000,
           cachedInputTokens: 300,
           errorRate: 0.02,
@@ -1285,6 +1293,7 @@ describe("buildDashboardView", () => {
         cost: { currency: "USD", totalUsd: 12.5 },
         metrics: {
           requests: 500,
+          conversationRequests: 0,
           tokens: 2000,
           cachedInputTokens: 300,
           errorRate: 0.02,
@@ -1313,6 +1322,7 @@ describe("buildDashboardView", () => {
         cost: { currency: "USD", totalUsd: 12.5 },
         metrics: {
           requests: 500,
+          conversationRequests: 0,
           tokens: 2000,
           cachedInputTokens: 300,
           errorRate: 0.02,
@@ -1326,10 +1336,43 @@ describe("buildDashboardView", () => {
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
     const convStat = view.stats.find((s) => s.label.includes("Conversations"));
     expect(convStat?.value).toBe("1,200");
-    expect(convStat?.meta).toBeUndefined();
+    expect(convStat?.meta).toBe("Avg req/conv 0.0");
   });
 
   it("formats Conversations stat above 1000 as grouped integer, not as '1.2K'", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          conversationRequests: 0,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 1523,
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convStat = view.stats.find((s) => s.label.includes("Conversations"));
+    expect(convStat?.value).toBe("1,523");
+    // Must not use compact format
+    expect(convStat?.value).not.toContain("K");
+    expect(convStat?.value).not.toContain(".");
+  });
+
+  it("renders Avg req/conv metadata with one decimal ratio", () => {
     const overview = createDashboardOverview({
       summary: {
         primaryWindow: {
@@ -1348,16 +1391,47 @@ describe("buildDashboardView", () => {
           errorRate: 0.02,
           errorCount: 10,
           topError: null,
-          conversations: 1523,
+          conversations: 2,
+          conversationRequests: 5,
         },
       },
-    });
+    } as Parameters<typeof buildDashboardView>[0]);
 
     const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
-    const convStat = view.stats.find((s) => s.label.includes("Conversations"));
-    expect(convStat?.value).toBe("1,523");
-    // Must not use compact format
-    expect(convStat?.value).not.toContain("K");
-    expect(convStat?.value).not.toContain(".");
+    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
+    expect(convStat).toBeDefined();
+    expect(convStat?.label).toBe("Active Conversations (7d)");
+    expect(convStat?.meta).toBe("Avg req/conv 2.5");
+  });
+
+  it("renders em-dash Avg req/conv metadata when conversations is zero", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 0,
+          conversationRequests: 4,
+        },
+      },
+    } as Parameters<typeof buildDashboardView>[0]);
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
+    expect(convStat).toBeDefined();
+    expect(convStat?.meta).toBe("Avg req/conv —");
   });
 });

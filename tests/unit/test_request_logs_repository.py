@@ -141,6 +141,44 @@ async def test_aggregate_conversations_by_bucket_deduplicates_model_service_grou
 
 
 @pytest.mark.asyncio
+async def test_aggregate_activity_counts_only_nonblank_conversation_requests(db_setup) -> None:
+    del db_setup
+    since = datetime(2026, 7, 21, 0, 0, 0)
+    until = since + timedelta(hours=1)
+
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for request_id, conversation_id, request_kind in (
+            ("conv-request-1", "conv-a", "normal"),
+            ("conv-request-2", " conv-a ", "normal"),
+            ("conv-request-3", "conv-b", "normal"),
+            ("conv-request-4", "conv-b", "normal"),
+            ("no-conversation-1", None, "normal"),
+            ("no-conversation-2", "   ", "normal"),
+            ("warmup-conversation", "conv-warmup", "warmup"),
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model="gpt-5.2",
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                conversation_id=conversation_id,
+                request_kind=request_kind,
+                requested_at=since + timedelta(minutes=5),
+            )
+
+        aggregate = await repo.aggregate_activity_between(since, until)
+
+    assert aggregate.request_count == 6
+    assert aggregate.conversation_count == 2
+    assert aggregate.conversation_request_count == 4
+
+
+@pytest.mark.asyncio
 async def test_add_log_does_not_recalculate_unpriced_model_source_cost(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

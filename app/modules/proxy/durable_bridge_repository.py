@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 
-from sqlalchemy import Row, case, delete, or_, select, text, update
+from sqlalchemy import Row, and_, case, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -392,6 +392,65 @@ class DurableBridgeRepository:
             row.last_seen_at = now
         await self._commit_writer_section()
         return len(rows)
+
+    async def purge_owned_sessions_on_startup(
+        self,
+        *,
+        instance_id: str,
+        ownerless_cutoff: datetime | None = None,
+        batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
+    ) -> int:
+        """Remove durable bridge rows left by the previous process instance.
+
+        Ownerless ACTIVE/DRAINING rows are preserved by default: a graceful
+        drain release intentionally clears ownership while keeping continuity
+        aliases reusable until the full bridge idle-retention window.  Callers
+        that already computed that retention cutoff may pass ``ownerless_cutoff``
+        to piggyback that abandoned-row cleanup onto startup.
+        """
+
+        deleted_count = 0
+        while True:
+            now = utcnow()
+            purge_predicates = [HttpBridgeSessionRecord.owner_instance_id == instance_id]
+            if ownerless_cutoff is not None:
+                purge_predicates.append(
+                    and_(
+                        HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                        HttpBridgeSessionRecord.state.in_(
+                            (HttpBridgeSessionState.ACTIVE, HttpBridgeSessionState.DRAINING),
+                        ),
+                        or_(
+                            HttpBridgeSessionRecord.lease_expires_at.is_(None),
+                            HttpBridgeSessionRecord.lease_expires_at < now,
+                        ),
+                        HttpBridgeSessionRecord.last_seen_at < ownerless_cutoff,
+                    )
+                )
+            startup_purge_filter = or_(*purge_predicates)
+            result = await self._session.execute(
+                select(HttpBridgeSessionRecord.id)
+                .where(startup_purge_filter)
+                .order_by(HttpBridgeSessionRecord.last_seen_at.asc())
+                .limit(batch_size)
+            )
+            session_ids = list(result.scalars().all())
+            if not session_ids:
+                return deleted_count
+            async with sqlite_writer_section():
+                deleted = await self._session.execute(
+                    delete(HttpBridgeSessionRecord)
+                    .where(HttpBridgeSessionRecord.id.in_(session_ids))
+                    .where(startup_purge_filter)
+                    .returning(HttpBridgeSessionRecord.id)
+                )
+                deleted_ids = list(deleted.scalars().all())
+                if deleted_ids:
+                    await self._session.execute(
+                        delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(deleted_ids))
+                    )
+                await self._session.commit()
+            deleted_count += len(deleted_ids)
 
     async def purge_closed_before(self, cutoff: datetime, *, batch_size: int = _PURGE_CLOSED_BATCH_SIZE) -> int:
         deleted_count = 0

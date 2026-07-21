@@ -1865,11 +1865,6 @@ class _HTTPBridgeMixin(
         retry_same_account_once = preferred_account_id is not None
         preferred_candidate_id = preferred_account_id
         selected_account_lease: AccountLease | None = None
-        scoped_account_ids: set[str] | None = (
-            set(api_key.assigned_account_ids)
-            if api_key is not None and api_key.account_assignment_scope_enabled
-            else None
-        )
         while True:
             select_kwargs = {
                 "request_id": request_state.request_log_id or request_state.request_id,
@@ -1901,7 +1896,6 @@ class _HTTPBridgeMixin(
                     require_preferred_account=(
                         require_preferred_account or not fallback_on_preferred_account_unavailable
                     ),
-                    scoped_account_ids=scoped_account_ids,
                 ):
                     continue
                 _record_same_account_takeover(

@@ -1769,7 +1769,6 @@ async def _reclaim_idle_http_bridge_stream_lease(
     capacity_blocked_account_ids: frozenset[str],
     preferred_account_id: str | None,
     require_preferred_account: bool,
-    scoped_account_ids: set[str] | None,
 ) -> bool:
     """Close one idle bridge that is holding an eligible account stream lease."""
 
@@ -1787,8 +1786,6 @@ async def _reclaim_idle_http_bridge_stream_lease(
             if not _http_bridge_session_account_active(candidate_session):
                 continue
             if candidate_session.account.id not in capacity_blocked_account_ids:
-                continue
-            if scoped_account_ids is not None and candidate_session.account.id not in scoped_account_ids:
                 continue
             if (
                 require_preferred_account

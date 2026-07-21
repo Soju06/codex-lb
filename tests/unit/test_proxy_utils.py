@@ -7791,10 +7791,27 @@ async def test_open_upstream_websocket_records_circuit_breaker_success_after_val
             )
 
     cb = _CircuitBreakerStub()
+    reader_config: dict[str, int | bool] = {}
+
+    def _build_reader(
+        reader: object,
+        max_msg_size: int,
+        *,
+        compress: bool,
+        decode_text: bool,
+    ) -> object:
+        del reader
+        reader_config.update(
+            max_msg_size=max_msg_size,
+            compress=compress,
+            decode_text=decode_text,
+        )
+        return object()
+
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
     monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
     monkeypatch.setattr(proxy_module.aiohttp.client_ws, "WebSocketDataQueue", lambda *args, **kwargs: object())
-    monkeypatch.setattr(proxy_module, "WebSocketReader", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketReader", _build_reader)
     monkeypatch.setattr(proxy_module, "WebSocketWriter", lambda *args, **kwargs: object())
 
     websocket_cm, websocket = await proxy_module._open_upstream_websocket(
@@ -7807,6 +7824,11 @@ async def test_open_upstream_websocket_records_circuit_breaker_success_after_val
     )
 
     assert websocket_cm == websocket
+    assert reader_config == {
+        "max_msg_size": 1024,
+        "compress": False,
+        "decode_text": True,
+    }
     assert cb.failures == []
     assert cb.successes == 0
 

@@ -400,12 +400,18 @@ async def test_selection_releases_lease_when_persistence_fails(
         assert await balancer.account_pressure_snapshot(account.id) == (0, 1, 42.0)
         raise RuntimeError("persistence failed")
 
+    release_spy = AsyncMock(wraps=balancer.release_account_lease)
     monkeypatch.setattr(balancer, "_persist_selection_state", fail_persist)
+    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
 
     with pytest.raises(RuntimeError, match="persistence failed"):
         await _select_with_lease(balancer, sticky=sticky)
 
     assert persist_calls == 1
+    release_spy.assert_awaited_once()
+    release_call = release_spy.await_args
+    assert release_call is not None
+    assert release_call.args[0] is not None
     assert sticky_repo.get_calls == (1 if sticky else 0)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
@@ -428,7 +434,9 @@ async def test_selection_releases_lease_when_persistence_is_cancelled(
         await persist_blocker.wait()
         return set()
 
+    release_spy = AsyncMock(wraps=balancer.release_account_lease)
     monkeypatch.setattr(balancer, "_persist_selection_state", block_persist)
+    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
 
     selection_task = asyncio.create_task(_select_with_lease(balancer, sticky=sticky))
     await asyncio.wait_for(persist_started.wait(), timeout=2.0)
@@ -438,6 +446,10 @@ async def test_selection_releases_lease_when_persistence_is_cancelled(
         await selection_task
 
     assert selection_task.cancelled()
+    release_spy.assert_awaited_once()
+    release_call = release_spy.await_args
+    assert release_call is not None
+    assert release_call.args[0] is not None
     assert sticky_repo.get_calls == (1 if sticky else 0)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
@@ -462,7 +474,9 @@ async def test_stale_selection_retries_do_not_leak_leases(
         assert await balancer.account_pressure_snapshot(account.id) == (0, 1, 42.0)
         return {account.id}
 
+    release_spy = AsyncMock(wraps=balancer.release_account_lease)
     monkeypatch.setattr(balancer, "_persist_selection_state", always_stale)
+    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
 
     selection = await _select_with_lease(balancer, sticky=sticky)
 
@@ -470,6 +484,10 @@ async def test_stale_selection_retries_do_not_leak_leases(
     assert load_spy.await_count == 4
     assert selection.account is None
     assert selection.lease is None
+    assert release_spy.await_count == persist_calls
+    released_leases = [release_call.args[0] for release_call in release_spy.await_args_list]
+    assert all(lease is not None for lease in released_leases)
+    assert len({lease.lease_id for lease in released_leases if lease is not None}) == persist_calls
     assert sticky_repo.get_calls == (4 if sticky else 0)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
@@ -480,4 +498,47 @@ async def test_stale_selection_retries_do_not_leak_leases(
     )
     assert replacement is not None
     await balancer.release_account_lease(replacement)
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_non_sticky_cache_generation_change_reselects_and_releases_once(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account("contract-cache-generation")
+    balancer, _, _, _ = _balancer([account], selection_cache)
+    original_load = balancer._load_selection_inputs
+    load_spy = AsyncMock(side_effect=original_load)
+    release_spy = AsyncMock(wraps=balancer.release_account_lease)
+    persist_calls = 0
+
+    async def invalidate_during_first_persist(*_args: Any, **_kwargs: Any) -> set[str]:
+        nonlocal persist_calls
+        persist_calls += 1
+        assert await balancer.account_pressure_snapshot(account.id) == (0, 1, 42.0)
+        if persist_calls == 1:
+            selection_cache.invalidate()
+        return set()
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_spy)
+    monkeypatch.setattr(balancer, "_persist_selection_state", invalidate_during_first_persist)
+    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
+
+    selection = await _select_with_lease(balancer, sticky=False)
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.lease is not None
+    assert persist_calls == 2
+    assert load_spy.await_count == 2
+    release_spy.assert_awaited_once()
+    release_call = release_spy.await_args
+    assert release_call is not None
+    released_lease = release_call.args[0]
+    assert released_lease is not None
+    assert released_lease.lease_id != selection.lease.lease_id
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 1, 42.0)
+
+    await balancer.release_account_lease(selection.lease)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)

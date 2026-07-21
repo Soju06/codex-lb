@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from functools import lru_cache
 from importlib import import_module
 from ipaddress import ip_address
@@ -52,6 +53,7 @@ from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
+from app.core.utils.time import utcnow
 from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.usage_rollup_scheduler import build_account_usage_rollup_scheduler
@@ -70,6 +72,7 @@ from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
@@ -86,7 +89,10 @@ from app.modules.request_logs import api as request_logs_api
 from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
-from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
+from app.modules.sticky_sessions.cleanup_scheduler import (
+    _abandoned_bridge_retention_seconds,
+    build_sticky_session_cleanup_scheduler,
+)
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_usage_ingestor
@@ -219,8 +225,24 @@ async def lifespan(app: FastAPI):
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
-    if bridge_durable_schema_ready:
+    if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
+        dashboard_settings = await get_settings_cache().get()
+        ownerless_cutoff = utcnow() - timedelta(
+            seconds=_abandoned_bridge_retention_seconds(dashboard_settings, settings)
+        )
+        deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
+            instance_id=settings.http_responses_session_bridge_instance_id,
+            ownerless_cutoff=ownerless_cutoff,
+        )
+        if deleted_bridge_rows > 0:
+            logger.info(
+                "Purged durable HTTP bridge rows from previous process instance",
+                extra={
+                    "instance_id": settings.http_responses_session_bridge_instance_id,
+                    "deleted": deleted_bridge_rows,
+                },
+            )
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
         NAMESPACE_ACCOUNT_ROUTING,

@@ -337,20 +337,23 @@ def _schedule_type_literal(value: str) -> Literal["daily"]:
 
 
 def _run_trigger_literal(value: str) -> Literal["scheduled", "manual"]:
-    if value in {"scheduled", "manual"}:
-        return cast(Literal["scheduled", "manual"], value)
+    match value:
+        case "scheduled" | "manual":
+            return value
     raise RuntimeError(f"Unexpected automation run trigger: {value}")
 
 
 def _run_status_literal(value: str) -> Literal["running", "success", "failed", "partial"]:
-    if value in {"running", "success", "failed", "partial"}:
-        return cast(Literal["running", "success", "failed", "partial"], value)
+    match value:
+        case "running" | "success" | "failed" | "partial":
+            return value
     raise RuntimeError(f"Unexpected automation run status: {value}")
 
 
 def _run_account_state_literal(value: str) -> Literal["pending", "running", "success", "failed", "partial"]:
-    if value in {"pending", "running", "success", "failed", "partial"}:
-        return cast(Literal["pending", "running", "success", "failed", "partial"], value)
+    match value:
+        case "pending" | "running" | "success" | "failed" | "partial":
+            return value
     raise RuntimeError(f"Unexpected automation run account state: {value}")
 
 

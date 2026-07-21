@@ -229,6 +229,18 @@ class DurableBridgeSessionCoordinator:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)
 
+    async def purge_owned_sessions_on_startup(
+        self,
+        *,
+        instance_id: str,
+        ownerless_cutoff: datetime | None = None,
+    ) -> int:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).purge_owned_sessions_on_startup(
+                instance_id=instance_id,
+                ownerless_cutoff=ownerless_cutoff,
+            )
+
     async def register_turn_state(
         self,
         *,

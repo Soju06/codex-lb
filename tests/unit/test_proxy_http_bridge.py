@@ -619,6 +619,74 @@ async def test_terminal_capacity_retry_does_not_reconnect_over_competing_pending
 
 
 @pytest.mark.asyncio
+async def test_terminal_capacity_close_retry_keeps_pending_request_for_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_capacity_retry_state(bridge_request_deadline=0.0)
+    session = _make_bridge_session(
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async def fake_acquire(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **kwargs: object,
+    ) -> None:
+        del kwargs
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", fake_acquire)
+
+    retried = await service._retry_http_bridge_terminal_capacity_request(
+        session,
+        request_state,
+        error_code="server_is_overloaded",
+        preserve_for_reader_failure=True,
+    )
+
+    assert retried is False
+    assert list(session.pending_requests) == [request_state]
+    assert session.queued_request_count == 1
+    assert request_state.response_create_gate_acquired is True
+
+    await service._fail_http_bridge_reader_and_maybe_retire(
+        session,
+        error_code="stream_incomplete",
+        error_message="HTTP bridge closed before the capacity retry could be sent",
+    )
+
+    assert request_state.event_queue is not None
+    terminal_block = await request_state.event_queue.get()
+    assert terminal_block is not None
+    terminal_event = json.loads(terminal_block.split("data: ", 1)[1])
+    assert terminal_event["type"] == "response.failed"
+    assert terminal_event["response"]["error"]["code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_expired_terminal_capacity_request_is_not_generic_precreated_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_capacity_retry_state(bridge_request_deadline=0.0)
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is False
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == [request_state]
+
+
+@pytest.mark.asyncio
 async def test_legacy_forward_anchor_lookup_accepts_registered_turn_state_alias() -> None:
     key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None)
     lookup = proxy_service.DurableBridgeLookup(

@@ -14017,6 +14017,11 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
     monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=regular_account.id))
+    monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value=regular_account.id),
+    )
     persist_security_requirement = AsyncMock(return_value=True)
     monkeypatch.setattr(service, "_persist_security_work_lineage_markers", persist_security_requirement)
 
@@ -14047,6 +14052,7 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
         {
             "model": "gpt-5.1",
             "instructions": "check pinned file",
+            "previous_response_id": "resp_security_file_anchor",
             "input": [
                 {
                     "role": "user",
@@ -14082,7 +14088,7 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
     assert only_call.kwargs["require_security_work_authorized"] is False
     persist_security_requirement.assert_awaited_once()
     assert persist_security_requirement.await_args is not None
-    assert persist_security_requirement.await_args.args[0][-1] == "sid-stream-file"
+    assert {"sid-stream-file", "resp_security_file_anchor"} <= set(persist_security_requirement.await_args.args[0])
 
 
 @pytest.mark.asyncio
@@ -36016,3 +36022,13 @@ async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatc
 
     assert exc_info.value.status_code == 400
     assert "image_download_failed" in json.dumps(exc_info.value.payload)
+
+
+def test_security_lineage_ids_include_previous_response_and_normalize_values() -> None:
+    assert proxy_support._security_lineage_ids(
+        " session-root ",
+        "session-root",
+        None,
+        " resp_previous ",
+        42,
+    ) == ("session-root", "resp_previous")

@@ -36,7 +36,11 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import (
+    _request_log_client_fields,
+    _RequestLogFailureMetadata,
+    _security_lineage_ids,
+)
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
     _AffinityPolicy,
@@ -611,8 +615,10 @@ class _CompactMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
-        security_lineage_ids = tuple(
-            dict.fromkeys(value for value in (affinity.selection_key, affinity.legacy_selection_key) if value)
+        security_lineage_ids = _security_lineage_ids(
+            affinity.selection_key,
+            affinity.legacy_selection_key,
+            getattr(payload, "previous_response_id", None),
         )
         request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
         sticky_key_source = "none"

@@ -2129,6 +2129,9 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     sync_url = to_sync_database_url(url)
+    preexisting_marker_key = (
+        "@security-work/v2/" + hashlib.sha256("api-key-scope\0security-alias-root".encode()).hexdigest()
+    )
     with create_engine(sync_url, future=True).begin() as connection:
         connection.execute(
             text(
@@ -2155,6 +2158,18 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
         )
         connection.execute(
             text("UPDATE sticky_sessions SET requires_security_work_authorized = 1 WHERE key = 'legacy-security-root'")
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO sticky_sessions (
+                    key, kind, account_id, requires_security_work_authorized, created_at, updated_at
+                ) VALUES (
+                    :key, 'codex_session', 'security-owner', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {"key": preexisting_marker_key},
         )
         connection.execute(
             text(
@@ -2205,15 +2220,12 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
                 """
             )
         ).fetchall()
-        alias_marker_key = (
-            "@security-work/v2/" + hashlib.sha256("api-key-scope\0security-alias-root".encode()).hexdigest()
-        )
         alias_marker = connection.execute(
             text(
                 "SELECT account_id, requires_security_work_authorized FROM sticky_sessions "
                 "WHERE key = :key AND kind = 'codex_session'"
             ),
-            {"key": alias_marker_key},
+            {"key": preexisting_marker_key},
         ).one()
         sticky_foreign_keys = connection.execute(text("PRAGMA foreign_key_list('sticky_sessions')")).mappings().all()
         usage_index_sql = {

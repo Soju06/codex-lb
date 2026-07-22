@@ -41,6 +41,7 @@ from app.modules.proxy._service.support import (
     _account_selection_recovery_sleep_seconds,
     _request_log_client_fields,
     _RetryableStreamError,
+    _security_lineage_ids,
     _signal_propagated_capacity_startup_wait,
     _stream_settlement_error_payload,
     _StreamSettlement,
@@ -313,8 +314,10 @@ class _StreamingRetryMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
-        security_lineage_ids = tuple(
-            dict.fromkeys(value for value in (affinity.selection_key, affinity.legacy_selection_key) if value)
+        security_lineage_ids = _security_lineage_ids(
+            affinity.selection_key,
+            affinity.legacy_selection_key,
+            payload.previous_response_id,
         )
         request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
         turn_state_owner_account_id: str | None = None

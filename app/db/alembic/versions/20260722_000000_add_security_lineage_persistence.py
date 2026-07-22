@@ -71,6 +71,17 @@ def _insert_marker(bind: Connection, marker_key: str) -> None:
         ),
         {"key": marker_key, "kind": _CODEX_SESSION_KIND, "required": True},
     )
+    bind.execute(
+        sa.text(
+            """
+            UPDATE sticky_sessions
+            SET account_id = NULL, requires_security_work_authorized = :required,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE key = :key AND kind = :kind
+            """
+        ),
+        {"key": marker_key, "kind": _CODEX_SESSION_KIND, "required": True},
+    )
 
 
 def _backfill_marker(bind: Connection, lineage_id: str, api_key_scope: str | None, *, legacy: bool = False) -> None:

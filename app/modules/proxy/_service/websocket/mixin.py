@@ -71,6 +71,7 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
@@ -328,6 +329,7 @@ from app.modules.proxy._service.support import (
     _StreamSettlement,
     _wait_for_websocket_continuity_gap,
     _websocket_full_replay_should_wait_for_continuity,
+    _websocket_request_can_replay_before_visible_output,
     _WebSocketConnectFailureEmitted,
     _WebSocketContinuityState,
     _WebSocketReceiveTimeout,
@@ -695,6 +697,18 @@ def _websocket_enforce_response_create_text_size(
         _facade()._enforce_response_create_size_limit(request_state)
     finally:
         request_state.request_text = original_request_text
+
+
+def _websocket_retry_text_contains_input_file_ids(text: str | None) -> bool:
+    if text is None:
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    return bool(extract_input_file_ids(payload.get("input")))
 
 
 class _WebSocketMixin:
@@ -1313,6 +1327,26 @@ class _WebSocketMixin:
                                 if key.lower() != "x-codex-turn-state"
                             }
 
+                if (
+                    request_state is not None
+                    and request_state_registered
+                    and text_data is not None
+                    and payload is not None
+                    and _is_websocket_response_create(payload)
+                    and upstream is not None
+                    and account is not None
+                    and await proxy._websocket_existing_account_security_reconnect_required(
+                        request_state,
+                        account=account,
+                        api_key=api_key,
+                    )
+                ):
+                    await retire_current_upstream()
+                    upstream_turn_state = None
+                    filtered_headers = {
+                        key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
+                    }
+
                 if upstream is None:
                     if text_data is not None and payload is None:
                         async with client_send_lock:
@@ -1378,6 +1412,9 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         websocket=websocket,
                     )
+                    if request_state.request_text is not None:
+                        text_data = request_state.request_text
+                        payload = _parse_websocket_payload(text_data)
                     if upstream is None or account is None:
                         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         if request_state_registered:
@@ -1803,6 +1840,9 @@ class _WebSocketMixin:
         request_state.useragent_group = useragent_group
         request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip
+        # Keep the root independently of per-turn WebSocket affinity. Codex
+        # subagents carry the shared session-id but a distinct turn-state.
+        request_state.security_lineage_id = _sticky_key_from_session_header(headers)
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         original_full_resend_input: JsonValue | None = None
@@ -1985,6 +2025,27 @@ class _WebSocketMixin:
             return None, selection.error_code, selection.error_message
         return selected_account, None, None
 
+    async def _websocket_existing_account_security_reconnect_required(
+        self,
+        request_state: _WebSocketRequestState,
+        *,
+        account: Account,
+        api_key: ApiKeyData | None,
+    ) -> bool:
+        proxy = cast(_WebSocketServiceProtocol, self)
+        if request_state.file_required_preferred_account or _websocket_retry_text_contains_input_file_ids(
+            request_state.request_text
+        ):
+            return False
+        if not request_state.require_security_work_authorized:
+            request_state.require_security_work_authorized = (
+                await proxy._security_lineage_requires_security_work_authorized(
+                    request_state.security_lineage_id,
+                    api_key_id=api_key.id if api_key is not None else None,
+                )
+            )
+        return request_state.require_security_work_authorized and not account.security_work_authorized
+
     async def _connect_proxy_websocket(
         self,
         headers: dict[str, str],
@@ -2022,6 +2083,8 @@ class _WebSocketMixin:
         last_failover_exc: ProxyResponseError | None = None
         last_failover_account: Account | None = None
         for attempt in range(max_attempts):
+            if request_state.require_security_work_authorized and request_state.previous_response_id is not None:
+                _prepare_websocket_request_state_for_account_switch(request_state)
             is_retry = attempt > 0
             forced_refresh_account_id = request_state.force_refresh_account_id
             preferred_account_id = forced_refresh_account_id or request_state.preferred_account_id
@@ -2268,12 +2331,17 @@ class _WebSocketMixin:
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
                     model=model,
+                    request_stage=request_state.request_stage,
                     service_tier=request_state.requested_service_tier,
                     exclude_account_ids=exclude_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    security_lineage_id=request_state.security_lineage_id,
+                    allow_security_lineage_account_migration=not (
+                        request_state.file_required_preferred_account
+                        or _websocket_retry_text_contains_input_file_ids(request_state.request_text)
+                    ),
                     lease_kind="stream",
-                    request_stage=request_state.request_stage,
                     estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
                         request_state.request_usage_budget
                     ),
@@ -2292,6 +2360,9 @@ class _WebSocketMixin:
                 raise
 
             account = selection.account
+            request_state.require_security_work_authorized = (
+                request_state.require_security_work_authorized or selection.requires_security_work_authorized
+            )
             if account is not None:
                 break
 
@@ -2377,7 +2448,10 @@ class _WebSocketMixin:
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE:
+        if (
+            request_state.require_security_work_authorized
+            and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+        ):
             await proxy._emit_websocket_security_work_missing_pool(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -4088,15 +4162,38 @@ class _WebSocketMixin:
             )
             terminal_error_message = error.message if error else None
             if _facade()._is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                security_retry_text = (
+                    request_state.fresh_upstream_request_text
+                    if request_state.previous_response_id is not None
+                    else request_state.request_text
+                )
+                # Missing replay text is unsafe for account migration, but it
+                # does not prove that the rooted lineage contains a file.
+                # Keep those decisions separate so a non-replayable ordinary
+                # continuation is still classified and its connection retired.
+                original_request_has_file_ids = _websocket_retry_text_contains_input_file_ids(
+                    request_state.request_text
+                )
+                security_retry_has_file_ids = original_request_has_file_ids or (
+                    security_retry_text is not None
+                    and _websocket_retry_text_contains_input_file_ids(security_retry_text)
+                )
+                security_retry_is_unsafe = security_retry_text is None or security_retry_has_file_ids
+                if not request_state.file_required_preferred_account and not security_retry_has_file_ids:
+                    await proxy._mark_security_lineage_requirement(
+                        request_state.security_lineage_id,
+                        account_id=account.id,
+                        api_key_id=api_key.id if api_key is not None else None,
+                    )
                 can_retry_security_work = (
                     not account.security_work_authorized
                     and not has_other_pending_requests
                     and request_state.last_downstream_sequence_number is None
-                    and request_state.response_id is None
                     and request_state.replay_count < 1
                     and bool(request_state.request_text)
-                    and request_state.preferred_account_id != account.id
+                    and _websocket_request_can_replay_before_visible_output(request_state)
                     and not request_state.file_required_preferred_account
+                    and not security_retry_is_unsafe
                     and (
                         request_state.previous_response_id is None
                         or (
@@ -4112,6 +4209,12 @@ class _WebSocketMixin:
                         retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
                     if retry_text:
                         request_state.replay_count += 1
+                        if request_state.response_id is not None and not request_state.awaiting_response_created:
+                            request_state.replay_downstream_response_id = request_state.response_id
+                            request_state.suppress_next_created_downstream = True
+                        else:
+                            request_state.replay_downstream_response_id = None
+                            request_state.suppress_next_created_downstream = False
                         request_state.response_id = None
                         request_state.awaiting_response_created = True
                         request_state.require_security_work_authorized = True
@@ -4137,6 +4240,9 @@ class _WebSocketMixin:
                         ]
                         upstream_control.replay_request_state = request_state
                         return downstream_text
+                if not request_state.file_required_preferred_account and not security_retry_has_file_ids:
+                    request_state.require_security_work_authorized = True
+                    upstream_control.reconnect_requested = True
 
         await proxy._finalize_websocket_request_state(
             request_state,
@@ -4193,6 +4299,7 @@ class _WebSocketMixin:
         pending_lock: anyio.Lock,
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
+        response_created_timeout_seconds: float | None = None,
     ) -> _WebSocketReceiveTimeout | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4202,11 +4309,39 @@ class _WebSocketMixin:
                 for request_state in pending_requests
                 if _http_bridge_request_counts_against_queue(request_state)
             ]
-        return _websocket_receive_timeout_for_pending_requests(
+            response_created_deadlines = [
+                (
+                    request_state.upstream_sent_at + response_created_timeout_seconds,
+                    request_state.request_id,
+                )
+                for request_state in pending_requests
+                if response_created_timeout_seconds is not None
+                and request_state.upstream_sent_at is not None
+                and request_state.response_id is None
+                and request_state.awaiting_response_created
+                and _http_bridge_request_counts_against_queue(request_state)
+            ]
+        receive_timeout = _websocket_receive_timeout_for_pending_requests(
             started_ats,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         )
+        if not response_created_deadlines:
+            return receive_timeout
+        next_response_created_deadline = min(deadline for deadline, _request_id in response_created_deadlines)
+        response_created_timeout = _WebSocketReceiveTimeout(
+            timeout_seconds=max(0.0, next_response_created_deadline - time.monotonic()),
+            error_code="response_created_timeout",
+            error_message="Upstream did not create a response within the startup window",
+            response_created_request_ids=frozenset(
+                request_id
+                for deadline, request_id in response_created_deadlines
+                if deadline == next_response_created_deadline
+            ),
+        )
+        if receive_timeout is None or response_created_timeout.timeout_seconds < receive_timeout.timeout_seconds:
+            return response_created_timeout
+        return receive_timeout
 
     async def _emit_pending_websocket_keepalive(
         self,

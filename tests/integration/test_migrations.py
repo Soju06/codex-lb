@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 
 import pytest
+from alembic import command
 from anyio import to_thread
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -29,6 +31,7 @@ except ImportError:
 
 from app.db.migrate import (
     LEGACY_MIGRATION_ORDER,
+    _build_alembic_config,
     check_schema_drift,
     inspect_migration_state,
     run_startup_migrations,
@@ -260,6 +263,94 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.bootstrap.stamped_revision is None
     assert result.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_reconcile_preserves_previously_deployed_aggregate_schema(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'security-lineage-reconcile.sqlite'}"
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260716_000000_add_oauth_device_flow_slots",
+            bootstrap_legacy=True,
+        )
+    )
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    "ALTER TABLE http_bridge_sessions "
+                    "ADD COLUMN requires_security_work_authorized BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+            await session.execute(
+                text("ALTER TABLE http_bridge_sessions ADD COLUMN latest_pending_function_call_ids TEXT")
+            )
+            await session.execute(
+                text("ALTER TABLE http_bridge_sessions ADD COLUMN latest_pending_custom_tool_call_ids TEXT")
+            )
+            await session.execute(
+                text(
+                    "ALTER TABLE quota_planner_settings "
+                    "ADD COLUMN auto_redeem_expiring_reset_credits BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+            await session.execute(
+                text(
+                    "ALTER TABLE quota_planner_settings "
+                    "ADD COLUMN reset_credit_redeem_lead_minutes INTEGER NOT NULL DEFAULT 30"
+                )
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            dashboard_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('dashboard_settings')"))).all()
+            }
+            sticky_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
+            }
+            quota_columns = {
+                str(row[1])
+                for row in (await session.execute(text("PRAGMA table_info('quota_planner_settings')"))).all()
+            }
+            revision = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+
+        assert "prohibit_fast_mode" in dashboard_columns
+        assert "requires_security_work_authorized" in sticky_columns
+        assert {
+            "auto_redeem_expiring_reset_credits",
+            "reset_credit_redeem_lead_minutes",
+        } <= quota_columns
+        assert revision == _HEAD_REVISION
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+
+        await to_thread.run_sync(
+            lambda: command.downgrade(
+                _build_alembic_config(db_url),
+                "20260710_010000_add_http_bridge_security_lineage",
+            )
+        )
+
+        async with session_factory() as session:
+            bridge_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('http_bridge_sessions')"))).all()
+            }
+            sticky_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
+            }
+        assert {
+            "latest_pending_function_call_ids",
+            "latest_pending_custom_tool_call_ids",
+        } <= bridge_columns
+        assert "requires_security_work_authorized" not in sticky_columns
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1105,6 +1196,257 @@ async def test_oauth_flow_states_migration_upgrade_and_downgrade(tmp_path):
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         assert await _has_flow_table(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_detach_migration_backfills_legacy_markers(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'security-lineage-detach.sqlite'}"
+    parent_revision = "20260711_020000_add_sticky_session_security_lineage"
+    detach_revision = "20260711_030000_detach_security_lineage_markers"
+    security_lineage_id = "legacy-root-security-session"
+    prefixed_security_lineage_id = "legacy-prefixed-root-security-session"
+    bridge_session_header = "legacy-bridge-session-header"
+    bridge_turn_state = "legacy-bridge-turn-state"
+    bridge_alias_session_header = "legacy-bridge-alias-session-header"
+    bridge_alias_turn_state = "legacy-bridge-alias-turn-state"
+    existing_v2_marker_key = "@security-work/v2/existing-legacy-marker"
+    anonymous_scope = "__anonymous__"
+
+    def marker_key_for(value: str) -> str:
+        digest = hashlib.sha256(f"{anonymous_scope}\0{value}".encode("utf-8")).hexdigest()
+        return f"@security-work/v2/{digest}"
+
+    def legacy_unscoped_marker_key_for(value: str) -> str:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return f"@security-work/v2/{digest}"
+
+    marker_key = marker_key_for(security_lineage_id)
+    legacy_unscoped_marker_key = legacy_unscoped_marker_key_for(security_lineage_id)
+    prefixed_marker_key = marker_key_for(prefixed_security_lineage_id)
+    prefixed_legacy_unscoped_marker_key = legacy_unscoped_marker_key_for(prefixed_security_lineage_id)
+    bridge_marker_keys = [
+        marker_key_for(value)
+        for value in [
+            bridge_session_header,
+            bridge_turn_state,
+            bridge_alias_session_header,
+            bridge_alias_turn_state,
+        ]
+    ]
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (
+                        key,
+                        kind,
+                        account_id,
+                        requires_security_work_authorized,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :key,
+                        'codex_session',
+                        'acc_legacy_security',
+                        1,
+                        '2026-01-01 00:00:00',
+                        '2026-01-01 00:00:00'
+                    )
+                    """
+                ),
+                {"key": security_lineage_id},
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (
+                        key,
+                        kind,
+                        account_id,
+                        requires_security_work_authorized,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :key,
+                        'codex_session',
+                        'acc_legacy_prefixed_security',
+                        1,
+                        '2026-01-01 00:00:00',
+                        '2026-01-01 00:00:00'
+                    )
+                    """
+                ),
+                {"key": f"security-work:{prefixed_security_lineage_id}"},
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (
+                        key,
+                        kind,
+                        account_id,
+                        requires_security_work_authorized,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :key,
+                        'codex_session',
+                        'acc_legacy_prefixed_security',
+                        1,
+                        '2026-01-01 00:00:00',
+                        '2026-01-01 00:00:00'
+                    )
+                    """
+                ),
+                {"key": existing_v2_marker_key},
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id,
+                        session_key_kind,
+                        session_key_value,
+                        session_key_hash,
+                        api_key_scope,
+                        owner_epoch,
+                        account_id,
+                        requires_security_work_authorized,
+                        latest_turn_state,
+                        created_at,
+                        updated_at,
+                        last_seen_at
+                    )
+                    VALUES (
+                        'bridge-security-session',
+                        'session_header',
+                        :session_header,
+                        :session_header_hash,
+                        '__anonymous__',
+                        1,
+                        'acc_bridge_security',
+                        1,
+                        :turn_state,
+                        '2026-01-01 00:00:00',
+                        '2026-01-01 00:00:00',
+                        '2026-01-01 00:00:00'
+                    )
+                    """
+                ),
+                {
+                    "session_header": bridge_session_header,
+                    "session_header_hash": hashlib.sha256(bridge_session_header.encode("utf-8")).hexdigest(),
+                    "turn_state": bridge_turn_state,
+                },
+            )
+            for alias_kind, alias_value in [
+                ("session_header", bridge_alias_session_header),
+                ("turn_state", bridge_alias_turn_state),
+            ]:
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO http_bridge_session_aliases (
+                            id,
+                            session_id,
+                            alias_kind,
+                            alias_value,
+                            alias_hash,
+                            api_key_scope,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            :id,
+                            'bridge-security-session',
+                            :alias_kind,
+                            :alias_value,
+                            :alias_hash,
+                            '__anonymous__',
+                            '2026-01-01 00:00:00',
+                            '2026-01-01 00:00:00'
+                        )
+                        """
+                    ),
+                    {
+                        "id": f"bridge-security-{alias_kind}",
+                        "alias_kind": alias_kind,
+                        "alias_value": alias_value,
+                        "alias_hash": hashlib.sha256(alias_value.encode("utf-8")).hexdigest(),
+                    },
+                )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, detach_revision, bootstrap_legacy=False))
+
+        async with engine.connect() as conn:
+            markers = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT key, account_id, requires_security_work_authorized
+                        FROM sticky_sessions
+                        WHERE key IN (
+                            :marker_key,
+                            :legacy_unscoped_marker_key,
+                            :prefixed_marker_key,
+                            :prefixed_legacy_unscoped_marker_key,
+                            :bridge_marker_key_0,
+                            :bridge_marker_key_1,
+                            :bridge_marker_key_2,
+                            :bridge_marker_key_3,
+                            :existing_v2_marker_key
+                        )
+                          AND kind = 'codex_session'
+                        ORDER BY key
+                        """
+                    ),
+                    {
+                        "marker_key": marker_key,
+                        "legacy_unscoped_marker_key": legacy_unscoped_marker_key,
+                        "prefixed_marker_key": prefixed_marker_key,
+                        "prefixed_legacy_unscoped_marker_key": prefixed_legacy_unscoped_marker_key,
+                        "bridge_marker_key_0": bridge_marker_keys[0],
+                        "bridge_marker_key_1": bridge_marker_keys[1],
+                        "bridge_marker_key_2": bridge_marker_keys[2],
+                        "bridge_marker_key_3": bridge_marker_keys[3],
+                        "existing_v2_marker_key": existing_v2_marker_key,
+                    },
+                )
+            ).all()
+            legacy_row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT account_id, requires_security_work_authorized
+                        FROM sticky_sessions
+                        WHERE key = :key
+                          AND kind = 'codex_session'
+                        """
+                    ),
+                    {"key": security_lineage_id},
+                )
+            ).one()
+
+        assert markers == sorted(
+            [
+                (marker_key, None, True),
+                (legacy_unscoped_marker_key, None, True),
+                (prefixed_marker_key, None, True),
+                (prefixed_legacy_unscoped_marker_key, None, True),
+                (existing_v2_marker_key, None, True),
+                *[(key, None, True) for key in bridge_marker_keys],
+            ]
+        )
+        assert legacy_row == ("acc_legacy_security", True)
     finally:
         await engine.dispose()
 

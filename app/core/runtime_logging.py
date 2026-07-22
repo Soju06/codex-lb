@@ -197,14 +197,20 @@ def log_error_response(
     level = logging.ERROR if status_code >= 500 else logging.WARNING
     logger.log(
         level,
-        "%s request_id=%s method=%s path=%s status=%s",
+        "%s request_id=%s method=%s path=%s status=%s code=%s message=%s",
         category,
         get_request_id(),
         request.method,
         request.url.path,
         status_code,
+        _error_log_field(code),
+        _error_log_field(message),
         exc_info=exc_info,
     )
+
+
+def _error_log_field(value: str | None) -> str:
+    return _redact_log_value(value) or "-"
 
 
 def _collapse_log_value(value: str | None) -> str | None:

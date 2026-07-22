@@ -728,6 +728,7 @@ class _WebSocketRequestState:
     )
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
+    upstream_sent_at: float | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None
@@ -772,6 +773,10 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    # Root Codex session from session-id / parent-thread headers.  This is
+    # deliberately distinct from affinity_policy, whose CODEX_SESSION key may
+    # be a per-turn x-codex-turn-state value.
+    security_lineage_id: str | None = None
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
@@ -794,6 +799,7 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
+    original_request_contains_input_file_ids: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
     error_message_override: str | None = None
@@ -908,6 +914,7 @@ class _HTTPBridgeSession:
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
+    requires_security_work_authorized: bool = False
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
     closed: bool = False
@@ -1083,6 +1090,13 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         return False
     if request_state.downstream_visible:
         return False
+    if request_state.transport == _REQUEST_TRANSPORT_HTTP and request_state.response_id is not None:
+        # An HTTP bridge response.created is already an SSE-visible continuity
+        # anchor. Rewriting a replacement upstream stream to that id would
+        # leave a later client previous_response_id pointing at an id the new
+        # upstream account never issued. Durable aliases identify the owning
+        # session, not an old-id-to-replacement-id translation target.
+        return False
     has_retry_safe_fresh_payload = (
         request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
     )
@@ -1170,6 +1184,7 @@ class _WebSocketReceiveTimeout:
     error_code: str
     error_message: str
     fail_all_pending: bool = False
+    response_created_request_ids: frozenset[str] = frozenset()
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

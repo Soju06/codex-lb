@@ -1,0 +1,3 @@
+- [x] Refuse HTTP bridge replay after `response.created` establishes a response id.
+- [x] Cover security-work and generic bridge retry paths at that boundary.
+- [x] Run focused unit tests and strict OpenSpec validation.

@@ -16,6 +16,7 @@ class _WebSocketServiceProtocol(Protocol):
     _emit_websocket_proxy_request_timeout: Any
     _emit_websocket_security_work_missing_pool: Any
     _emit_websocket_terminal_error: Any
+    _mark_security_lineage_requirement: Any
     _encryptor: Any
     _ensure_fresh_with_budget: Any
     _fail_expired_pending_websocket_requests: Any
@@ -54,8 +55,10 @@ class _WebSocketServiceProtocol(Protocol):
     _send_downstream_websocket_bytes: Any
     _send_downstream_websocket_text: Any
     _settle_stream_api_key_usage: Any
+    _security_lineage_requires_security_work_authorized: Any
     _start_request_state_api_key_reservation_heartbeat: Any
     _try_open_websocket_connect_attempt: Any
+    _websocket_existing_account_security_reconnect_required: Any
     _websocket_continuity_index: Any
     _websocket_continuity_state_for_request: Any
     _websocket_previous_response_account_index: Any

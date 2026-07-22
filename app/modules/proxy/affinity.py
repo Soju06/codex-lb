@@ -86,20 +86,11 @@ class _AffinityPolicy:
         _CodexSessionSource | None,
         str | None,
     ]:
-        if sticky_source != "session_header":
-            return (
-                sticky_key,
-                sticky_kind,
-                reallocate_sticky,
-                sticky_max_age_seconds,
-                sticky_source,
-                legacy_sticky_key,
-            )
-        # A resolved response/file/bridge owner bypasses the new soft row, but
-        # the raw compatibility row still has to be checked for conflicting
-        # legacy hard ownership. Selection receives no writable sticky key, so
-        # a raw miss cannot manufacture or rebind a mapping.
-        return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
+        # A resolved response/file/bridge owner is more specific than broad
+        # sticky state. Do not let Codex session or turn-state rows veto the
+        # known owner; those rows are locality hints for account-neutral turns,
+        # not owner evidence here.
+        return None, None, False, sticky_max_age_seconds, None, None
 
 
 def _codex_session_selection_key(key: str) -> str:
@@ -253,7 +244,17 @@ def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
 
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
     normalized = {key.lower(): value for key, value in headers.items()}
-    for key in ("session_id", "session-id", "x-codex-session-id", "x-codex-conversation-id", "thread-id"):
+    # session-id is the Codex root that child/fork requests share.  A
+    # parent-thread id is the explicit equivalent when the root session header
+    # is absent.  Keep the legacy thread-id fallback last for older clients.
+    for key in (
+        "session_id",
+        "session-id",
+        "x-codex-session-id",
+        "x-codex-conversation-id",
+        "x-codex-parent-thread-id",
+        "thread-id",
+    ):
         value = normalized.get(key)
         if not isinstance(value, str):
             continue

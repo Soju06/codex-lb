@@ -82,7 +82,12 @@ class DurableBridgeSessionCoordinator:
                 )
                 if snapshot is not None:
                     resolved_aliases.append((alias_kind, snapshot))
-            resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
+            resolved_snapshots = [snapshot for _alias_kind, snapshot in resolved_aliases]
+            resolved_identities = {(snapshot.id, snapshot.account_id) for snapshot in resolved_snapshots}
+            resolved_account_ids = {
+                snapshot.account_id for snapshot in resolved_snapshots if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for snapshot in resolved_snapshots)
             if len(resolved_identities) > 1:
                 specific_aliases = [
                     (alias_kind, snapshot)
@@ -103,19 +108,35 @@ class DurableBridgeSessionCoordinator:
                         key=specific_snapshot.session_key_value,
                     ) and conflicting_alias_kinds == {_DURABLE_SESSION_HEADER_ALIAS}:
                         return _to_lookup(specific_snapshot)
-                # Turn-state/response/session aliases are independent hard
-                # evidence. Returning the first match would silently discard a
-                # conflicting durable owner based on source ordering.
-                raise ProxyResponseError(
-                    502,
-                    openai_error(
-                        "continuity_owner_conflict",
-                        "Durable continuity aliases resolve to conflicting upstream owners.",
-                        error_type="server_error",
-                    ),
-                )
+                if len(resolved_account_ids) > 1 or (has_ownerless_snapshot and resolved_account_ids):
+                    # Alias rows may diverge during a same-account blue-green
+                    # handoff, but they must never disagree on the upstream owner.
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "continuity_owner_conflict",
+                            "Durable continuity aliases resolve to conflicting upstream owners.",
+                            error_type="server_error",
+                        ),
+                    )
             if resolved_aliases:
-                return _to_lookup(resolved_aliases[0][1])
+                return _to_lookup(
+                    next(
+                        (
+                            snapshot
+                            for alias_kind, snapshot in resolved_aliases
+                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS
+                        ),
+                        next(
+                            (
+                                snapshot
+                                for alias_kind, snapshot in resolved_aliases
+                                if alias_kind == _DURABLE_TURN_STATE_ALIAS
+                            ),
+                            resolved_snapshots[0],
+                        ),
+                    )
+                )
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,

@@ -1,0 +1,3 @@
+- [x] 1. Block security retry after a created anchor or deferred upstream reasoning output.
+- [x] 2. Clear stale turn affinity only for a permitted pre-created retry and restore it on reconnect failure.
+- [x] 3. Cover deferred-output replay blocking and preserve pinned-request denial coverage.

@@ -250,6 +250,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         previous_response_id: str,
         api_key: ApiKeyData | None,
         durable_lookup: DurableBridgeLookup | None = None,
+        require_security_work_authorized: bool,
     ) -> str | None:
         api_key_id = api_key.id if api_key is not None else None
         candidate_keys: list[_HTTPBridgeSessionKey] = [key]
@@ -284,6 +285,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     key=candidate_key,
                     incoming_turn_state=incoming_turn_state,
                     previous_response_id=previous_response_id,
+                    require_security_work_authorized=require_security_work_authorized,
                 ):
                     continue
                 resolved_owners.append((candidate_key, session.account.id))

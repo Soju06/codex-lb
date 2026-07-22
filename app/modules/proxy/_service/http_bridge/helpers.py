@@ -1145,7 +1145,7 @@ def _http_bridge_session_reusable_for_request(
     key: "_HTTPBridgeSessionKey",
     incoming_turn_state: str | None,
     previous_response_id: str | None,
-    require_security_work_authorized: bool = False,
+    require_security_work_authorized: bool,
 ) -> bool:
     if not _http_bridge_session_meets_security_requirement(session, require_security_work_authorized):
         return False
@@ -1229,6 +1229,7 @@ def _http_bridge_session_reusable_for_lookup(
     require_preferred_account: bool,
     service_tier_supported: bool,
     allow_closed_admission_handoff: bool,
+    require_security_work_authorized: bool,
 ) -> bool:
     live_or_retained = _http_bridge_session_account_active(session) and (
         not session.closed or (allow_closed_admission_handoff and _http_bridge_session_has_admission_waiter(session))
@@ -1241,6 +1242,7 @@ def _http_bridge_session_reusable_for_lookup(
             key=key,
             incoming_turn_state=incoming_turn_state,
             previous_response_id=previous_response_id,
+            require_security_work_authorized=require_security_work_authorized,
         )
         and _http_bridge_session_matches_preferred_account(
             session=session,

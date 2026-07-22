@@ -671,6 +671,7 @@ class _HTTPBridgeMixin(
                         require_preferred_account=require_preferred_account,
                         service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
                         allow_closed_admission_handoff=retained_handoff,
+                        require_security_work_authorized=require_security_work_authorized,
                     )
                 )
                 fork_key = _http_bridge_parallel_fork_key(
@@ -1422,6 +1423,7 @@ class _HTTPBridgeMixin(
                         key=key,
                         incoming_turn_state=incoming_turn_state,
                         previous_response_id=previous_response_id,
+                        require_security_work_authorized=require_security_work_authorized,
                     )
                     and _http_bridge_session_matches_preferred_account(
                         session=session,

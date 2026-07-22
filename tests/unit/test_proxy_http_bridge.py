@@ -385,6 +385,7 @@ def test_http_bridge_reuse_honors_security_requirement_stored_on_session() -> No
         key=session.key,
         incoming_turn_state=None,
         previous_response_id=None,
+        require_security_work_authorized=False,
     )
 
     session.account.security_work_authorized = True
@@ -396,6 +397,27 @@ def test_http_bridge_reuse_honors_security_requirement_stored_on_session() -> No
         key=session.key,
         incoming_turn_state=None,
         previous_response_id=None,
+        require_security_work_authorized=False,
+    )
+
+
+def test_http_bridge_reuse_honors_incoming_security_requirement() -> None:
+    session = _make_bridge_session()
+    session.account.security_work_authorized = False
+
+    assert not http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+        session=session,
+        key=session.key,
+        incoming_turn_state=None,
+        previous_response_id=None,
+        require_security_work_authorized=True,
+    )
+    assert http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+        session=session,
+        key=session.key,
+        incoming_turn_state=None,
+        previous_response_id=None,
+        require_security_work_authorized=False,
     )
 
 
@@ -9858,6 +9880,7 @@ async def test_http_bridge_local_owner_account_id_records_resolution_source(
         incoming_turn_state=None,
         previous_response_id="resp_prev_local_owner_metric",
         api_key=None,
+        require_security_work_authorized=False,
     )
 
     assert owner == "acc-1"
@@ -9869,6 +9892,38 @@ async def test_http_bridge_local_owner_account_id_records_resolution_source(
             "value": 1.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_local_owner_account_id_honors_security_requirement() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "security-owner", None)
+    session = _make_bridge_session(key=key)
+    session.account.security_work_authorized = False
+    service._http_bridge_sessions[key] = session
+
+    assert (
+        await service._http_bridge_local_owner_account_id(
+            key=key,
+            incoming_turn_state=None,
+            previous_response_id="resp_security_owner",
+            api_key=None,
+            require_security_work_authorized=True,
+        )
+        is None
+    )
+
+    session.account.security_work_authorized = True
+    assert (
+        await service._http_bridge_local_owner_account_id(
+            key=key,
+            incoming_turn_state=None,
+            previous_response_id="resp_security_owner",
+            api_key=None,
+            require_security_work_authorized=True,
+        )
+        == session.account.id
+    )
 
 
 @pytest.mark.asyncio
@@ -9897,6 +9952,7 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
             incoming_turn_state="http_turn_conflict",
             previous_response_id="resp_conflict",
             api_key=None,
+            require_security_work_authorized=False,
         )
 
     assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
@@ -11995,6 +12051,71 @@ async def test_get_or_create_http_bridge_session_preserves_inflight_model_transi
     assert service._http_bridge_sessions[parent_key] is parent
     assert evictable_key not in service._http_bridge_sessions
     assert closed_sessions == [evictable]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_security_work_authorized", [False, True])
+async def test_get_or_create_http_bridge_session_inflight_waiter_applies_security_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    require_security_work_authorized: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "security-inflight", None)
+    ordinary = _make_bridge_session(key=key)
+    ordinary.request_model = "gpt-5.6-sol"
+    ordinary.account.security_work_authorized = False
+    authorized = _make_bridge_session(key=key)
+    authorized.request_model = "gpt-5.6-sol"
+    authorized.account.security_work_authorized = True
+    inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
+    service._http_bridge_inflight_sessions[key] = inflight_future
+    create_session = AsyncMock(return_value=authorized)
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    request_task = asyncio.create_task(
+        service._get_or_create_http_bridge_session(
+            key,
+            headers={"x-codex-session-id": "security-inflight"},
+            affinity=proxy_service._AffinityPolicy(
+                key="security-inflight",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.6-sol",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+            require_security_work_authorized=require_security_work_authorized,
+        )
+    )
+    await asyncio.sleep(0)
+    assert request_task.done() is False
+
+    service._http_bridge_sessions[key] = ordinary
+    service._http_bridge_inflight_sessions.pop(key)
+    inflight_future.set_result(ordinary)
+
+    resolved = await request_task
+
+    if require_security_work_authorized:
+        assert resolved is authorized
+        create_session.assert_awaited_once()
+        create_args = create_session.await_args
+        assert create_args is not None
+        assert create_args.kwargs["require_security_work_authorized"] is True
+    else:
+        assert resolved is ordinary
+        create_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

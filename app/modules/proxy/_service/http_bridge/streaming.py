@@ -1091,6 +1091,7 @@ class _HTTPBridgeStreamingMixin:
                 previous_response_id=request_state.previous_response_id,
                 api_key=api_key,
                 durable_lookup=durable_lookup,
+                require_security_work_authorized=require_security_work_authorized,
             )
             indexed_previous_response_owner = await self._resolve_websocket_previous_response_owner(
                 previous_response_id=request_state.previous_response_id,

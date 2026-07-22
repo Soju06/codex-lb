@@ -202,7 +202,7 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
         recipient_name = tool_use.get("recipient_name")
         if (
             not isinstance(recipient_name, str)
-            or recipient_name not in tool_call_safety.PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES
+            or recipient_name not in tool_call_safety.PARALLEL_TOOL_USE_SIDE_EFFECT_RECIPIENT_NAMES
         ):
             continue
         dedupe_response_id = response_id if scope_side_effects_by_response_id else None
@@ -225,7 +225,7 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
         recipient_name = tool_use.get("recipient_name")
         if (
             not isinstance(recipient_name, str)
-            or recipient_name not in tool_call_safety.PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES
+            or recipient_name not in tool_call_safety.PARALLEL_TOOL_USE_SIDE_EFFECT_RECIPIENT_NAMES
         ):
             kept_tool_uses.append(cast(JsonValue, tool_use))
             continue

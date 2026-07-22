@@ -1506,7 +1506,26 @@ The classifier MUST recognize both the legacy cybersecurity-risk message and the
 
 - **WHEN** a downstream websocket request is eligible for security-work replay
 - **THEN** codex-lb releases the request's response-create gate before scheduling the replay
-- **AND** the replay can acquire the gate instead of blocking behind the failed first attempt
+- **AND** the replay MUST reacquire the per-session gate and shared/account create admission before it is queued or sent on the authorized replacement socket
+- **AND** the replay remains subject to the normal startup timeout and serialization gate
+
+#### Scenario: Hard bridge reconnect preserves one owner
+
+- **GIVEN** a pre-created HTTP bridge request uses a hard session-header key
+- **WHEN** its upstream socket closes before visible output
+- **THEN** the reconnect MUST require the established account
+- **AND** the session turn-state and owner affinity MUST NOT be cleared for migration
+
+#### Scenario: Replacement connection drops stale turn state
+
+- **WHEN** an account replacement has no replacement turn state
+- **THEN** its upstream handshake MUST NOT inherit a stale `x-codex-turn-state` header from the retired owner
+
+#### Scenario: Entire reasoning prelude stays buffered
+
+- **WHEN** an HTTP bridge has buffered the first reasoning-prelude event pending a terminal security decision
+- **THEN** later reasoning-prelude events MUST remain buffered even though model output has been observed
+- **AND** the buffered output MUST continue to disable account-switch replay
 
 #### Scenario: Non-replayable WebSocket denial retires the ordinary connection
 

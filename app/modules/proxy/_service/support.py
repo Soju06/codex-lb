@@ -1097,7 +1097,14 @@ def _websocket_should_defer_reasoning_prelude(
         return False
     if not _websocket_is_reasoning_output_item_event(event_type, payload):
         return False
-    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+    if request_state.downstream_visible:
+        return False
+    # Keep the whole reasoning prelude buffered. The first reasoning event
+    # marks model output as seen to disable replay; that marker must not expose
+    # a later reasoning event before the terminal security decision.
+    if request_state.deferred_reasoning_downstream_texts:
+        return True
+    if request_state.upstream_model_output_seen:
         return False
     if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
         return False

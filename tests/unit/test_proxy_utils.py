@@ -14634,11 +14634,14 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(
     assert session.downstream_turn_state is None
     assert session.downstream_turn_state_aliases == set()
     assert session.previous_response_ids == set()
-    sticky_sessions.upsert.assert_awaited_once_with(
-        original_selection_key,
-        authorized_account.id,
-        kind=proxy_service.StickySessionKind.CODEX_SESSION,
-    )
+    if sticky_source == "session_header":
+        sticky_sessions.upsert.assert_awaited_once_with(
+            original_selection_key,
+            authorized_account.id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+    else:
+        sticky_sessions.upsert.assert_not_awaited()
     assert session.last_completed_input_count == 0
     assert session.last_completed_response_id is None
     assert session.last_completed_input_prefix_fingerprint is None
@@ -36208,6 +36211,145 @@ def test_websocket_safe_headers_clear_stale_turn_state_when_replacement_has_none
 
     assert headers["session_id"] == "hard-session-key"
     assert "x-codex-turn-state" not in {key.lower() for key in headers}
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_security_replacement_strips_stale_turn_state(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected_account = _make_account("acc_bridge_security_header_rejected")
+    authorized_account = _make_account("acc_bridge_security_header_authorized")
+    authorized_account.security_work_authorized = True
+    old_upstream = AsyncMock()
+    replacement_upstream = SimpleNamespace(response_header=lambda _name: None)
+    original_affinity = proxy_service._AffinityPolicy(
+        key="turn-security-stale",
+        kind=StickySessionKind.CODEX_SESSION,
+        codex_session_source="turn_state",
+    )
+    replacement_affinity = proxy_service._AffinityPolicy(reallocate_sticky=True)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_security_header_replacement",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+        excluded_account_ids={rejected_account.id},
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-stale", None),
+        headers={"session_id": "sid-security-replacement", "X-Codex-Turn-State": "turn-security-stale"},
+        affinity=replacement_affinity,
+        request_model="gpt-5.1",
+        account=rejected_account,
+        upstream=old_upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        upstream_turn_state=None,
+        downstream_turn_state=None,
+    )
+    connect_headers: list[dict[str, str]] = []
+
+    async def open_replacement(_account, headers, **_kwargs):
+        connect_headers.append(dict(headers))
+        return replacement_upstream
+
+    select_account = AsyncMock(return_value=AccountSelection(account=authorized_account, error_message=None))
+    claim_replacement = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=authorized_account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_replacement)
+    monkeypatch.setattr(service, "_claim_http_bridge_replacement_before_swap", claim_replacement)
+
+    await service._reconnect_http_bridge_session(
+        session,
+        request_state=request_state,
+        require_security_work_authorized=True,
+        owner_rebind_affinity=original_affinity,
+    )
+
+    assert len(connect_headers) == 1
+    assert connect_headers[0]["session_id"] == "sid-security-replacement"
+    assert "x-codex-turn-state" not in {key.lower() for key in connect_headers[0]}
+    assert "x-codex-turn-state" not in {key.lower() for key in session.headers}
+    assert session.account is authorized_account
+    assert session.affinity is replacement_affinity
+    assert session.upstream_turn_state is None
+    assert session.downstream_turn_state is None
+    select_account.assert_awaited_once()
+    claim_replacement.assert_awaited_once_with(
+        session,
+        account_id=authorized_account.id,
+        upstream=replacement_upstream,
+        release_selected_account_lease=ANY,
+        owner_rebind_affinity=original_affinity,
+    )
+    old_upstream.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_refuses_raw_file_backed_initial_turn(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_raw_file_stalled")
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "input": [{"type": "input_file", "file_id": "file_startup_owner"}],
+        },
+        separators=(",", ":"),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_raw_file_stalled_initial",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=request_text,
+        preferred_account_id=account.id,
+        file_required_preferred_account=False,
+    )
+    upstream = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-raw-file-stalled-key", None),
+        headers={"x-codex-turn-state": "turn_state_old_account"},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        upstream_turn_state="turn_state_old_account",
+        downstream_turn_state="turn_state_old_account",
+    )
+    reconnect = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    reconnect.assert_not_awaited()
+    upstream.send_text.assert_not_awaited()
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert session.upstream_turn_state == "turn_state_old_account"
+    assert session.downstream_turn_state == "turn_state_old_account"
+    assert session.headers.get("x-codex-turn-state") == "turn_state_old_account"
 
 
 @pytest.mark.asyncio

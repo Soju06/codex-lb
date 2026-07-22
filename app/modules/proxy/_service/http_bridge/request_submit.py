@@ -1564,6 +1564,7 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
+        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         now = _service_time().monotonic()
         async with session.pending_lock:
             retryable_requests = [
@@ -1624,15 +1625,19 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    request_state.excluded_account_ids.add(session.account.id)
+                    if not hard_owner_bound:
+                        request_state.excluded_account_ids.add(session.account.id)
             else:
                 require_preferred_reconnect = account_neutral_recovery
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
+                request_text_contains_file_ids = _http_bridge_request_contains_input_file_ids(request_text)
+                if request_text_contains_file_ids:
+                    return False
                 if account_neutral_recovery:
                     request_state.preferred_account_id = session.account.id
-                elif not request_state.file_required_preferred_account:
+                elif not request_state.file_required_preferred_account and not hard_owner_bound:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
@@ -1652,7 +1657,13 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             request_state.precreated_replay_account_id = session.account.id
-            if require_preferred_reconnect:
+            if hard_owner_bound:
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    require_same_account=True,
+                )
+            elif require_preferred_reconnect:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
@@ -2004,6 +2015,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 await self._unregister_http_bridge_previous_response_ids(session)
                 if (
                     require_security_work_authorized
+                    and previous_session_affinity.codex_session_source == "session_header"
                     and previous_session_affinity.selection_key is not None
                     and previous_session_affinity.kind is not None
                 ):

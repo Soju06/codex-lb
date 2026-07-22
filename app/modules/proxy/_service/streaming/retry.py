@@ -376,6 +376,7 @@ class _StreamingRetryMixin:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
+        security_requirement_preexisting = False
         security_lineage_requirement_marked = False
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
@@ -927,6 +928,8 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     account = selection.account
+                    if selection.requires_security_work_authorized and last_security_work_retry_error is None:
+                        security_requirement_preexisting = True
                     require_security_work_authorized = (
                         require_security_work_authorized or selection.requires_security_work_authorized
                     )
@@ -938,7 +941,7 @@ class _StreamingRetryMixin:
                         and require_security_work_authorized
                         and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
                     ):
-                        if security_lineage_id:
+                        if security_requirement_preexisting:
                             _facade().logger.info(
                                 "No security-work-authorized account available for classified stream request_id=%s",
                                 request_id,

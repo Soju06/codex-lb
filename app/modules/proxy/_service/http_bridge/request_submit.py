@@ -75,9 +75,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_enabled,
     _http_bridge_request_contains_input_file_ids,
     _http_bridge_request_counts_against_queue,
+    _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
     _record_http_bridge_prewarm_outcome,
+    _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -1564,7 +1566,6 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
-        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         now = _service_time().monotonic()
         async with session.pending_lock:
             retryable_requests = [
@@ -1577,6 +1578,12 @@ class _HTTPBridgeRequestSubmitMixin:
             if len(retryable_requests) != 1:
                 return False
             request_state = retryable_requests[0]
+            # A caller excludes a hard owner only after proving that the
+            # request can be replayed as a full resend. That explicit decision
+            # outranks the session key's normal hard-owner reconnect policy.
+            owner_reselection_allowed = session.account.id in request_state.excluded_account_ids
+            account_neutral_recovery = account_neutral_recovery and not owner_reselection_allowed
+            hard_owner_bound = _http_bridge_key_strength(session.key) == "hard" and not owner_reselection_allowed
             if request_state.previous_response_id is not None and not (
                 request_state.proxy_injected_previous_response_id
                 and request_state.fresh_upstream_request_is_retry_safe
@@ -1835,12 +1842,22 @@ class _HTTPBridgeRequestSubmitMixin:
                         max_age_seconds=owner_rebind_affinity.max_age_seconds,
                     )
                 if legacy_owner_id is not None and legacy_owner_id != account_id:
-                    raise RuntimeError("security retry conflicts with legacy continuity owner")
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "continuity_owner_conflict",
+                            "Security retry conflicts with a legacy continuity owner.",
+                            error_type="server_error",
+                        ),
+                    )
             if session.durable_session_id is not None:
                 await _call_with_supported_optional_kwargs(
                     self._claim_durable_http_bridge_session,
                     session,
-                    optional_kwargs={"claim_account_id": account_id},
+                    optional_kwargs={
+                        "claim_account_id": account_id,
+                        "clear_latest_turn_state": owner_rebind_affinity is not None,
+                    },
                     allow_takeover=True,
                     force_owner_epoch_advance=True,
                 )
@@ -1894,9 +1911,17 @@ class _HTTPBridgeRequestSubmitMixin:
             and not durable_security_requirement_persisted
             and session.durable_session_id is not None
         ):
-            durable_lookup = await self._durable_bridge.require_security_work_authorized(
-                session_id=session.durable_session_id
-            )
+            try:
+                durable_lookup = await self._durable_bridge.require_security_work_authorized(
+                    session_id=session.durable_session_id
+                )
+            except Exception as exc:
+                if not _is_missing_durable_bridge_table_error(exc):
+                    raise
+                logger.warning(
+                    "Durable bridge tables missing during security retry; continuing with sticky lineage only"
+                )
+                durable_lookup = session
             if durable_lookup is None:
                 # A claimed production lineage must be durably marked before
                 # it can move accounts. Fail closed if its record disappeared.
@@ -1925,8 +1950,13 @@ class _HTTPBridgeRequestSubmitMixin:
         previous_request_security_requirement = request_state.require_security_work_authorized
         previous_session_security_requirement = session.requires_security_work_authorized
         previous_session_affinity = session.affinity
+        previous_session_codex_session = session.codex_session
         previous_session_upstream_turn_state = session.upstream_turn_state
         previous_session_downstream_turn_state = session.downstream_turn_state
+        previous_session_turn_state_aliases = set(session.downstream_turn_state_aliases)
+        previous_session_turn_state_alias_registration_generations = dict(
+            session.turn_state_alias_registration_generations
+        )
         previous_session_headers = session.headers
         if request_state.previous_response_id is not None:
             prepared_retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
@@ -1944,20 +1974,15 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=None,
             reallocate_sticky=True,
         )
-        # Reconnect selects with the session policy, not the request copy.  A
-        # turn-state CODEX_SESSION policy would otherwise retain the rejected
-        # account's hard sticky row and turn this authorized retry into a
-        # no-account response before the replacement account is considered.
-        session.affinity = replace(
+        # Select without the rejected turn-state affinity, but do not mutate
+        # the live owner before the replacement is durably claimed.
+        replacement_session_affinity = replace(
             session.affinity,
             key=None,
             kind=None,
             reallocate_sticky=True,
             codex_session_source=None,
         )
-        session.upstream_turn_state = None
-        session.downstream_turn_state = None
-        session.headers = {key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"}
         # The replacement bridge session may belong to a different account.
         # Keep the shared response-create gate, but drop the old account-local
         # create lease so the replay is counted against the account that
@@ -2004,7 +2029,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 self._reconnect_http_bridge_session,
                 session,
                 optional_kwargs={
-                    "owner_rebind_affinity": (previous_session_affinity if require_security_work_authorized else None)
+                    "owner_rebind_affinity": (previous_session_affinity if require_security_work_authorized else None),
+                    "selection_affinity": (replacement_session_affinity if require_security_work_authorized else None),
                 },
                 request_state=request_state,
                 require_security_work_authorized=require_security_work_authorized,
@@ -2013,6 +2039,13 @@ class _HTTPBridgeRequestSubmitMixin:
             if session.account.id != owner_account_id:
                 await self._unregister_http_bridge_turn_states(session)
                 await self._unregister_http_bridge_previous_response_ids(session)
+                session.affinity = replacement_session_affinity
+                session.codex_session = False
+                session.upstream_turn_state = None
+                session.downstream_turn_state = None
+                session.headers = {
+                    key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+                }
                 if (
                     require_security_work_authorized
                     and previous_session_affinity.codex_session_source == "session_header"
@@ -2058,18 +2091,16 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized,
                 exc_info=True,
             )
-            switched_accounts = session.account.id != owner_account_id
-            if switched_accounts and not session.closed:
-                await self._retire_stale_pending_http_bridge_session(
-                    session,
-                    detail="security_retry_account_switch_failed",
-                )
             # A failed connect leaves the original owner socket live, so
             # restore its continuity state and let the caller emit the
             # owner-unavailable rewrite. After a successful reconnect the old
             # socket is already retired; a later send failure cannot safely
             # pretend that the owner state is still current.
-            if not reconnected:
+            if reconnected:
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                await self._retire_http_bridge_after_drain_if_ready(session)
+            else:
                 request_state.previous_response_id = previous_response_id
                 request_state.proxy_injected_previous_response_id = previous_proxy_injected_response_id
                 request_state.request_text = previous_request_text
@@ -2089,8 +2120,15 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.awaiting_response_created = previous_awaiting_response_created
                 request_state.force_refresh_account_id = previous_force_refresh_account_id
                 session.affinity = previous_session_affinity
+                session.codex_session = previous_session_codex_session
                 session.upstream_turn_state = previous_session_upstream_turn_state
                 session.downstream_turn_state = previous_session_downstream_turn_state
+                async with self._http_bridge_lock:
+                    session.downstream_turn_state_aliases.update(previous_session_turn_state_aliases)
+                    session.turn_state_alias_registration_generations.update(
+                        previous_session_turn_state_alias_registration_generations
+                    )
+                    _register_http_bridge_turn_state_aliases_locked(self, session)
                 session.headers = previous_session_headers
                 if require_security_work_authorized:
                     request_state.require_security_work_authorized = True
@@ -2117,7 +2155,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
                     )
             async with session.pending_lock:
-                if appended_pending_request and request_state in session.pending_requests:
+                if (reconnected or appended_pending_request) and request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
             return False

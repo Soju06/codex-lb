@@ -49,7 +49,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_contains_input_file_ids,
     _http_bridge_request_counts_against_queue,
+    _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
@@ -1419,17 +1421,59 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                security_retry_text = (
+                    terminal_request_state.fresh_upstream_request_text
+                    if terminal_request_state.previous_response_id is not None
+                    else terminal_request_state.request_text
+                )
+                original_request_has_file_ids = (
+                    terminal_request_state.original_request_contains_input_file_ids
+                    or _http_bridge_request_contains_input_file_ids(terminal_request_state.request_text)
+                )
+                security_retry_has_file_ids = original_request_has_file_ids or (
+                    security_retry_text is not None
+                    and _http_bridge_request_contains_input_file_ids(security_retry_text)
+                )
+                file_replay_unsafe = (
+                    terminal_request_state.file_required_preferred_account
+                    or security_retry_text is None
+                    or security_retry_has_file_ids
+                )
+                durable_security_requirement_persisted = False
+                if not terminal_request_state.file_required_preferred_account and not security_retry_has_file_ids:
+                    await self._mark_security_lineage_requirement(
+                        terminal_request_state.security_lineage_id,
+                        account_id=session.account.id,
+                        api_key_id=session.key.api_key_id,
+                    )
+                    terminal_request_state.require_security_work_authorized = True
+                    session.requires_security_work_authorized = True
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    if session.durable_session_id is not None:
+                        try:
+                            durable_lookup = await self._durable_bridge.require_security_work_authorized(
+                                session_id=session.durable_session_id
+                            )
+                            durable_security_requirement_persisted = durable_lookup is not None
+                        except Exception as exc:
+                            if not _is_missing_durable_bridge_table_error(exc):
+                                raise
+                            logger.warning(
+                                "Durable bridge tables missing while persisting security requirement; "
+                                "continuing with sticky lineage only"
+                            )
+                owner_is_security_work_authorized = bool(getattr(session.account, "security_work_authorized", False))
                 can_retry_security_work = (
                     not is_http_bridge_account_neutral_replay(
                         kind=session.key.affinity_kind,
                         key=session.key.affinity_key,
                     )
-                    and not session.account.security_work_authorized
+                    and not owner_is_security_work_authorized
                     and not has_other_pending_requests
-                    and terminal_request_state.response_id is None
+                    and not file_replay_unsafe
                     and terminal_request_state.replay_count < 1
                     and bool(terminal_request_state.request_text)
-                    and terminal_request_state.preferred_account_id != session.account.id
                     and _websocket_auth_request_can_switch_account(terminal_request_state)
                     and _websocket_request_can_replay_before_visible_output(
                         terminal_request_state,
@@ -1460,7 +1504,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                     )
                 if can_retry_security_work:
-                    retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
+                    retried = await self._retry_http_bridge_security_work_request(
+                        session,
+                        terminal_request_state,
+                        durable_security_requirement_persisted=durable_security_requirement_persisted,
+                    )
                     if retried:
                         return
 

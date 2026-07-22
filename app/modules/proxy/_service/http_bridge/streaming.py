@@ -951,8 +951,33 @@ class _HTTPBridgeStreamingMixin:
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
             if (
+                require_security_work_authorized
+                and not live_local_session_exists
+                and not forwards_to_active_owner
+                and payload.previous_response_id is None
+                and bridge_session_key.strength == "hard"
+                and durable_lookup.latest_response_id is not None
+                and not payload_looks_like_full_resend
+            ):
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="security_lineage_context_unavailable",
+                    previous_response_id=durable_lookup.latest_response_id,
+                    session_id=durable_lookup.canonical_key,
+                    upstream_error_code="security_lineage_context_unavailable",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "security_lineage_context_unavailable",
+                        "Security-classified session context is unavailable; "
+                        "resend the full conversation before retrying.",
+                    ),
+                )
+            if (
                 not live_local_session_exists
                 and not forwards_to_active_owner
+                and not require_security_work_authorized
                 and payload.previous_response_id is None
                 and not payload.conversation
                 and bridge_session_key.strength == "hard"
@@ -1027,10 +1052,18 @@ class _HTTPBridgeStreamingMixin:
             payload=effective_payload,
             durable_lookup=durable_lookup,
         )
+        security_required_unanchored_full_resend = (
+            require_security_work_authorized
+            and durable_lookup is not None
+            and request_state.previous_response_id is None
+            and not request_contains_input_file_ids
+            and _http_bridge_payload_looks_like_full_resend(effective_payload)
+        )
         request_state.preferred_account_id = (
             durable_lookup.account_id
             if (
                 durable_lookup is not None
+                and not security_required_unanchored_full_resend
                 and (
                     request_state.previous_response_id is not None
                     or bridge_session_key.strength == "hard"
@@ -1680,17 +1713,14 @@ class _HTTPBridgeStreamingMixin:
                 payload=effective_payload,
                 durable_lookup=durable_lookup,
             )
-            request_state.require_security_work_authorized = (
-                previous_request_state.require_security_work_authorized
-            )
+            request_state.require_security_work_authorized = previous_request_state.require_security_work_authorized
             request_state.preferred_account_id = resolve_required_account_id(
                 ("prepared request", previous_request_state.preferred_account_id),
                 ("durable bridge", durable_lookup.account_id if durable_lookup is not None else None),
                 ("input file", rewritten_file_account_id),
             )
             request_state.file_required_preferred_account = (
-                previous_request_state.file_required_preferred_account
-                or rewritten_file_account_id is not None
+                previous_request_state.file_required_preferred_account or rewritten_file_account_id is not None
             )
             request_state.original_request_contains_input_file_ids = (
                 previous_request_state.original_request_contains_input_file_ids

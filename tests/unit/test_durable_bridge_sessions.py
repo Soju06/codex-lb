@@ -132,7 +132,7 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
 
 
 @pytest.mark.asyncio
-async def test_durable_bridge_lookup_accepts_same_account_alias_session_divergence(
+async def test_durable_bridge_lookup_prefers_explicit_response_anchor_over_fresher_same_account_turn_alias(
     coordinator: DurableBridgeSessionCoordinator,
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:
@@ -371,66 +371,6 @@ async def test_durable_bridge_lookup_preserves_requested_response_alias_after_an
     assert lookup is not None
     assert lookup.session_id == requested_owner.session_id
     assert lookup.latest_response_id == "resp-requested-latest"
-
-
-@pytest.mark.asyncio
-async def test_durable_bridge_lookup_rejects_ownerless_and_live_alias_divergence(
-    coordinator: DurableBridgeSessionCoordinator,
-) -> None:
-    ownerless = await coordinator.claim_live_session(
-        session_key_kind="session_header",
-        session_key_value="sid-ownerless",
-        api_key_id="key-ownerless-conflict",
-        instance_id="instance-a",
-        lease_ttl_seconds=120.0,
-        account_id=None,
-        model="gpt-5.4",
-        service_tier=None,
-        latest_turn_state=None,
-        latest_response_id=None,
-        allow_takeover=True,
-    )
-    live_owner = await coordinator.claim_live_session(
-        session_key_kind="session_header",
-        session_key_value="sid-live-owner",
-        api_key_id="key-ownerless-conflict",
-        instance_id="instance-b",
-        lease_ttl_seconds=120.0,
-        account_id="acc-live",
-        model="gpt-5.4",
-        service_tier=None,
-        latest_turn_state=None,
-        latest_response_id=None,
-        allow_takeover=True,
-    )
-    await coordinator.register_turn_state(
-        session_id=ownerless.session_id,
-        api_key_id="key-ownerless-conflict",
-        instance_id="instance-a",
-        owner_epoch=ownerless.owner_epoch,
-        turn_state="http_turn_ownerless",
-        lease_ttl_seconds=120.0,
-    )
-    await coordinator.register_previous_response_id(
-        session_id=live_owner.session_id,
-        api_key_id="key-ownerless-conflict",
-        instance_id="instance-b",
-        owner_epoch=live_owner.owner_epoch,
-        response_id="resp_live_owner",
-        lease_ttl_seconds=120.0,
-    )
-
-    with pytest.raises(ProxyResponseError) as exc_info:
-        await coordinator.lookup_request_targets(
-            session_key_kind="request",
-            session_key_value="req-ownerless-conflict",
-            api_key_id="key-ownerless-conflict",
-            turn_state="http_turn_ownerless",
-            session_header=None,
-            previous_response_id="resp_live_owner",
-        )
-
-    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio

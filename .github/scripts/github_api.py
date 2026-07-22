@@ -32,7 +32,7 @@ RATE_LIMIT_DETAIL_MARKERS = (
 class GitHubApiError(RuntimeError):
     """Raised when a GitHub API request fails."""
 
-    def __init__(self, message: str, *, transient: bool = False) -> None:
+    def __init__(self, message: str, *, transient: bool = True) -> None:
         super().__init__(message)
         self.transient = transient
 

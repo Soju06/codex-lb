@@ -210,7 +210,10 @@ def log_error_response(
 
 
 def _error_log_field(value: str | None) -> str:
-    return _redact_log_value(value) or "-"
+    redacted = _redact_log_value(value)
+    if redacted is None:
+        return "-"
+    return json.dumps(redacted)
 
 
 def _collapse_log_value(value: str | None) -> str | None:

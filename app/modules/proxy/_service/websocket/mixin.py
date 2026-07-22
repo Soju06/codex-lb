@@ -4262,7 +4262,12 @@ class _WebSocketMixin:
                         return downstream_text
                 if not request_state.file_required_preferred_account and not security_retry_has_file_ids:
                     request_state.require_security_work_authorized = True
-                    upstream_control.reconnect_requested = True
+                    if request_state.last_downstream_sequence_number is None and (
+                        request_state.previous_response_id is None
+                        or request_state.proxy_injected_previous_response_id
+                        or request_state.security_lineage_id is not None
+                    ):
+                        upstream_control.reconnect_requested = True
 
         await proxy._finalize_websocket_request_state(
             request_state,

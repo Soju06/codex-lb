@@ -948,8 +948,6 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_budget=sum(token_counts),
     )
     required_indices = set(state_anchor_indices)
-    if input_value:
-        required_indices.add(len(input_value) - 1)
     if required_indices & unusable_side_effect_indices:
         raise ClientPayloadError(
             "Compact input cannot retain a required side-effect call without a usable call_id.",
@@ -968,6 +966,12 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_counts=token_counts,
         has_previous_response_anchor=_compact_has_previous_response_anchor(payload),
     )
+    if terminal_is_required and terminal_indices & unusable_side_effect_indices:
+        raise ClientPayloadError(
+            "Compact input cannot retain a required side-effect call without a usable call_id.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
     if terminal_indices:
         prospective_required_indices = required_indices | terminal_indices
         prospective_required_indices = _compact_reconciled_tool_call_indices(
@@ -1055,12 +1059,20 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
         required_indices=required_indices | side_effect_indices,
     )
+    selected_tool_indices: set[int] = set()
+    for index in selected_indices:
+        selected_item = _json_mapping_or_none(input_value[index])
+        if (
+            selected_item is not None
+            and selected_item.get("type") in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        ):
+            selected_tool_indices.add(index)
     selected_indices = _compact_fit_selected_indices_to_wire_budget(
         input_value,
         token_counts,
         selected_indices=selected_indices,
         required_indices=required_indices,
-        priority_indices=side_effect_indices,
+        priority_indices=side_effect_indices | selected_tool_indices,
     )
     trimmed_input = (
         input_value

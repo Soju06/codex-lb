@@ -839,6 +839,7 @@ class _CompactMixin:
             network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
             require_security_work_authorized = False
+            security_requirement_preexisting = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
@@ -863,6 +864,8 @@ class _CompactMixin:
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,
                 )
+                if selection.requires_security_work_authorized and last_exc is None:
+                    security_requirement_preexisting = True
                 require_security_work_authorized = (
                     require_security_work_authorized or selection.requires_security_work_authorized
                 )
@@ -872,7 +875,7 @@ class _CompactMixin:
                         require_security_work_authorized
                         and selection.error_code == _no_security_work_authorized_accounts_code()
                     ):
-                        if security_lineage_id:
+                        if security_requirement_preexisting:
                             logger.info(
                                 "No security-work-authorized account available for classified compact request_id=%s",
                                 request_id,

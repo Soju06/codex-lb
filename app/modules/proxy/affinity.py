@@ -86,11 +86,12 @@ class _AffinityPolicy:
         _CodexSessionSource | None,
         str | None,
     ]:
-        # A resolved response/file/bridge owner is more specific than broad
-        # sticky state. Do not let Codex session or turn-state rows veto the
-        # known owner; those rows are locality hints for account-neutral turns,
-        # not owner evidence here.
-        return None, None, False, sticky_max_age_seconds, None, None
+        if sticky_source != "session_header":
+            return None, None, False, sticky_max_age_seconds, None, None
+        # A resolved owner bypasses the new soft row, while the raw compatibility
+        # row remains a conflict check for legacy hard ownership.  With no
+        # writable key, a miss cannot manufacture or rebind a mapping.
+        return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
 
 
 def _codex_session_selection_key(key: str) -> str:

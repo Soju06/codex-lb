@@ -1297,16 +1297,12 @@ def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
 
 
 def test_request_log_useragent_fields_preserve_multi_word_family() -> None:
-    useragent, useragent_group = proxy_service._request_log_useragent_fields(
-        {"User-Agent": "Codex Desktop/0.142.4"}
-    )
+    useragent, useragent_group = proxy_service._request_log_useragent_fields({"User-Agent": "Codex Desktop/0.142.4"})
 
     assert useragent == "Codex Desktop/0.142.4"
     assert useragent_group == "Codex Desktop"
 
-    slash_free_useragent, slash_free_group = proxy_service._request_log_useragent_fields(
-        {"User-Agent": "CodexCLI"}
-    )
+    slash_free_useragent, slash_free_group = proxy_service._request_log_useragent_fields({"User-Agent": "CodexCLI"})
     assert slash_free_useragent == "CodexCLI"
     assert slash_free_group == "CodexCLI"
 

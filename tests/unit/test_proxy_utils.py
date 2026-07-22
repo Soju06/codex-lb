@@ -14717,6 +14717,68 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(
     assert request_state.event_queue.empty()
 
 
+@pytest.mark.parametrize(
+    ("item_type", "expected_deferred"),
+    [
+        ("apply_patch_call", False),
+        ("code_interpreter_call", False),
+        ("computer_call", False),
+        ("custom_tool_call", False),
+        ("image_generation_call", False),
+        ("reasoning", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_bridge_marks_every_visible_output_item_before_security_replay(
+    item_type: str,
+    expected_deferred: bool,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_visible_output_item",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp_visible_output_item",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"check"}',
+    )
+    upstream = AsyncMock()
+    upstream.archive_received = MagicMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "visible-output-item", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_visible_output_item"),
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    payload = {
+        "type": "response.output_item.added",
+        "response_id": request_state.response_id,
+        "item": {"id": "item_visible_output", "call_id": "call_visible_output", "type": item_type},
+    }
+
+    await service._process_http_bridge_upstream_text(session, json.dumps(payload, separators=(",", ":")))
+
+    assert request_state.upstream_model_output_seen is True
+    assert proxy_service._websocket_request_can_replay_before_visible_output(request_state) is False
+    assert bool(request_state.deferred_reasoning_downstream_texts) is expected_deferred
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty() is expected_deferred
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_token_invalidated_retries_then_fails_over(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -31911,7 +31973,7 @@ async def test_select_account_with_budget_intersects_cap_spillover_with_request_
     ],
 )
 @pytest.mark.asyncio
-async def test_select_account_with_budget_ignores_sticky_mapping_for_preferred_owner(
+async def test_select_account_with_budget_reconciles_sticky_mapping_for_preferred_owner(
     monkeypatch: pytest.MonkeyPatch,
     sticky_source: proxy_service._CodexSessionSource,
     sticky_key: str,
@@ -31948,14 +32010,15 @@ async def test_select_account_with_budget_ignores_sticky_mapping_for_preferred_o
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["account_ids"] is None
     assert select_account.await_args.kwargs["required_account_id"] == owner.id
-    assert select_account.await_args.kwargs["sticky_key"] is None
     if sticky_source == "session_header":
+        assert select_account.await_args.kwargs["sticky_key"] is None
         assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
         assert select_account.await_args.kwargs["sticky_source"] == "session_header"
         assert select_account.await_args.kwargs["legacy_sticky_key"] == sticky_key
     else:
-        assert select_account.await_args.kwargs["sticky_kind"] is None
-        assert select_account.await_args.kwargs["sticky_source"] is None
+        assert select_account.await_args.kwargs["sticky_key"] == sticky_key
+        assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
+        assert select_account.await_args.kwargs["sticky_source"] == "turn_state"
         assert select_account.await_args.kwargs["legacy_sticky_key"] is None
 
 

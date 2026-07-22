@@ -87,10 +87,18 @@ class _AffinityPolicy:
         str | None,
     ]:
         if sticky_source != "session_header":
-            return None, None, False, sticky_max_age_seconds, None, None
-        # A resolved owner bypasses the new soft row, while the raw compatibility
-        # row remains a conflict check for legacy hard ownership.  With no
-        # writable key, a miss cannot manufacture or rebind a mapping.
+            return (
+                sticky_key,
+                sticky_kind,
+                reallocate_sticky,
+                sticky_max_age_seconds,
+                sticky_source,
+                legacy_sticky_key,
+            )
+        # A resolved response/file/bridge owner bypasses the new soft row, but
+        # the raw compatibility row still has to be checked for conflicting
+        # legacy hard ownership. Selection receives no writable sticky key, so
+        # a raw miss cannot manufacture or rebind a mapping.
         return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
 
 

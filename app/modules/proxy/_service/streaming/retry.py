@@ -367,6 +367,8 @@ class _StreamingRetryMixin:
         current_account_lease: AccountLease | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
+        transient_failed_account_id: str | None = None
+        hard_affinity_same_owner_retry_attempted = False
         deferred_capacity_account: Account | None = None
         deferred_capacity_lease: AccountLease | None = None
         preferred_account_id: str | None = None
@@ -1057,6 +1059,26 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(deferred_capacity_lease)
                         deferred_capacity_account = None
                         deferred_capacity_lease = None
+                    if (
+                        not account
+                        and selection.error_code == "hard_affinity_saturated"
+                        and transient_failed_account_id is not None
+                        and transient_failed_account_id in excluded_account_ids
+                        and not hard_affinity_same_owner_retry_attempted
+                    ):
+                        # A hard CODEX_SESSION row can resolve only to its owner.
+                        # If the transport just excluded that same account after
+                        # a pre-visible transient failure, alternate selection is
+                        # impossible by construction. Retry the known owner once
+                        # without weakening or rebinding the durable affinity.
+                        excluded_account_ids.discard(transient_failed_account_id)
+                        hard_affinity_same_owner_retry_attempted = True
+                        _facade().logger.info(
+                            "Retrying transient stream failure on hard affinity owner request_id=%s account_id=%s",
+                            request_id,
+                            transient_failed_account_id,
+                        )
+                        continue
                     if (
                         not account
                         and (
@@ -1909,6 +1931,7 @@ class _StreamingRetryMixin:
                                 )
                                 if action == "failover_next":
                                     last_transient_exc = tex
+                                    transient_failed_account_id = account.id
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)

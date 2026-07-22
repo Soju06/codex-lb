@@ -13331,6 +13331,61 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_retries_hard_owner_after_transient_exclusion(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_direct_hard_owner_retry")
+    selections: list[set[str]] = []
+    stream_attempts = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        selections.append(excluded)
+        if account.id in excluded:
+            return AccountSelection(
+                account=None,
+                error_message="Hard affinity owner account is unavailable",
+                error_code="hard_affinity_saturated",
+            )
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream(*_args: object, **_kwargs: object):
+        nonlocal stream_attempts
+        stream_attempts += 1
+        if stream_attempts == 1:
+            raise proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_error", "temporary upstream failure"),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_hard_owner_retry"}}\n\n'
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        service,
+        "_handle_stream_error",
+        AsyncMock(return_value={"failure_class": "retryable_transient"}),
+    )
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "inspect image", "input": [], "stream": True}
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-hard-owner"})]
+
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_hard_owner_retry"
+    assert selections == [set(), {account.id}, set()]
+    assert stream_attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_empty_upstream_emits_terminal_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

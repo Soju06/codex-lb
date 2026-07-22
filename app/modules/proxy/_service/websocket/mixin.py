@@ -4884,6 +4884,53 @@ class _WebSocketMixin:
                         exc_info=True,
                     )
 
+            if not health_penalty_ready and account is not None and penalty_code is not None:
+                proxy._schedule_cancel_safe_cleanup(
+                    proxy._settle_deferred_websocket_reservations_and_apply_health_penalty(
+                        remaining=remaining,
+                        account=account,
+                        account_id_value=account_id_value,
+                        penalty_code=penalty_code,
+                        penalty_message=penalty_message or error_message,
+                    ),
+                    action="release_stream_api_key_reservations_and_apply_websocket_health_penalty",
+                    request_id=remaining[-1].request_id,
+                )
+
+    async def _settle_deferred_websocket_reservations_and_apply_health_penalty(
+        self,
+        *,
+        remaining: list[_WebSocketRequestState],
+        account: Account,
+        account_id_value: str | None,
+        penalty_code: str,
+        penalty_message: str,
+    ) -> None:
+        proxy = cast(_WebSocketServiceProtocol, self)
+        retry_delay_seconds = 0.1
+        while any(request_state.api_key_reservation is not None for request_state in remaining):
+            for request_state in remaining:
+                if request_state.api_key_reservation is None:
+                    continue
+                try:
+                    await proxy._release_websocket_request_state_reservation(request_state)
+                except Exception:
+                    _facade().logger.warning(
+                        "Failed to settle deferred websocket reservation; retaining cleanup ownership "
+                        "account_id=%s error_code=%s request_id=%s",
+                        account_id_value,
+                        penalty_code,
+                        request_state.request_id,
+                        exc_info=True,
+                    )
+                else:
+                    request_state.api_key_reservation = None
+            if any(request_state.api_key_reservation is not None for request_state in remaining):
+                await asyncio.sleep(retry_delay_seconds)
+                retry_delay_seconds = min(retry_delay_seconds * 2, 5.0)
+
+        await proxy._handle_stream_error(account, {"message": penalty_message}, penalty_code)
+
     async def _emit_websocket_terminal_error(
         self,
         websocket: WebSocket,

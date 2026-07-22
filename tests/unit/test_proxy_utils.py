@@ -19062,6 +19062,15 @@ async def test_fail_pending_websocket_requests_continues_terminal_cleanup_when_s
 
     monkeypatch.setattr(service, "_release_websocket_request_state_reservation", fail_release)
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    scheduled_cleanup = None
+
+    def capture_cleanup(coro, *, action, request_id):
+        nonlocal scheduled_cleanup
+        assert action == "release_stream_api_key_reservations_and_apply_websocket_health_penalty"
+        assert request_id == "ws_req_settlement_failure_cleanup"
+        scheduled_cleanup = coro
+
+    monkeypatch.setattr(service, "_schedule_cancel_safe_cleanup", capture_cleanup)
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_settlement_failure_cleanup",
@@ -19086,9 +19095,57 @@ async def test_fail_pending_websocket_requests_continues_terminal_cleanup_when_s
 
     handle_stream_error.assert_not_awaited()
     assert release_attempts == 6
+    assert scheduled_cleanup is not None
+    scheduled_cleanup.close()
     assert request_state.event_queue is not None
     assert await request_state.event_queue.get() is not None
     assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_retains_cleanup_until_settlement_and_penalty(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_deferred_cleanup_owner")
+    ordering: list[str] = []
+    release_attempts = 0
+
+    async def release_reservation(_request_state):
+        nonlocal release_attempts
+        release_attempts += 1
+        if release_attempts <= 6:
+            raise RuntimeError("reservation store unavailable")
+        ordering.append("settle")
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        ordering.append("health")
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_deferred_cleanup_owner",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
+        started_at=time.monotonic(),
+        skip_request_log=True,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert release_attempts == 7
+    assert ordering == ["settle", "health"]
+    assert request_state.api_key_reservation is None
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.requests import ResponsesRequest
 from app.db.models import Account
 from app.modules.proxy._service.support import _HTTPBridgeSession, _HTTPBridgeSessionKey
+from app.modules.proxy.durable_bridge_repository import DurableBridgeAliasRegistrationReceipt
 from app.modules.proxy.load_balancer import AccountSelection
 
 
@@ -55,6 +56,28 @@ class _HTTPBridgeServiceProtocol(Protocol):
         expected_session: _HTTPBridgeSession | None = None,
         mark_closed: bool = True,
     ) -> _HTTPBridgeSession | None: ...
+    def _unregister_http_bridge_turn_states_locked(self, session: _HTTPBridgeSession) -> None: ...
+    def _unregister_http_bridge_previous_response_ids_locked(self, session: _HTTPBridgeSession) -> None: ...
+    async def _register_http_bridge_turn_state_impl(
+        self,
+        session: _HTTPBridgeSession,
+        turn_state: str,
+    ) -> bool: ...
+    async def _register_http_bridge_turn_state_core(
+        self,
+        session: _HTTPBridgeSession,
+        turn_state: str,
+        *,
+        reversible: bool,
+    ) -> tuple[bool, DurableBridgeAliasRegistrationReceipt | None]: ...
+    async def _register_http_bridge_previous_response_id_impl(
+        self,
+        session: _HTTPBridgeSession,
+        response_id: str,
+        *,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
+    ) -> bool: ...
     def _schedule_http_bridge_session_closes(
         self,
         sessions: list[_HTTPBridgeSession],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,27 @@ from app.modules.usage.additional_quota_keys import clear_additional_quota_regis
 
 def _db_url(path: Path) -> str:
     return f"sqlite+aiosqlite:///{path}"
+
+
+def test_parse_args_rejects_explicit_empty_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["codex-lb-db", "--db-url", "", "current"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        migrate_module._parse_args()
+
+    assert exc_info.value.code == 2
+    assert "argument --db-url: database URL must not be empty" in capsys.readouterr().err
+
+
+def test_parse_args_preserves_omitted_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["codex-lb-db", "current"])
+
+    args = migrate_module._parse_args()
+
+    assert args.db_url is None
 
 
 def test_check_schema_drift_disposes_sync_engine(monkeypatch) -> None:

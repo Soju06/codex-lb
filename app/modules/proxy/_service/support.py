@@ -443,6 +443,12 @@ def _supported_optional_kwargs(
     return kwargs
 
 
+_CONVERSATION_HEADERS_BY_USERAGENT_PREFIX = (
+    ("opencode", ("x-parent-session-id", "x-opencode-session", "x-session-id", "x-session-affinity")),
+    ("codex", ("thread-id",)),
+)
+
+
 def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
     raw_useragent = next((value for key, value in headers.items() if key.lower() == "user-agent"), None)
     if raw_useragent is None:
@@ -453,6 +459,22 @@ def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | Non
     first_token = useragent.split(maxsplit=1)[0]
     useragent_group = first_token.split("/", 1)[0].strip() or None
     return useragent, useragent_group
+
+
+def _request_log_client_fields(
+    headers: Mapping[str, str],
+) -> tuple[str | None, str | None, str | None]:
+    useragent, useragent_group = _request_log_useragent_fields(headers)
+    normalized_useragent = (useragent or "").strip().casefold()
+    normalized_headers = {key.casefold(): value for key, value in headers.items()}
+    for prefix, header_names in _CONVERSATION_HEADERS_BY_USERAGENT_PREFIX:
+        if normalized_useragent.startswith(prefix):
+            for header_name in header_names:
+                value = normalized_headers.get(header_name)
+                if value and (conversation_id := value.strip()):
+                    return useragent, useragent_group, conversation_id
+            break
+    return useragent, useragent_group, None
 
 
 class _RetryableStreamError(Exception):
@@ -709,6 +731,10 @@ class _WebSocketRequestState:
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None
+    # Monotonic time immediately before the current upstream response.create
+    # send. Retries replace this value so admission wait and prior attempts do
+    # not age a fresh send into the eventless owner deadline.
+    response_create_sent_at: float | None = None
     bridge_queue_wait_started_at: float | None = None
     # Monotonic deadline of the original bridge request budget. Retry and
     # recovery paths re-prepare request states with a fresh started_at, so
@@ -807,6 +833,7 @@ class _WebSocketRequestState:
     upstream_proxy_fail_closed_reason: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    conversation_id: str | None = None
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
@@ -855,11 +882,15 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    # Wakes a reader that began an unbounded receive before the first request
+    # was enqueued. The reader keeps one receive task alive across wakeups.
+    upstream_reader_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
     unanchored_reservation_id: str | None = None
     admission_waiter_count: int = 0
     request_service_tier: str | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    recovery_alias_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False

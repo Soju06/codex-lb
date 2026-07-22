@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -64,6 +64,118 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
         persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
         assert persisted is not None
         assert persisted.request_kind == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_add_log_persists_normalized_conversation_id(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            request_id="req_conversation",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            conversation_id=" conv-a ",
+        )
+        empty = await repo.add_log(
+            account_id=None,
+            request_id="req_conversation_empty",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            conversation_id=" ",
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        empty_persisted = await session.scalar(select(RequestLog).where(RequestLog.id == empty.id))
+
+    assert persisted is not None
+    assert persisted.conversation_id == "conv-a"
+    assert empty_persisted is not None
+    assert empty_persisted.conversation_id is None
+
+
+@pytest.mark.asyncio
+async def test_aggregate_conversations_by_bucket_deduplicates_model_service_groups_and_excludes_warmups(
+    db_setup,
+) -> None:
+    del db_setup
+    since = datetime(2026, 7, 21, 0, 0, 0)
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for request_id, model, service_tier, conversation_id, request_kind in (
+            ("conversation_bucket_1", "gpt-5.1", None, "conv-a", "normal"),
+            ("conversation_bucket_2", "gpt-5.2", "priority", " conv-a ", "normal"),
+            ("conversation_bucket_3", "gpt-5.1", None, "conv-b", "normal"),
+            ("conversation_bucket_warmup", "gpt-5.1", None, "conv-warmup", "warmup"),
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model=model,
+                service_tier=service_tier,
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                conversation_id=conversation_id,
+                request_kind=request_kind,
+                requested_at=since + timedelta(minutes=5),
+            )
+
+        buckets = await repo.aggregate_conversations_by_bucket(since, bucket_seconds=3600)
+
+    assert [(bucket.bucket_epoch, bucket.conversation_count) for bucket in buckets] == [
+        (int(since.replace(tzinfo=timezone.utc).timestamp()), 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_activity_counts_only_nonblank_conversation_requests(db_setup) -> None:
+    del db_setup
+    since = datetime(2026, 7, 21, 0, 0, 0)
+    until = since + timedelta(hours=1)
+
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for request_id, conversation_id, request_kind in (
+            ("conv-request-1", "conv-a", "normal"),
+            ("conv-request-2", " conv-a ", "normal"),
+            ("conv-request-3", "conv-b", "normal"),
+            ("conv-request-4", "conv-b", "normal"),
+            ("no-conversation-1", None, "normal"),
+            ("no-conversation-2", "   ", "normal"),
+            ("warmup-conversation", "conv-warmup", "warmup"),
+        ):
+            await repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model="gpt-5.2",
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                conversation_id=conversation_id,
+                request_kind=request_kind,
+                requested_at=since + timedelta(minutes=5),
+            )
+
+        aggregate = await repo.aggregate_activity_between(since, until)
+
+    assert aggregate.request_count == 6
+    assert aggregate.conversation_count == 2
+    assert aggregate.conversation_request_count == 4
 
 
 @pytest.mark.asyncio

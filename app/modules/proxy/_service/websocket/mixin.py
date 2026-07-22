@@ -322,7 +322,7 @@ from app.modules.proxy._service.support import (
     _PreparedWebSocketRequest,
     _record_response_event,
     _record_websocket_route_metadata,
-    _request_log_useragent_fields,
+    _request_log_client_fields,
     _sleep_for_account_selection_recovery,
     _stream_settlement_error_payload,
     _StreamSettlement,
@@ -452,6 +452,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    apply_enforced_service_tier_model_fallback,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_invalid_payload_error,
@@ -751,7 +752,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -942,6 +943,7 @@ class _WebSocketMixin:
                                     continuity_state=continuity_state,
                                     useragent=useragent,
                                     useragent_group=useragent_group,
+                                    conversation_id=conversation_id,
                                     client_ip=client_ip,
                                     synthesized_turn_state=synthesized_turn_state,
                                 )
@@ -979,6 +981,7 @@ class _WebSocketMixin:
                                         continuity_state=continuity_state,
                                         useragent=useragent,
                                         useragent_group=useragent_group,
+                                        conversation_id=conversation_id,
                                         client_ip=client_ip,
                                         synthesized_turn_state=synthesized_turn_state,
                                     )
@@ -1643,6 +1646,7 @@ class _WebSocketMixin:
         continuity_state: "_WebSocketContinuityState | None" = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        conversation_id: str | None = None,
         client_ip: str | None = None,
         synthesized_turn_state: str | None = None,
     ) -> _PreparedWebSocketRequest:
@@ -1653,10 +1657,14 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
-        apply_api_key_enforcement(
+        service_tier_was_enforced = apply_api_key_enforcement(
             responses_payload,
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
+        )
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
         )
         normalized_payload = responses_payload.to_payload()
         body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)
@@ -1793,6 +1801,7 @@ class _WebSocketMixin:
             raise
         request_state.useragent = useragent
         request_state.useragent_group = useragent_group
+        request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
@@ -1996,8 +2005,16 @@ class _WebSocketMixin:
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        if request_state.useragent is None and request_state.useragent_group is None:
-            request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        if (
+            request_state.useragent is None
+            and request_state.useragent_group is None
+            and request_state.conversation_id is None
+        ):
+            (
+                request_state.useragent,
+                request_state.useragent_group,
+                request_state.conversation_id,
+            ) = _request_log_client_fields(headers)
         deadline = _websocket_connect_deadline(request_state, _facade().get_settings().proxy_request_budget_seconds)
         base_settings = _facade().get_settings()
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
@@ -4476,6 +4493,7 @@ class _WebSocketMixin:
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
                 useragent=request_state.useragent,
                 useragent_group=request_state.useragent_group,
+                conversation_id=request_state.conversation_id,
                 client_ip=request_state.client_ip,
                 request_kind=request_state.request_kind,
             )
@@ -4542,6 +4560,7 @@ class _WebSocketMixin:
             upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
             useragent=request_state.useragent,
             useragent_group=request_state.useragent_group,
+            conversation_id=request_state.conversation_id,
             client_ip=request_state.client_ip,
             request_kind=request_state.request_kind,
         )
@@ -4781,6 +4800,7 @@ class _WebSocketMixin:
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
                 useragent=request_state.useragent,
                 useragent_group=request_state.useragent_group,
+                conversation_id=request_state.conversation_id,
                 client_ip=request_state.client_ip,
                 request_kind=request_state.request_kind,
             )

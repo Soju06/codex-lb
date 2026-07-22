@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
+from app.core.usage.types import BucketConversationAggregate, BucketModelAggregate, RequestActivityAggregate
 from app.db.models import (
     Account,
     AccountLimitWarmup,
@@ -64,6 +64,13 @@ class DashboardRepository:
         bucket_seconds: int = 21600,
     ) -> list[BucketModelAggregate]:
         return await self._logs_repo.aggregate_by_bucket(since, bucket_seconds)
+
+    async def aggregate_conversations_by_bucket(
+        self,
+        since: datetime,
+        bucket_seconds: int = 21600,
+    ) -> list[BucketConversationAggregate]:
+        return await self._logs_repo.aggregate_conversations_by_bucket(since, bucket_seconds)
 
     async def aggregate_activity_since(self, since: datetime) -> RequestActivityAggregate:
         return await self._logs_repo.aggregate_activity_since(since)

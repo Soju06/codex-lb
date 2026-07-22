@@ -485,6 +485,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         concurrency_caps: AccountConcurrencyCaps | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        conversation_id: str | None = None,
         client_ip: str | None = None,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
@@ -1080,9 +1081,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 bridge_stage=failure_metadata.bridge_stage,
                 upstream_proxy_route_mode=route_trace.mode or (route.mode if route is not None else None),
                 upstream_proxy_pool_id=route_trace.pool_id or (route.pool_id if route is not None else None),
-                upstream_proxy_endpoint_id=(
-                    route_trace.endpoint_id or (route.endpoint_id if route is not None else None)
-                ),
+                upstream_proxy_endpoint_id=route_trace.endpoint_id or (route.endpoint_id if route else None),
                 upstream_proxy_fallback_used=(
                     route_trace.fallback_used
                     if route_trace.endpoint_id is not None
@@ -1091,6 +1090,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
                 client_ip=client_ip,
             )
             _maybe_log_proxy_service_tier_trace(

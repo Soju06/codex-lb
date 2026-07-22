@@ -1,0 +1,6 @@
+- [x] Carry the payload fingerprint in the response-create dump id.
+- [x] Skip writing a dump when a dump for the same fingerprint already exists, and log the suppressed duplicate.
+- [x] Prune the oldest dump pairs on write so the directory retains at most a fixed number of pairs.
+- [x] Remove the meta sibling alongside each pruned dump so pairs stay consistent.
+- [x] Add unit coverage for duplicate suppression, distinct-payload retention, and prune-on-write.
+- [x] Extend the deployment-installation requirement to cover dump-directory bounding and validate OpenSpec.

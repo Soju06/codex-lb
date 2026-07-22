@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
+from app.core.audit.service import drain_audit_log_tasks
 from app.core.auth.guardian import build_auth_guardian_scheduler
 from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
@@ -40,8 +41,11 @@ from app.core.middleware import (
     add_app_version_middleware,
     add_backend_api_codex_v1_alias_middleware,
     add_dashboard_auth_proxy_middleware,
+    add_multipart_content_encoding_middleware,
+    add_request_body_limit_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
+    add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
 from app.core.middleware.inflight import InFlightMiddleware
@@ -51,6 +55,7 @@ from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.scheduling.leader_election import get_leader_election
+from app.core.shutdown import close_control_plane_task_admission
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -132,6 +137,46 @@ async def _release_leader_lease_within(timeout: float) -> None:
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+
+
+async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
+    # Closing admission is synchronous with producer checks on the event loop,
+    # so no task can appear after the stable drain passes complete.
+    close_control_plane_task_admission()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    clean_passes = 0
+
+    while clean_passes < 2:
+        remaining = max(0.0, deadline - loop.time())
+        results = await asyncio.gather(
+            drain_audit_log_tasks(remaining),
+            fleet_api.drain_background_refresh_tasks(remaining),
+            return_exceptions=True,
+        )
+
+        clean_pass = True
+        for task_kind, result in zip(("audit log", "fleet refresh"), results, strict=True):
+            if isinstance(result, BaseException):
+                clean_pass = False
+                logger.warning(
+                    "Failed to drain %s tasks during shutdown",
+                    task_kind,
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+            elif result is False:
+                clean_pass = False
+
+        if not clean_pass:
+            return
+
+        clean_passes += 1
+
+        # A done callback may enqueue sibling audit/fleet work after both
+        # registries looked empty. One extra stable pass catches that before
+        # HTTP clients and DB engines are torn down.
+        if clean_passes < 2:
+            await asyncio.sleep(0)
 
 
 class _MetricsServer(Protocol):
@@ -469,6 +514,10 @@ async def lifespan(app: FastAPI):
         shutdown_state.set_bridge_drain_active(True)
         shutdown_state.set_draining(True)
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+        # No await separates the timeout result from this cutoff. A slow
+        # request therefore either registered its task before the barrier or
+        # is prevented from starting new audit/fleet database work afterward.
+        shutdown_state.close_control_plane_task_admission()
         if not drained:
             logger.warning("Drain timeout reached, proceeding with shutdown")
 
@@ -519,6 +568,12 @@ async def lifespan(app: FastAPI):
 
         if metrics_server is not None:
             metrics_server.should_exit = True
+
+        # Detached control-plane work must finish while usage singleflight,
+        # shared HTTP clients, and both database engines are still available.
+        # The replica heartbeat is already stopped/staled so this grace period
+        # does not extend its active bridge-ring lifetime.
+        await _drain_detached_control_plane_tasks(settings.shutdown_drain_timeout_seconds)
 
         # Start the single process-level lease-renewal keeper BEFORE stopping any
         # scheduler. Schedulers are stopped one at a time and only the final
@@ -572,7 +627,6 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Metrics server stopped with an error")
             finally:
-                shutdown_state.reset()
                 mark_process_dead()
                 await close_db()
 
@@ -591,6 +645,8 @@ def create_app() -> FastAPI:
     add_dashboard_gzip_middleware(app)
     add_dashboard_auth_proxy_middleware(app)
     add_request_decompression_middleware(app)
+    add_request_body_limit_middleware(app)
+    add_multipart_content_encoding_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)
     app.add_middleware(cast(Any, MetricsMiddleware), enabled=settings.metrics_enabled)
@@ -613,6 +669,7 @@ def create_app() -> FastAPI:
     add_backend_api_codex_v1_alias_middleware(app)
     add_app_version_middleware(app)
     add_exception_handlers(app)
+    add_trusted_proxy_headers_middleware(app)
 
     app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)

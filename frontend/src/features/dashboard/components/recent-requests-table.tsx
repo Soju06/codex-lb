@@ -82,6 +82,7 @@ export type RecentRequestsTableProps = {
   hasMore: boolean;
   onLimitChange: (limit: number) => void;
   onOffsetChange: (offset: number) => void;
+  onConversationClick?: (conversationId: string) => void;
 };
 
 function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
@@ -169,6 +170,7 @@ export function RecentRequestsTable({
   hasMore,
   onLimitChange,
   onOffsetChange,
+  onConversationClick,
 }: RecentRequestsTableProps) {
   const { t } = useTranslation();
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
@@ -427,13 +429,49 @@ export function RecentRequestsTable({
                 copyLabel={t("dashboard.requestDetails.copyUserAgent")}
                 compactCopy
               />
-              <RequestDetailField
-                label={t("dashboard.requestDetails.clientIp")}
-                value={selectedRequest?.clientIp ?? "—"}
-                copyValue={selectedRequest?.clientIp ?? undefined}
-                copyLabel={t("dashboard.requestDetails.copyClientIp")}
-                compactCopy
-              />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <RequestDetailField
+                  label={t("dashboard.requestDetails.clientIp")}
+                  value={selectedRequest?.clientIp ?? "—"}
+                  copyValue={selectedRequest?.clientIp ?? undefined}
+                  copyLabel={t("dashboard.requestDetails.copyClientIp")}
+                  compactCopy
+                />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                      {t("dashboard.requestDetails.conversationId")}
+                    </div>
+                    {selectedRequest?.conversationId ? (
+                      <CopyButton value={selectedRequest.conversationId} label={t("dashboard.requestDetails.copyConversationId")} iconOnly />
+                    ) : null}
+                  </div>
+                  <div className="flex flex-col items-start gap-2">
+                    {selectedRequest?.conversationId ? (
+                      onConversationClick ? (
+                        <button
+                          type="button"
+                          className="max-w-[200px] truncate text-left text-sm leading-relaxed text-primary hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                          title={selectedRequest.conversationId}
+                          onClick={() => {
+                            setSelectedRequest(null);
+                            onConversationClick(selectedRequest?.conversationId ?? "");
+                          }}
+                          aria-label={t("dashboard.filters.conversationFilterAria", { id: selectedRequest.conversationId })}
+                        >
+                          {selectedRequest.conversationId}
+                        </button>
+                      ) : (
+                        <p className="max-w-[200px] truncate text-sm leading-relaxed" title={selectedRequest.conversationId ?? undefined}>
+                          {selectedRequest.conversationId}
+                        </p>
+                      )
+                    ) : (
+                      <p className="min-w-0 flex-1 break-all text-sm leading-relaxed">—</p>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
             <RequestArchivePanel

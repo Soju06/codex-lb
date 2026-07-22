@@ -25,6 +25,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardAuthError, DashboardPermissionError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
+from app.core.socket_peer import raw_socket_peer_host
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
@@ -242,7 +243,7 @@ def get_dashboard_request_auth_mode() -> DashboardAuthMode:
 
 
 def _is_proxy_unauthenticated_socket_peer_allowed(request: HTTPConnection) -> bool:
-    socket_host = request.client.host if request.client else None
+    socket_host = raw_socket_peer_host(request)
     if socket_host is None:
         return False
 

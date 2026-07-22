@@ -12,18 +12,32 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
+from httpx import AsyncByteStream
+from starlette.datastructures import UploadFile
 from starlette.responses import JSONResponse
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
 from app.core.exceptions import ProxyModelNotAllowed, ProxyRateLimitError
+from app.core.multipart import MultipartPolicy
 from app.db.models import DashboardSettings
 
 pytestmark = pytest.mark.integration
+
+
+class _NeverReadStream(AsyncByteStream):
+    def __init__(self) -> None:
+        self.iterated = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.iterated = True
+        raise AssertionError("request body must not be consumed")
+        yield b""  # pragma: no cover
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -597,6 +611,349 @@ async def test_images_generations_failed_image_returns_5xx(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    ["multipart/form-data; boundary=never-read", "application/json"],
+    ids=["multipart", "wrong-json-content-type"],
+)
+async def test_v1_images_edits_auth_rejection_does_not_read_body_and_records_once(
+    async_client,
+    caplog,
+    content_type: str,
+) -> None:
+    await _enable_api_key_auth(async_client)
+    stream = _NeverReadStream()
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            content=stream,
+            headers={"content-type": content_type},
+        )
+
+    assert response.status_code == 401
+    assert stream.iterated is False
+    message = "images_route_complete route=edits model=unknown stream=false status=401 outcome=auth_error"
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_images_edits_compressed_rejection_does_not_read_body_and_records_once(
+    async_client,
+    caplog,
+) -> None:
+    stream = _NeverReadStream()
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            content=stream,
+            headers={
+                "content-type": "multipart/form-data; boundary=never-read",
+                "content-encoding": "gzip",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"
+    assert stream.iterated is False
+    message = "images_route_complete route=edits model=unknown stream=false status=400 outcome=invalid_request"
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_images_edits_missing_content_type_retains_openai_validation_and_records_once(
+    async_client,
+    caplog,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post("/v1/images/edits", content=b"not multipart")
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request_error"
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "prompt"
+    message = "images_route_complete route=edits model=unknown stream=false status=400 outcome=invalid_request"
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_images_edits_preserves_mixed_image_order_and_closes_spools_before_pipeline(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed_uploads: list[UploadFile] = []
+    original_close = UploadFile.close
+    captured: dict[str, object] = {}
+
+    async def record_close(upload: UploadFile) -> None:
+        await original_close(upload)
+        closed_uploads.append(upload)
+
+    async def fake_proxy_images_edit_request(**kwargs: object) -> JSONResponse:
+        assert len(closed_uploads) == 3
+        assert all(upload.file.closed for upload in closed_uploads)
+        captured.update(kwargs)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(UploadFile, "close", record_close)
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fake_proxy_images_edit_request)
+
+    response = await async_client.post(
+        "/v1/images/edits",
+        files=[
+            ("image[]", ("first.png", b"first", "image/png")),
+            ("prompt", (None, "keep order")),
+            ("image", ("second.webp", b"second", "image/webp")),
+            ("mask", ("mask.png", b"mask", "image/png")),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert captured["images"] == [(b"first", "image/png"), (b"second", "image/webp")]
+    assert captured["mask"] == (b"mask", "image/png")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("files", "expected_param"),
+    [
+        (
+            [("image", (f"{index}.png", b"x", "image/png")) for index in range(17)]
+            + [("prompt", (None, "too many images"))],
+            "image",
+        ),
+        (
+            [
+                ("image", ("image.png", b"x", "image/png")),
+                ("mask", ("first-mask.png", b"x", "image/png")),
+                ("mask", ("second-mask.png", b"x", "image/png")),
+                ("prompt", (None, "too many masks")),
+            ],
+            "mask",
+        ),
+        (
+            [
+                ("image", ("image.png", b"x", "image/png")),
+                ("attachment", ("unknown.bin", b"x", "application/octet-stream")),
+                ("prompt", (None, "unknown file")),
+            ],
+            "attachment",
+        ),
+    ],
+    ids=["combined-image-count", "mask-count", "unknown-file-field"],
+)
+async def test_v1_images_edits_rejects_invalid_file_shapes_before_pipeline(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    files: list[tuple[str, tuple[str | None, bytes | str, str] | tuple[None, str]]],
+    expected_param: str,
+) -> None:
+    async def fail_proxy_images_edit_request(**_kwargs: object) -> JSONResponse:
+        raise AssertionError("invalid file shape must not reach image pipeline")
+
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fail_proxy_images_edit_request)
+
+    response = await async_client.post("/v1/images/edits", files=files)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == expected_param
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image", "mask", "expected_param"),
+    [
+        (b"12345", None, "image"),
+        (b"1234", b"123", "mask"),
+    ],
+    ids=["per-file", "aggregate"],
+)
+async def test_v1_images_edits_binary_limits_return_one_413_without_pipeline_work(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog,
+    image: bytes,
+    mask: bytes | None,
+    expected_param: str,
+) -> None:
+    monkeypatch.setattr(
+        proxy_api_module,
+        "IMAGE_EDITS_MULTIPART_POLICY",
+        MultipartPolicy(
+            max_body_bytes=4096,
+            max_file_bytes=4,
+            max_aggregate_file_bytes=6,
+            max_files=17,
+            max_fields=32,
+            max_text_part_bytes=32,
+        ),
+    )
+
+    async def fail_proxy_images_edit_request(**_kwargs: object) -> JSONResponse:
+        raise AssertionError("oversized upload must not reach image pipeline")
+
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fail_proxy_images_edit_request)
+    files: list[tuple[str, tuple[str | None, bytes | str, str] | tuple[None, str]]] = [
+        ("image", ("image.png", image, "image/png")),
+        ("prompt", (None, "bounded")),
+    ]
+    if mask is not None:
+        files.append(("mask", ("mask.png", mask, "image/png")))
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post("/v1/images/edits", files=files)
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "payload_too_large"
+    assert body["error"]["param"] == expected_param
+    message = "images_route_complete route=edits model=unknown stream=false status=413 outcome=invalid_request"
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_images_edits_allows_exact_small_binary_policy_boundary(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy_api_module,
+        "IMAGE_EDITS_MULTIPART_POLICY",
+        MultipartPolicy(
+            max_body_bytes=4096,
+            max_file_bytes=4,
+            max_aggregate_file_bytes=6,
+            max_files=17,
+            max_fields=32,
+            max_text_part_bytes=32,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_proxy_images_edit_request(**kwargs: object) -> JSONResponse:
+        captured.update(kwargs)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fake_proxy_images_edit_request)
+
+    response = await async_client.post(
+        "/v1/images/edits",
+        files=[
+            ("image", ("image.png", b"1234", "image/png")),
+            ("mask", ("mask.png", b"12", "image/png")),
+            ("prompt", (None, "bounded")),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert captured["images"] == [(b"1234", "image/png")]
+    assert captured["mask"] == (b"12", "image/png")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "prompt"),
+    [
+        (
+            MultipartPolicy(
+                max_body_bytes=64,
+                max_file_bytes=16,
+                max_aggregate_file_bytes=16,
+                max_files=17,
+                max_fields=32,
+                max_text_part_bytes=32,
+            ),
+            "body",
+        ),
+        (
+            MultipartPolicy(
+                max_body_bytes=4096,
+                max_file_bytes=16,
+                max_aggregate_file_bytes=16,
+                max_files=17,
+                max_fields=32,
+                max_text_part_bytes=4,
+            ),
+            "12345",
+        ),
+    ],
+    ids=["body", "text-part"],
+)
+async def test_v1_images_edits_body_and_text_limits_reject_before_pipeline(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: MultipartPolicy,
+    prompt: str,
+) -> None:
+    monkeypatch.setattr(proxy_api_module, "IMAGE_EDITS_MULTIPART_POLICY", policy)
+
+    async def fail_proxy_images_edit_request(**_kwargs: object) -> JSONResponse:
+        raise AssertionError("oversized multipart input must not reach image pipeline")
+
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fail_proxy_images_edit_request)
+
+    response = await async_client.post(
+        "/v1/images/edits",
+        files=[
+            ("image", ("image.png", b"1234", "image/png")),
+            ("prompt", (None, prompt)),
+        ],
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image", "mask", "expected_param"),
+    [(b"", None, "image"), (b"image", b"", "mask")],
+    ids=["empty-image", "empty-mask"],
+)
+async def test_v1_images_edits_rejects_empty_binary_parts_before_pipeline(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    image: bytes,
+    mask: bytes | None,
+    expected_param: str,
+) -> None:
+    async def fail_proxy_images_edit_request(**_kwargs: object) -> JSONResponse:
+        raise AssertionError("empty multipart input must not reach image pipeline")
+
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fail_proxy_images_edit_request)
+    files: list[tuple[str, tuple[str | None, bytes | str, str] | tuple[None, str]]] = [
+        ("image", ("image.png", image, "image/png")),
+        ("prompt", (None, "empty part")),
+    ]
+    if mask is not None:
+        files.append(("mask", ("mask.png", mask, "image/png")))
+
+    response = await async_client.post("/v1/images/edits", files=files)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == expected_param
+
+
+@pytest.mark.asyncio
+async def test_v1_images_edits_malformed_multipart_records_one_invalid_request(
+    async_client,
+    caplog,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            content=b"not multipart",
+            headers={"content-type": "multipart/form-data; boundary=broken"},
+        )
+
+    assert response.status_code == 400
+    message = "images_route_complete route=edits model=unknown stream=false status=400 outcome=invalid_request"
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_images_edits_requires_native_image_data_urls(async_client, caplog):
     with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
         response = await async_client.post(
@@ -876,10 +1233,10 @@ async def test_images_edits_missing_image_records_route_observability(async_clie
     with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
         response = await async_client.post(
             "/v1/images/edits",
-            data={
-                "model": "gpt-image-2",
-                "prompt": "hi",
-            },
+            files=[
+                ("model", (None, "gpt-image-2")),
+                ("prompt", (None, "hi")),
+            ],
         )
     assert response.status_code == 400
     body = response.json()

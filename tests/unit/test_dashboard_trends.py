@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.core.usage.types import BucketModelAggregate
+from app.core.usage.types import BucketConversationAggregate, BucketModelAggregate
 from app.modules.usage.builders import align_bucket_window_start, build_trends_from_buckets
 
 BUCKET_SECONDS = 21600  # 6 hours
@@ -58,17 +58,33 @@ class TestBuildTrendsFromBuckets:
         assert len(trends.tokens) == 28
         assert len(trends.cost) == 28
         assert len(trends.error_rate) == 28
+        assert len(trends.conversations) == 28
 
         assert all(p.v == 0 for p in trends.requests)
         assert all(p.v == 0 for p in trends.tokens)
         assert all(p.v == 0 for p in trends.cost)
         assert all(p.v == 0 for p in trends.error_rate)
+        assert all(p.v == 0 for p in trends.conversations)
 
         assert metrics.requests == 0
         assert metrics.tokens == 0
         assert metrics.error_rate is None
         assert metrics.error_count == 0
         assert cost.total_usd == 0.0
+
+    def test_conversations_are_aligned_and_zero_filled(self):
+        conversation_rows = [
+            BucketConversationAggregate(bucket_epoch=FIRST_SLOT_EPOCH + 2 * BUCKET_SECONDS, conversation_count=3),
+            BucketConversationAggregate(bucket_epoch=FIRST_SLOT_EPOCH + 5 * BUCKET_SECONDS, conversation_count=1),
+        ]
+
+        trends, _, _ = build_trends_from_buckets([], SINCE, conversation_rows=conversation_rows)
+
+        assert len(trends.conversations) == 28
+        assert trends.conversations[2].t == trends.requests[2].t
+        assert trends.conversations[2].v == 3
+        assert trends.conversations[5].v == 1
+        assert trends.conversations[0].v == 0
 
     def test_single_bucket_populates_correct_slot(self):
         rows = [_make_row(slot_index=2)]

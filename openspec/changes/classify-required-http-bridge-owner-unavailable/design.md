@@ -1,0 +1,60 @@
+## Context
+
+HTTP bridge reattachment resolves durable continuity to an account before it opens or reuses an upstream WebSocket. A required-owner selection is deliberately narrower than the ordinary account pool. A terminal miss in that restricted candidate set was previously indistinguishable from global exhaustion, so callers received a degraded-mode `no_accounts` response even when another account was serving other tasks.
+
+The bridge can recover only when the client has resent a structurally complete logical request and durable metadata proves the retained input prefix. The projected suffix must retain a completed prior assistant output boundary and then supply fresh user/content input; a prefix followed only by a new user message silently drops the previous answer. Direct calls and outputs may appear before that assistant boundary, including a call at the exact durable boundary whose matching output starts the suffix, but every represented call must be settled. They cannot establish completeness alone because current durable metadata has no prior-output manifest capable of detecting an omitted parallel call. This structural proof cannot authenticate the assistant text itself without storing response-output content or fingerprints, so the predicate remains deliberately conservative.
+
+A fresh cross-account request must not carry any account-scoped upstream object. Removing only `previous_response_id` is insufficient because Codex full resends retain encrypted reasoning and server-assigned item identities. After the raw prefix proof, recovery therefore builds a deterministic plaintext projection: it omits reasoning items and completed web/tool-search bookkeeping, strips upstream item IDs, shape-validates retained client turn metadata, and validates the result as a fresh request. Stored conversations, compaction, uploaded files, opaque hosted/MCP state, stale turn headers, unmatched tool outputs, and unknown shapes remain disqualifying.
+
+Once a verified task moves from account A to B, its specific aliases must stay on B while a shared session header may continue routing sibling tasks to A. That exception must survive durable writes, replica restarts, reconnects, and model transitions without giving unrelated internal lanes permission to override aliases.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Distinguish request-owned selection misses from true global pool exhaustion.
+- Authorize cross-account replay only from positive durable and request-shape proof.
+- Preserve the recovered task's account and alias ownership through its full lifecycle.
+- Keep the implementation within existing tables, settings, and public contracts.
+
+**Non-Goals:**
+
+- Do not move partial continuations, conversations, encrypted content, compaction, opaque account-scoped file/container/vector handles, hosted or MCP state, or unknown request shapes across accounts. Known reasoning and completed search bookkeeping may be omitted from a verified resend; inline data images and HTTP(S) file/image content remain self-contained inputs.
+- Do not treat authentication, connection, timeout, local-cap, policy, or post-output failures as replay permission.
+- Do not rebind a shared session header, invent a global retry mode, or add schema/index/settings surface.
+
+## Decisions
+
+1. **Carry ownership provenance explicitly.** A preferred account, configured single-account strategy, and required continuity owner are different concepts. The selector accepts separate provenance for a request ownership constraint and for the typed continuity-owner contract. Resolved hard sticky ownership and durable continuity provenance, including a soft prompt-cache follow-up with a latest turn state, count as restricted ownership selection. Local reuse and fresh selection must enforce that account before proof-gated replay. Configured single-account routing without request ownership remains a global routing policy and retains degraded-mode behavior when its pool is unavailable.
+
+2. **Classify before dispatch in required-owner selection.** The selector returns `continuity_owner_unavailable` when the proven owner no longer exists or becomes unavailable after all supported reload attempts. An owner outside the model, API-key, security, or other eligibility policy returns `continuity_owner_policy_conflict`. Stable account-cap and other policy codes remain unchanged. The HTTP bridge maps only typed `continuity_owner_unavailable` from a required continuity selection to `previous_response_owner_unavailable`. Once an owner has been selected, refresh, authentication, WebSocket connection, and later transport failures keep their ordinary error classification and cannot authorize cross-account replay.
+
+3. **Require complete, conservative replay proof and projection.** Durable metadata stores the completed request's input-item count and full fingerprint. A later list-shaped full resend is eligible only when its raw retained prefix matches both values. Only after that proof, the bridge projects the input by dropping `reasoning`, `web_search_call`, `tool_search_call`, and `tool_search_output` items and removing upstream `id` fields from retained items. Known client turn metadata is preserved only when it has the exact account-neutral shape. The projected suffix must prove a completed assistant `output_text`/`refusal` boundary with nonblank content followed by nonblank fresh text or valid file/image input. It may contain multiple intervening turns only when each user input is followed by another complete assistant boundary and the final cycle ends in fresh input. A direct function/custom/apply-patch call at the end of the verified prefix may be settled by the matching terminal output at the start of the suffix; all other represented calls must likewise be settled before the assistant boundary. In-progress calls or outputs fail closed. Direct calls cannot prove completeness alone because an omitted parallel call is invisible without a persisted output manifest. A new-user-only suffix, tool-call-only suffix, empty or partial output, unresolved parallel call, duplicate or mismatched output, or misordered output fails closed.
+
+   The projected copy is evaluated without `previous_response_id`; unknown top-level fields and unknown fields or malformed values in the top-level reasoning configuration fail closed. Nonblank conversation or prompt handles, remaining encrypted content, compaction, opaque account-scoped file/container/vector handles, nonportable file schemes, hosted/MCP/program-mediated/unknown calls or tool choices, role-invalid or malformed message/content shapes, and outputs without matching intrinsic calls all reject replay. Assistant parts are output-only; user/system/developer parts are input-only. Inline data images and HTTP(S) file/image content are self-contained. Only self-contained direct function/custom/apply-patch histories and shape-validated account-neutral declared tools and choices are allowed; nested web-search options use exact known shapes. Apply-patch calls accept exactly one supported wire representation: an exact structured operation, a nonblank legacy patch, or a nonblank legacy input.
+
+4. **Create a fresh recovery lane.** After a typed pre-visible owner miss, the bridge removes `previous_response_id`, strips every downstream session/turn alias, clears hard affinity, excludes the failed account, disables remote-owner forwarding for initial recovery, and uses a random server-namespaced key under the existing `internal_unanchored_parallel` durable kind. The verified plaintext projection is submitted once to the replacement account. No retry occurs after downstream-visible bytes.
+
+5. **Forward only recovered task identity.** If the recovery lane is later forwarded to its current replica owner, the origin drops all raw affinity headers before constructing the signed forward context. It signs only the recovered downstream turn-state alias and the recovery lane identity. The target continues stripping stale affinity before opening an upstream WebSocket.
+
+6. **Fence aliases atomically and compensate pre-dispatch cancellation.** Durable alias upsert uses the existing unique alias key with a conditional conflict update. A verified recovery lane may replace only documented predecessor kinds or an ownerless/lease-expired prior recovery lane; an actively leased recovery lane remains protected. Ordinary sessions cannot replace a recovery alias. Registration returns `registered`, `owner_fenced`, or `alias_protected`; only owner fencing evicts the whole local session, while alias protection detaches that alias and preserves siblings. Recovery claim/renewal is mandatory. The incoming turn alias is committed immediately before dispatch with a receipt capturing the predecessor and target latest-turn state. Cancellation before send may have started rolls that write back; the predecessor is restored only while its captured owner epoch and account still match, otherwise only the provisional alias is removed. Once send may have started, the new alias stays authoritative and the socket retires.
+
+7. **Preserve recovery provenance and ambiguous-send isolation.** Specific recovery turn-state or previous-response aliases outrank only a conflicting broad session-header alias. Conflicting specific aliases still fail closed. Reconnect/prewarm selection requires the recovery session's current account, and model-transition descendants receive a fresh namespaced recovery key while retaining owner provenance. A cancelled or failed visible/prewarm send that may have reached the transport marks the socket closed and retiring before response-create admission is released, so an admitted waiter cannot reconnect or inherit a late response. Startup converts recent recovery rows owned by the restarting instance to ownerless `DRAINING` proof without refreshing `last_seen_at`; stale recovery rows are purged by the existing cutoff and the broad alias becomes authoritative again.
+
+8. **Keep hot modules maintainable.** Selection input, unpinned selection, budget policy, and bridge session-registry responsibilities are extracted into focused modules while preserving existing public and monkeypatch surfaces. No new abstraction changes the routing contract.
+
+## Risks / Trade-offs
+
+- A conservative predicate rejects some requests that might be portable. This is intentional: a false negative returns a retryable continuity error, while a false positive can send account-scoped state to the wrong account.
+- Retained-output proof is structural rather than cryptographic. Storing output fingerprints would strengthen authenticity but would add persistence surface beyond this focused fix; exact shape checks and fail-closed ordering keep the current design bounded.
+- The projection removes prior reasoning and search bookkeeping, so the replacement model receives the retained user, assistant, and direct-tool content without those internal traces. This is preferable to forwarding undecryptable or server-bound state, and recovery still requires a complete assistant boundary before fresh input.
+- A recent ownerless recovery row temporarily outranks a stale shared alias after restart. Existing TTL cleanup bounds this proof; preserving its original `last_seen_at` prevents indefinite retention.
+- Mixed-version replicas understand the base durable kind but not the namespaced recovery semantics. Upgraded replicas must be deployed before relying on cross-account recovery. Rolling back may lose the special precedence/restart proof and therefore fail closed or temporarily follow the stale shared alias until existing TTL cleanup; rollback is not behavior-transparent.
+
+## Migration Plan
+
+Deploy application code to all bridge replicas before enabling reliance on the recovery behavior. No database migration or configuration change is required. Observe continuity-owner and bridge-recovery diagnostics during rollout. A rollback changes interpretation only; it does not require data migration, but operators should expect the mixed-version limitation described above.
+
+## Open Questions
+
+None.

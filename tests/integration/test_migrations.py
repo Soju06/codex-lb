@@ -1159,3 +1159,39 @@ async def test_dashboard_retention_settings_migration_upgrade_and_downgrade(tmp_
         assert set(column_names) <= await _dashboard_columns(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_request_log_conversation_id_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'request-log-conversation-id.sqlite'}"
+    parent_revision = "20260717_000000_optimize_dashboard_hot_path_indexes"
+    conversation_revision = "20260720_000000_add_request_log_conversation_id"
+
+    async def _request_log_schema(engine) -> tuple[set[str], set[str]]:
+        async with engine.connect() as conn:
+            columns = {row[1] for row in await conn.execute(text("PRAGMA table_info('request_logs')"))}
+            indexes = {row[1] for row in await conn.execute(text("PRAGMA index_list('request_logs')"))}
+            return columns, indexes
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        columns, indexes = await _request_log_schema(engine)
+        assert "conversation_id" not in columns
+        assert "idx_logs_conversation_id" not in indexes
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, conversation_revision, bootstrap_legacy=False))
+        columns, indexes = await _request_log_schema(engine)
+        assert "conversation_id" in columns
+        assert "idx_logs_conversation_id" in indexes
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        columns, indexes = await _request_log_schema(engine)
+        assert "idx_logs_conversation_id" not in indexes
+        assert "conversation_id" not in columns
+    finally:
+        await engine.dispose()

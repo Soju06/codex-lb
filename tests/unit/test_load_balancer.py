@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from datetime import datetime
@@ -3758,24 +3759,36 @@ def test_error_backoff_expired_account_does_not_immediately_relock():
 
 
 @pytest.mark.asyncio
-async def test_load_selection_inputs_parallelizes_usage_queries():
-    """Verify that independent usage queries are parallelized with asyncio.gather()."""
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock
-
+async def test_load_selection_inputs_serializes_usage_queries_on_shared_session():
+    """Usage reads sharing one repository context must never overlap."""
     from app.modules.proxy.load_balancer import LoadBalancer
 
-    # Create mock repositories
     mock_accounts_repo = AsyncMock()
-    mock_accounts_repo.list_accounts = AsyncMock(return_value=[])
+    mock_accounts_repo.list_accounts = AsyncMock(
+        return_value=[_make_test_account(account_id="a", status=AccountStatus.ACTIVE)]
+    )
 
     mock_usage_repo = AsyncMock()
+    in_flight = 0
+    max_in_flight = 0
+    calls: list[str] = []
 
-    async def slow_query():
-        await asyncio.sleep(0.2)
-        return {}
+    async def guarded_query(*, window: str | None = None):
+        nonlocal in_flight, max_in_flight
+        label = window or "primary"
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        if in_flight > 1:
+            in_flight -= 1
+            raise AssertionError(f"overlapping shared-session usage read: {label}")
+        calls.append(label)
+        try:
+            await asyncio.sleep(0)
+            return {"a": _make_test_usage(account_id="a", window=label)}
+        finally:
+            in_flight -= 1
 
-    mock_usage_repo.latest_by_account = AsyncMock(side_effect=slow_query)
+    mock_usage_repo.latest_by_account = AsyncMock(side_effect=guarded_query)
 
     mock_repos = MagicMock()
     mock_repos.accounts = mock_accounts_repo
@@ -3783,20 +3796,14 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
     mock_repos.__aexit__ = AsyncMock(return_value=None)
 
-    # Create LoadBalancer with mocked repo factory
     balancer = LoadBalancer(repo_factory=lambda: mock_repos)
-
-    # Measure execution time
-    start = time.time()
     result = await balancer._load_selection_inputs(model=None)
-    elapsed = time.time() - start
 
-    # If queries were sequential, elapsed would be ~0.4s (0.2 + 0.2)
-    # If queries are parallel, elapsed should be ~0.2s
-    # We use a generous threshold of 0.35s to account for test environment overhead
-    assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
-    assert result.latest_primary == {}
-    assert result.latest_secondary == {}
+    assert max_in_flight == 1
+    assert calls == ["primary", "secondary", "monthly"]
+    assert result.latest_primary["a"].window == "primary"
+    assert result.latest_secondary["a"].window == "secondary"
+    assert result.latest_monthly["a"].window == "monthly"
 
 
 @pytest.mark.asyncio

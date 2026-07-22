@@ -130,7 +130,26 @@
     "externalSecrets": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "remoteRefs": {
+          "type": "object",
+          "properties": {
+            "databaseUrl": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "string" },
+                "property": { "type": "string" }
+              }
+            },
+            "encryptionKey": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "string" },
+                "property": { "type": "string" }
+              }
+            }
+          }
+        }
       }
     },
     "rollout": {

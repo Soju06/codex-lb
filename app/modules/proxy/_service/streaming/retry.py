@@ -39,7 +39,7 @@ from app.modules.proxy._service.support import (
     _LOCAL_ACCOUNT_CAP_ERROR_CODES,
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
-    _request_log_useragent_fields,
+    _request_log_client_fields,
     _RetryableStreamError,
     _signal_propagated_capacity_startup_wait,
     _stream_settlement_error_payload,
@@ -241,7 +241,7 @@ class _StreamingRetryMixin:
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = ensure_request_id()
         start = time.monotonic()
         base_settings = _facade().get_settings()
@@ -421,6 +421,7 @@ class _StreamingRetryMixin:
                 upstream_transport=upstream_stream_transport,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
                 client_ip=client_ip,
             )
             settled = await proxy._settle_stream_api_key_usage(
@@ -485,6 +486,7 @@ class _StreamingRetryMixin:
                         concurrency_caps=concurrency_caps,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        conversation_id=conversation_id,
                         client_ip=client_ip,
                         tool_call_dedupe=tool_call_dedupe,
                         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -598,6 +600,7 @@ class _StreamingRetryMixin:
                     requested_service_tier=payload.service_tier,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    conversation_id=conversation_id,
                     client_ip=client_ip,
                 )
             return format_sse_event(event)
@@ -709,6 +712,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         return
@@ -745,6 +749,7 @@ class _StreamingRetryMixin:
                         upstream_transport=upstream_stream_transport,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        conversation_id=conversation_id,
                         client_ip=client_ip,
                     )
                     yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
@@ -793,6 +798,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                conversation_id=conversation_id,
                                 client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
@@ -952,6 +958,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         if propagate_http_errors:
@@ -1012,6 +1019,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         return
@@ -1044,6 +1052,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         return
@@ -1074,6 +1083,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         return
@@ -1104,6 +1114,7 @@ class _StreamingRetryMixin:
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        conversation_id=conversation_id,
                         client_ip=client_ip,
                     )
                     return
@@ -1166,6 +1177,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         return
@@ -1193,6 +1205,7 @@ class _StreamingRetryMixin:
                             upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
@@ -1216,6 +1229,7 @@ class _StreamingRetryMixin:
                             upstream_proxy_fail_closed_reason=exc.reason,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         event = response_failed_event(
@@ -1317,6 +1331,7 @@ class _StreamingRetryMixin:
                                     upstream_transport=upstream_stream_transport,
                                     useragent=useragent,
                                     useragent_group=useragent_group,
+                                    conversation_id=conversation_id,
                                     client_ip=client_ip,
                                 )
                                 event = response_failed_event(
@@ -1413,6 +1428,7 @@ class _StreamingRetryMixin:
                             upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         event = response_failed_event(
@@ -1448,6 +1464,7 @@ class _StreamingRetryMixin:
                             upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
@@ -1480,6 +1497,7 @@ class _StreamingRetryMixin:
                                 concurrency_caps=concurrency_caps,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                conversation_id=conversation_id,
                                 client_ip=client_ip,
                                 # Let the retry path observe a pre-visible
                                 # account-recovery error only for the one case
@@ -1898,6 +1916,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                conversation_id=conversation_id,
                                 client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
@@ -1990,6 +2009,7 @@ class _StreamingRetryMixin:
                                         upstream_transport=upstream_stream_transport,
                                         useragent=useragent,
                                         useragent_group=useragent_group,
+                                        conversation_id=conversation_id,
                                         client_ip=client_ip,
                                     )
                                     event = response_failed_event(
@@ -2061,6 +2081,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                conversation_id=conversation_id,
                                 client_ip=client_ip,
                             )
                             event = response_failed_event(
@@ -2094,6 +2115,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                conversation_id=conversation_id,
                                 client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
@@ -2365,6 +2387,7 @@ class _StreamingRetryMixin:
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        conversation_id=conversation_id,
                         client_ip=client_ip,
                     )
                 return
@@ -2419,6 +2442,7 @@ class _StreamingRetryMixin:
                     requested_service_tier=payload.service_tier,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    conversation_id=conversation_id,
                     client_ip=client_ip,
                 )
         finally:

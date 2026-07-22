@@ -263,6 +263,348 @@ async def test_public_selection_applies_candidate_gates(
 
 
 @pytest.mark.asyncio
+async def test_required_continuity_owner_miss_does_not_mark_healthy_pool_degraded(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_owner = _account("contract-required-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-available-alternate")
+    balancer, _, _, _ = _balancer(
+        [unavailable_owner, available_alternate],
+        selection_cache,
+    )
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        required_account_id=unavailable_owner.id,
+        required_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_message == "No available accounts"
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_deleted_required_continuity_owner_returns_typed_miss_without_global_health_change(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    available_alternate = _account("contract-deleted-owner-alternate")
+    balancer, _, _, _ = _balancer([available_alternate], selection_cache)
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        required_account_id="contract-deleted-owner",
+        required_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_message == "Required continuity owner account no longer exists"
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_required_owner_miss_preserves_continuity_classification(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_owner = _account("contract-opportunistic-required-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-opportunistic-available-alternate")
+    balancer, _, _, _ = _balancer(
+        [unavailable_owner, available_alternate],
+        selection_cache,
+    )
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        required_account_id=unavailable_owner.id,
+        required_continuity_owner=True,
+        lease_kind="stream",
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_OPPORTUNISTIC,
+    )
+
+    assert selection.account is None
+    assert selection.error_message == "No available accounts"
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_policy_block_is_not_classified_as_owner_unavailable(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    preserve_owner = _account("contract-opportunistic-preserve-owner")
+    preserve_owner.routing_policy = "preserve"
+    available_alternate = _account("contract-opportunistic-policy-alternate")
+    balancer, _, _, _ = _balancer(
+        [preserve_owner, available_alternate],
+        selection_cache,
+        primary={
+            preserve_owner.id: _usage_row(100, preserve_owner.id, window="primary", used_percent=92.0),
+            available_alternate.id: _usage_row(
+                101,
+                available_alternate.id,
+                window="primary",
+                used_percent=10.0,
+            ),
+        },
+        secondary={
+            preserve_owner.id: _usage_row(102, preserve_owner.id, window="secondary", used_percent=20.0),
+            available_alternate.id: _usage_row(
+                103,
+                available_alternate.id,
+                window="secondary",
+                used_percent=10.0,
+            ),
+        },
+    )
+
+    selection = await balancer.select_account(
+        required_account_id=preserve_owner.id,
+        required_continuity_owner=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_OPPORTUNISTIC,
+    )
+
+    assert selection.account is None
+    assert selection.error_message == (
+        "opportunistic burn window closed: preserve floor or stale usage data blocks opportunistic burn"
+    )
+    assert selection.error_code == load_balancer_module.OPPORTUNISTIC_BURN_WINDOW_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_required_file_owner_miss_does_not_mark_healthy_pool_degraded(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_owner = _account("contract-file-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-file-alternate")
+    balancer, _, _, _ = _balancer(
+        [unavailable_owner, available_alternate],
+        selection_cache,
+    )
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        required_account_id=unavailable_owner.id,
+        required_account_is_ownership_constraint=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_message == "No available accounts"
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_gate", ["scope", "security"])
+async def test_required_continuity_owner_policy_conflict_does_not_fallback(
+    selection_cache: AccountSelectionCache,
+    policy_gate: str,
+) -> None:
+    owner = _account("contract-policy-owner")
+    alternate = _account("contract-policy-alternate", security_work_authorized=True)
+    balancer, _, _, _ = _balancer([owner, alternate], selection_cache)
+
+    selection = await balancer.select_account(
+        account_ids={alternate.id} if policy_gate == "scope" else None,
+        required_account_id=owner.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        require_security_work_authorized=policy_gate == "security",
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_POLICY_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_required_continuity_owner_preserves_empty_security_policy_error(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    owner = _account("contract-unauthorized-owner")
+    balancer, _, _, _ = _balancer([owner], selection_cache)
+
+    selection = await balancer.select_account(
+        required_account_id=owner.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        require_security_work_authorized=True,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "no_security_work_authorized_accounts"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("required_account_is_ownership_constraint", "required_continuity_owner"),
+    [
+        (True, False),
+        (False, True),
+    ],
+)
+async def test_required_account_ownership_flags_require_an_account_id(
+    selection_cache: AccountSelectionCache,
+    required_account_is_ownership_constraint: bool,
+    required_continuity_owner: bool,
+) -> None:
+    balancer, _, _, _ = _balancer([_account("contract-owner")], selection_cache)
+
+    with pytest.raises(ValueError, match="require required_account_id"):
+        await balancer.select_account(
+            required_account_is_ownership_constraint=required_account_is_ownership_constraint,
+            required_continuity_owner=required_continuity_owner,
+        )
+
+
+@pytest.mark.asyncio
+async def test_hard_sticky_owner_miss_does_not_mark_healthy_pool_degraded(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_owner = _account("contract-sticky-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-sticky-alternate")
+    balancer, _, _, sticky_repo = _balancer(
+        [unavailable_owner, available_alternate],
+        selection_cache,
+    )
+    sticky_repo.account_id = unavailable_owner.id
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        sticky_key="hard-owned-turn-state",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "hard_affinity_saturated"
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_hard_sticky_owner_miss_with_optional_preferred_owner_preserves_global_health(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_owner = _account("contract-sticky-preferred-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-sticky-preferred-alternate")
+    balancer, _, _, sticky_repo = _balancer(
+        [unavailable_owner, available_alternate],
+        selection_cache,
+    )
+    sticky_repo.account_id = unavailable_owner.id
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        sticky_key="hard-owned-preferred-turn-state",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        required_account_id=unavailable_owner.id,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "hard_affinity_saturated"
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_hard_sticky_owner_miss_under_single_account_routing_preserves_global_health(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_owner = _account("contract-sticky-single-owner")
+    unavailable_owner.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-sticky-single-alternate")
+    balancer, _, _, sticky_repo = _balancer(
+        [unavailable_owner, available_alternate],
+        selection_cache,
+    )
+    sticky_repo.account_id = unavailable_owner.id
+    degraded_reasons: list[str] = []
+    normal_calls: list[bool] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+    monkeypatch.setattr(load_balancer_module, "set_normal", lambda: normal_calls.append(True))
+
+    selection = await balancer.select_account(
+        sticky_key="hard-owned-single-turn-state",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        required_account_id=unavailable_owner.id,
+        routing_strategy="single_account",
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "hard_affinity_saturated"
+    assert degraded_reasons == []
+    assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_configured_single_account_miss_marks_service_degraded(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unavailable_account = _account("contract-configured-account")
+    unavailable_account.status = AccountStatus.QUOTA_EXCEEDED
+    available_alternate = _account("contract-available-alternate")
+    balancer, _, _, _ = _balancer(
+        [unavailable_account, available_alternate],
+        selection_cache,
+    )
+    degraded_reasons: list[str] = []
+    monkeypatch.setattr(load_balancer_module, "set_degraded", degraded_reasons.append)
+
+    selection = await balancer.select_account(
+        required_account_id=unavailable_account.id,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_message is not None
+    assert "degraded mode" in selection.error_message
+    assert degraded_reasons == ["all upstream accounts are unavailable"]
+
+
+@pytest.mark.asyncio
 async def test_public_selection_reports_an_empty_security_pool(selection_cache: AccountSelectionCache) -> None:
     balancer, _, _, _ = _balancer([_account("contract-unauthorized")], selection_cache)
 

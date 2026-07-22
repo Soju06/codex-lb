@@ -27,7 +27,7 @@ from app.core.openai.requests import ResponsesCompactRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
-from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_useragent_fields
+from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import normalize_upstream_model_alias, validate_model_access
 
@@ -303,7 +303,7 @@ class _WarmupMixin:
         allow_pre_submit_errors_as_result: bool = False,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         live_account = _materialize_warmup_account(account)
         request_id = str(uuid4())
         upstream_headers = {
@@ -457,6 +457,7 @@ class _WarmupMixin:
                     upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    conversation_id=conversation_id,
                 )
             finally:
                 await proxy._release_websocket_reservation(reservation)

@@ -142,7 +142,7 @@ Interpretation:
 Start a local proxy instance on a spare port:
 
 ```bash
-cd /home/egor/services/codex-lb-defin85 && env CODEX_LB_USAGE_REFRESH_ENABLED=false CODEX_LB_MODEL_REGISTRY_ENABLED=false .venv/bin/fastapi run app/main.py --host 127.0.0.1 --port 2460
+cd /home/egor/services/codex-lb-defin85 && env CODEX_LB_USAGE_REFRESH_ENABLED=false CODEX_LB_MODEL_REGISTRY_ENABLED=false .venv/bin/fastapi run app/main.py --host 127.0.0.1 --port 2460 --no-proxy-headers
 ```
 
 Prepare an isolated `HOME` for the CLI:

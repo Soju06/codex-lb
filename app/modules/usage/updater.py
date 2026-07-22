@@ -35,7 +35,7 @@ from app.modules.accounts.repository import AccountsRepository as SessionAccount
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
-from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageWindowWrite
 from app.modules.usage.repository import UsageRepository as SessionUsageRepository
 
 logger = logging.getLogger(__name__)
@@ -49,20 +49,13 @@ class UsageRepositoryPort(Protocol):
         window: str | None = None,
     ) -> UsageHistory | None: ...
 
-    async def add_entry(
+    async def add_account_snapshot(
         self,
         account_id: str,
-        used_percent: float,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
+        windows: Collection[UsageWindowWrite],
+        *,
         recorded_at: datetime | None = None,
-        window: str | None = None,
-        reset_at: int | None = None,
-        window_minutes: int | None = None,
-        credits_has: bool | None = None,
-        credits_unlimited: bool | None = None,
-        credits_balance: float | None = None,
-    ) -> UsageHistory | None: ...
+    ) -> list[UsageHistory]: ...
 
 
 class AdditionalUsageRepositoryPort(Protocol):
@@ -690,49 +683,49 @@ class UsageUpdater:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
-        usage_written = False
+        snapshot_windows: list[UsageWindowWrite] = []
 
         if primary and primary.used_percent is not None:
-            entry = await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(primary.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="primary",
-                reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(primary.limit_window_seconds),
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
+            snapshot_windows.append(
+                UsageWindowWrite(
+                    window="primary",
+                    used_percent=float(primary.used_percent),
+                    reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(primary.limit_window_seconds),
+                    credits_has=credits_has,
+                    credits_unlimited=credits_unlimited,
+                    credits_balance=credits_balance,
+                )
             )
-            usage_written = usage_written or _usage_entry_written(entry)
 
         if secondary and secondary.used_percent is not None:
-            entry = await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(secondary.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="secondary",
-                reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(secondary.limit_window_seconds),
+            snapshot_windows.append(
+                UsageWindowWrite(
+                    window="secondary",
+                    used_percent=float(secondary.used_percent),
+                    reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(secondary.limit_window_seconds),
+                )
             )
-            usage_written = usage_written or _usage_entry_written(entry)
 
         if monthly and monthly.used_percent is not None:
-            entry = await self._usage_repo.add_entry(
-                account_id=account.id,
-                used_percent=float(monthly.used_percent),
-                input_tokens=None,
-                output_tokens=None,
-                window="monthly",
-                reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
-                window_minutes=_window_minutes(monthly.limit_window_seconds),
-                credits_has=credits_has,
-                credits_unlimited=credits_unlimited,
-                credits_balance=credits_balance,
+            snapshot_windows.append(
+                UsageWindowWrite(
+                    window="monthly",
+                    used_percent=float(monthly.used_percent),
+                    reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
+                    window_minutes=_window_minutes(monthly.limit_window_seconds),
+                    credits_has=credits_has,
+                    credits_unlimited=credits_unlimited,
+                    credits_balance=credits_balance,
+                )
             )
-            usage_written = usage_written or _usage_entry_written(entry)
+
+        entries = await self._usage_repo.add_account_snapshot(
+            account.id,
+            snapshot_windows,
+        )
+        usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
         return AccountRefreshResult(usage_written=usage_written)
 

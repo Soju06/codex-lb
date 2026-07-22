@@ -271,6 +271,7 @@ export function createDashboardOverview(
 				errorRate: 0.028,
 				errorCount: 6,
 				topError: "rate_limit_exceeded",
+				conversationRequests: 0,
 			},
 		},
 		windows: {
@@ -304,6 +305,7 @@ export function createDashboardOverview(
 			tokens: createTrendPoints(1600, timeframe.bucketCount, timeframe.bucketSeconds),
 			cost: createTrendPoints(0.065, timeframe.bucketCount, timeframe.bucketSeconds),
 			errorRate: createTrendPoints(0.03, timeframe.bucketCount, timeframe.bucketSeconds),
+			conversations: createTrendPoints(1, timeframe.bucketCount, timeframe.bucketSeconds),
 		},
 		depletionPrimary: {
 			risk: 0.55,
@@ -367,6 +369,7 @@ export function createRequestLogEntry(
 		useragent: null,
 		useragentGroup: null,
 		clientIp: null,
+		conversationId: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,

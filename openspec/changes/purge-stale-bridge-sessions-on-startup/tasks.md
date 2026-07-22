@@ -1,6 +1,6 @@
 ## 1. Repository & Coordinator
 
-- [x] 1.1 Add `purge_owned_sessions_on_startup` to `DurableBridgeRepository` - deletes rows owned by instance + ownerless stale rows with expired leases, plus aliases
+- [x] 1.1 Add `purge_owned_sessions_on_startup` to `DurableBridgeRepository` - deletes ordinary rows owned by the instance plus expired ownerless rows older than retention, while preserving recent namespaced recovery proof as ownerless DRAINING
 - [x] 1.2 Add `purge_owned_sessions_on_startup` wrapper to `DurableBridgeSessionCoordinator`
 
 ## 2. Startup Integration
@@ -12,6 +12,8 @@
 
 - [x] 3.1 Add test verifying owned bridge rows are purged on startup
 - [x] 3.2 Add test verifying sticky-session mappings are preserved after purge
+- [x] 3.3 Add test verifying recent namespaced recovery rows and aliases survive as ownerless restart proof without refreshing their age
+- [x] 3.4 Add test verifying stale recovery proof is removed after the existing retention cutoff
 
 ## 4. Spec
 

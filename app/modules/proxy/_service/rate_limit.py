@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol, cast
@@ -101,10 +100,8 @@ class _RateLimitMixin:
                 return headers
 
             account_map = {account.id: account for account in selected_accounts}
-            primary_rows_raw, secondary_rows_raw = await asyncio.gather(
-                self._latest_usage_rows(repos, account_map, "primary"),
-                self._latest_usage_rows(repos, account_map, "secondary"),
-            )
+            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
+            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
             monthly_rows = await self._latest_usage_rows(repos, account_map, "monthly")
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,
@@ -139,10 +136,8 @@ class _RateLimitMixin:
                 return RateLimitStatusPayloadData(plan_type="guest")
 
             account_map = {account.id: account for account in selected_accounts}
-            primary_rows_raw, secondary_rows_raw = await asyncio.gather(
-                self._latest_usage_rows(repos, account_map, "primary"),
-                self._latest_usage_rows(repos, account_map, "secondary"),
-            )
+            primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
+            secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
             monthly_rows = await self._latest_usage_rows(repos, account_map, "monthly")
             primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(
                 primary_rows_raw,

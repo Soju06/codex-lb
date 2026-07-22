@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from collections.abc import Mapping
 from time import perf_counter
 
@@ -10,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 import app.core.audit.service as audit_service_module
+from app.core import shutdown as shutdown_state
 from app.core.auth import generate_unique_account_id
 from app.core.utils.time import utcnow
 from app.db.models import AuditLog
@@ -101,14 +103,15 @@ async def test_audit_log_async_is_fire_and_forget(monkeypatch: pytest.MonkeyPatc
     tasks: list[asyncio.Task[None]] = []
     original_create_task = asyncio.create_task
     started = asyncio.Event()
+    allow_write_finish = asyncio.Event()
 
     async def slow_write(action: str, actor_ip: str | None, details: dict | None, request_id: str | None) -> None:
         _ = (action, actor_ip, details, request_id)
         started.set()
-        await asyncio.sleep(0.2)
+        await allow_write_finish.wait()
 
-    def capture_task(coro):
-        task = original_create_task(coro)
+    def capture_task(coro, *, name=None, context=None):
+        task = original_create_task(coro, name=name, context=context)
         tasks.append(task)
         return task
 
@@ -121,7 +124,86 @@ async def test_audit_log_async_is_fire_and_forget(monkeypatch: pytest.MonkeyPatc
 
     assert elapsed < 0.05
     await asyncio.wait_for(started.wait(), timeout=0.1)
-    await asyncio.gather(*tasks)
+    assert set(tasks) <= audit_service_module._AUDIT_LOG_TASKS
+
+    drain = asyncio.create_task(audit_service_module.drain_audit_log_tasks(timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert not drain.done()
+
+    allow_write_finish.set()
+    assert await drain is True
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+
+
+def test_audit_log_async_rejects_post_cutoff_work_without_creating_a_task(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def unexpected_write(*args, **kwargs) -> None:
+        _ = (args, kwargs)
+        raise AssertionError("post-cutoff audit write coroutine was created")
+
+    def unexpected_task(*args, **kwargs) -> None:
+        _ = (args, kwargs)
+        raise AssertionError("post-cutoff audit task was created")
+
+    monkeypatch.setattr(audit_service_module, "_write_audit_log", unexpected_write)
+    monkeypatch.setattr(audit_service_module.asyncio, "create_task", unexpected_task)
+    shutdown_state.close_control_plane_task_admission()
+
+    started_at = perf_counter()
+    with caplog.at_level(logging.WARNING, logger=audit_service_module.__name__):
+        audit_service_module.AuditService.log_async("post_cutoff_settings_change")
+    elapsed = perf_counter() - started_at
+
+    assert elapsed < 0.05
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+    assert "Audit log task rejected after shutdown admission closed: post_cutoff_settings_change" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_audit_log_task_failure_is_consumed_and_cleaned_up(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail_write(action: str, actor_ip: str | None, details: dict | None, request_id: str | None) -> None:
+        _ = (action, actor_ip, details, request_id)
+        raise RuntimeError("unexpected audit failure")
+
+    monkeypatch.setattr(audit_service_module, "_write_audit_log", fail_write)
+
+    with caplog.at_level(logging.WARNING, logger=audit_service_module.__name__):
+        audit_service_module.AuditService.log_async("failure_test")
+        assert await audit_service_module.drain_audit_log_tasks(timeout_seconds=1) is True
+
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+    assert "Audit log task failed unexpectedly: audit-log-failure_test" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_audit_log_drain_reports_overdue_task(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    started = asyncio.Event()
+    allow_write_finish = asyncio.Event()
+
+    async def blocked_write(action: str, actor_ip: str | None, details: dict | None, request_id: str | None) -> None:
+        _ = (action, actor_ip, details, request_id)
+        started.set()
+        await allow_write_finish.wait()
+
+    monkeypatch.setattr(audit_service_module, "_write_audit_log", blocked_write)
+    audit_service_module.AuditService.log_async("timeout_test")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    with caplog.at_level(logging.WARNING, logger=audit_service_module.__name__):
+        assert await audit_service_module.drain_audit_log_tasks(timeout_seconds=0) is False
+
+    assert "Audit log task did not drain before shutdown: audit-log-timeout_test" in caplog.text
+    allow_write_finish.set()
+    assert await audit_service_module.drain_audit_log_tasks(timeout_seconds=1) is True
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
 
 
 @pytest.mark.asyncio

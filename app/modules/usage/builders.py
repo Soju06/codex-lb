@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from app.core import usage as usage_core
 from app.core.usage.logs import cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
 from app.core.usage.types import (
+    BucketConversationAggregate,
     BucketModelAggregate,
     RequestActivityAggregate,
     UsageCostByModel,
@@ -50,6 +51,8 @@ class ActivityMetricsSummary:
     error_rate: float | None = None
     error_count: int | None = None
     top_error: str | None = None
+    conversation_count: int = 0
+    conversation_request_count: int = 0
 
 
 def align_bucket_window_start(
@@ -73,6 +76,7 @@ def build_trends_from_buckets(
     bucket_seconds: int = _BUCKET_SECONDS,
     bucket_count: int = _BUCKET_COUNT,
     top_error: str | None = None,
+    conversation_rows: list[BucketConversationAggregate] | None = None,
 ) -> tuple[MetricsTrends, ActivityMetricsSummary, ActivityCostSummary]:
     # Align slots so the last slot contains "now" (since + window).
     # Use floor to snap since to a bucket boundary, then shift by 1
@@ -91,6 +95,7 @@ def build_trends_from_buckets(
     bucket_errors: dict[int, int] = defaultdict(int)
     bucket_tokens: dict[int, int] = defaultdict(int)
     bucket_costs: dict[int, float] = defaultdict(float)
+    bucket_conversations: dict[int, int] = defaultdict(int)
     total_costs_by_model: dict[str, float] = defaultdict(float)
 
     total_requests = 0
@@ -115,10 +120,15 @@ def build_trends_from_buckets(
         total_cached_tokens += row.cached_input_tokens
         total_cost_usd += float(row.cost_usd)
 
+    for row in conversation_rows or []:
+        if row.bucket_epoch in slot_set:
+            bucket_conversations[row.bucket_epoch] += row.conversation_count
+
     requests_points: list[TrendPoint] = []
     tokens_points: list[TrendPoint] = []
     cost_points: list[TrendPoint] = []
     error_rate_points: list[TrendPoint] = []
+    conversations_points: list[TrendPoint] = []
 
     for epoch in slots:
         t = datetime.fromtimestamp(epoch, tz=timezone.utc)
@@ -126,6 +136,7 @@ def build_trends_from_buckets(
         err = bucket_errors.get(epoch, 0)
         tok = bucket_tokens.get(epoch, 0)
         cost_value = bucket_costs.get(epoch, 0.0)
+        conversations = bucket_conversations.get(epoch, 0)
 
         err_rate = (err / req) if req > 0 else 0.0
 
@@ -133,12 +144,14 @@ def build_trends_from_buckets(
         tokens_points.append(TrendPoint(t=t, v=float(tok)))
         cost_points.append(TrendPoint(t=t, v=round(cost_value, 6)))
         error_rate_points.append(TrendPoint(t=t, v=round(err_rate, 4)))
+        conversations_points.append(TrendPoint(t=t, v=float(conversations)))
 
     trends = MetricsTrends(
         requests=requests_points,
         tokens=tokens_points,
         cost=cost_points,
         error_rate=error_rate_points,
+        conversations=conversations_points,
     )
 
     error_rate_total: float | None = None
@@ -184,6 +197,8 @@ def build_activity_summaries(
             error_rate=error_rate,
             error_count=aggregate.error_count,
             top_error=top_error,
+            conversation_count=aggregate.conversation_count,
+            conversation_request_count=aggregate.conversation_request_count,
         ),
         ActivityCostSummary(
             currency="USD",

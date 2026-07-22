@@ -7,6 +7,7 @@ from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
 
 from app.core.config.settings import get_settings
+from app.core.socket_peer import raw_socket_peer_host
 
 _LOCAL_HOSTS = {
     "",
@@ -36,6 +37,79 @@ def _combined_chain_header(headers: Mapping[str, str], header_name: str) -> str 
     return headers.get(header_name)
 
 
+def _has_non_empty_header_value(
+    headers: Mapping[str, str],
+    header_name: str,
+) -> bool:
+    if isinstance(headers, Headers):
+        return any(value.strip() for value in headers.getlist(header_name))
+    value = headers.get(header_name)
+    return bool(value and value.strip())
+
+
+def _resolve_proxy_header_consensus(
+    headers: Mapping[str, str],
+    socket_ip: str,
+    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...],
+    allowed_header_names: frozenset[str],
+) -> str | None:
+    if isinstance(headers, Headers):
+        for header_name in _SINGLETON_CLIENT_IP_HEADER_NAMES:
+            if (
+                header_name in allowed_header_names
+                and len(headers.getlist(header_name)) > 1
+                and _has_non_empty_header_value(headers, header_name)
+            ):
+                return None
+
+    resolved_client_ips: list[str] = []
+    if "x-forwarded-for" in allowed_header_names and _has_non_empty_header_value(headers, "x-forwarded-for"):
+        forwarded_for = _combined_chain_header(headers, "x-forwarded-for")
+        assert forwarded_for is not None
+        try:
+            resolved_client_ips.append(
+                _resolve_client_ip_from_xff_chain(
+                    socket_ip,
+                    forwarded_for,
+                    trusted_proxy_networks,
+                )
+            )
+        except ValueError:
+            return None
+
+    for header_name in _SINGLETON_CLIENT_IP_HEADER_NAMES:
+        if header_name not in allowed_header_names or not _has_non_empty_header_value(headers, header_name):
+            continue
+        forwarded_ip = headers.get(header_name)
+        assert forwarded_ip is not None
+        candidate = forwarded_ip.strip()
+        if not _is_valid_ip(candidate):
+            return None
+        resolved_client_ips.append(candidate)
+
+    if "forwarded" in allowed_header_names and _has_non_empty_header_value(headers, "forwarded"):
+        forwarded = _combined_chain_header(headers, "forwarded")
+        assert forwarded is not None
+        try:
+            resolved_client_ips.append(
+                _resolve_client_ip_from_forwarded_chain(
+                    socket_ip,
+                    forwarded,
+                    trusted_proxy_networks,
+                )
+            )
+        except ValueError:
+            return None
+
+    if not resolved_client_ips:
+        return None
+    first_resolution = resolved_client_ips[0]
+    first_address = ip_address(first_resolution)
+    if any(ip_address(candidate) != first_address for candidate in resolved_client_ips[1:]):
+        return None
+    return first_resolution
+
+
 def resolve_connection_client_ip(
     headers: Mapping[str, str],
     socket_ip: str | None,
@@ -43,11 +117,20 @@ def resolve_connection_client_ip(
     trust_proxy_headers: bool,
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...] = (),
     allowed_proxy_header_names: frozenset[str] | None = None,
+    require_proxy_header_consensus: bool = False,
 ) -> str | None:
     if trust_proxy_headers and socket_ip and is_trusted_proxy_source(socket_ip, trusted_proxy_networks):
         allowed_header_names = (
             _FORWARDED_CLIENT_IP_HEADERS if allowed_proxy_header_names is None else allowed_proxy_header_names
         )
+        if require_proxy_header_consensus:
+            return _resolve_proxy_header_consensus(
+                headers,
+                socket_ip,
+                trusted_proxy_networks,
+                allowed_header_names,
+            )
+
         if isinstance(headers, Headers):
             for header_name in _SINGLETON_CLIENT_IP_HEADER_NAMES:
                 if header_name in allowed_header_names and len(headers.getlist(header_name)) > 1:
@@ -364,12 +447,13 @@ def is_local_request(request: HTTPConnection) -> bool:
 
     settings = get_settings()
     trusted_proxy_networks = parse_trusted_proxy_networks(settings.firewall_trusted_proxy_cidrs)
-    socket_ip = request.client.host if request.client else None
+    socket_ip = raw_socket_peer_host(request)
     client_host = resolve_connection_client_ip(
         request.headers,
         socket_ip,
         trust_proxy_headers=settings.firewall_trust_proxy_headers,
         trusted_proxy_networks=trusted_proxy_networks,
+        require_proxy_header_consensus=True,
     )
     if not client_host:
         return False

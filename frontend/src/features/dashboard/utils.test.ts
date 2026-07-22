@@ -803,6 +803,8 @@ describe("buildDashboardView", () => {
         },
         metrics: {
           requests: 228,
+          conversations: 0,
+          conversationRequests: 0,
           tokens: 45000,
           cachedInputTokens: 8200,
           errorRate: 0.028,
@@ -885,6 +887,8 @@ describe("buildDashboardView", () => {
         },
         metrics: {
           requests: 228,
+          conversations: 0,
+          conversationRequests: 0,
           tokens: 45000,
           cachedInputTokens: 8200,
           errorRate: 0.028,
@@ -1003,6 +1007,8 @@ describe("buildDashboardView", () => {
           },
           metrics: {
             requests: 228,
+            conversations: 0,
+            conversationRequests: 0,
             tokens: 45000,
             cachedInputTokens: 8200,
             errorRate: 0.028,
@@ -1044,6 +1050,8 @@ describe("buildDashboardView", () => {
           },
           metrics: {
             requests: 228,
+            conversations: 0,
+            conversationRequests: 0,
             tokens: 45000,
             cachedInputTokens: 8200,
             errorRate: 0.028,
@@ -1070,6 +1078,8 @@ describe("buildDashboardView", () => {
           ...overview.summary,
           metrics: {
             requests: 1500,
+            conversations: 0,
+            conversationRequests: 0,
             tokens: 450,
             cachedInputTokens: 0,
             errorRate: 0.028,
@@ -1110,6 +1120,8 @@ describe("buildDashboardView", () => {
           ...overview.summary,
           metrics: {
             requests: 1001,
+            conversations: 0,
+            conversationRequests: 0,
             tokens: 999,
             cachedInputTokens: 0,
             errorRate: 0.028,
@@ -1187,5 +1199,239 @@ describe("buildDashboardView", () => {
     expect(zeroPreviousView.stats[0]?.comparison).toBeUndefined();
     expect(zeroPreviousView.stats[1]?.comparison).toBeUndefined();
     expect(zeroPreviousView.stats[2]?.comparison).toBeUndefined();
+  });
+
+  it("places Conversations stat after Est. API Cost and before optional burn-rate/Error Rate", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          conversationRequests: 0,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 42,
+        },
+      },
+    });
+
+    const viewWithoutBurn = buildDashboardView(overview, createDefaultRequestLogs(), false);
+
+    const costIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Est. API Cost"));
+    const convIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Conversations"));
+    const errorIdx = viewWithoutBurn.stats.findIndex((s) => s.label.includes("Error rate"));
+
+    expect(convIdx).toBeGreaterThan(costIdx);
+    expect(convIdx).toBeGreaterThan(-1);
+    expect(errorIdx).toBeGreaterThan(convIdx);
+
+    // With burn-rate enabled, conversation should still be between cost and burn-rate
+    const viewWithBurn = buildDashboardView(overview, createDefaultRequestLogs(), { isDark: false, showAccountBurnrate: true });
+
+    const costIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Est. API Cost"));
+    const convIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Conversations"));
+    const burnIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Account burn"));
+    const errorIdxB = viewWithBurn.stats.findIndex((s) => s.label.includes("Error rate"));
+
+    expect(convIdxB).toBeGreaterThan(costIdxB);
+    expect(burnIdxB).toBeGreaterThan(convIdxB);
+    expect(errorIdxB).toBeGreaterThan(burnIdxB);
+  });
+
+  it("omits Conversations stat when metrics.conversations is null/undefined", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          conversationRequests: 0,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: null,
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convIdx = view.stats.findIndex((s) => s.label.includes("Conversations"));
+    expect(convIdx).toBe(-1);
+  });
+
+  it("omits Conversations stat when metrics.conversations is entirely absent", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          conversationRequests: 0,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+        } as Record<string, unknown>,
+      },
+    } as Parameters<typeof buildDashboardView>[0]);
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convIdx = view.stats.findIndex((s) => s.label.includes("Conversations"));
+    expect(convIdx).toBe(-1);
+  });
+
+  it("formats Conversations stat as integer with thousand grouping, not compact abbreviation", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          conversationRequests: 0,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 1200,
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convStat = view.stats.find((s) => s.label.includes("Conversations"));
+    expect(convStat?.value).toBe("1,200");
+    expect(convStat?.meta).toBe("Avg req/conv 0.0");
+  });
+
+  it("formats Conversations stat above 1000 as grouped integer, not as '1.2K'", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          conversationRequests: 0,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 1523,
+        },
+      },
+    });
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convStat = view.stats.find((s) => s.label.includes("Conversations"));
+    expect(convStat?.value).toBe("1,523");
+    // Must not use compact format
+    expect(convStat?.value).not.toContain("K");
+    expect(convStat?.value).not.toContain(".");
+  });
+
+  it("renders Avg req/conv metadata with one decimal ratio", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 2,
+          conversationRequests: 5,
+        },
+      },
+    } as Parameters<typeof buildDashboardView>[0]);
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
+    expect(convStat).toBeDefined();
+    expect(convStat?.label).toBe("Active Conversations (7d)");
+    expect(convStat?.meta).toBe("Avg req/conv 2.5");
+  });
+
+  it("renders em-dash Avg req/conv metadata when conversations is zero", () => {
+    const overview = createDashboardOverview({
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: null,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: {
+          requests: 500,
+          tokens: 2000,
+          cachedInputTokens: 300,
+          errorRate: 0.02,
+          errorCount: 10,
+          topError: null,
+          conversations: 0,
+          conversationRequests: 4,
+        },
+      },
+    } as Parameters<typeof buildDashboardView>[0]);
+
+    const view = buildDashboardView(overview, createDefaultRequestLogs(), false);
+    const convStat = view.stats.find((s) => s.label.includes("Active Conversations"));
+    expect(convStat).toBeDefined();
+    expect(convStat?.meta).toBe("Avg req/conv —");
   });
 });

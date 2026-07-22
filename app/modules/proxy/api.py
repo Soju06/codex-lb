@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
@@ -16,14 +16,11 @@ from fastapi import (
     APIRouter,
     Body,
     Depends,
-    File,
-    Form,
     HTTPException,
     Path,
     Request,
     Response,
     Security,
-    UploadFile,
     WebSocket,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -42,7 +39,7 @@ from app.core.auth.dependencies import (
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, _is_native_codex_request
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ResetCreditFetchError,
@@ -72,6 +69,22 @@ from app.core.exceptions import (
     ProxyUpstreamError,
 )
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
+from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
+from app.core.multipart import (
+    IMAGE_EDITS_MULTIPART_POLICY,
+    TRANSCRIPTION_MULTIPART_POLICY,
+    bounded_multipart_form,
+    read_bounded_upload,
+)
+from app.core.multipart_fields import (
+    optional_text,
+    optional_upload,
+    ordered_text_items,
+    ordered_uploads,
+    required_text,
+    required_upload,
+    uploaded_file_items,
+)
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import (
     ChatCompletion,
@@ -176,6 +189,7 @@ from app.modules.proxy._service.support import (
     _could_be_blank_html_comment_line,
     _is_reasoning_summary_interleavable_event,
     _reasoning_summary_delta_key,
+    _request_log_client_fields,
     _reset_propagated_capacity_startup_ready,
     _reset_propagated_capacity_startup_wait,
     _strip_blank_html_comment_lines,
@@ -184,10 +198,15 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
-from app.modules.proxy.images_observability import record_images_route_observability
+from app.modules.proxy.images_observability import (
+    IMAGE_ROUTE_MODEL_STATE,
+    IMAGE_ROUTE_STREAM_STATE,
+    record_images_route_observability,
+)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
+    apply_enforced_service_tier_model_fallback,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     model_alias_requests_fast_mode,
@@ -323,6 +342,181 @@ internal_router = APIRouter(
 )
 
 _TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
+_OPENAPI_VALIDATION_ERROR_RESPONSE: Final[dict[str, Any]] = {
+    "description": "Validation Error",
+    "content": {
+        "application/json": {
+            "schema": {"$ref": "#/components/schemas/HTTPValidationError"},
+        }
+    },
+}
+_BACKEND_TRANSCRIBE_OPENAPI_EXTRA: Final[dict[str, Any]] = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "title": "Body_backend_transcribe_backend_api_transcribe_post",
+                    "required": ["file"],
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "contentMediaType": "application/octet-stream",
+                            "title": "File",
+                        },
+                        "prompt": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Prompt",
+                        },
+                    },
+                }
+            }
+        },
+    },
+    "responses": {"422": _OPENAPI_VALIDATION_ERROR_RESPONSE},
+}
+_V1_AUDIO_TRANSCRIPTIONS_OPENAPI_EXTRA: Final[dict[str, Any]] = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "title": "Body_v1_audio_transcriptions_v1_audio_transcriptions_post",
+                    "required": ["model", "file"],
+                    "properties": {
+                        "model": {"type": "string", "title": "Model"},
+                        "file": {
+                            "type": "string",
+                            "contentMediaType": "application/octet-stream",
+                            "title": "File",
+                        },
+                        "prompt": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Prompt",
+                        },
+                    },
+                }
+            }
+        },
+    },
+    "responses": {"422": _OPENAPI_VALIDATION_ERROR_RESPONSE},
+}
+_V1_IMAGES_EDITS_OPENAPI_EXTRA: Final[dict[str, Any]] = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "title": "Body_v1_images_edits_v1_images_edits_post",
+                    "required": ["prompt"],
+                    "properties": {
+                        "model": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Model",
+                        },
+                        "prompt": {"type": "string", "title": "Prompt"},
+                        "image": {
+                            "anyOf": [
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "contentMediaType": "application/octet-stream",
+                                    },
+                                },
+                                {"type": "null"},
+                            ],
+                            "title": "Image",
+                        },
+                        "image[]": {
+                            "anyOf": [
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "contentMediaType": "application/octet-stream",
+                                    },
+                                },
+                                {"type": "null"},
+                            ],
+                            "title": "Image[]",
+                        },
+                        "mask": {
+                            "anyOf": [
+                                {
+                                    "type": "string",
+                                    "contentMediaType": "application/octet-stream",
+                                },
+                                {"type": "null"},
+                            ],
+                            "title": "Mask",
+                        },
+                        "n": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "N",
+                        },
+                        "size": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Size",
+                        },
+                        "quality": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Quality",
+                        },
+                        "background": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Background",
+                        },
+                        "output_format": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Output Format",
+                        },
+                        "output_compression": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Output Compression",
+                        },
+                        "moderation": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Moderation",
+                        },
+                        "partial_images": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Partial Images",
+                        },
+                        "stream": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Stream",
+                        },
+                        "input_fidelity": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "Input Fidelity",
+                        },
+                        "user": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "title": "User",
+                        },
+                    },
+                }
+            }
+        },
+    },
+    "responses": {"422": _OPENAPI_VALIDATION_ERROR_RESPONSE},
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedTranscriptionMultipart:
+    audio_bytes: bytes
+    filename: str
+    content_type: str | None
+    model: str | None
+    prompt: str | None
+    ordered_text_fields: tuple[tuple[str, str], ...]
+
+
 _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_accounts",
     "no_plan_support_for_model",
@@ -422,16 +616,20 @@ def _has_openai_responses_shape(payload: V1ResponsesRequest | Mapping[str, JsonV
     )
 
 
-def _is_openai_sdk_request(
-    request: Request,
-    payload: V1ResponsesRequest | Mapping[str, JsonValue] | None = None,
-) -> bool:
+def _has_explicit_openai_sdk_marker(request: Request) -> bool:
     for header_name in request.headers:
         normalized_header = header_name.lower()
         if normalized_header.startswith("x-stainless-"):
             return True
     user_agent = request.headers.get("user-agent", "").lower()
-    if "openai" in user_agent:
+    return "openai" in user_agent
+
+
+def _is_openai_sdk_request(
+    request: Request,
+    payload: V1ResponsesRequest | Mapping[str, JsonValue] | None = None,
+) -> bool:
+    if _has_explicit_openai_sdk_marker(request):
         return True
     if payload is None or not _has_openai_responses_shape(payload):
         return False
@@ -519,7 +717,8 @@ async def _codex_control_proxy(
     )
 
 
-@router.api_route("/thread/goal/get", methods=["GET", "POST"])
+@router.get("/thread/goal/get")
+@router.post("/thread/goal/get")
 async def thread_goal_get(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
@@ -609,6 +808,7 @@ async def wham_agent_identities_jwks(
     return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
 
 
+@router.post("/responses/", include_in_schema=False)
 @router.post(
     "/responses",
     responses={
@@ -627,7 +827,9 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    explicit_openai_sdk_marker = _has_explicit_openai_sdk_marker(request)
     openai_sdk_request = _is_openai_sdk_request(request, payload)
+    native_codex_heartbeat = _is_native_codex_request(request.headers) and not explicit_openai_sdk_marker
     openai_compat_payload = _has_openai_responses_shape(payload)
     try:
         responses_payload = normalize_responses_request_payload(
@@ -642,7 +844,9 @@ async def responses(
         return _logged_error_json_response(request, 400, error)
 
     raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
-    prohibit_fast_mode = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
+    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+        responses_payload, api_key
+    )
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -676,6 +880,11 @@ async def responses(
             rate_limit_headers=rate_limit_headers,
         )
 
+    apply_enforced_service_tier_model_fallback(
+        responses_payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
+
     return await _stream_responses(
         request,
         responses_payload,
@@ -689,6 +898,7 @@ async def responses(
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
         enforce_openai_sdk_contract=openai_sdk_request,
+        native_codex_heartbeat=native_codex_heartbeat,
     )
 
 
@@ -731,6 +941,7 @@ async def responses_websocket(
     )
 
 
+@v1_router.post("/responses/", response_model=OpenAIResponseResult, include_in_schema=False)
 @v1_router.post(
     "/responses",
     response_model=OpenAIResponseResult,
@@ -761,7 +972,9 @@ async def v1_responses(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
     raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
-    prohibit_fast_mode = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
+    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+        responses_payload, api_key
+    )
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -793,6 +1006,10 @@ async def v1_responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
         )
+    apply_enforced_service_tier_model_fallback(
+        responses_payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     if responses_payload.stream:
         return await _stream_responses(
             request,
@@ -1440,10 +1657,14 @@ async def _hide_upstream_quota_for_api_key_clients(api_key: ApiKeyData | None) -
 async def _apply_api_key_enforcement_with_fast_mode_policy(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
-) -> bool:
+) -> tuple[bool, bool]:
     prohibit_fast_mode = await _prohibit_fast_mode_enabled()
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
-    return prohibit_fast_mode
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    return prohibit_fast_mode, service_tier_was_enforced
 
 
 async def _prohibit_fast_mode_enabled() -> bool:
@@ -1598,18 +1819,16 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
     return list(result.scalars().all())
 
 
-@transcribe_router.post("/transcribe")
+@transcribe_router.post("/transcribe", openapi_extra=_BACKEND_TRANSCRIBE_OPENAPI_EXTRA)
 async def backend_transcribe(
     request: Request,
-    file: UploadFile = File(...),
-    prompt: str | None = Form(None),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
+    multipart = await _parse_transcription_multipart(request, require_model=False)
     return await _transcribe_request(
         request=request,
-        file=file,
-        prompt=prompt,
+        multipart=multipart,
         context=context,
         api_key=api_key,
     )
@@ -1712,15 +1931,18 @@ async def backend_files_finalize(
     return JSONResponse(content=result)
 
 
-@v1_router.post("/audio/transcriptions")
+@v1_router.post(
+    "/audio/transcriptions",
+    openapi_extra=_V1_AUDIO_TRANSCRIPTIONS_OPENAPI_EXTRA,
+)
 async def v1_audio_transcriptions(
     request: Request,
-    model: str = Form(...),
-    file: UploadFile = File(...),
-    prompt: str | None = Form(None),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    multipart = await _parse_transcription_multipart(request, require_model=True)
+    assert multipart.model is not None
+    model = multipart.model
     source = await _select_audio_transcriptions_model_source(model, api_key)
     if source is not None:
         validate_model_access(api_key, model)
@@ -1728,7 +1950,7 @@ async def v1_audio_transcriptions(
         return await _source_audio_transcription_response(
             request=request,
             model=model,
-            file=file,
+            multipart=multipart,
             source=source,
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
@@ -1741,8 +1963,7 @@ async def v1_audio_transcriptions(
         )
     return await _transcribe_request(
         request=request,
-        file=file,
-        prompt=prompt,
+        multipart=multipart,
         context=context,
         api_key=api_key,
     )
@@ -1786,38 +2007,142 @@ def _record_images_edit_early_rejection(
     )
 
 
-@v1_router.post("/images/edits", response_model=None)
+def _images_edit_invalid_request_response(
+    request: Request,
+    *,
+    message: str,
+    param: str,
+    model: str | None,
+    stream: bool,
+    started_at: float,
+) -> JSONResponse:
+    _record_images_edit_early_rejection(
+        model=model,
+        stream=stream,
+        started_at=started_at,
+    )
+    return _logged_error_json_response(
+        request,
+        400,
+        images_service_module.make_invalid_request_error(message, param=param),
+    )
+
+
+@v1_router.post(
+    "/images/edits",
+    response_model=None,
+    openapi_extra=_V1_IMAGES_EDITS_OPENAPI_EXTRA,
+)
 async def v1_images_edits(
     request: Request,
-    # All typed form fields below are bound as raw strings so FastAPI
-    # never 422s on malformed input (e.g. ``n=abc``). Pydantic on
-    # ``V1ImagesEditsForm`` coerces and validates them and surfaces any
-    # failure as an OpenAI-shape ``invalid_request_error`` envelope.
-    model: str | None = Form(None),
-    prompt: str = Form(...),
-    # Accept either the OpenAI canonical ``image`` form key (single or
-    # repeated) or the ``image[]`` array-style key that some OpenAI SDKs
-    # / HTTP clients emit when sending multiple files. Both are bound as
-    # ``list[UploadFile] = File(None)`` and merged below; at least one
-    # entry must be present after the merge.
-    image: list[UploadFile] | None = File(None),
-    image_brackets: list[UploadFile] | None = File(None, alias="image[]"),
-    mask: UploadFile | None = File(None),
-    n: str | None = Form(None),
-    size: str | None = Form(None),
-    quality: str | None = Form(None),
-    background: str | None = Form(None),
-    output_format: str | None = Form(None),
-    output_compression: str | None = Form(None),
-    moderation: str | None = Form(None),
-    partial_images: str | None = Form(None),
-    stream: str | None = Form(None),
-    input_fidelity: str | None = Form(None),
-    user: str | None = Form(None),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     started_at = time.perf_counter()
+    raise_for_unsupported_multipart_content_encoding(request)
+
+    async with bounded_multipart_form(request, IMAGE_EDITS_MULTIPART_POLICY) as form:
+        model = optional_text(form, "model")
+        stream = optional_text(form, "stream")
+        observability_stream = _coerce_image_form_stream_for_observability(stream)
+        setattr(request.state, IMAGE_ROUTE_MODEL_STATE, model)
+        setattr(request.state, IMAGE_ROUTE_STREAM_STATE, observability_stream)
+
+        prompt = required_text(form, "prompt")
+        n = optional_text(form, "n")
+        size = optional_text(form, "size")
+        quality = optional_text(form, "quality")
+        background = optional_text(form, "background")
+        output_format = optional_text(form, "output_format")
+        output_compression = optional_text(form, "output_compression")
+        moderation = optional_text(form, "moderation")
+        partial_images = optional_text(form, "partial_images")
+        input_fidelity = optional_text(form, "input_fidelity")
+        user = optional_text(form, "user")
+
+        file_items = uploaded_file_items(form)
+        unknown_file = next(
+            (field for field, _upload in file_items if field not in {"image", "image[]", "mask"}),
+            None,
+        )
+        if unknown_file is not None:
+            return _images_edit_invalid_request_response(
+                request,
+                message=f"Unknown file field '{unknown_file}'.",
+                param=unknown_file,
+                model=model,
+                stream=observability_stream,
+                started_at=started_at,
+            )
+
+        merged_images = ordered_uploads(form, ("image", "image[]"))
+        if len(merged_images) > 16:
+            return _images_edit_invalid_request_response(
+                request,
+                message="At most 16 image parts are allowed.",
+                param="image",
+                model=model,
+                stream=observability_stream,
+                started_at=started_at,
+            )
+        if not merged_images:
+            return _images_edit_invalid_request_response(
+                request,
+                message="At least one ``image`` (or ``image[]``) multipart part is required.",
+                param="image",
+                model=model,
+                stream=observability_stream,
+                started_at=started_at,
+            )
+
+        mask_values = form.getlist("mask")
+        if len(mask_values) > 1:
+            return _images_edit_invalid_request_response(
+                request,
+                message="At most one mask part is allowed.",
+                param="mask",
+                model=model,
+                stream=observability_stream,
+                started_at=started_at,
+            )
+        mask = optional_upload(form, "mask")
+
+        images_payload: list[tuple[bytes, str | None]] = []
+        for upload in merged_images:
+            data = await read_bounded_upload(
+                upload,
+                max_bytes=IMAGE_EDITS_MULTIPART_POLICY.max_file_bytes,
+                param="image",
+            )
+            if not data:
+                return _images_edit_invalid_request_response(
+                    request,
+                    message="image part is empty",
+                    param="image",
+                    model=model,
+                    stream=observability_stream,
+                    started_at=started_at,
+                )
+            images_payload.append((data, upload.content_type))
+
+        mask_payload: tuple[bytes, str | None] | None = None
+        if mask is not None:
+            mask_data = await read_bounded_upload(
+                mask,
+                max_bytes=IMAGE_EDITS_MULTIPART_POLICY.max_file_bytes,
+                param="mask",
+            )
+            if not mask_data:
+                return _images_edit_invalid_request_response(
+                    request,
+                    message="mask part is empty",
+                    param="mask",
+                    model=model,
+                    stream=observability_stream,
+                    started_at=started_at,
+                )
+            mask_payload = (mask_data, mask.content_type)
+
     raw_form: dict[str, object] = {
         "model": model,
         "prompt": prompt,
@@ -1852,77 +2177,10 @@ async def v1_images_edits(
     except ValidationError as exc:
         _record_images_edit_early_rejection(
             model=model,
-            stream=_coerce_image_form_stream_for_observability(stream),
+            stream=observability_stream,
             started_at=started_at,
         )
         return _logged_error_json_response(request, 400, openai_validation_error(exc))
-
-    # Merge ``image`` and ``image[]`` into a single ordered list. Both
-    # form keys are accepted so OpenAI SDKs and HTTP clients that pick
-    # either convention work without modification.
-    merged_images: list[UploadFile] = []
-    if image:
-        merged_images.extend(image)
-    if image_brackets:
-        merged_images.extend(image_brackets)
-    if not merged_images:
-        _record_images_edit_early_rejection(
-            model=form_payload.model,
-            stream=bool(form_payload.stream),
-            started_at=started_at,
-        )
-        return _logged_error_json_response(
-            request,
-            400,
-            images_service_module.make_invalid_request_error(
-                "At least one ``image`` (or ``image[]``) multipart part is required.",
-                param="image",
-            ),
-        )
-
-    images_payload: list[tuple[bytes, str | None]] = []
-    for upload in merged_images:
-        try:
-            data = await upload.read()
-        finally:
-            await upload.close()
-        if not data:
-            _record_images_edit_early_rejection(
-                model=form_payload.model,
-                stream=bool(form_payload.stream),
-                started_at=started_at,
-            )
-            return _logged_error_json_response(
-                request,
-                400,
-                images_service_module.make_invalid_request_error(
-                    "image part is empty",
-                    param="image",
-                ),
-            )
-        images_payload.append((data, upload.content_type))
-
-    mask_payload: tuple[bytes, str | None] | None = None
-    if mask is not None:
-        try:
-            data = await mask.read()
-        finally:
-            await mask.close()
-        if not data:
-            _record_images_edit_early_rejection(
-                model=form_payload.model,
-                stream=bool(form_payload.stream),
-                started_at=started_at,
-            )
-            return _logged_error_json_response(
-                request,
-                400,
-                images_service_module.make_invalid_request_error(
-                    "mask part is empty",
-                    param="mask",
-                ),
-            )
-        mask_payload = (data, mask.content_type)
 
     return await _proxy_images_edit_request(
         request=request,
@@ -3232,7 +3490,9 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
-    prohibit_fast_mode = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
+    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+        responses_payload, api_key
+    )
     if prohibit_fast_mode and _is_fast_mode_model_alias(effective_model):
         effective_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -3249,6 +3509,10 @@ async def v1_chat_completions(
     source = source_selection[0] if source_selection is not None else None
     request_model = source_selection[1] if source_selection is not None else responses_payload.model
     if source is None:
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
         # not reject them.
@@ -3462,19 +3726,40 @@ def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | No
     return set(api_key.assigned_source_ids)
 
 
+async def _parse_transcription_multipart(
+    request: Request,
+    *,
+    require_model: bool,
+) -> _ParsedTranscriptionMultipart:
+    raise_for_unsupported_multipart_content_encoding(request)
+    async with bounded_multipart_form(request, TRANSCRIPTION_MULTIPART_POLICY) as form:
+        model = required_text(form, "model") if require_model else None
+        file = required_upload(form, "file")
+        prompt = optional_text(form, "prompt")
+        audio_bytes = await read_bounded_upload(
+            file,
+            max_bytes=TRANSCRIPTION_MULTIPART_POLICY.max_file_bytes,
+            param="file",
+        )
+        return _ParsedTranscriptionMultipart(
+            audio_bytes=audio_bytes,
+            filename=file.filename or "audio.wav",
+            content_type=file.content_type,
+            model=model,
+            prompt=prompt,
+            ordered_text_fields=tuple(ordered_text_items(form, excluded_fields=("file",))),
+        )
+
+
 async def _source_audio_transcription_response(
     *,
     request: Request,
     model: str,
-    file: UploadFile,
+    multipart: _ParsedTranscriptionMultipart,
     source: ModelSource,
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
-    # Read the downstream form and file before reserving usage: a parse or
-    # upload failure here must not leave the API key's budget held.
-    fields = await _audio_transcription_form_fields(request)
-    audio_bytes = await file.read()
     reservation = await _enforce_request_limits(
         api_key,
         request_model=model,
@@ -3483,10 +3768,10 @@ async def _source_audio_transcription_response(
     try:
         result = await forward_source_audio_transcription(
             source,
-            audio_bytes=audio_bytes,
-            filename=file.filename or "audio.wav",
-            content_type=file.content_type,
-            fields=fields,
+            audio_bytes=multipart.audio_bytes,
+            filename=multipart.filename,
+            content_type=multipart.content_type,
+            fields=list(multipart.ordered_text_fields),
         )
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
@@ -3575,17 +3860,6 @@ async def _source_audio_transcription_response(
     if result.content_type is not None:
         headers["content-type"] = result.content_type
     return Response(content=result.body, status_code=200, headers=headers)
-
-
-async def _audio_transcription_form_fields(request: Request) -> list[tuple[str, str]]:
-    form = await request.form()
-    fields: list[tuple[str, str]] = []
-    for key, value in form.multi_items():
-        if key == "file":
-            continue
-        if isinstance(value, str):
-            fields.append((key, value))
-    return fields
 
 
 async def _source_responses_response(
@@ -4257,9 +4531,27 @@ async def _stream_responses(
     forwarded_file_owner_account_id: str | None = None,
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
+    # Owner-forwarded payloads have already passed API-key enforcement,
+    # account-catalog fallback, reservation, and signing on the origin
+    # instance. Re-validate the key's other policy here, but retain the
+    # signed effective tier: an owner with an older/staler model snapshot must
+    # not re-add a tier that the origin authoritatively removed.
+    forwarded_effective_service_tier = payload.service_tier if forwarded_request else None
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    if forwarded_request:
+        payload.service_tier = forwarded_effective_service_tier
+    else:
+        apply_enforced_service_tier_model_fallback(
+            payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
     if codex_session_affinity:
@@ -4452,8 +4744,9 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
-    keepalive_frame = CODEX_KEEPALIVE_FRAME if not enforce_openai_sdk_contract else SSE_KEEPALIVE_FRAME
-    if not enforce_openai_sdk_contract:
+    use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
+    if use_codex_keepalive:
         stream = _prepend_initial_sse_heartbeat(
             stream,
             keepalive_frame,
@@ -4492,7 +4785,15 @@ async def _collect_responses(
     prefer_http_bridge: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
@@ -4633,7 +4934,15 @@ async def _compact_responses(
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> JSONResponse:
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     validate_model_access(api_key, payload.model)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
@@ -4805,8 +5114,7 @@ async def _synthetic_compaction_response_stream(
 async def _transcribe_request(
     *,
     request: Request,
-    file: UploadFile,
-    prompt: str | None,
+    multipart: _ParsedTranscriptionMultipart,
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> JSONResponse:
@@ -4818,12 +5126,11 @@ async def _transcribe_request(
     )
     rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     try:
-        audio_bytes = await file.read()
         result = await context.service.transcribe(
-            audio_bytes=audio_bytes,
-            filename=file.filename or "audio.wav",
-            content_type=file.content_type,
-            prompt=prompt,
+            audio_bytes=multipart.audio_bytes,
+            filename=multipart.filename,
+            content_type=multipart.content_type,
+            prompt=multipart.prompt,
             headers=request.headers,
             api_key=api_key,
         )
@@ -5904,6 +6211,7 @@ async def _log_source_chat_completion(
     error_message: str | None = None,
     upstream_status_code: int | None = None,
 ) -> None:
+    conversation_id = _request_log_client_fields(request.headers)[2]
     try:
         async with get_background_session() as session:
             await RequestLogsRepository(session).add_log(
@@ -5929,6 +6237,7 @@ async def _log_source_chat_completion(
                 upstream_transport="openai_compatible_http",
                 source="model_source",
                 useragent=request.headers.get("user-agent"),
+                conversation_id=conversation_id,
                 client_ip=resolve_request_client_host(request),
             )
     except Exception:

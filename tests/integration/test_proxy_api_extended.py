@@ -1378,7 +1378,7 @@ async def test_proxy_stream_classifies_core_generated_eof_failure(async_client, 
         assert log.failure_detail == "upstream_eof_before_terminal_event"
 
 
-async def test_proxy_stream_preserves_first_core_generated_eof_after_retry_exhaustion(async_client, monkeypatch):
+async def test_proxy_stream_surfaces_first_core_generated_eof_before_no_accounts(async_client, monkeypatch):
     expected_account_id = await _import_account(
         async_client,
         "acc_stream_first_core_eof",

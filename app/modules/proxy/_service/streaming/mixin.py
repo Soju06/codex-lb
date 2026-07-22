@@ -240,13 +240,18 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
-    _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401,
-    _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401,
-    _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401,
-    _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401,
-    _ApiKeyReservationTouchState, _event_type_from_payload, _finalize_ttft_latency_ms,
-    _RequestLogFailureMetadata, _RetryableStreamError, _StreamSettlement,
-    _TerminalStreamError, _TransientStreamError, _ttft_event_latency_ms,
+    _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
+    _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
+    _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _ApiKeyReservationTouchState,
+    _event_type_from_payload,
+    _finalize_ttft_latency_ms,
+    _RequestLogFailureMetadata,
+    _RetryableStreamError,
+    _StreamSettlement,
+    _TerminalStreamError,
+    _ttft_event_latency_ms,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward
@@ -620,18 +625,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                    transient_response_id = tool_call_response_id_from_payload(first_payload)
-                    if event_type == "error" and transient_response_id == request_id:
-                        # Normalized raw upstream `error` events use the
-                        # proxy request id as the synthetic response id. That
-                        # is not proof that upstream accepted the request.
-                        transient_response_id = None
-                    if allow_transient_retry and _facade()._should_retry_transient_stream_error(
-                        code, error_message, response_id=transient_response_id
-                    ):
-                        raise _TransientStreamError(
-                            code, upstream_error, preserve_on_selection_exhausted=transient_response_id is None
-                        )
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
                     upstream_error,

@@ -6562,7 +6562,8 @@ async def test_stream_responses_keeps_budget_timeout_when_budget_precedes_idle(m
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_maps_connect_timeout_to_upstream_unavailable(monkeypatch):
+@pytest.mark.parametrize("raise_for_status", [False, True])
+async def test_stream_responses_preserves_connect_timeout_retry_provenance(monkeypatch, raise_for_status: bool):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -6592,17 +6593,23 @@ async def test_stream_responses_maps_connect_timeout_to_upstream_unavailable(mon
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
 
-    events = [
-        event
-        async for event in proxy_module.stream_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, _ConnectTimeoutSseSession()),
-        )
-    ]
+    stream = proxy_module.stream_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, _ConnectTimeoutSseSession()),
+        raise_for_status=raise_for_status,
+    )
+    if raise_for_status:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            _ = [event async for event in stream]
+        assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+        assert exc_info.value.failure_phase == "connect"
+        assert exc_info.value.retryable_same_contract is True
+        return
 
+    events = [event async for event in stream]
     event = json.loads(events[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_unavailable"
 
@@ -12185,7 +12192,8 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_post_refresh_model_capacity_retries_same_account(monkeypatch):
+@pytest.mark.parametrize("post_refresh_failure", ["model_capacity", "connect"])
+async def test_stream_with_retry_post_refresh_http_failure_retries_same_account(monkeypatch, post_refresh_failure: str):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_refresh_model_capacity")
@@ -12215,14 +12223,18 @@ async def test_stream_with_retry_post_refresh_model_capacity_retries_same_accoun
             )
         if stream_once_calls == 2:
             assert kwargs["allow_transient_retry"] is True
-            raise proxy_service._TransientStreamError(
-                "invalid_request_error",
-                cast(
-                    UpstreamError,
-                    {
-                        "message": "Selected model is at capacity. Please try a different model.",
-                        "code": "invalid_request_error",
-                    },
+            if post_refresh_failure == "connect":
+                raise proxy_module.ProxyResponseError(
+                    502,
+                    proxy_module.openai_error("upstream_unavailable", "Server disconnected"),
+                    failure_phase="connect",
+                    retryable_same_contract=True,
+                )
+            raise proxy_module.ProxyResponseError(
+                400,
+                proxy_module.openai_error(
+                    "invalid_request_error",
+                    "Selected model is at capacity. Please try a different model.",
                 ),
             )
         yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_model_capacity_ok"}}\n\n'

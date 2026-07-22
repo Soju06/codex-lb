@@ -615,9 +615,12 @@ class _CompactMixin:
         security_lineage_id = _sticky_key_from_session_header(headers)
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = (
-                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
-            )
+            if _sticky_key_from_turn_state_header(headers) is not None:
+                sticky_key_source = "turn_state_header"
+            elif _sticky_key_from_session_header(headers) is not None:
+                sticky_key_source = "session_header"
+            else:
+                sticky_key_source = "payload"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
         _maybe_log_proxy_request_shape(

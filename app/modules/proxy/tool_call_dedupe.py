@@ -165,8 +165,8 @@ def mark_duplicate_tool_call_downstream_event(
 
 def _clear_legacy_downstream_tool_call_keys(seen_tool_call_keys: dict[ToolCallDedupeKey, None]) -> None:
     for key in tuple(seen_tool_call_keys):
-        _, _, namespace, _, call_id, _ = key
-        if namespace is not None and call_id is not None:
+        _, item_type, namespace, _, call_id, _ = key
+        if namespace is not None and (call_id is not None or item_type == "parallel_tool_use"):
             continue
         seen_tool_call_keys.pop(key, None)
 
@@ -277,6 +277,22 @@ def json_object_from_argument(argument_value: str) -> dict[str, JsonValue] | Non
     if not isinstance(decoded_argument, dict):
         return None
     return cast(dict[str, JsonValue], decoded_argument)
+
+
+def parallel_argument_has_code_mode_side_effect(argument_value: str) -> bool:
+    argument = json_object_from_argument(argument_value)
+    if argument is None:
+        return False
+    tool_uses = argument.get("tool_uses")
+    if not isinstance(tool_uses, list):
+        return False
+    return any(
+        isinstance(tool_use, dict)
+        and isinstance(recipient_name := tool_use.get("recipient_name"), str)
+        and recipient_name.removeprefix("functions.")
+        in tool_call_safety.CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+        for tool_use in tool_uses
+    )
 
 
 def canonical_json_key(value: JsonValue) -> str:
@@ -511,7 +527,10 @@ def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> Replaye
     namespace_value = item.get("namespace")
     namespace = namespace_value if isinstance(namespace_value, str) else None
     call_id_value = item.get("call_id")
-    identity_scoped = namespace is not None or item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME
+    identity_scoped = namespace is not None or (
+        item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME
+        and parallel_argument_has_code_mode_side_effect(argument_value)
+    )
     call_id = call_id_value if identity_scoped and isinstance(call_id_value, str) and call_id_value else None
     return (item_type, namespace, item_name, call_id, argument_key)
 

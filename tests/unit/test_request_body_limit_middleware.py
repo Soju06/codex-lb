@@ -314,29 +314,43 @@ async def test_outer_alias_rewrite_selects_responses_budget(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_unencoded_multipart_is_exempt_but_encoded_multipart_is_guarded(
+async def test_only_route_owned_unencoded_multipart_is_exempt_from_generic_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_limits(monkeypatch, general=5)
     multipart = (b"content-type", b"multipart/form-data; boundary=test")
 
-    plain_inner = _BodyConsumer()
-    plain_sent = await _run_direct(
-        RequestBodyLimitMiddleware(plain_inner),
-        _http_scope(headers=[multipart, (b"content-length", b"8")]),
+    route_owned_inner = _BodyConsumer()
+    route_owned_sent = await _run_direct(
+        RequestBodyLimitMiddleware(route_owned_inner),
+        _http_scope("/v1/images/edits", headers=[multipart, (b"content-length", b"8")]),
         _request_messages(b"12345678"),
     )
-    assert plain_inner.chunks == [b"12345678"]
-    assert plain_sent[0]["status"] == 204
+    assert route_owned_inner.chunks == [b"12345678"]
+    assert route_owned_sent[0]["status"] == 204
 
-    encoded_inner = _BodyConsumer()
-    encoded_sent = await _run_direct(
-        RequestBodyLimitMiddleware(encoded_inner),
-        _http_scope(headers=[multipart, (b"content-encoding", b"identity"), (b"content-length", b"8")]),
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_encoding", [None, b"identity", b"gzip"])
+async def test_unrelated_multipart_remains_under_generic_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    content_encoding: bytes | None,
+) -> None:
+    _configure_limits(monkeypatch, general=5)
+    headers = [(b"content-type", b"multipart/form-data; boundary=test")]
+    if content_encoding is not None:
+        headers.append((b"content-encoding", content_encoding))
+    headers.append((b"content-length", b"8"))
+    inner = _BodyConsumer()
+
+    sent = await _run_direct(
+        RequestBodyLimitMiddleware(inner),
+        _http_scope("/v1/chat/completions", headers=headers),
         _request_messages(b"12345678"),
     )
-    assert encoded_inner.calls == 0
-    assert encoded_sent[0]["status"] == 413
+
+    assert inner.calls == 0
+    assert sent[0]["status"] == 413
 
 
 @pytest.mark.asyncio

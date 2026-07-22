@@ -36,11 +36,11 @@ Alternatives rejected:
 - A `BaseHTTPMiddleware` implementation adds request-stream adaptation without providing value here; the ASGI receive contract is the boundary being limited.
 - A server-global cap cannot preserve the larger Responses budget and does not replace the expanded-body cap.
 
-### Reuse the existing route budgets and leave plain multipart unchanged
+### Reuse the existing budgets and scope multipart exemptions to owned routes
 
 The raw guard and decompressor share one path-budget selector. `/v1/responses` and `/backend-api/codex/responses`, after removing trailing slashes, use the larger of `max_decompressed_body_bytes` and `max_decompressed_responses_body_bytes`; other guarded paths use `max_decompressed_body_bytes`.
 
-Requests declaring `multipart/form-data` without `Content-Encoding` bypass this whole-body guard. Encoded multipart remains guarded because decompression otherwise creates the same raw and expansion risks. Content type is client-declared, so this exemption is not a security boundary; multipart-specific aggregate, parser, and per-file limits remain a separate change with their own compatibility analysis.
+Client-declared `multipart/form-data` is not itself an exemption because an unrelated typed-body route would otherwise consume a mislabeled body before authorization. Only unencoded multipart on an exact operation with a route-owned bounded parser bypasses the generic guard. When that capability also supplies an outer content-encoding gate, the gate marks its handled scope independently of the declared media type; the generic guard honors only that exact operation predicate or internal marker. All other unencoded and encoded multipart requests remain guarded.
 
 ### Use a private receive sentinel plus a request-scope marker
 
@@ -55,14 +55,14 @@ Ingress occurs before route metadata can reliably set `request.state.error_forma
 - overflow: HTTP 413 with `code = payload_too_large`;
 - malformed or unsupported compression: HTTP 400, using `invalid_request_error` for OpenAI paths and `invalid_request` otherwise.
 
-OpenAI ingress errors use `type = invalid_request_error`. Existing decompression support for `gzip`, `deflate`, `zstd`, `identity`, and stacked encodings remains unchanged after the raw guard. Stacked encodings are removed in reverse header/application order, and every intermediate decoded representation remains capped.
+OpenAI ingress errors use `type = invalid_request_error`. Existing decompression support for `gzip`, `deflate`, `zstd`, `identity`, and stacked encodings remains unchanged after the raw guard for requests under generic admission. Stacked encodings are removed in reverse header/application order, and every intermediate decoded representation remains capped. Exact route-owned exceptions follow their owning capability's post-authorization encoded-body contract instead.
 
 ## Risks / Trade-offs
 
 - **The 128 MiB Responses budget still permits substantial per-request memory use** → Existing bulkhead/backpressure middleware remains outside the guard, and both raw and expanded representations are independently bounded by the established budget.
 - **A client can lie in `Content-Length`** → The receive wrapper always counts actual chunks even after a declared length passes the early check.
 - **A downstream component could start a response before reading a later body chunk** → The raw middleware tracks `http.response.start` and re-raises rather than attempting a second response.
-- **A client can label an unencoded body as multipart to bypass the generic guard** → The declared-media-type exemption is explicit and tested; multipart aggregate/parser/per-file controls are the standalone follow-up that closes this residual gap.
+- **A client can label an unrelated body as multipart to seek an exemption** → Generic admission keys the exception to the exact route-owned operation rather than trusting `Content-Type`; every other operation remains guarded.
 
 ## Migration Plan
 

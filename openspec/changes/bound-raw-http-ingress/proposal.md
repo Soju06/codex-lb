@@ -9,7 +9,7 @@ HTTP request bodies without content encoding are currently unbounded, while comp
 - Register hidden trailing-slash HTTP aliases for both Responses paths so FastAPI does not redirect before chunked-body admission runs.
 - Preserve decompressed-size enforcement for `gzip`, `deflate`, `zstd`, `identity`, and stacked encodings so neither transfer size nor expanded size can exceed its route budget.
 - Reject oversized bodies with HTTP 413 and path-appropriate error envelopes; return OpenAI-compatible invalid-request envelopes for malformed or unsupported compression on proxy path families.
-- Leave requests declaring unencoded `multipart/form-data` outside this generic whole-body limit so multipart per-file and aggregate limits can remain a separate, standalone change.
+- Allow only exact route-owned multipart operations with dedicated bounded parsers to bypass the generic whole-body limit; a multipart `Content-Type` on any other operation remains generically guarded.
 - Add no new setting: the guard reuses `max_decompressed_body_bytes` and `max_decompressed_responses_body_bytes`.
 
 ## Capabilities

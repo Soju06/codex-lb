@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This change closes the pre-routing memory-exhaustion gap for guarded HTTP requests. The existing decompression cap protects expanded data, but it runs only after the complete encoded body has been collected; unencoded JSON bodies have no equivalent ingress cap at all. Requests declaring unencoded multipart remain a documented residual gap for the standalone multipart-limits change.
+This change closes the pre-routing memory-exhaustion gap for guarded HTTP requests. The existing decompression cap protects expanded data, but it runs only after the complete encoded body has been collected; unencoded JSON bodies have no equivalent ingress cap at all. Route-owned multipart operations can use dedicated bounded parsers, but a client-declared multipart media type alone cannot safely exempt any other route from generic admission.
 
 ## Decisions and constraints
 
@@ -11,7 +11,7 @@ This change closes the pre-routing memory-exhaustion gap for guarded HTTP reques
 - Keep the larger budget for the two Responses HTTP aliases, including trailing slashes.
 - Register trailing-slash HTTP paths explicitly so chunked bodies reach admission instead of being redirected before consumption.
 - Limit raw bytes before decompression and expanded bytes after decompression.
-- Keep requests declaring unencoded multipart outside this change. The declared media type is spoofable and is not a security boundary; file-aware aggregate, parser, and per-file limits need separate requirements and compatibility tests.
+- Exempt unencoded multipart only on exact operations that own file-aware aggregate, parser, and per-file limits. Keep every other request under generic admission regardless of a spoofable declared media type.
 - Select the error envelope from the canonical path because the rejection can happen before router/dependency metadata is available. Proxy families include `/v1/*`, `/backend-api/*`, `/api/codex/*`, and `/internal/bridge/*`.
 - Preserve endpoint authorization for every body admitted by the ingress guard; the transport guard is not an authentication replacement.
 

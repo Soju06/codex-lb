@@ -11,6 +11,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.config.settings import get_settings
 from app.core.errors import dashboard_error, openai_error
+from app.core.middleware.multipart_content_encoding import (
+    is_route_owned_multipart_operation,
+    multipart_content_encoding_gate_was_applied,
+)
 from app.core.runtime_logging import log_error_response
 
 REQUEST_BODY_TOO_LARGE_MESSAGE = "Request body exceeds the maximum allowed size"
@@ -115,7 +119,8 @@ class RequestBodyLimitMiddleware:
             return
 
         headers = Headers(scope=scope)
-        if _is_unencoded_multipart(headers):
+        route_owned_multipart = is_route_owned_multipart_operation(scope) and _is_unencoded_multipart(headers)
+        if multipart_content_encoding_gate_was_applied(scope) or route_owned_multipart:
             await self.app(scope, receive, send)
             return
 

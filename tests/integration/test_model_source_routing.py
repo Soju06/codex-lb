@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import socket
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from tempfile import SpooledTemporaryFile
 from typing import TypeAlias, cast
 
 import pytest
+import starlette.formparsers as starlette_formparsers
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
@@ -90,6 +92,19 @@ async def _enable_api_key_auth(async_client) -> None:
 _UpstreamHandler: TypeAlias = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
+def _record_multipart_spools(monkeypatch: pytest.MonkeyPatch) -> list[SpooledTemporaryFile[bytes]]:
+    original = starlette_formparsers.SpooledTemporaryFile
+    spools: list[SpooledTemporaryFile[bytes]] = []
+
+    def create_spool(*, max_size: int) -> SpooledTemporaryFile[bytes]:
+        spool = original(max_size=max_size)
+        spools.append(spool)
+        return spool
+
+    monkeypatch.setattr(starlette_formparsers, "SpooledTemporaryFile", create_spool)
+    return spools
+
+
 @pytest.fixture
 async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaitable[str]]]:
     runners: list[web.AppRunner] = []
@@ -112,15 +127,23 @@ async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaita
 
 
 @pytest.mark.asyncio
-async def test_source_audio_transcription_routes_multipart_and_settles_usage(async_client, source_upstream):
+async def test_source_audio_transcription_routes_multipart_and_settles_usage(
+    async_client,
+    source_upstream,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}
+    spools: list[SpooledTemporaryFile[bytes]] = []
 
     async def transcribe(request: web.Request) -> web.Response:
+        assert spools
+        assert all(spool.closed for spool in spools)
         captured["path"] = request.path
         captured["authorization"] = request.headers.get("authorization")
         reader = await request.multipart()
         fields: dict[str, list[str]] = {}
+        field_items: list[tuple[str, str]] = []
         while True:
             next_part = await reader.next()
             if next_part is None:
@@ -132,8 +155,11 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(asy
                 captured["file_content_type"] = part.headers.get("Content-Type")
                 continue
             if part.name is not None:
-                fields.setdefault(part.name, []).append(await part.text())
+                value = await part.text()
+                fields.setdefault(part.name, []).append(value)
+                field_items.append((part.name, value))
         captured["fields"] = fields
+        captured["field_items"] = field_items
         return web.json_response(
             {
                 "text": "hello from source asr",
@@ -167,12 +193,18 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(asy
     )
     assert created.status_code == 200
     key = created.json()["key"]
+    spools = _record_multipart_spools(monkeypatch)
 
     response = await async_client.post(
         "/v1/audio/transcriptions",
         headers={"Authorization": f"Bearer {key}"},
-        data={"model": model, "prompt": "domain words", "response_format": "json"},
-        files={"file": ("sample.wav", b"\x01\x02\x03", "audio/wav")},
+        files=[
+            ("model", (None, model)),
+            ("prompt", (None, "first context")),
+            ("response_format", (None, "json")),
+            ("prompt", (None, "domain words")),
+            ("file", ("sample.wav", b"\x01\x02\x03", "audio/wav")),
+        ],
     )
 
     assert response.status_code == 200
@@ -184,9 +216,15 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(asy
     assert captured["file_content_type"] == "audio/wav"
     assert captured["fields"] == {
         "model": [model],
-        "prompt": ["domain words"],
+        "prompt": ["first context", "domain words"],
         "response_format": ["json"],
     }
+    assert captured["field_items"] == [
+        ("model", model),
+        ("prompt", "first context"),
+        ("response_format", "json"),
+        ("prompt", "domain words"),
+    ]
 
     async with SessionLocal() as session:
         result = await session.execute(select(RequestLog).where(RequestLog.model == model))

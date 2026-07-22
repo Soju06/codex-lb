@@ -15,7 +15,8 @@
     "doctor:changed": "react-doctor . --diff origin/main --no-score --blocking none",
     "typecheck": "bun node_modules/typescript-7/bin/tsc -b",
     "preview": "vite preview",
-    "screenshots": "npx playwright test --config screenshots/playwright.config.ts"
+    "screenshots": "npx playwright test --config screenshots/playwright.config.ts",
+    "test:browser-smoke": "playwright test --config browser-smoke/playwright.config.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

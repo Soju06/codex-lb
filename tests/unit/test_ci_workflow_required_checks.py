@@ -64,3 +64,14 @@ def test_postgres_real_test_steps_still_run_only_for_backend_changes() -> None:
     ):
         step = pg_job.split(f"- name: {step_name}", maxsplit=1)[1]
         assert step.lstrip().startswith("if: needs.changes.outputs.backend == 'true'")
+
+
+def test_dashboard_browser_smoke_covers_both_contract_sides_and_is_required() -> None:
+    workflow = _ci_workflow_text()
+    browser_job = _job_block(workflow, "dashboard-browser-smoke")
+    required_job = _job_block(workflow, "ci-required")
+
+    assert "if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true'" in browser_job
+    assert "bun run playwright install --with-deps chromium" in browser_job
+    assert "run: make test-dashboard-browser-smoke" in browser_job
+    assert "- dashboard-browser-smoke" in required_job

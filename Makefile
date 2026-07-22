@@ -26,13 +26,15 @@ help:
 	  '  make architecture-check      proxy architecture fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make frontend-test           vitest coverage, same as CI' \
+	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package' \
 	  '  make ci                      full local CI gate'
 
-.PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build
+.PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build \
+	test-dashboard-browser-smoke
 frontend-install:
 	cd frontend && bun install --frozen-lockfile
 
@@ -50,6 +52,10 @@ frontend-test-fast: frontend-install
 
 frontend-build: frontend-install
 	cd frontend && bun run build
+
+test-dashboard-browser-smoke: frontend-build
+	uv sync --dev --frozen
+	uv run python scripts/run_dashboard_browser_smoke.py
 
 .PHONY: lint typecheck architecture-check
 lint: architecture-check

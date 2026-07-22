@@ -235,9 +235,9 @@ def test_owner_mismatch_raises_409_for_retry() -> None:
     """
     import inspect
 
-    from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+    from app.modules.proxy._service.http_bridge.durable_sessions import _HTTPBridgeDurableSessionsMixin
 
-    source = inspect.getsource(http_bridge_mixin_module)
+    source = inspect.getsource(_HTTPBridgeDurableSessionsMixin._claim_durable_http_bridge_session)
     assert "owner_mismatch_retry" in source, (
         "Expected 'owner_mismatch_retry' log event in the HTTP bridge implementation. "
         "The mismatch block should raise 409 for retry, not fall through."

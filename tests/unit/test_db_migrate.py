@@ -528,7 +528,10 @@ def test_request_log_useragent_family_migration_backfills_only_slash_values(tmp_
     engine = create_engine(to_sync_database_url(url), future=True)
     try:
         with engine.begin() as connection:
-            groups = dict(connection.execute(text("SELECT request_id, useragent_group FROM request_logs")).all())
+            groups = {
+                row.request_id: row.useragent_group
+                for row in connection.execute(text("SELECT request_id, useragent_group FROM request_logs")).all()
+            }
     finally:
         engine.dispose()
 

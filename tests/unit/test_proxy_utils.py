@@ -14386,12 +14386,45 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retries_security_work_warning_on_authorized_account(monkeypatch):
+@pytest.mark.parametrize(
+    ("sticky_source", "legacy_owner_mode", "retry_expected"),
+    [
+        ("turn_state", None, True),
+        ("session_header", None, True),
+        ("session_header", "rejected", False),
+    ],
+)
+async def test_http_bridge_retries_security_work_warning_on_authorized_account(
+    monkeypatch,
+    sticky_source,
+    legacy_owner_mode,
+    retry_expected,
+):
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    sticky_sessions = AsyncMock()
+
+    class _TrackingRepoContext:
+        def __init__(self) -> None:
+            self._repos = ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aenter__(self) -> ProxyRepositories:
+            return self._repos
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(_TrackingRepoContext)
     regular_account = _make_account("acc_bridge_security_regular")
     authorized_account = _make_account("acc_bridge_security_authorized")
     authorized_account.security_work_authorized = True
+    sticky_sessions.get_account_id.return_value = regular_account.id if legacy_owner_mode == "rejected" else None
     request_text = json.dumps(
         {
             "type": "response.create",
@@ -14408,8 +14441,12 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         async def send_text(self, text: str) -> None:
             self.sent_text.append(text)
 
+        async def close(self) -> None:
+            return None
+
     retry_upstream = _FakeUpstreamWebSocket()
     reconnect_calls: list[dict[str, object]] = []
+    durable_claim_accounts: list[str] = []
 
     async def fake_reconnect_http_bridge_session(
         session,
@@ -14419,6 +14456,7 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         require_security_work_authorized=False,
         require_same_account=False,
         require_preferred_account=False,
+        owner_rebind_affinity=None,
     ):
         del require_same_account, require_preferred_account
         reconnect_calls.append(
@@ -14428,11 +14466,32 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
                 "require_security_work_authorized": require_security_work_authorized,
             }
         )
+        await service._claim_http_bridge_replacement_before_swap(
+            session,
+            account_id=authorized_account.id,
+            upstream=retry_upstream,
+            release_selected_account_lease=AsyncMock(),
+            owner_rebind_affinity=owner_rebind_affinity,
+        )
         session.account = authorized_account
         session.upstream = retry_upstream
         session.upstream_control = proxy_service._WebSocketUpstreamControl()
 
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
+
+    async def fake_claim_durable_http_bridge_session(
+        session,
+        *,
+        allow_takeover,
+        force_owner_epoch_advance=False,
+        claim_account_id=None,
+    ):
+        assert allow_takeover is True
+        assert force_owner_epoch_advance is True
+        durable_claim_accounts.append(claim_account_id or session.account.id)
+        session.durable_owner_epoch = 8
+
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", fake_claim_durable_http_bridge_session)
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="bridge_req_security",
@@ -14448,8 +14507,12 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
     )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security", None),
-        headers={},
-        affinity=proxy_service._AffinityPolicy(),
+        headers={"x-codex-turn-state": "turn-security"},
+        affinity=proxy_service._AffinityPolicy(
+            key="turn-security",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            codex_session_source=sticky_source,
+        ),
         request_model="gpt-5.1",
         account=regular_account,
         upstream=cast(proxy_service.UpstreamResponsesWebSocket, _FakeUpstreamWebSocket()),
@@ -14460,7 +14523,18 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         queued_request_count=1,
         last_used_at=1.0,
         idle_ttl_seconds=300.0,
+        upstream_turn_state="turn-security",
+        downstream_turn_state="turn-security",
+        downstream_turn_state_aliases={"turn-security", "turn-security-old"},
+        previous_response_ids={"resp-security-old"},
+        last_completed_input_count=2,
+        last_completed_response_id="resp-security-old",
+        last_completed_input_prefix_fingerprint="old-security-fingerprint",
+        last_pending_tool_calls={"call-security-old": "tool"},
+        durable_session_id="durable-security",
+        durable_owner_epoch=7,
     )
+    original_selection_key = session.affinity.selection_key
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "
         "To get authorized for security work, join the Trusted Access for Cyber program. "
@@ -14491,7 +14565,17 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
             "require_security_work_authorized": True,
         }
     ]
+    if not retry_expected:
+        assert session.account is regular_account
+        assert durable_claim_accounts == []
+        assert session.durable_owner_epoch == 7
+        sticky_sessions.upsert.assert_not_awaited()
+        assert retry_upstream.sent_text == []
+        assert session.closed is False
+        return
     assert session.account is authorized_account
+    assert durable_claim_accounts == [authorized_account.id]
+    assert session.durable_owner_epoch == 8
     assert len(retry_upstream.sent_text) == 1
     assert _json_text_without_installation_metadata(retry_upstream.sent_text[0]) == json.loads(request_text)
     assert list(session.pending_requests) == [request_state]
@@ -14499,6 +14583,24 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
     assert request_state.replay_count == 1
     assert request_state.response_id is None
     assert request_state.awaiting_response_created is True
+    assert session.affinity.key is None
+    assert session.affinity.kind is None
+    assert session.affinity.reallocate_sticky is True
+    assert session.affinity.codex_session_source is None
+    assert session.upstream_turn_state is None
+    assert session.downstream_turn_state is None
+    assert session.downstream_turn_state_aliases == set()
+    assert session.previous_response_ids == set()
+    sticky_sessions.upsert.assert_awaited_once_with(
+        original_selection_key,
+        authorized_account.id,
+        kind=proxy_service.StickySessionKind.CODEX_SESSION,
+    )
+    assert session.last_completed_input_count == 0
+    assert session.last_completed_response_id is None
+    assert session.last_completed_input_prefix_fingerprint is None
+    assert session.last_pending_tool_calls == {}
+    assert "x-codex-turn-state" not in session.headers
     assert request_state.event_queue is not None
     warning_block = await request_state.event_queue.get()
     assert warning_block is not None

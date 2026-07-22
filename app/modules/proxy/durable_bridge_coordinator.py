@@ -11,7 +11,6 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
-from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
@@ -82,30 +81,14 @@ class DurableBridgeSessionCoordinator:
                 )
                 if snapshot is not None:
                     resolved_aliases.append((alias_kind, snapshot))
-            resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
-            if len(resolved_identities) > 1:
-                specific_aliases = [
-                    (alias_kind, snapshot)
-                    for alias_kind, snapshot in resolved_aliases
-                    if alias_kind != _DURABLE_SESSION_HEADER_ALIAS
-                ]
-                specific_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in specific_aliases}
-                if len(specific_identities) == 1:
-                    specific_snapshot = specific_aliases[0][1]
-                    specific_identity = (specific_snapshot.id, specific_snapshot.account_id)
-                    conflicting_alias_kinds = {
-                        alias_kind
-                        for alias_kind, snapshot in resolved_aliases
-                        if (snapshot.id, snapshot.account_id) != specific_identity
-                    }
-                    if is_http_bridge_account_neutral_replay(
-                        kind=specific_snapshot.session_key_kind,
-                        key=specific_snapshot.session_key_value,
-                    ) and conflicting_alias_kinds == {_DURABLE_SESSION_HEADER_ALIAS}:
-                        return _to_lookup(specific_snapshot)
-                # Turn-state/response/session aliases are independent hard
-                # evidence. Returning the first match would silently discard a
-                # conflicting durable owner based on source ordering.
+            resolved_snapshots = [snapshot for _, snapshot in resolved_aliases]
+            resolved_account_ids = {
+                snapshot.account_id for snapshot in resolved_snapshots if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for snapshot in resolved_snapshots)
+            if len(resolved_account_ids) > 1 or (has_ownerless_snapshot and resolved_account_ids):
+                # Alias rows may diverge during a same-account blue-green
+                # handoff, but they must never disagree on the upstream owner.
                 raise ProxyResponseError(
                     502,
                     openai_error(
@@ -114,8 +97,26 @@ class DurableBridgeSessionCoordinator:
                         error_type="server_error",
                     ),
                 )
-            if resolved_aliases:
-                return _to_lookup(resolved_aliases[0][1])
+            if resolved_snapshots:
+                explicit_response_snapshot = next(
+                    (
+                        snapshot
+                        for alias_kind, snapshot in resolved_aliases
+                        if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS
+                    ),
+                    None,
+                )
+                if explicit_response_snapshot is not None:
+                    return _to_lookup(explicit_response_snapshot)
+                return _to_lookup(
+                    max(
+                        resolved_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.owner_epoch,
+                        ),
+                    )
+                )
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,

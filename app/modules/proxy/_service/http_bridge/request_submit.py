@@ -167,6 +167,7 @@ from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
 from app.modules.proxy.affinity import (
+    _AffinityPolicy,
     _extract_model_class,
     _owner_lookup_session_id_from_headers,
 )
@@ -1806,17 +1807,32 @@ class _HTTPBridgeRequestSubmitMixin:
         account_id: str,
         upstream: Any,
         release_selected_account_lease: Any,
+        owner_rebind_affinity: _AffinityPolicy | None = None,
     ) -> None:
-        if account_id == session.account.id or session.durable_session_id is None:
+        if account_id == session.account.id:
             return
         try:
-            await _call_with_supported_optional_kwargs(
-                self._claim_durable_http_bridge_session,
-                session,
-                optional_kwargs={"claim_account_id": account_id},
-                allow_takeover=True,
-                force_owner_epoch_advance=True,
-            )
+            if (
+                owner_rebind_affinity is not None
+                and owner_rebind_affinity.legacy_selection_key is not None
+                and owner_rebind_affinity.kind is not None
+            ):
+                async with self._repo_factory() as repos:
+                    legacy_owner_id = await repos.sticky_sessions.get_account_id(
+                        owner_rebind_affinity.legacy_selection_key,
+                        kind=owner_rebind_affinity.kind,
+                        max_age_seconds=owner_rebind_affinity.max_age_seconds,
+                    )
+                if legacy_owner_id is not None and legacy_owner_id != account_id:
+                    raise RuntimeError("security retry conflicts with legacy continuity owner")
+            if session.durable_session_id is not None:
+                await _call_with_supported_optional_kwargs(
+                    self._claim_durable_http_bridge_session,
+                    session,
+                    optional_kwargs={"claim_account_id": account_id},
+                    allow_takeover=True,
+                    force_owner_epoch_advance=True,
+                )
         except BaseException:
             try:
                 await upstream.close()
@@ -1897,6 +1913,7 @@ class _HTTPBridgeRequestSubmitMixin:
         previous_force_refresh_account_id = request_state.force_refresh_account_id
         previous_request_security_requirement = request_state.require_security_work_authorized
         previous_session_security_requirement = session.requires_security_work_authorized
+        previous_session_affinity = session.affinity
         previous_session_upstream_turn_state = session.upstream_turn_state
         previous_session_downstream_turn_state = session.downstream_turn_state
         previous_session_headers = session.headers
@@ -1910,18 +1927,26 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.require_security_work_authorized = True
         request_state.preferred_account_id = None
         request_state.excluded_account_ids.add(owner_account_id)
-        if owner_account_id in request_state.excluded_account_ids:
-            request_state.affinity_policy = replace(
-                request_state.affinity_policy,
-                key=None,
-                kind=None,
-                reallocate_sticky=True,
-            )
-            session.upstream_turn_state = None
-            session.downstream_turn_state = None
-            session.headers = {
-                key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
-            }
+        request_state.affinity_policy = replace(
+            request_state.affinity_policy,
+            key=None,
+            kind=None,
+            reallocate_sticky=True,
+        )
+        # Reconnect selects with the session policy, not the request copy.  A
+        # turn-state CODEX_SESSION policy would otherwise retain the rejected
+        # account's hard sticky row and turn this authorized retry into a
+        # no-account response before the replacement account is considered.
+        session.affinity = replace(
+            session.affinity,
+            key=None,
+            kind=None,
+            reallocate_sticky=True,
+            codex_session_source=None,
+        )
+        session.upstream_turn_state = None
+        session.downstream_turn_state = None
+        session.headers = {key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"}
         # The replacement bridge session may belong to a different account.
         # Keep the shared response-create gate, but drop the old account-local
         # create lease so the replay is counted against the account that
@@ -1964,12 +1989,40 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         reconnected = False
         try:
-            await self._reconnect_http_bridge_session(
+            await _call_with_supported_optional_kwargs(
+                self._reconnect_http_bridge_session,
                 session,
+                optional_kwargs={
+                    "owner_rebind_affinity": (previous_session_affinity if require_security_work_authorized else None)
+                },
                 request_state=request_state,
                 require_security_work_authorized=require_security_work_authorized,
             )
             reconnected = True
+            if session.account.id != owner_account_id:
+                await self._unregister_http_bridge_turn_states(session)
+                await self._unregister_http_bridge_previous_response_ids(session)
+                if (
+                    require_security_work_authorized
+                    and previous_session_affinity.selection_key is not None
+                    and previous_session_affinity.kind is not None
+                ):
+                    async with self._repo_factory() as repos:
+                        # The rejected turn's persistent namespaced row
+                        # otherwise remains a path back to the old account.
+                        await repos.sticky_sessions.upsert(
+                            previous_session_affinity.selection_key,
+                            session.account.id,
+                            kind=previous_session_affinity.kind,
+                        )
+
+                # Completed-response anchors and pending tool-call state are
+                # account-local. A full resend on the replacement account must
+                # not inherit continuity from the rejected upstream session.
+                session.last_completed_input_count = 0
+                session.last_completed_response_id = None
+                session.last_completed_input_prefix_fingerprint = None
+                session.last_pending_tool_calls.clear()
             if request_state.account_response_create_lease is None:
                 current_settings = await _service_get_settings_cache().get()
                 request_state.account_response_create_lease = (
@@ -1993,6 +2046,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized,
                 exc_info=True,
             )
+            switched_accounts = session.account.id != owner_account_id
+            if switched_accounts and not session.closed:
+                await self._retire_stale_pending_http_bridge_session(
+                    session,
+                    detail="security_retry_account_switch_failed",
+                )
             # A failed connect leaves the original owner socket live, so
             # restore its continuity state and let the caller emit the
             # owner-unavailable rewrite. After a successful reconnect the old
@@ -2017,6 +2076,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.suppress_next_created_downstream = previous_suppress_next_created_downstream
                 request_state.awaiting_response_created = previous_awaiting_response_created
                 request_state.force_refresh_account_id = previous_force_refresh_account_id
+                session.affinity = previous_session_affinity
                 session.upstream_turn_state = previous_session_upstream_turn_state
                 session.downstream_turn_state = previous_session_downstream_turn_state
                 session.headers = previous_session_headers

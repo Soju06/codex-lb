@@ -2001,6 +2001,7 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        owner_rebind_affinity: _AffinityPolicy | None = None,
     ) -> None:
         # A replacement reader can start before its caller resends the request.
         # Clear the prior attempt first so an expired send timestamp cannot
@@ -2325,6 +2326,13 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
+        await self._claim_http_bridge_replacement_before_swap(
+            session,
+            account_id=account.id,
+            upstream=upstream,
+            release_selected_account_lease=release_selected_account_lease,
+            owner_rebind_affinity=owner_rebind_affinity,
+        )
         try:
             await old_upstream.close()
         except Exception:

@@ -6722,6 +6722,66 @@ async def test_stream_responses_direct_http_tls_connect_failure_is_not_retryable
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_routed_http_tls_connect_failure_is_not_retryable(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 5.0
+        upstream_stream_transport = "http"
+
+    certificate_error = _client_connector_certificate_error()
+
+    class _TlsFailureCodexSession:
+        async def request(self, *_args: object, **_kwargs: object):
+            raise certificate_error
+
+    completions: list[dict[str, object]] = []
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(
+        proxy_module,
+        "_maybe_log_upstream_request_complete",
+        lambda **kwargs: completions.append(dict(kwargs)),
+    )
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_tls",
+        endpoint=ResolvedProxyEndpoint("ep_tls", "http", "proxy.test", 8080),
+    )
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_routed_tls_failure",
+            session=cast(proxy_module.aiohttp.ClientSession, object()),
+            route=route,
+            codex_client=proxy_module.CodexClient(_TlsFailureCodexSession()),
+            allow_direct_egress=False,
+            raise_for_status=True,
+        )
+    ]
+
+    assert len(events) == 1
+    failed = cast(dict[str, object], parse_sse_data_json(events[0]))
+    response = cast(dict[str, object], failed["response"])
+    error = cast(dict[str, object], response["error"])
+    assert error["code"] == "upstream_unavailable"
+    assert completions[-1]["failure_phase"] == "connect"
+    assert completions[-1]["failure_exception_type"] == "CodexTransportError"
+    assert completions[-1]["retryable_same_contract"] is False
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_maps_typed_dns_failure_with_failed_session_provenance(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

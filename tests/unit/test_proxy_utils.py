@@ -12439,7 +12439,11 @@ async def test_stream_with_retry_post_refresh_transport_failure_retries_same_acc
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(monkeypatch):
+@pytest.mark.parametrize("replacement_outcome", ["success", "model_rejection", "surface"])
+async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
+    monkeypatch,
+    replacement_outcome: str,
+):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     original_handle_stream_error = service._handle_stream_error
@@ -12524,12 +12528,41 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
                     },
                 ),
             )
+        if (
+            account.id == account_b.id
+            and replacement_outcome != "success"
+            and stream_account_ids.count(account_b.id) == 1
+        ):
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "replacement token expired"),
+            )
+        if replacement_outcome == "model_rejection":
+            raise proxy_module.ProxyResponseError(
+                400,
+                proxy_module.openai_error(
+                    "invalid_request_error",
+                    "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                    error_type="invalid_request_error",
+                ),
+            )
+        if replacement_outcome == "surface":
+            raise proxy_module.ProxyResponseError(
+                500,
+                proxy_module.openai_error(
+                    "replacement_failed",
+                    "Replacement upstream failed",
+                    error_type="server_error",
+                ),
+            )
         yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_transient_b_ok"}}\n\n'
 
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
 
-    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
 
     chunks = [
         chunk
@@ -12547,21 +12580,27 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
         )
     ]
 
-    completed = json.loads(chunks[-1].split("data: ", 1)[1])
-    assert completed["response"]["id"] == "resp_post_refresh_transient_b_ok"
-    assert stream_account_ids == [account_a.id, account_a.id, account_a.id, account_a.id, account_b.id]
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    if replacement_outcome == "success":
+        assert terminal["response"]["id"] == "resp_post_refresh_transient_b_ok"
+    elif replacement_outcome == "model_rejection":
+        assert terminal["response"]["error"]["message"].startswith("The 'gpt-5.6-sol' model is not supported")
+    else:
+        assert terminal["response"]["error"]["code"] == "replacement_failed"
+    expected_account_ids = [account_a.id, account_a.id, account_a.id, account_a.id, account_b.id]
+    if replacement_outcome != "success":
+        expected_account_ids.append(account_b.id)
+    assert stream_account_ids == expected_account_ids
     assert excluded_snapshots == [set(), {account_a.id}]
     transient_penalties = [
         call for call in handle_stream_error.await_args_list if call.args[2] == "invalid_request_error"
     ]
     assert len(transient_penalties) == 1
     assert transient_penalties[0].args[0] is account_a
-    assert [entry for entry in settlement_order if entry != "health:invalid_api_key"] == [
-        "settle",
-        "health:invalid_request_error",
-    ]
+    ordered_effects = [entry for entry in settlement_order if entry != "health:invalid_api_key"]
+    assert ordered_effects.index("settle") < ordered_effects.index("health:invalid_request_error")
     assert settlement_wait_flags == [True]
-    assert stream_reservations == [reservation] * 5
+    assert stream_reservations == [reservation] * len(expected_account_ids)
     release_unsettled.assert_not_awaited()
     record_errors.assert_any_await(account_a, 2)
 

@@ -14427,7 +14427,7 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_precreated_replay_reuses_current_account_when_no_alternative_exists(
+async def test_http_bridge_precreated_replay_keeps_hard_owner_without_alternative_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -14514,18 +14514,18 @@ async def test_http_bridge_precreated_replay_reuses_current_account_when_no_alte
     retried = await service._retry_http_bridge_precreated_request(session)
 
     assert retried is True
-    assert seen_excluded_account_ids == [{account.id}, set()]
+    assert seen_excluded_account_ids == [set()]
     assert request_state.excluded_account_ids == set()
     assert request_state.account_response_create_lease is not None
     assert session.account is account
-    assert "x-codex-turn-state" not in session.headers
-    assert session.upstream_turn_state is None
-    assert session.downstream_turn_state is None
+    assert session.headers["x-codex-turn-state"] == "http_turn_single"
+    assert session.upstream_turn_state == "http_turn_single"
+    assert session.downstream_turn_state == "http_turn_single"
     cast(Any, upstream).send_text.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_precreated_proxy_anchor_reuses_current_account_when_no_alternative_exists(
+async def test_http_bridge_precreated_proxy_anchor_keeps_hard_owner_without_alternative_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -14616,15 +14616,15 @@ async def test_http_bridge_precreated_proxy_anchor_reuses_current_account_when_n
     retried = await service._retry_http_bridge_precreated_request(session)
 
     assert retried is True
-    assert seen_excluded_account_ids == [{account.id}, set()]
+    assert seen_excluded_account_ids == [set()]
     assert request_state.previous_response_id is None
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == set()
     assert request_state.request_text == fresh_text
     assert session.account is account
-    assert "x-codex-turn-state" not in session.headers
-    assert session.upstream_turn_state is None
-    assert session.downstream_turn_state is None
+    assert session.headers["x-codex-turn-state"] == "http_turn_single_anchor"
+    assert session.upstream_turn_state == "http_turn_single_anchor"
+    assert session.downstream_turn_state == "http_turn_single_anchor"
     cast(Any, upstream).send_text.assert_awaited_once_with(fresh_text)
 
 

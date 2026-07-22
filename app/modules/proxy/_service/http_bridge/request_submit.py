@@ -2010,6 +2010,7 @@ class _HTTPBridgeRequestSubmitMixin:
             key=session.key.affinity_key,
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
+        now = _service_time().monotonic()
         async with session.pending_lock:
             if request_state is not None:
                 if (

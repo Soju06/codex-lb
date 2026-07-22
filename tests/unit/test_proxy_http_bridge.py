@@ -16821,6 +16821,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
         latest_turn_state="http_turn_model_parent",
         latest_response_id="resp_model_parent",
         model="gpt-5.6-sol",
+        requires_security_work_authorized=True,
     )
     owner_unavailable = ProxyResponseError(
         502,
@@ -16912,6 +16913,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
     assert all(call["previous_response_id"] is None for call in creation_calls)
     assert all(call["preferred_account_id"] == "acc-model-owner" for call in creation_calls)
     assert all(call["preferred_account_has_continuity_provenance"] is True for call in creation_calls)
+    assert all(call["require_security_work_authorized"] is True for call in creation_calls)
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import sqlite3
@@ -2117,4 +2118,139 @@ def test_dashboard_hot_path_index_migration_drops_redundant_indexes(tmp_path: Pa
     assert "idx_logs_dash_usage_covering" in log_indexes
     assert "ix_additional_usage_distinct_labels" in usage_indexes
 
+
+def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_preserves_markers(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "security-lineage.db"
+    url = _db_url(db_path)
+    parent_revision = "20260720_000000_add_request_log_conversation_id"
+    target_revision = "20260722_000000_add_security_lineage_persistence"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO accounts (id, email, plan_type, access_token_encrypted, refresh_token_encrypted,
+                    id_token_encrypted, codex_installation_id, last_refresh, status)
+                VALUES ('security-owner', 'security-owner@example.com', 'plus', X'01', X'01', X'01',
+                    'security-owner-installation', CURRENT_TIMESTAMP, 'active')
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO sticky_sessions (key, kind, account_id, created_at, updated_at)
+                VALUES ('legacy-security-root', 'codex_session', 'security-owner', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """
+            )
+        )
+        # Simulate the deployed aggregate: it already created some columns,
+        # but its revision id is not in this focused branch's graph.
+        connection.execute(
+            text("ALTER TABLE sticky_sessions ADD COLUMN requires_security_work_authorized BOOLEAN NOT NULL DEFAULT 0")
+        )
+        connection.execute(
+            text("UPDATE sticky_sessions SET requires_security_work_authorized = 1 WHERE key = 'legacy-security-root'")
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE http_bridge_sessions "
+                "ADD COLUMN requires_security_work_authorized BOOLEAN NOT NULL DEFAULT 0"
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO http_bridge_sessions (
+                    id, session_key_kind, session_key_value, session_key_hash, api_key_scope,
+                    requires_security_work_authorized
+                ) VALUES (
+                    'security-bridge', 'session_header', 'security-bridge-root', 'bridge-hash',
+                    'api-key-scope', 1
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO http_bridge_session_aliases (
+                    id, session_id, alias_kind, alias_value, alias_hash, api_key_scope
+                ) VALUES (
+                    'security-alias', 'security-bridge', 'turn_state', 'security-alias-root',
+                    'alias-hash', 'api-key-scope'
+                )
+                """
+            )
+        )
+
+    result = run_upgrade(url, target_revision, bootstrap_legacy=False)
+    assert result.current_revision == target_revision
+
+    with create_engine(sync_url, future=True).connect() as connection:
+        sticky_columns = {column["name"]: column for column in inspect(connection).get_columns("sticky_sessions")}
+        usage_columns = {column["name"]: column for column in inspect(connection).get_columns("usage_history")}
+        bridge_columns = {column["name"] for column in inspect(connection).get_columns("http_bridge_sessions")}
+        quota_columns = {column["name"] for column in inspect(connection).get_columns("quota_planner_settings")}
+        detached = connection.execute(
+            text(
+                """
+                SELECT account_id, requires_security_work_authorized
+                FROM sticky_sessions
+                WHERE key LIKE '@security-work/v2/%' AND kind = 'codex_session'
+                """
+            )
+        ).fetchall()
+        alias_marker_key = (
+            "@security-work/v2/" + hashlib.sha256("api-key-scope\0security-alias-root".encode()).hexdigest()
+        )
+        alias_marker = connection.execute(
+            text(
+                "SELECT account_id, requires_security_work_authorized FROM sticky_sessions "
+                "WHERE key = :key AND kind = 'codex_session'"
+            ),
+            {"key": alias_marker_key},
+        ).one()
+        sticky_foreign_keys = connection.execute(text("PRAGMA foreign_key_list('sticky_sessions')")).mappings().all()
+        usage_index_sql = {
+            name: sql
+            for name, sql in connection.execute(
+                text(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'index' AND name IN "
+                    "('idx_usage_window_account_latest', 'idx_usage_window_account_time')"
+                )
+            ).all()
+        }
+
+    assert sticky_columns["account_id"]["nullable"] is True
+    assert usage_columns["account_id"]["nullable"] is True
+    assert "requires_security_work_authorized" in usage_columns
+    assert {
+        "requires_security_work_authorized",
+        "latest_pending_function_call_ids",
+        "latest_pending_custom_tool_call_ids",
+    } <= bridge_columns
+    assert {"auto_redeem_expiring_reset_credits", "reset_credit_redeem_lead_minutes"} <= quota_columns
+    assert detached
+    assert alias_marker == (None, True)
+    assert all(account_id is None and bool(required) for account_id, required in detached)
+    assert any(
+        foreign_key["from"] == "account_id"
+        and foreign_key["table"] == "accounts"
+        and foreign_key["on_delete"] == "SET NULL"
+        for foreign_key in sticky_foreign_keys
+    )
+    assert all("coalesce(\"window\", 'primary')" in sql for sql in usage_index_sql.values())
     assert check_schema_drift(url) == ()
+
+    config = _build_alembic_config(url)
+    command.downgrade(config, parent_revision)
+    with create_engine(sync_url, future=True).connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM sticky_sessions WHERE key LIKE '@security-work/v2/%' AND account_id IS NULL")
+        ).scalar_one() == len(detached)

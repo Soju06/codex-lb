@@ -32,6 +32,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
 )
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 pytestmark = pytest.mark.unit
 
@@ -2290,3 +2291,130 @@ async def test_startup_rechecks_ownerless_stale_rows_before_delete(
             select(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id == "sid-race-claim")
         )
         assert aliases.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_durable_security_requirement_is_persisted_monotonically(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with async_session_factory() as session:
+        repository = DurableBridgeRepository(session)
+        claimed = await repository.claim_session(
+            session_key_kind="session_header",
+            session_key_value="security-root",
+            api_key_scope="__anonymous__",
+            instance_id="instance-a",
+            lease_ttl_seconds=60,
+            account_id=None,
+            model="gpt-5.6",
+            service_tier=None,
+            latest_turn_state=None,
+            latest_response_id=None,
+            allow_takeover=True,
+        )
+
+        marked = await repository.require_security_work_authorized(session_id=claimed.id)
+        again = await repository.require_security_work_authorized(session_id=claimed.id)
+
+    assert marked is not None and marked.requires_security_work_authorized is True
+    assert again is not None and again.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_durable_security_requirement_survives_coordinator_lookup(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="security-coordinator-root",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60,
+        account_id=None,
+        model="gpt-5.6",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    marked = await coordinator.require_security_work_authorized(session_id=claimed.session_id)
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="security-coordinator-root",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+
+    assert marked is not None and marked.requires_security_work_authorized is True
+    assert lookup is not None and lookup.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_sticky_security_marker_is_monotonic_and_not_cleanup_eligible(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with async_session_factory() as session:
+        repository = StickySessionsRepository(session)
+        marker = await repository.upsert(
+            "@security-work/v2/unit-marker",
+            None,
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        )
+        refreshed = await repository.upsert(
+            marker.key,
+            None,
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=False,
+        )
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == marker.key, StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(updated_at=utcnow() - timedelta(days=2))
+        )
+        await session.commit()
+
+        deleted = await repository.purge_before(utcnow() - timedelta(days=1))
+        retained = await repository.get_entry(marker.key, kind=StickySessionKind.CODEX_SESSION)
+
+    assert refreshed.requires_security_work_authorized is True
+    assert deleted == 0
+    assert retained is not None and retained.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_sticky_security_marker_is_scoped_and_consultable(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with async_session_factory() as session:
+        repository = StickySessionsRepository(session)
+        marker_keys = await repository.require_security_work_authorized(
+            ["scoped-security-root"],
+            api_key_scope="api-key-a",
+        )
+        await repository.upsert(
+            "scoped-security-root",
+            None,
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        )
+
+        required = await repository.security_work_required(
+            ["scoped-security-root"],
+            api_key_scope="api-key-a",
+        )
+        wrong_scope = await repository.security_work_required(
+            ["scoped-security-root"],
+            api_key_scope="api-key-b",
+        )
+        markers = (
+            (await session.execute(select(StickySession).where(StickySession.key.in_(marker_keys)))).scalars().all()
+        )
+
+    assert required is True
+    assert wrong_scope is False
+    assert markers
+    assert all(marker.account_id is None for marker in markers)

@@ -12,6 +12,7 @@ class _StreamingServiceProtocol(Protocol):
     _handle_stream_error: Any
     _load_balancer: Any
     _maybe_touch_api_key_reservation: Any
+    _persist_security_work_lineage_markers: Any
     _raise_for_unsupported_input_image_references: Any
     _release_unsettled_stream_api_key_usage: Any
     _resolve_file_account_for_responses: Any

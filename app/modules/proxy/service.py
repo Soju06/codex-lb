@@ -701,6 +701,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeSessionCoordinator,
 )
+from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _header_account_id,
@@ -1419,6 +1420,16 @@ class ProxyService(
             if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
                 return None
             scoped_account_ids = {selected_account_id}
+        require_security_work_authorized = False
+        if affinity.kind == StickySessionKind.CODEX_SESSION and affinity.selection_key:
+            async with self._repo_factory() as repos:
+                require_security_work_authorized = (
+                    await repos.sticky_sessions.security_work_required(
+                        tuple(key for key in (affinity.selection_key, affinity.legacy_selection_key) if key),
+                        api_key_scope=durable_bridge_api_key_scope(api_key.id if api_key is not None else None),
+                    )
+                    is True
+                )
         selection = await self._load_balancer.select_account(
             sticky_key=affinity.selection_key,
             sticky_kind=affinity.kind,
@@ -1433,10 +1444,33 @@ class ProxyService(
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            require_security_work_authorized=require_security_work_authorized,
         )
         if selection.account is None:
             return None
         return _detached_account_copy(selection.account)
+
+    async def _persist_security_work_lineage_markers(
+        self,
+        lineage_ids: Collection[str],
+        *,
+        api_key_id: str | None,
+    ) -> bool:
+        normalized_lineage_ids = tuple(dict.fromkeys(value.strip() for value in lineage_ids if value.strip()))
+        if not normalized_lineage_ids:
+            # A request without a reusable lineage has no future selection to
+            # constrain. Its current in-memory retry is therefore sufficient.
+            return True
+        try:
+            async with self._repo_factory() as repos:
+                marker_keys = await repos.sticky_sessions.require_security_work_authorized(
+                    normalized_lineage_ids,
+                    api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                )
+        except Exception:
+            logger.warning("Failed to persist security-work lineage markers", exc_info=True)
+            return False
+        return bool(marker_keys)
 
     @asynccontextmanager
     async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
@@ -1739,6 +1773,17 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                if sticky_kind == StickySessionKind.CODEX_SESSION:
+                    lineage_ids = tuple(key for key in (sticky_key, legacy_sticky_key) if key)
+                    if lineage_ids:
+                        async with self._repo_factory() as repos:
+                            persisted_security_requirement = await repos.sticky_sessions.security_work_required(
+                                lineage_ids,
+                                api_key_scope=durable_bridge_api_key_scope(api_key.id if api_key is not None else None),
+                            )
+                        require_security_work_authorized = (
+                            require_security_work_authorized or persisted_security_requirement is True
+                        )
                 concurrency_caps = effective_account_concurrency_caps(settings)
                 stream_reserve_slots = (
                     (

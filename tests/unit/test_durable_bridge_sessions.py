@@ -287,7 +287,6 @@ async def test_reversible_recovery_rollback_does_not_restore_reclaimed_predecess
     )
 
 
-
 @pytest.mark.asyncio
 async def test_durable_bridge_lookup_accepts_same_account_alias_session_divergence(
     coordinator: DurableBridgeSessionCoordinator,

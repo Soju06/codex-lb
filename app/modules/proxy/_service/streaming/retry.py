@@ -67,6 +67,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
+    is_upstream_model_capacity_error,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 
@@ -469,11 +470,8 @@ class _StreamingRetryMixin:
         ) -> AsyncIterator[str]:
             nonlocal last_transient_exc
             transient_retries = 0
-            while True:
-                settlement.reset()
-                stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
-                    _facade()._remaining_budget_seconds(deadline)
-                )
+
+            async def _iter_stream_once() -> AsyncIterator[str]:
                 try:
                     async for line in proxy._stream_once(
                         account,
@@ -497,6 +495,36 @@ class _StreamingRetryMixin:
                         tool_call_dedupe=tool_call_dedupe,
                         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     ):
+                        yield line
+                except ProxyResponseError as exc:
+                    error = _parse_openai_error(exc.payload)
+                    error_code = _normalize_error_code(
+                        error.code if error else None,
+                        error.type if error else None,
+                    )
+                    error_message = error.message if error else None
+                    retryable_connect_failure = bool(
+                        exc.failure_phase == "connect"
+                        and _facade()._should_retry_transient_stream_error(error_code, error_message)
+                    )
+                    retryable_capacity_rejection = bool(
+                        is_upstream_model_capacity_error(error_message)
+                        and _facade()._should_retry_transient_stream_error(error_code, error_message)
+                    )
+                    if retryable_connect_failure or retryable_capacity_rejection:
+                        raise _TransientStreamError(
+                            error_code or "upstream_error",
+                            _upstream_error_from_openai(error),
+                        ) from exc
+                    raise
+
+            while True:
+                settlement.reset()
+                stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
+                    _facade()._remaining_budget_seconds(deadline)
+                )
+                try:
+                    async for line in _iter_stream_once():
                         yield line
                     network_recovery.log_recovered()
                     return

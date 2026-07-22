@@ -3175,6 +3175,17 @@ async def _stream_responses_with_session(
                 retryable_same_contract=True,
                 failed_session=None,
             ) from exc
+        if raise_for_status and exc.retryable_same_contract:
+            raise ProxyResponseError(
+                exc.status_code or 502,
+                openai_error(routed_error_code, response_error_message),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                upstream_status_code=exc.status_code,
+                upstream_error_code=routed_error_code,
+            ) from exc
         yield format_sse_event(
             response_failed_event(routed_error_code, response_error_message, response_id=get_request_id()),
         )
@@ -3204,6 +3215,16 @@ async def _stream_responses_with_session(
                 response_error_message,
                 exc,
                 retryable_same_contract=retryable_same_contract,
+                failed_session=client_session,
+            ) from exc
+        if raise_for_status and retryable_same_contract:
+            raise ProxyResponseError(
+                502,
+                openai_error(error_code or "upstream_unavailable", response_error_message),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
                 failed_session=client_session,
             ) from exc
         yield format_sse_event(

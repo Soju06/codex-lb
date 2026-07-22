@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from importlib import import_module
 
 import pytest
@@ -222,7 +223,7 @@ async def test_release_leader_lease_within_swallows_release_error(
 
 
 @pytest.fixture(autouse=True)
-def reset_shutdown_state():  # noqa: ANN201
+def reset_shutdown_state() -> Iterator[None]:
     shutdown_state.reset()
     yield
     shutdown_state.reset()

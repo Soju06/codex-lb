@@ -30,3 +30,10 @@ When upstream returns a temporary model-capacity failure whose message says that
 
 - **WHEN** upstream returns a quota or rate-limit error code
 - **THEN** the proxy MUST keep classifying it as quota or rate-limit before applying message-based model-capacity detection.
+
+#### Scenario: Post-refresh transient exhaustion preserves every health signal
+
+- **WHEN** one or more accounts each exhaust multiple same-account post-refresh transient retries before the request succeeds or terminates
+- **THEN** the proxy MUST settle API-key usage before recording any deferred account-health failure
+- **AND** each exhausted account MUST receive exactly one classified health failure plus one additional failure for every remaining exhausted retry
+- **AND** selecting or exhausting a later account MUST NOT replace, lose, or duplicate an earlier account's deferred failures.

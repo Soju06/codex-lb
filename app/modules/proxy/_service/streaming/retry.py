@@ -100,7 +100,6 @@ def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mappi
 
 
 _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhausted"
-_POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR = "_codex_lb_post_refresh_transient_retry_count"
 
 
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
@@ -375,7 +374,7 @@ class _StreamingRetryMixin:
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
-        pending_post_refresh_transient_penalty: tuple[Account, UpstreamError, str, int, int] | None = None
+        pending_post_refresh_transient_penalties: list[tuple[Account, UpstreamError, str, int, int]] = []
         post_refresh_transient_replacement_selected = False
         require_security_work_authorized = False
         security_requirement_preexisting = False
@@ -403,9 +402,8 @@ class _StreamingRetryMixin:
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,
         ) -> bool:
-            nonlocal pending_post_refresh_transient_penalty
-            apply_pending_penalty = (
-                post_refresh_transient_replacement_selected and pending_post_refresh_transient_penalty is not None
+            apply_pending_penalty = post_refresh_transient_replacement_selected and bool(
+                pending_post_refresh_transient_penalties
             )
             if apply_pending_penalty:
                 settled_result = await proxy._settle_stream_api_key_usage(
@@ -415,24 +413,24 @@ class _StreamingRetryMixin:
                     request_id,
                     wait_for_settlement=True,
                 )
-                pending_penalty = pending_post_refresh_transient_penalty
-                pending_post_refresh_transient_penalty = None
-                assert pending_penalty is not None
-                (
-                    failed_account,
-                    transient_error_payload,
-                    transient_error_code,
-                    transient_http_status,
-                    transient_retry_count,
-                ) = pending_penalty
-                await proxy._handle_stream_error(
-                    failed_account,
-                    transient_error_payload,
-                    transient_error_code,
-                    http_status=transient_http_status,
-                )
-                if transient_retry_count > 1:
-                    await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
+                pending_penalties = list(pending_post_refresh_transient_penalties)
+                pending_post_refresh_transient_penalties.clear()
+                for pending_penalty in pending_penalties:
+                    (
+                        failed_account,
+                        transient_error_payload,
+                        transient_error_code,
+                        transient_http_status,
+                        transient_retry_count,
+                    ) = pending_penalty
+                    await proxy._handle_stream_error(
+                        failed_account,
+                        transient_error_payload,
+                        transient_error_code,
+                        http_status=transient_http_status,
+                    )
+                    if transient_retry_count > 1:
+                        await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
                 return settled_result
             return await proxy._settle_stream_api_key_usage(
                 api_key,
@@ -445,7 +443,7 @@ class _StreamingRetryMixin:
             current_settlement: _StreamSettlement,
         ) -> None:
             nonlocal post_refresh_transient_replacement_selected, settled
-            if pending_post_refresh_transient_penalty is not None:
+            if pending_post_refresh_transient_penalties:
                 # A failed replacement selection still ends the request. Mark
                 # it as terminal so the deferred failure is settled and
                 # recorded before this path returns or re-raises.
@@ -650,10 +648,19 @@ class _StreamingRetryMixin:
                         or is_upstream_model_capacity_error(error_message)
                         or exc.account_health_error
                     )
+                    if settlement.account_health_error:
+                        pending_post_refresh_transient_penalties.append(
+                            (
+                                account,
+                                _stream_settlement_error_payload(settlement),
+                                settlement.error_code or "upstream_error",
+                                502,
+                                transient_retries,
+                            )
+                        )
                     if can_try_other_account:
                         retry_exc = ProxyResponseError(502, openai_error(exc.code, error_message))
                         setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
-                        setattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, transient_retries)
                         raise retry_exc from exc
                     yield format_sse_event(
                         response_failed_event(
@@ -1361,7 +1368,7 @@ class _StreamingRetryMixin:
                     )
                     return
 
-                if pending_post_refresh_transient_penalty is not None:
+                if pending_post_refresh_transient_penalties:
                     post_refresh_transient_replacement_selected = True
 
                 account_id_value = account.id
@@ -2453,14 +2460,6 @@ class _StreamingRetryMixin:
                             )
                             if getattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, False):
                                 transient_error_payload = _stream_settlement_error_payload(settlement)
-                                if settlement.account_health_error:
-                                    pending_post_refresh_transient_penalty = (
-                                        account,
-                                        transient_error_payload,
-                                        settlement.error_code or "upstream_error",
-                                        retry_exc.status_code,
-                                        int(getattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, 1)),
-                                    )
                                 last_transient_exc = retry_exc
                                 last_retryable_stream_error = _RetryableStreamError(
                                     settlement.error_code or error_code or "upstream_error",
@@ -2554,7 +2553,13 @@ class _StreamingRetryMixin:
                             _apply_error_metadata(event["response"]["error"], error)
                             yield format_sse_event(event)
                             return
-                        if settlement.account_health_error:
+                        current_account_penalty_queued = any(
+                            failed_account is account
+                            for failed_account, *_rest in pending_post_refresh_transient_penalties
+                        )
+                        if pending_post_refresh_transient_penalties:
+                            await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+                        if settlement.account_health_error and not current_account_penalty_queued:
                             await proxy._handle_stream_error(
                                 account,
                                 _stream_settlement_error_payload(settlement),
@@ -2562,7 +2567,8 @@ class _StreamingRetryMixin:
                             )
                         elif settlement.record_success:
                             await proxy._load_balancer.record_success(account)
-                        settled = await _settle_stream_usage_before_pending_penalty(settlement)
+                        if not settled:
+                            settled = await _settle_stream_usage_before_pending_penalty(settlement)
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
                         return

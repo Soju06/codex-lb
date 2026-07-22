@@ -52,6 +52,7 @@ from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.scheduling.leader_election import get_leader_election
+from app.core.shutdown import close_control_plane_task_admission
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -136,6 +137,9 @@ async def _release_leader_lease_within(timeout: float) -> None:
 
 
 async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
+    # Closing admission is synchronous with producer checks on the event loop,
+    # so no task can appear after the stable drain passes complete.
+    close_control_plane_task_admission()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     clean_passes = 0
@@ -507,6 +511,10 @@ async def lifespan(app: FastAPI):
         shutdown_state.set_bridge_drain_active(True)
         shutdown_state.set_draining(True)
         drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+        # No await separates the timeout result from this cutoff. A slow
+        # request therefore either registered its task before the barrier or
+        # is prevented from starting new audit/fleet database work afterward.
+        shutdown_state.close_control_plane_task_admission()
         if not drained:
             logger.warning("Drain timeout reached, proceeding with shutdown")
 
@@ -616,7 +624,6 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Metrics server stopped with an error")
             finally:
-                shutdown_state.reset()
                 mark_process_dead()
                 await close_db()
 

@@ -19,7 +19,16 @@ The system MUST execute `AuditService.log_async()` writes in tracked background 
 
 ### Requirement: Graceful shutdown drains pending audit writes
 
-Graceful shutdown MUST wait for tracked audit-log tasks for up to `shutdown_drain_timeout_seconds` before closing shared database resources. The drain MUST include tasks that complete or become visible while task-completion callbacks are running. If the deadline expires, the system MUST report each audit task that did not drain before continuing shutdown.
+Immediately after the in-flight drain attempt returns, graceful shutdown MUST synchronously close asynchronous audit-task admission before any further shutdown await. An `AuditService.log_async()` call after this cutoff MUST remain non-blocking, MUST report the rejected action, and MUST NOT construct a write coroutine or task. Graceful shutdown MUST wait for audit-log tasks accepted before the cutoff for up to `shutdown_drain_timeout_seconds` before closing shared database resources. The drain MUST include tasks that complete or become visible while task-completion callbacks are running. If the deadline expires, the system MUST report each audit task that did not drain before continuing shutdown.
+
+#### Scenario: Late audit producer is rejected after in-flight timeout
+
+- **GIVEN** an HTTP handler remains alive after the in-flight drain timeout
+- **AND** graceful shutdown has closed control-plane task admission
+- **WHEN** the handler calls `AuditService.log_async()`
+- **THEN** the call returns without waiting
+- **AND** the rejected action is reported
+- **AND** no audit write coroutine or task is created
 
 #### Scenario: Shutdown preserves a pending audit row
 

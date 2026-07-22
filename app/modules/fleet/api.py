@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, Security
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_usage_api_key
 from app.core.config.settings_cache import get_settings_cache
-from app.core.shutdown import wait_for_tasks_to_drain
+from app.core.exceptions import DashboardServiceUnavailableError
+from app.core.shutdown import is_control_plane_task_admission_open, wait_for_tasks_to_drain
 from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
 from app.db.session import get_background_session
@@ -31,6 +32,8 @@ router = APIRouter(
 )
 
 _REFRESH_SKIP_STATUSES = {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
+# Every route-owned refresh is registered at creation. Caller cancellation only
+# changes who observes its outcome; it does not establish task ownership.
 _BACKGROUND_REFRESH_TASKS: set[asyncio.Task[FleetRefreshResponse]] = set()
 
 
@@ -99,14 +102,17 @@ async def refresh_fleet_usage(
 ) -> FleetRefreshResponse:
     """Request a bounded usage refresh using codex-lb's normal refresh rules."""
 
+    if not is_control_plane_task_admission_open():
+        raise DashboardServiceUnavailableError("Server is draining")
     task = asyncio.create_task(
         _refresh_fleet_usage_with_owned_session(_visible_account_ids(api_key)),
         name="fleet-usage-refresh",
     )
+    _BACKGROUND_REFRESH_TASKS.add(task)
+    task.add_done_callback(_discard_refresh_task)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        _BACKGROUND_REFRESH_TASKS.add(task)
         task.add_done_callback(_handle_cancelled_refresh_task_done)
         raise
 
@@ -151,6 +157,10 @@ def _handle_cancelled_refresh_task_done(task: asyncio.Task[FleetRefreshResponse]
         _log_cancelled_refresh_task_exception(task)
     finally:
         _BACKGROUND_REFRESH_TASKS.discard(task)
+
+
+def _discard_refresh_task(task: asyncio.Task[FleetRefreshResponse]) -> None:
+    _BACKGROUND_REFRESH_TASKS.discard(task)
 
 
 def _log_cancelled_refresh_task_exception(task: asyncio.Task[FleetRefreshResponse]) -> None:

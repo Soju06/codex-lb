@@ -7,6 +7,7 @@ from datetime import timedelta, timezone
 
 import pytest
 
+from app.core import shutdown as shutdown_state
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -1018,6 +1019,35 @@ async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_se
 
 
 @pytest.mark.asyncio
+async def test_fleet_refresh_rejects_post_cutoff_work_with_dashboard_503(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plain_key = await _create_api_key("fleet-refresh-post-cutoff-key")
+
+    def unexpected_refresh(_: list[str] | None) -> None:
+        raise AssertionError("post-cutoff fleet refresh coroutine was created")
+
+    monkeypatch.setattr(fleet_api, "_refresh_fleet_usage_with_owned_session", unexpected_refresh)
+    shutdown_state.close_control_plane_task_admission()
+
+    response = await async_client.post(
+        "/api/fleet/refresh",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "service_unavailable",
+            "message": "Server is draining",
+        }
+    }
+    assert fleet_api._BACKGROUND_REFRESH_TASKS == set()
+
+
+@pytest.mark.asyncio
 async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_setup, monkeypatch):
     fleet_api._BACKGROUND_REFRESH_TASKS.clear()
     await _seed_account_with_windows(
@@ -1091,13 +1121,17 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
     )
     await asyncio.wait_for(refresh_started.wait(), timeout=1)
 
+    assert len(fleet_api._BACKGROUND_REFRESH_TASKS) == 1
+    owned_refresh_task = next(iter(fleet_api._BACKGROUND_REFRESH_TASKS))
+    assert not owned_refresh_task.done()
+
     request_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await request_task
     await asyncio.sleep(0)
 
     assert not session_exited.is_set()
-    assert len(fleet_api._BACKGROUND_REFRESH_TASKS) == 1
+    assert fleet_api._BACKGROUND_REFRESH_TASKS == {owned_refresh_task}
     drain = asyncio.create_task(fleet_api.drain_background_refresh_tasks(timeout_seconds=1))
     await asyncio.sleep(0)
     assert not drain.done()

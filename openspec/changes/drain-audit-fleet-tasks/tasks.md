@@ -17,3 +17,9 @@
 - [x] 3.1 Run focused unit/integration tests plus Ruff format/check and ty for changed Python files.
 - [x] 3.2 Run strict OpenSpec validation, architecture/simplicity gates, and relevant broader test suites.
 - [x] 3.3 Perform an adversarial lifecycle review and reconcile every requirement/scenario with implementation evidence.
+
+## 4. P1 review follow-up: post-timeout admission race
+
+- [x] 4.1 Close a synchronous audit/fleet task-admission barrier immediately after in-flight draining, keep it closed through resource teardown, and own every fleet refresh task from creation.
+- [x] 4.2 Cover post-cutoff audit rejection, fleet ownership before caller cancellation, the fleet route's 503 contract, and the real late-cancellation lifespan race through in-flight HTTP middleware.
+- [x] 4.3 Re-run focused and broader tests, static checks, strict OpenSpec validation, architecture/simplicity gates, and an adversarial standalone-diff review.

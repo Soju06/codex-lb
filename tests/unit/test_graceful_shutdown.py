@@ -222,15 +222,24 @@ async def test_release_leader_lease_within_swallows_release_error(
 
 
 @pytest.fixture(autouse=True)
-def reset_shutdown_state() -> None:
-    setattr(shutdown_state, "_draining", False)
-    setattr(shutdown_state, "_in_flight", 0)
+def reset_shutdown_state():  # noqa: ANN201
+    shutdown_state.reset()
+    yield
+    shutdown_state.reset()
 
 
 def test_set_draining_updates_shutdown_state() -> None:
     shutdown_state.set_draining(True)
 
     assert shutdown_state._draining is True
+
+
+def test_reset_reopens_control_plane_task_admission() -> None:
+    shutdown_state.close_control_plane_task_admission()
+
+    shutdown_state.reset()
+
+    assert shutdown_state.is_control_plane_task_admission_open() is True
 
 
 @pytest.mark.asyncio

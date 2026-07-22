@@ -10,13 +10,24 @@ _TaskResultT = TypeVar("_TaskResultT")
 _draining: bool = False
 _bridge_drain_active: bool = False
 _in_flight: int = 0
+_control_plane_task_admission_open: bool = True
 
 
 def reset() -> None:
-    global _draining, _bridge_drain_active, _in_flight
+    global _draining, _bridge_drain_active, _in_flight, _control_plane_task_admission_open
     _draining = False
     _bridge_drain_active = False
     _in_flight = 0
+    _control_plane_task_admission_open = True
+
+
+def close_control_plane_task_admission() -> None:
+    global _control_plane_task_admission_open
+    _control_plane_task_admission_open = False
+
+
+def is_control_plane_task_admission_open() -> bool:
+    return _control_plane_task_admission_open
 
 
 def set_draining(val: bool = True) -> None:

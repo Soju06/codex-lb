@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import anyio
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
@@ -251,9 +252,18 @@ class _DummyScheduler:
 @pytest.mark.asyncio
 async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import app.core.startup as startup_module
     import app.main as main
+    from app.core import shutdown as shutdown_state
+    from app.core.auth.dependencies import (
+        require_dashboard_write_access,
+        validate_dashboard_session,
+        validate_usage_api_key,
+    )
+    from app.dependencies import get_accounts_context
+    from app.modules.accounts.schemas import AccountImportResponse
 
     settings = Settings(
         otel_enabled=False,
@@ -274,10 +284,15 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     lifespan_entered = asyncio.Event()
     begin_shutdown = asyncio.Event()
     ring_marked_stale = asyncio.Event()
+    final_control_plane_drain_started = asyncio.Event()
     audit_write_started = asyncio.Event()
     allow_audit_write = asyncio.Event()
+    audit_route_started = asyncio.Event()
+    allow_audit_route_finish = asyncio.Event()
     fleet_refresh_started = asyncio.Event()
     allow_fleet_refresh = asyncio.Event()
+    fleet_refresh_finished = asyncio.Event()
+    audit_write_actions: list[str] = []
 
     async def _mark_stale(*args, **kwargs) -> None:
         _ = (args, kwargs)
@@ -305,12 +320,14 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         request_id: str | None,
     ) -> None:
         _ = (action, actor_ip, details, request_id)
+        audit_write_actions.append(action)
         audit_write_started.set()
         await allow_audit_write.wait()
 
     async def _blocked_fleet_refresh(_: list[str] | None) -> FleetRefreshResponse:
         fleet_refresh_started.set()
         await allow_fleet_refresh.wait()
+        fleet_refresh_finished.set()
         return FleetRefreshResponse(
             usage_written=False,
             account_count=0,
@@ -319,10 +336,60 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         )
 
     async def _close_http_client() -> None:
+        assert fleet_refresh_finished.is_set()
+        assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_http_client")
 
     async def _close_db() -> None:
+        assert fleet_refresh_finished.is_set()
+        assert not shutdown_state.is_control_plane_task_admission_open()
         call_order.append("close_db")
+
+    class _BlockedAccountsService:
+        async def import_account(self, raw: bytes) -> AccountImportResponse:
+            assert raw == b"{}"
+            audit_route_started.set()
+            await allow_audit_route_finish.wait()
+            return AccountImportResponse(
+                account_id="late-audit-account",
+                email="late-audit@example.com",
+                plan_type="plus",
+                status="active",
+            )
+
+    fleet_api_key = ApiKeyData(
+        id="lifespan-fleet-key",
+        name="lifespan fleet key",
+        key_prefix="lifespan-fleet",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    async def _allow_dashboard_access() -> None:
+        return None
+
+    async def _accounts_context_override() -> SimpleNamespace:
+        return SimpleNamespace(service=_BlockedAccountsService())
+
+    async def _fleet_api_key_override() -> ApiKeyData:
+        return fleet_api_key
+
+    async def _force_in_flight_timeout(*, timeout_seconds: float) -> bool:
+        assert timeout_seconds == 5
+        assert shutdown_state.get_in_flight() == 2
+        return False
+
+    original_control_plane_drain = main._drain_detached_control_plane_tasks
+
+    async def _track_control_plane_drain(timeout_seconds: float) -> None:
+        final_control_plane_drain_started.set()
+        await original_control_plane_drain(timeout_seconds)
 
     init_db = AsyncMock()
     init_db.side_effect = _init_db
@@ -350,6 +417,13 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
+    monkeypatch.setattr(shutdown_state, "wait_for_in_flight_drain", _force_in_flight_timeout)
+    monkeypatch.setattr(main, "_drain_detached_control_plane_tasks", _track_control_plane_drain)
+    monkeypatch.setitem(main.app.dependency_overrides, validate_dashboard_session, _allow_dashboard_access)
+    monkeypatch.setitem(main.app.dependency_overrides, require_dashboard_write_access, _allow_dashboard_access)
+    monkeypatch.setitem(main.app.dependency_overrides, get_accounts_context, _accounts_context_override)
+    monkeypatch.setitem(main.app.dependency_overrides, validate_usage_api_key, _fleet_api_key_override)
+    caplog.set_level(logging.WARNING, logger=audit_service_module.__name__)
 
     async def _run_lifespan() -> None:
         async with main.lifespan(main.app):
@@ -363,6 +437,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 
     await asyncio.wait_for(lifespan_entered.wait(), timeout=1)
     assert startup_module._startup_complete is True
+    assert shutdown_state.is_control_plane_task_admission_open() is True
     assert usage_scheduler.started is True
     assert api_key_limit_reset_scheduler.started is True
     assert model_scheduler.started is True
@@ -372,48 +447,56 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     await asyncio.wait_for(audit_write_started.wait(), timeout=1)
     audit_task = next(iter(audit_service_module._AUDIT_LOG_TASKS))
 
-    fleet_request_task = asyncio.create_task(
-        main.fleet_api.refresh_fleet_usage(
-            api_key=ApiKeyData(
-                id="lifespan-fleet-key",
-                name="lifespan fleet key",
-                key_prefix="lifespan-fleet",
-                allowed_models=None,
-                enforced_model=None,
-                enforced_reasoning_effort=None,
-                enforced_service_tier=None,
-                expires_at=None,
-                is_active=True,
-                created_at=utcnow(),
-                last_used_at=None,
+    transport = ASGITransport(app=main.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        fleet_request_task = asyncio.create_task(client.post("/api/fleet/refresh"))
+        audit_request_task = asyncio.create_task(
+            client.post(
+                "/api/accounts/import",
+                files={"auth_json": ("auth.json", b"{}", "application/json")},
             )
         )
-    )
-    await asyncio.wait_for(fleet_refresh_started.wait(), timeout=1)
-    fleet_request_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await fleet_request_task
-    await asyncio.sleep(0)
-    fleet_task = next(iter(main.fleet_api._BACKGROUND_REFRESH_TASKS))
+        await asyncio.wait_for(fleet_refresh_started.wait(), timeout=1)
+        await asyncio.wait_for(audit_route_started.wait(), timeout=1)
 
-    begin_shutdown.set()
-    await asyncio.wait_for(ring_marked_stale.wait(), timeout=1)
-    await asyncio.sleep(0)
+        assert shutdown_state.get_in_flight() == 2
+        assert len(main.fleet_api._BACKGROUND_REFRESH_TASKS) == 1
+        fleet_task = next(iter(main.fleet_api._BACKGROUND_REFRESH_TASKS))
 
-    assert not lifespan_task.done()
-    close_http_client.assert_not_awaited()
-    close_db.assert_not_awaited()
+        begin_shutdown.set()
+        await asyncio.wait_for(ring_marked_stale.wait(), timeout=1)
+        await asyncio.wait_for(final_control_plane_drain_started.wait(), timeout=1)
 
-    allow_audit_write.set()
-    await asyncio.wait_for(audit_task, timeout=1)
-    await asyncio.sleep(0)
-    assert not lifespan_task.done()
-    close_http_client.assert_not_awaited()
-    close_db.assert_not_awaited()
+        assert shutdown_state.is_control_plane_task_admission_open() is False
+        assert not lifespan_task.done()
+        close_http_client.assert_not_awaited()
+        close_db.assert_not_awaited()
 
-    allow_fleet_refresh.set()
-    await asyncio.wait_for(fleet_task, timeout=1)
-    await asyncio.wait_for(lifespan_task, timeout=1)
+        fleet_request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fleet_request_task
+        assert main.fleet_api._BACKGROUND_REFRESH_TASKS == {fleet_task}
+
+        allow_audit_route_finish.set()
+        audit_response = await asyncio.wait_for(audit_request_task, timeout=1)
+        assert audit_response.status_code == 200
+        assert audit_write_actions == ["lifespan_shutdown_test"]
+        assert "Audit log task rejected after shutdown admission closed: account_created" in caplog.text
+
+        assert not lifespan_task.done()
+        close_http_client.assert_not_awaited()
+        close_db.assert_not_awaited()
+
+        allow_audit_write.set()
+        await asyncio.wait_for(audit_task, timeout=1)
+        await asyncio.sleep(0)
+        assert not lifespan_task.done()
+        close_http_client.assert_not_awaited()
+        close_db.assert_not_awaited()
+
+        allow_fleet_refresh.set()
+        await asyncio.wait_for(fleet_task, timeout=1)
+        await asyncio.wait_for(lifespan_task, timeout=1)
 
     init_db.assert_awaited_once()
     init_background_db.assert_called_once()
@@ -425,6 +508,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     assert call_order[:2] == ["init_db", "init_background_db"]
     assert call_order.index("mark_ring_stale") < call_order.index("close_http_client")
     assert call_order.index("mark_ring_stale") < call_order.index("close_db")
+    assert shutdown_state.is_control_plane_task_admission_open() is False
     assert audit_service_module._AUDIT_LOG_TASKS == set()
     assert main.fleet_api._BACKGROUND_REFRESH_TASKS == set()
     assert usage_scheduler.stopped is True

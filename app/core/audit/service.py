@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 
-from app.core.shutdown import wait_for_tasks_to_drain
+from app.core.shutdown import is_control_plane_task_admission_open, wait_for_tasks_to_drain
 from app.core.utils.request_id import get_request_id
 from app.db.models import AuditLog
 from app.db.session import get_session
@@ -58,6 +58,9 @@ class AuditService:
         details: AuditDetails | None = None,
         request_id: str | None = None,
     ) -> None:
+        if not is_control_plane_task_admission_open():
+            logger.warning("Audit log task rejected after shutdown admission closed: %s", action)
+            return
         task = asyncio.create_task(
             _write_audit_log(action, actor_ip, details, request_id or get_request_id()),
             name=f"audit-log-{action}",

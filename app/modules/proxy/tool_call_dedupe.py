@@ -21,6 +21,32 @@ ToolCallDedupeKey = tuple[str, str, str | None, str | None, str | None, str]
 ReplayedSideEffectToolCallKey = tuple[str, str | None, str | None, str | None, str]
 
 
+def is_downstream_side_effect_tool_call(item: Mapping[str, JsonValue]) -> bool:
+    """Return whether a tool-call history item represents a local side effect.
+
+    Compact history retention and downstream replay deduplication must agree on
+    this classification.  In particular, code-mode's ``exec`` and
+    ``collaboration`` wrappers are side effects even though they do not use the
+    lower-level ``functions.exec_command`` spelling.
+    """
+
+    item_type = item.get("type")
+    if item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES:
+        return True
+    if item_type == "function_call":
+        argument_value = item.get("arguments")
+    elif item_type == "custom_tool_call":
+        argument_value = item.get("input")
+    else:
+        return False
+    if not isinstance(argument_value, str):
+        return False
+    item_name = item.get("name")
+    return isinstance(item_name, str) and tool_call_safety.is_downstream_side_effect_tool_call(
+        item_name, argument_value
+    )
+
+
 def event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
     if event is not None:
         return event.type
@@ -89,10 +115,7 @@ def mark_duplicate_tool_call_downstream_event(
     call_id = item.get("call_id")
     if call_id is not None and not isinstance(call_id, str):
         call_id = None
-    is_side_effect_tool_call = item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES or (
-        item_name in tool_call_safety.DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
-        and tool_call_safety.is_downstream_side_effect_tool_call(item_name, argument_value)
-    )
+    is_side_effect_tool_call = is_downstream_side_effect_tool_call(item)
     if not is_side_effect_tool_call:
         _clear_legacy_downstream_tool_call_keys(seen_tool_call_keys)
         return False

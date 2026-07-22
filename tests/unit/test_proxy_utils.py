@@ -33,6 +33,7 @@ from websockets.frames import Close
 import app.core.clients.proxy as proxy_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
+from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
@@ -1524,6 +1525,29 @@ def test_selected_model_capacity_stream_does_not_retry_accepted_response() -> No
             "invalid_request_error",
             "Selected model is at capacity. Please try a different model.",
             response_id="resp_model_capacity_accepted",
+        )
+        is False
+    )
+
+
+def test_upstream_unavailable_stream_does_not_retry_accepted_response() -> None:
+    assert (
+        proxy_service._should_retry_transient_stream_error(
+            "upstream_unavailable",
+            "Server disconnected",
+            response_id="resp_body_read_accepted",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("code", ["server_error", "stream_incomplete", "overloaded_error"])
+def test_generic_transient_stream_does_not_retry_accepted_response(code: str) -> None:
+    assert (
+        proxy_service._should_retry_transient_stream_error(
+            code,
+            "temporary upstream failure",
+            response_id="resp_generic_transient_accepted",
         )
         is False
     )
@@ -12108,6 +12132,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
         if stream_once_calls == 2:
+            assert _kwargs["allow_transient_retry"] is True
             settlement.record_success = False
             raise proxy_module.ProxyResponseError(
                 429,
@@ -12157,6 +12182,308 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
     assert ensure_fresh.await_count == 2
     assert ensure_fresh.await_args_list[1].kwargs["force"] is True
     release_account_lease.assert_awaited_once_with(stream_lease)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_model_capacity_retries_same_account(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_model_capacity")
+    stream_once_calls = 0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", fake_sleep)
+
+    async def fake_stream_once(*_args: object, **kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        if stream_once_calls == 2:
+            assert kwargs["allow_transient_retry"] is True
+            raise proxy_service._TransientStreamError(
+                "invalid_request_error",
+                cast(
+                    UpstreamError,
+                    {
+                        "message": "Selected model is at capacity. Please try a different model.",
+                        "code": "invalid_request_error",
+                    },
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_model_capacity_ok"}}\n\n'
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-model-capacity"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    completed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert completed["response"]["id"] == "resp_post_refresh_model_capacity_ok"
+    assert stream_once_calls == 3
+    assert sleeps
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_post_refresh_transient_a")
+    account_b = _make_account("acc_post_refresh_transient_b")
+    stream_account_ids: list[str] = []
+    excluded_snapshots: list[set[str]] = []
+    handle_stream_error = AsyncMock()
+    record_errors = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        excluded_snapshots.append(excluded)
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_account_ids.append(account.id)
+        if stream_account_ids == [account_a.id]:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        if stream_account_ids[:1] == [account_a.id] and all(
+            account_id == account_a.id for account_id in stream_account_ids[1:]
+        ):
+            raise proxy_service._TransientStreamError(
+                "server_error",
+                cast(
+                    UpstreamError,
+                    {
+                        "message": "Selected model is at capacity. Please try a different model.",
+                        "code": "server_error",
+                    },
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_transient_b_ok"}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-transient-failover"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    completed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert completed["response"]["id"] == "resp_post_refresh_transient_b_ok"
+    assert stream_account_ids == [account_a.id, account_a.id, account_a.id, account_a.id, account_b.id]
+    assert excluded_snapshots == [set(), {account_a.id}]
+    transient_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] == "server_error"]
+    assert len(transient_penalties) == 1
+    assert transient_penalties[0].args[0] is account_a
+    record_errors.assert_awaited_once_with(account_a, 2)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_transient_exhaustion_terminal_penalizes_once(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_transient_terminal")
+    stream_once_calls = 0
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise proxy_service._TransientStreamError(
+            "server_error",
+            cast(
+                UpstreamError,
+                {
+                    "message": "Selected model is at capacity. Please try a different model.",
+                    "code": "server_error",
+                },
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-transient-terminal"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"]["message"] == "Selected model is at capacity. Please try a different model."
+    assert stream_once_calls == 2
+    transient_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] == "server_error"]
+    assert len(transient_penalties) == 1
+    assert transient_penalties[0].args[0] is account
+    service._load_balancer.record_errors.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_transient_exhaustion_preserves_error_without_replacement(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_transient_no_replacement")
+    stream_once_calls = 0
+    selections = 0
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+
+    async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
+        nonlocal selections
+        selections += 1
+        if selections == 1:
+            return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts")
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise proxy_service._TransientStreamError(
+            "invalid_request_error",
+            cast(
+                UpstreamError,
+                {
+                    "message": "Selected model is at capacity. Please try a different model.",
+                    "code": "invalid_request_error",
+                },
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-transient-no-replacement"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"] == {
+        "message": "Selected model is at capacity. Please try a different model.",
+        "type": "server_error",
+        "code": "invalid_request_error",
+    }
+    assert stream_once_calls == 2
+    assert selections == 2
+    assert all(call.args[2] != "invalid_request_error" for call in handle_stream_error.await_args_list)
+    service._load_balancer.record_errors.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -13025,12 +13352,11 @@ async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_first_event_connection_reset_fails_over(monkeypatch):
+async def test_stream_responses_first_event_connection_reset_surfaces_without_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_a = _make_account("acc_reset_stream_a")
-    account_b = _make_account("acc_reset_stream_b")
     record_error = AsyncMock()
     record_success = AsyncMock()
     seen_excluded_account_ids: list[set[str]] = []
@@ -13041,14 +13367,12 @@ async def test_stream_responses_first_event_connection_reset_fails_over(monkeypa
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = kwargs.get("exclude_account_ids")
         seen_excluded_account_ids.append(set(cast(set[str], excluded_account_ids)))
-        if len(seen_excluded_account_ids) == 1:
-            return AccountSelection(account=account_a, error_message=None)
-        return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
-    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_a))
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         if account_id == account_a.chatgpt_account_id:
@@ -13066,12 +13390,13 @@ async def test_stream_responses_first_event_connection_reset_fails_over(monkeypa
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
-    assert event["response"]["id"] == "resp_reset_ok"
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_excluded_account_ids == [set()]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     record_error.assert_awaited_once_with(account_a)
-    record_success.assert_awaited_once_with(account_b)
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -13281,7 +13606,7 @@ async def test_stream_websocket_network_drop_rotates_generation_for_next_request
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_first_event_upstream_unavailable_fails_over(monkeypatch):
+async def test_stream_responses_visible_upstream_unavailable_with_response_id_does_not_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13328,17 +13653,18 @@ async def test_stream_responses_first_event_upstream_unavailable_fails_over(monk
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
-    assert event["response"]["id"] == "resp_reset_event_ok"
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
-    record_error.assert_awaited_once_with(account_a)
-    record_errors.assert_awaited_once_with(account_a, 2)
-    record_success.assert_awaited_once_with(account_b)
+    assert event["type"] == "response.failed"
+    assert event["response"]["id"] == "resp_reset_event"
+    assert event["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_excluded_account_ids == [set()]
+    assert request_logs.calls == []
+    record_error.assert_not_awaited()
+    record_errors.assert_not_awaited()
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_first_event_raw_eof_fails_over_before_downstream_visible(monkeypatch):
+async def test_stream_responses_first_event_raw_eof_with_response_id_surfaces_without_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -13355,9 +13681,7 @@ async def test_stream_responses_first_event_raw_eof_fails_over_before_downstream
     async def select_account(**kwargs: object) -> AccountSelection:
         excluded_account_ids = kwargs.get("exclude_account_ids")
         seen_excluded_account_ids.append(set(cast(set[str], excluded_account_ids)))
-        if len(seen_excluded_account_ids) == 1:
-            return AccountSelection(account=account_a, error_message=None)
-        return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
@@ -13387,17 +13711,18 @@ async def test_stream_responses_first_event_raw_eof_fails_over_before_downstream
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
-    assert event["response"]["id"] == "resp_raw_eof_ok"
-    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert event["type"] == "response.failed"
+    assert event["response"]["id"] == "resp_raw_eof_event"
+    assert event["response"]["error"]["code"] == "stream_incomplete"
+    assert seen_excluded_account_ids == [set()]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     assert request_logs.calls[0]["failure_detail"] == "upstream_eof_before_terminal_event"
-    assert request_logs.calls[-1]["status"] == "success"
-    assert request_logs.calls[-1]["account_id"] == account_b.id
+    assert request_logs.calls[-1]["status"] == "error"
+    assert request_logs.calls[-1]["account_id"] == account_a.id
     record_error.assert_awaited_once_with(account_a)
-    record_errors.assert_awaited_once_with(account_a, 2)
-    record_success.assert_awaited_once_with(account_b)
+    record_errors.assert_not_awaited()
+    record_success.assert_not_awaited()
 
 
 @pytest.mark.asyncio

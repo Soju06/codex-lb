@@ -598,8 +598,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                if allow_retry:
-                    raise _RetryableStreamError(error_code, settlement.error, exclude_account=True)
                 yield format_sse_event(
                     response_failed_event(
                         error_code,
@@ -714,12 +712,18 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
+                    transient_response_id = tool_call_response_id_from_payload(first_payload)
+                    if event_type == "error" and transient_response_id == request_id:
+                        # Normalized raw upstream `error` events use the
+                        # proxy request id as the synthetic response id. That
+                        # is not proof that upstream accepted the request.
+                        transient_response_id = None
                     if allow_transient_retry and _facade()._should_retry_transient_stream_error(
-                        code,
-                        error_message,
-                        response_id=response_id if event.type == "response.failed" else None,
+                        code, error_message, response_id=transient_response_id
                     ):
-                        raise _TransientStreamError(code, upstream_error)
+                        raise _TransientStreamError(
+                            code, upstream_error, preserve_on_selection_exhausted=transient_response_id is None
+                        )
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
                     upstream_error,

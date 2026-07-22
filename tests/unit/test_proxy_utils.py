@@ -12439,7 +12439,10 @@ async def test_stream_with_retry_post_refresh_transport_failure_retries_same_acc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("replacement_outcome", ["success", "model_rejection", "surface"])
+@pytest.mark.parametrize(
+    "replacement_outcome",
+    ["success", "model_rejection", "surface", "second_transient_exhaustion"],
+)
 async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     monkeypatch,
     replacement_outcome: str,
@@ -12449,6 +12452,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     original_handle_stream_error = service._handle_stream_error
     account_a = _make_account("acc_post_refresh_transient_a")
     account_b = _make_account("acc_post_refresh_transient_b")
+    account_c = _make_account("acc_post_refresh_transient_c")
     stream_account_ids: list[str] = []
     excluded_snapshots: list[set[str]] = []
     handle_stream_error = AsyncMock()
@@ -12472,7 +12476,8 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     ) -> bool:
         assert settled_api_key is api_key
         assert settled_reservation is reservation
-        assert stream_account_ids[-1] == account_b.id
+        expected_settlement_account = account_c if replacement_outcome == "second_transient_exhaustion" else account_b
+        assert stream_account_ids[-1] == expected_settlement_account.id
         settlement_wait_flags.append(bool(_kwargs.get("wait_for_settlement")))
         settlement_order.append("settle")
         return True
@@ -12488,7 +12493,11 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(
+        proxy_service,
+        "_STREAM_MAX_ACCOUNT_ATTEMPTS",
+        3 if replacement_outcome == "second_transient_exhaustion" else 2,
+    )
     monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
     monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
@@ -12502,7 +12511,12 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
         excluded_snapshots.append(excluded)
-        account = account_b if account_a.id in excluded else account_a
+        if account_b.id in excluded:
+            account = account_c
+        elif account_a.id in excluded:
+            account = account_b
+        else:
+            account = account_a
         return AccountSelection(account=account, error_message=None)
 
     async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
@@ -12536,6 +12550,17 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
             raise proxy_module.ProxyResponseError(
                 401,
                 proxy_module.openai_error("invalid_api_key", "replacement token expired"),
+            )
+        if account.id == account_b.id and replacement_outcome == "second_transient_exhaustion":
+            raise proxy_service._TransientStreamError(
+                "invalid_request_error",
+                cast(
+                    UpstreamError,
+                    {
+                        "message": "Selected model is at capacity. Please try a different model.",
+                        "code": "invalid_request_error",
+                    },
+                ),
             )
         if replacement_outcome == "model_rejection":
             raise proxy_module.ProxyResponseError(
@@ -12581,42 +12606,68 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     ]
 
     terminal = json.loads(chunks[-1].split("data: ", 1)[1])
-    if replacement_outcome == "success":
+    if replacement_outcome in ("success", "second_transient_exhaustion"):
         assert terminal["response"]["id"] == "resp_post_refresh_transient_b_ok"
     elif replacement_outcome == "model_rejection":
         assert terminal["response"]["error"]["message"].startswith("The 'gpt-5.6-sol' model is not supported")
     else:
         assert terminal["response"]["error"]["code"] == "replacement_failed"
     expected_account_ids = [account_a.id, account_a.id, account_a.id, account_a.id, account_b.id]
-    if replacement_outcome != "success":
+    if replacement_outcome == "second_transient_exhaustion":
+        expected_account_ids.extend([account_b.id, account_b.id, account_b.id, account_c.id])
+    elif replacement_outcome != "success":
         expected_account_ids.append(account_b.id)
     assert stream_account_ids == expected_account_ids
-    assert excluded_snapshots == [set(), {account_a.id}]
+    expected_exclusions = [set(), {account_a.id}]
+    if replacement_outcome == "second_transient_exhaustion":
+        expected_exclusions.append({account_a.id, account_b.id})
+    assert excluded_snapshots == expected_exclusions
     transient_penalties = [
         call for call in handle_stream_error.await_args_list if call.args[2] == "invalid_request_error"
     ]
-    assert len(transient_penalties) == 1
-    assert transient_penalties[0].args[0] is account_a
-    ordered_effects = [entry for entry in settlement_order if entry != "health:invalid_api_key"]
-    assert ordered_effects.index("settle") < ordered_effects.index("health:invalid_request_error")
+    expected_penalty_accounts = [account_a]
+    if replacement_outcome == "second_transient_exhaustion":
+        expected_penalty_accounts.append(account_b)
+    assert [call.args[0] for call in transient_penalties] == expected_penalty_accounts
+    ordered_effects = [entry for entry in settlement_order if entry in ("settle", "health:invalid_request_error")]
+    assert ordered_effects == ["settle"] + ["health:invalid_request_error"] * len(expected_penalty_accounts)
     assert settlement_wait_flags == [True]
     assert stream_reservations == [reservation] * len(expected_account_ids)
     release_unsettled.assert_not_awaited()
-    record_errors.assert_any_await(account_a, 2)
+    expected_record_error_calls = [mock_call(account_a, 2)]
+    if replacement_outcome == "second_transient_exhaustion":
+        expected_record_error_calls.append(mock_call(account_b, 2))
+    extra_retry_calls = [call for call in record_errors.await_args_list if call.args[1] == 2]
+    assert extra_retry_calls == expected_record_error_calls
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_penalizes_once(monkeypatch):
+async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_counts_every_retry(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_refresh_transient_terminal")
     stream_once_calls = 0
-    handle_stream_error = AsyncMock()
+    settlement_order: list[str] = []
+
+    async def settle_usage(*_args: object, **kwargs: object) -> bool:
+        assert kwargs["wait_for_settlement"] is True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(*args: object, **_kwargs: object) -> object:
+        if args[2] == "upstream_unavailable":
+            assert args[0] is account
+            settlement_order.append("health")
+        return {"failure_class": "non_retryable"}
+
+    async def record_errors(failed_account: Account, count: int) -> None:
+        assert failed_account is account
+        settlement_order.append(f"extra:{count}")
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
-    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
     monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(
@@ -12626,7 +12677,8 @@ async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_penali
     )
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
-    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
 
     async def fake_stream_once(*_args: object, **_kwargs: object):
         nonlocal stream_once_calls
@@ -12667,13 +12719,8 @@ async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_penali
     failed = json.loads(chunks[-1].split("data: ", 1)[1])
     assert failed["type"] == "response.failed"
     assert failed["response"]["error"]["message"] == "proxy cannot connect"
-    assert stream_once_calls == 2
-    transient_penalties = [
-        call for call in handle_stream_error.await_args_list if call.args[2] == "upstream_unavailable"
-    ]
-    assert len(transient_penalties) == 1
-    assert transient_penalties[0].args[0] is account
-    service._load_balancer.record_errors.assert_not_awaited()
+    assert stream_once_calls == 4
+    assert settlement_order == ["settle", "health", "extra:2"]
 
 
 @pytest.mark.asyncio

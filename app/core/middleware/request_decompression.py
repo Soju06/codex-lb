@@ -9,6 +9,7 @@ from typing import Protocol
 import zstandard as zstd
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
+from starlette._utils import get_route_path
 from starlette.requests import ClientDisconnect
 
 from app.core.middleware.request_body_limit import (
@@ -132,7 +133,7 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         encodings = [enc.strip().lower() for enc in content_encoding.split(",") if enc.strip()]
         if not encodings:
             return await call_next(request)
-        max_size = request_body_limit_for_path(request.url.path)
+        max_size = request_body_limit_for_path(get_route_path(request.scope))
         try:
             body = await request.body()
         except ClientDisconnect:

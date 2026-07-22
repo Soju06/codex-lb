@@ -372,6 +372,28 @@ async def test_request_decompression_allows_larger_responses_payload(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_request_decompression_allows_larger_responses_payload_under_root_path(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
+    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+
+    payload = {"input": "x" * 512}
+    body = json.dumps(payload).encode("utf-8")
+    compressed = zstd.ZstdCompressor().compress(body)
+    assert len(compressed) < 128 < len(body)
+
+    transport = ASGITransport(app=_build_echo_app(), root_path="/api")
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/backend-api/codex/responses",
+            content=compressed,
+            headers={"Content-Encoding": "zstd", "Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == payload
+
+
+@pytest.mark.asyncio
 async def test_request_decompression_allows_larger_trailing_slash_responses_payload(monkeypatch):
     monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
     monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")

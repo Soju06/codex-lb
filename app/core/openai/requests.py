@@ -1058,6 +1058,26 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     )
     selected_indices.update(required_indices)
     selected_indices.difference_update(unusable_side_effect_indices)
+    latest_index = len(input_value) - 1
+    latest_mapping = _json_mapping_or_none(input_value[latest_index]) if input_value else None
+    latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if (
+        latest_mapping is not None
+        and _compact_has_continuity_anchor(payload)
+        and isinstance(latest_type, str)
+        and latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        and _compact_matching_tool_call_index(input_value, latest_index) is None
+    ):
+        latest_call_id = latest_mapping.get("call_id")
+        matching_call_type = _COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(latest_type)
+        selected_indices.difference_update(
+            index
+            for index, item in enumerate(input_value[:latest_index])
+            if is_json_mapping(item)
+            and item.get("call_id") == latest_call_id
+            and item.get("type") in {latest_type, matching_call_type}
+            and index not in required_indices
+        )
     selected_indices = _compact_reconciled_tool_call_indices(
         input_value,
         selected_indices,
@@ -1423,13 +1443,16 @@ def _compact_reconciled_tool_call_indices(
                 reconciled.remove(index)
                 selected_tokens -= token_counts[index]
 
-    def matching_call_index(call_indices: list[int], output_index: int) -> int | None:
-        if not call_indices:
-            return None
-        preceding_call_indices = [call_index for call_index in call_indices if call_index < output_index]
-        if preceding_call_indices:
-            return preceding_call_indices[-1]
-        return call_indices[0]
+    def matching_call_index(call_indices: list[int], output_indices: list[int], output_index: int) -> int | None:
+        unmatched_calls: list[int] = []
+        call_index_set = set(call_indices)
+        output_index_set = set(output_indices)
+        for index in range(output_index):
+            if index in call_index_set:
+                unmatched_calls.append(index)
+            elif index in output_index_set and unmatched_calls:
+                unmatched_calls.pop()
+        return unmatched_calls[-1] if unmatched_calls else None
 
     def matching_output_indices(call_indices: list[int], call_index: int, output_indices: list[int]) -> list[int]:
         next_call_indices = [next_call_index for next_call_index in call_indices if next_call_index > call_index]
@@ -1438,7 +1461,7 @@ def _compact_reconciled_tool_call_indices(
             output_index
             for output_index in output_indices
             if output_index > call_index and (next_call_index is None or output_index < next_call_index)
-        ]
+        ][:1]
 
     for pair_key, output_indices in output_indices_by_key.items():
         selected_outputs = [index for index in output_indices if index in reconciled]
@@ -1446,7 +1469,7 @@ def _compact_reconciled_tool_call_indices(
             continue
         call_indices = call_indices_by_key.get(pair_key, [])
         for output_index in selected_outputs:
-            call_index = matching_call_index(call_indices, output_index)
+            call_index = matching_call_index(call_indices, output_indices, output_index)
             if call_index is None:
                 remove_indices([output_index])
             elif not allow_pair_additions and call_index not in reconciled:

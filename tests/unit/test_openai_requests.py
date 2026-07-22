@@ -1821,6 +1821,33 @@ def test_compact_anchored_output_does_not_reattach_consumed_reused_call_pair():
     assert historical_output not in dumped_input
 
 
+def test_compact_anchored_output_does_not_reattach_small_consumed_pair():
+    historical_call = _compact_call_item("function_call", "call-reused-small")
+    historical_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused-small",
+        "output": "historical result",
+    }
+    terminal_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused-small",
+        "output": "current result",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [historical_call, historical_output, {"role": "assistant", "content": "x" * 500_000}, terminal_output],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert terminal_output in dumped_input
+    assert historical_call not in dumped_input
+    assert historical_output not in dumped_input
+
+
 def test_compact_trimming_rejects_oversized_latest_apply_patch_pair():
     call = {
         "type": "apply_patch_call",

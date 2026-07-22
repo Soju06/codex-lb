@@ -733,17 +733,13 @@ def test_rewrite_parallel_tool_call_payload_keeps_duplicate_read_only_connector_
     assert rewritten_payload is payload
 
 
-@pytest.mark.parametrize(
-    "recipient_name",
-    ["functions.exec_command", "functions.exec", "functions.collaboration"],
-)
-def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_replay(recipient_name: str):
+def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     arguments = json.dumps(
         {
             "tool_uses": [
                 {
-                    "recipient_name": recipient_name,
+                    "recipient_name": "functions.exec_command",
                     "parameters": {"cmd": "gh pr create --repo Komzpa/evince"},
                 }
             ]
@@ -787,6 +783,35 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_r
         )
         is True
     )
+
+
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_mark_duplicate_parallel_code_mode_calls_keeps_distinct_outer_call_ids(recipient_name: str):
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    arguments = json.dumps(
+        {"tool_uses": [{"recipient_name": recipient_name, "parameters": {"cmd": "same"}}]},
+        separators=(",", ":"),
+    )
+
+    for call_id in ("call_code_first", "call_code_second"):
+        payload: dict[str, JsonValue] = {
+            "type": "response.output_item.done",
+            "response_id": "resp_parallel_code",
+            "item": {
+                "type": "function_call",
+                "name": "multi_tool_use.parallel",
+                "arguments": arguments,
+                "call_id": call_id,
+            },
+        }
+        assert (
+            tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+                payload,
+                seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+                response_id="resp_parallel_code",
+            )
+            is False
+        )
 
 
 def test_mark_duplicate_tool_call_downstream_event_trims_overlapping_parallel_replay():

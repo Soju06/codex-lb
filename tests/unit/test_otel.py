@@ -17,13 +17,17 @@ import pytest
 
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
+from app.core.audit import service as audit_service_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
 from app.dependencies import get_proxy_service_for_app
+from app.modules.api_keys.service import ApiKeyData
+from app.modules.fleet.schemas import FleetRefreshResponse
 from app.modules.usage import updater as usage_updater_module
 
 pytestmark = pytest.mark.unit
@@ -245,7 +249,9 @@ class _DummyScheduler:
 
 
 @pytest.mark.asyncio
-async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.MonkeyPatch):
+async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import app.core.startup as startup_module
     import app.main as main
 
@@ -253,7 +259,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=5,
     )
     settings_cache = SimpleNamespace(
         invalidate=AsyncMock(),
@@ -265,10 +271,18 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
     call_order: list[str] = []
+    lifespan_entered = asyncio.Event()
+    begin_shutdown = asyncio.Event()
+    ring_marked_stale = asyncio.Event()
+    audit_write_started = asyncio.Event()
+    allow_audit_write = asyncio.Event()
+    fleet_refresh_started = asyncio.Event()
+    allow_fleet_refresh = asyncio.Event()
 
     async def _mark_stale(*args, **kwargs) -> None:
         _ = (args, kwargs)
         call_order.append("mark_ring_stale")
+        ring_marked_stale.set()
 
     ring_service = SimpleNamespace(
         register=AsyncMock(),
@@ -284,15 +298,25 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     def _init_background_db() -> None:
         call_order.append("init_background_db")
 
-    async def _drain_audit_tasks(timeout_seconds: float) -> bool:
-        assert timeout_seconds == settings.shutdown_drain_timeout_seconds
-        call_order.append("drain_audit_tasks")
-        return True
+    async def _blocked_audit_write(
+        action: str,
+        actor_ip: str | None,
+        details: audit_service_module.AuditDetails | None,
+        request_id: str | None,
+    ) -> None:
+        _ = (action, actor_ip, details, request_id)
+        audit_write_started.set()
+        await allow_audit_write.wait()
 
-    async def _drain_fleet_tasks(timeout_seconds: float) -> bool:
-        assert timeout_seconds == settings.shutdown_drain_timeout_seconds
-        call_order.append("drain_fleet_tasks")
-        return True
+    async def _blocked_fleet_refresh(_: list[str] | None) -> FleetRefreshResponse:
+        fleet_refresh_started.set()
+        await allow_fleet_refresh.wait()
+        return FleetRefreshResponse(
+            usage_written=False,
+            account_count=0,
+            attempted_count=0,
+            generated_at=utcnow(),
+        )
 
     async def _close_http_client() -> None:
         call_order.append("close_http_client")
@@ -319,21 +343,77 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
-    monkeypatch.setattr(main, "drain_audit_log_tasks", _drain_audit_tasks)
-    monkeypatch.setattr(main.fleet_api, "drain_background_refresh_tasks", _drain_fleet_tasks)
+    monkeypatch.setattr(audit_service_module, "_write_audit_log", _blocked_audit_write)
+    monkeypatch.setattr(main.fleet_api, "_refresh_fleet_usage_with_owned_session", _blocked_fleet_refresh)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
 
-    async with main.lifespan(main.app):
-        await asyncio.sleep(0)
-        assert startup_module._startup_complete is True
-        assert usage_scheduler.started is True
-        assert api_key_limit_reset_scheduler.started is True
-        assert model_scheduler.started is True
-        assert sticky_scheduler.started is True
+    async def _run_lifespan() -> None:
+        async with main.lifespan(main.app):
+            await asyncio.sleep(0)
+            lifespan_entered.set()
+            await begin_shutdown.wait()
+
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+    assert main.fleet_api._BACKGROUND_REFRESH_TASKS == set()
+    lifespan_task = asyncio.create_task(_run_lifespan())
+
+    await asyncio.wait_for(lifespan_entered.wait(), timeout=1)
+    assert startup_module._startup_complete is True
+    assert usage_scheduler.started is True
+    assert api_key_limit_reset_scheduler.started is True
+    assert model_scheduler.started is True
+    assert sticky_scheduler.started is True
+
+    audit_service_module.AuditService.log_async("lifespan_shutdown_test")
+    await asyncio.wait_for(audit_write_started.wait(), timeout=1)
+    audit_task = next(iter(audit_service_module._AUDIT_LOG_TASKS))
+
+    fleet_request_task = asyncio.create_task(
+        main.fleet_api.refresh_fleet_usage(
+            api_key=ApiKeyData(
+                id="lifespan-fleet-key",
+                name="lifespan fleet key",
+                key_prefix="lifespan-fleet",
+                allowed_models=None,
+                enforced_model=None,
+                enforced_reasoning_effort=None,
+                enforced_service_tier=None,
+                expires_at=None,
+                is_active=True,
+                created_at=utcnow(),
+                last_used_at=None,
+            )
+        )
+    )
+    await asyncio.wait_for(fleet_refresh_started.wait(), timeout=1)
+    fleet_request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await fleet_request_task
+    await asyncio.sleep(0)
+    fleet_task = next(iter(main.fleet_api._BACKGROUND_REFRESH_TASKS))
+
+    begin_shutdown.set()
+    await asyncio.wait_for(ring_marked_stale.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not lifespan_task.done()
+    close_http_client.assert_not_awaited()
+    close_db.assert_not_awaited()
+
+    allow_audit_write.set()
+    await asyncio.wait_for(audit_task, timeout=1)
+    await asyncio.sleep(0)
+    assert not lifespan_task.done()
+    close_http_client.assert_not_awaited()
+    close_db.assert_not_awaited()
+
+    allow_fleet_refresh.set()
+    await asyncio.wait_for(fleet_task, timeout=1)
+    await asyncio.wait_for(lifespan_task, timeout=1)
 
     init_db.assert_awaited_once()
     init_background_db.assert_called_once()
@@ -343,12 +423,10 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     settings_cache.invalidate.assert_awaited_once()
     rate_limit_cache.invalidate.assert_awaited_once()
     assert call_order[:2] == ["init_db", "init_background_db"]
-    assert call_order.index("mark_ring_stale") < call_order.index("drain_audit_tasks")
-    assert call_order.index("mark_ring_stale") < call_order.index("drain_fleet_tasks")
-    assert call_order.index("drain_audit_tasks") < call_order.index("close_http_client")
-    assert call_order.index("drain_fleet_tasks") < call_order.index("close_http_client")
-    assert call_order.index("drain_audit_tasks") < call_order.index("close_db")
-    assert call_order.index("drain_fleet_tasks") < call_order.index("close_db")
+    assert call_order.index("mark_ring_stale") < call_order.index("close_http_client")
+    assert call_order.index("mark_ring_stale") < call_order.index("close_db")
+    assert audit_service_module._AUDIT_LOG_TASKS == set()
+    assert main.fleet_api._BACKGROUND_REFRESH_TASKS == set()
     assert usage_scheduler.stopped is True
     assert api_key_limit_reset_scheduler.stopped is True
     assert model_scheduler.stopped is True

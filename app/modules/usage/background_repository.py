@@ -5,7 +5,7 @@ from datetime import datetime
 
 from app.db.models import UsageHistory
 from app.db.session import detach_session_objects, get_background_session
-from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository, UsageWindowWrite
 
 
 class BackgroundUsageRepository:
@@ -50,6 +50,22 @@ class BackgroundUsageRepository:
             )
             detach_session_objects(session)
             return entry
+
+    async def add_account_snapshot(
+        self,
+        account_id: str,
+        windows: Collection[UsageWindowWrite],
+        *,
+        recorded_at: datetime | None = None,
+    ) -> list[UsageHistory]:
+        async with get_background_session() as session:
+            entries = await UsageRepository(session).add_account_snapshot(
+                account_id,
+                windows,
+                recorded_at=recorded_at,
+            )
+            detach_session_objects(session)
+            return entries
 
 
 class BackgroundAdditionalUsageRepository:

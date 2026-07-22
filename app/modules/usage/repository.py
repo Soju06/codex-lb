@@ -40,6 +40,17 @@ class UsageHistorySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageWindowWrite:
+    window: str
+    used_percent: float
+    reset_at: int | None = None
+    window_minutes: int | None = None
+    credits_has: bool | None = None
+    credits_unlimited: bool | None = None
+    credits_balance: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _BulkHistoryCacheMetadata:
     row_count: int
     max_id: int
@@ -610,6 +621,42 @@ class UsageRepository:
             await self._session.commit()
             await self._session.refresh(entry)
         return entry
+
+    async def add_account_snapshot(
+        self,
+        account_id: str,
+        windows: Collection[UsageWindowWrite],
+        *,
+        recorded_at: datetime | None = None,
+    ) -> list[UsageHistory]:
+        """Persist one account's standard usage windows atomically."""
+        if not windows:
+            return []
+        captured_at = recorded_at or utcnow()
+        entries = [
+            UsageHistory(
+                account_id=account_id,
+                used_percent=window.used_percent,
+                input_tokens=None,
+                output_tokens=None,
+                window=window.window,
+                reset_at=window.reset_at,
+                window_minutes=window.window_minutes,
+                credits_has=window.credits_has,
+                credits_unlimited=window.credits_unlimited,
+                credits_balance=window.credits_balance,
+                recorded_at=captured_at,
+            )
+            for window in windows
+        ]
+        self._session.add_all(entries)
+        try:
+            async with sqlite_writer_section():
+                await self._session.commit()
+        except BaseException:
+            await self._session.rollback()
+            raise
+        return entries
 
     async def aggregate_since(
         self,

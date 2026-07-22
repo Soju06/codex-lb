@@ -1400,6 +1400,7 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
+        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         async with session.pending_lock:
             retryable_requests = [
                 request_state
@@ -1458,7 +1459,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    request_state.excluded_account_ids.add(session.account.id)
+                    if not hard_owner_bound:
+                        request_state.excluded_account_ids.add(session.account.id)
             else:
                 require_preferred_reconnect = account_neutral_recovery
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
@@ -1466,7 +1468,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     return False
                 if account_neutral_recovery:
                     request_state.preferred_account_id = session.account.id
-                elif not request_state.file_required_preferred_account:
+                elif not request_state.file_required_preferred_account and not hard_owner_bound:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
@@ -1485,7 +1487,13 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
-            if require_preferred_reconnect:
+            if hard_owner_bound:
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    require_same_account=True,
+                )
+            elif require_preferred_reconnect:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
@@ -1719,7 +1727,11 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             reconnected = True
             if session.account.id != owner_account_id:
-                if previous_session_affinity.selection_key is not None and previous_session_affinity.kind is not None:
+                if (
+                    previous_session_affinity.codex_session_source == "session_header"
+                    and previous_session_affinity.selection_key is not None
+                    and previous_session_affinity.kind is not None
+                ):
                     async with self._repo_factory() as repos:
                         await repos.sticky_sessions.upsert(
                             previous_session_affinity.selection_key,
@@ -1752,7 +1764,15 @@ class _HTTPBridgeRequestSubmitMixin:
                 if request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
-            if not reconnected:
+            if reconnected:
+                # Ownership and the replacement socket were already swapped,
+                # but response.create never reached that socket.  Retire the
+                # replacement instead of leaving a live bridge with aliases
+                # rebound to a turn that was never submitted.
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                await self._retire_http_bridge_after_drain_if_ready(session)
+            else:
                 request_state.replay_count = previous_replay_count
                 request_state.response_id = previous_response_id
                 request_state.response_event_count = previous_response_event_count

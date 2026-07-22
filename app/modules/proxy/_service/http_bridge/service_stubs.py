@@ -306,7 +306,7 @@ def _websocket_safe_headers_with_turn_state(headers: Mapping[str, str], turn_sta
     filtered = {
         key: value
         for key, value in filter_inbound_websocket_headers(dict(headers)).items()
-        if key.lower() not in _response_create_compatibility_metadata_headers()
+        if key.lower() not in _response_create_compatibility_metadata_headers() and key.lower() != "x-codex-turn-state"
     }
     return cast(dict[str, str], _headers_with_turn_state(filtered, turn_state))
 

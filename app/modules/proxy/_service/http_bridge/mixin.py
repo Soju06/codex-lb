@@ -1522,6 +1522,7 @@ class _HTTPBridgeMixin(
                         "request_deadline",
                         "exclude_account_ids",
                         "preferred_account_is_continuity_owner",
+                        "require_security_work_authorized",
                     ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)

@@ -12507,7 +12507,8 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     if replacement_outcome == "second_transient_exhaustion":
         expected_penalties.append((account_b, "invalid_request_error"))
     assert [(call.args[0], call.args[2]) for call in transient_penalties] == expected_penalties
-    ordered_effects = [entry for entry in settlement_order if entry == "settle" or entry.startswith("health:")]
+    expected_health_effects = {f"health:{error_code}" for _account, error_code in expected_penalties}
+    ordered_effects = [entry for entry in settlement_order if entry == "settle" or entry in expected_health_effects]
     assert ordered_effects == ["settle"] + [f"health:{error_code}" for _account, error_code in expected_penalties]
     assert settlement_wait_flags == [True]
     assert stream_reservations == [reservation] * len(expected_account_ids)

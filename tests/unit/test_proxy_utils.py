@@ -12316,7 +12316,7 @@ async def test_stream_with_retry_post_refresh_http_failure_retries_same_account(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "replacement_outcome",
-    ["success", "model_rejection", "surface", "second_transient_exhaustion"],
+    ["success", "model_rejection", "surface", "visible_surface", "second_transient_exhaustion"],
 )
 async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     monkeypatch,
@@ -12437,6 +12437,16 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
                     },
                 ),
             )
+        if account.id == account_b.id and replacement_outcome == "visible_surface":
+            yield 'data: {"type":"response.created","response":{"id":"resp_replacement_visible"}}\n\n'
+            raise proxy_module.ProxyResponseError(
+                500,
+                proxy_module.openai_error(
+                    "replacement_failed",
+                    "Visible replacement upstream failed",
+                    error_type="server_error",
+                ),
+            )
         if replacement_outcome == "model_rejection":
             raise proxy_module.ProxyResponseError(
                 400,
@@ -12497,19 +12507,16 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     if replacement_outcome == "second_transient_exhaustion":
         expected_exclusions.append({account_a.id, account_b.id})
     assert excluded_snapshots == expected_exclusions
-    transient_penalties = [
-        call
-        for call in handle_stream_error.await_args_list
-        if (call.args[0] is account_a or call.args[0] is account_b)
-        and call.args[2] in {"server_error", "invalid_request_error"}
-    ]
+    terminal_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] != "invalid_api_key"]
     expected_penalties = [(account_a, "server_error")]
     if replacement_outcome == "second_transient_exhaustion":
         expected_penalties.append((account_b, "invalid_request_error"))
-    assert [(call.args[0], call.args[2]) for call in transient_penalties] == expected_penalties
-    expected_health_effects = {f"health:{error_code}" for _account, error_code in expected_penalties}
-    ordered_effects = [entry for entry in settlement_order if entry == "settle" or entry in expected_health_effects]
-    assert ordered_effects == ["settle"] + [f"health:{error_code}" for _account, error_code in expected_penalties]
+    elif replacement_outcome in ("surface", "visible_surface"):
+        expected_penalties.append((account_b, "replacement_failed"))
+    assert [(call.args[0], call.args[2]) for call in terminal_penalties] == expected_penalties
+    expected_health_codes = [error_code for _account, error_code in expected_penalties]
+    ordered_terminal_effects = [entry for entry in settlement_order if entry != "health:invalid_api_key"]
+    assert ordered_terminal_effects == ["settle"] + [f"health:{code}" for code in expected_health_codes]
     assert settlement_wait_flags == [True]
     assert stream_reservations == [reservation] * len(expected_account_ids)
     release_unsettled.assert_not_awaited()
@@ -12603,10 +12610,19 @@ async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_counts
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("propagate_http_errors", [False, True])
+@pytest.mark.parametrize(
+    ("propagate_http_errors", "terminal_outcome"),
+    [
+        (False, "no_accounts"),
+        (True, "no_accounts"),
+        (False, "budget_before_selection"),
+        (False, "budget_during_selection"),
+    ],
+)
 async def test_stream_with_retry_post_refresh_transient_exhaustion_penalizes_without_replacement(
     monkeypatch,
     propagate_http_errors: bool,
+    terminal_outcome: str,
 ):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -12637,12 +12653,22 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_penalizes_wit
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "_remaining_budget_seconds",
+        lambda _deadline: 0.0 if terminal_outcome == "budget_before_selection" and stream_once_calls >= 2 else 10.0,
+    )
 
     async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
         nonlocal selections
         selections += 1
         if selections == 1:
             return AccountSelection(account=account, error_message=None)
+        if terminal_outcome == "budget_during_selection":
+            raise proxy_module.ProxyResponseError(
+                504,
+                proxy_module.openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+            )
         return AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts")
 
     async def fake_stream_once(*_args: object, **_kwargs: object):
@@ -12705,14 +12731,17 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_penalizes_wit
 
         failed = json.loads(chunks[-1].split("data: ", 1)[1])
         assert failed["type"] == "response.failed"
-        assert failed["response"]["error"] == {
-            "message": "Selected model is at capacity. Please try a different model.",
-            "type": "server_error",
-            "code": "invalid_request_error",
-        }
+        if terminal_outcome.startswith("budget_"):
+            assert failed["response"]["error"]["code"] == "upstream_request_timeout"
+        else:
+            assert failed["response"]["error"] == {
+                "message": "Selected model is at capacity. Please try a different model.",
+                "type": "server_error",
+                "code": "invalid_request_error",
+            }
 
     assert stream_once_calls == 2
-    assert selections == 2
+    assert selections == (1 if terminal_outcome == "budget_before_selection" else 2)
     assert settlement_order == ["settle", "health"]
     service._load_balancer.record_errors.assert_not_awaited()
 

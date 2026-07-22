@@ -324,6 +324,10 @@ class _StreamingRetryMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        security_lineage_ids = tuple(
+            dict.fromkeys(value for value in (affinity.selection_key, affinity.legacy_selection_key) if value)
+        )
+        request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)
         if turn_state is not None:
@@ -377,6 +381,7 @@ class _StreamingRetryMixin:
         deferred_account_error_backoffs: dict[str, Account] = {}
         post_refresh_transient_replacement_selected = False
         require_security_work_authorized = False
+        security_lineage_persisted: bool | None = None
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
@@ -478,6 +483,16 @@ class _StreamingRetryMixin:
                 settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
                 return settled
             return True
+
+        async def _persist_security_work_lineage_once() -> bool:
+            nonlocal security_lineage_persisted
+            if security_lineage_persisted is not None:
+                return security_lineage_persisted
+            security_lineage_persisted = await proxy._persist_security_work_lineage_markers(
+                security_lineage_ids,
+                api_key_id=api_key.id if api_key is not None else None,
+            )
+            return security_lineage_persisted
 
         async def _wait_for_process_network_recovery(
             account: Account,
@@ -1902,8 +1917,11 @@ class _StreamingRetryMixin:
                                     # already excluded by the helper.
                                     break
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
+                                    security_requirement_persisted = await _persist_security_work_lineage_once()
                                     if (
-                                        account.security_work_authorized
+                                        not security_requirement_persisted
+                                        or account.security_work_authorized
+                                        or request_contains_input_file_ids
                                         or account.id == file_preferred_account_id
                                         or require_preferred_account
                                         or attempt >= max_attempts - 1
@@ -2165,8 +2183,11 @@ class _StreamingRetryMixin:
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     if _facade()._is_security_work_authorization_required_error(exc.code, exc.error.get("message")):
+                        security_requirement_persisted = await _persist_security_work_lineage_once()
                         if (
-                            account.security_work_authorized
+                            not security_requirement_persisted
+                            or account.security_work_authorized
+                            or request_contains_input_file_ids
                             or account.id == file_preferred_account_id
                             or require_preferred_account
                             or attempt >= max_attempts - 1
@@ -2718,8 +2739,11 @@ class _StreamingRetryMixin:
                     error_type = error.type if error else None
                     error_param = error.param if error else None
                     if _facade()._is_security_work_authorization_required_error(error_code, error_message):
+                        security_requirement_persisted = await _persist_security_work_lineage_once()
                         if (
-                            not account.security_work_authorized
+                            security_requirement_persisted
+                            and not account.security_work_authorized
+                            and not request_contains_input_file_ids
                             and account.id != file_preferred_account_id
                             and not require_preferred_account
                             and attempt < max_attempts - 1

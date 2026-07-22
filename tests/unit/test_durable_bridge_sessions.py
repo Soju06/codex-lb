@@ -32,6 +32,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
 )
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 pytestmark = pytest.mark.unit
 

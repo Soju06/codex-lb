@@ -441,6 +441,13 @@ class _StreamingRetryMixin:
                 request_id,
             )
 
+        async def _drain_pending_post_refresh_penalty_on_terminal(
+            current_settlement: _StreamSettlement,
+        ) -> None:
+            nonlocal settled
+            if post_refresh_transient_replacement_selected and pending_post_refresh_transient_penalty is not None:
+                settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
+
         async def _wait_for_process_network_recovery(
             account: Account,
             *,
@@ -2464,6 +2471,7 @@ class _StreamingRetryMixin:
                             if account_model_retry:
                                 continue
                             if account_model_retry is False:
+                                await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                                 if propagate_http_errors:
                                     raise
                                 yield await _render_account_model_rejection(
@@ -2484,8 +2492,10 @@ class _StreamingRetryMixin:
                                 # loop so the preserved cap is propagated or
                                 # rendered below, instead of replacing it with
                                 # a next-attempt timeout.
+                                await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                                 break
                             if _facade()._is_account_neutral_error_code(error_code):
+                                await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                                 raise
                             classified = await proxy._handle_stream_error(
                                 account,
@@ -2523,6 +2533,7 @@ class _StreamingRetryMixin:
                                 )
                                 excluded_account_ids.add(account.id)
                                 continue
+                            await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                             if propagate_http_errors:
                                 raise
                             error_message = error.message if error else None

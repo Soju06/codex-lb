@@ -106,6 +106,86 @@ def test_external_secrets_upgrade_keeps_startup_migration_disabled_and_runs_hook
     assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
 
 
+def test_external_secret_uses_v1_api_and_default_json_properties() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["apiVersion"] == "external-secrets.io/v1"
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "codex-lb", "property": "database-url"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "codex-lb", "property": "encryption-key"},
+        },
+    ]
+
+
+def test_external_secret_supports_individual_remote_secret_keys() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=infisical",
+        "--set-string",
+        "externalSecrets.remoteRefs.databaseUrl.key=/apps/codex-lb/DATABASE_URL",
+        "--set",
+        "externalSecrets.remoteRefs.databaseUrl.property=",
+        "--set-string",
+        "externalSecrets.remoteRefs.encryptionKey.key=/apps/codex-lb/ENCRYPTION_KEY",
+        "--set",
+        "externalSecrets.remoteRefs.encryptionKey.property=",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "/apps/codex-lb/DATABASE_URL"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "/apps/codex-lb/ENCRYPTION_KEY"},
+        },
+    ]
+
+
+def test_external_secret_nulled_remote_refs_render_default_layout() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+        "--set",
+        "externalSecrets.remoteRefs=null",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "codex-lb", "property": "database-url"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "codex-lb", "property": "encryption-key"},
+        },
+    ]
+
+
 def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migration() -> None:
     rendered = _helm_template(
         "--is-upgrade",

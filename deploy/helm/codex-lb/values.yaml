@@ -197,6 +197,17 @@ externalSecrets:
     kind: SecretStore
   # @param externalSecrets.refreshInterval How often to refresh the secret
   refreshInterval: 1h
+  remoteRefs:
+    databaseUrl:
+      # @param externalSecrets.remoteRefs.databaseUrl.key Remote secret key for the database URL (empty defaults to the release fullname)
+      key: ""
+      # @param externalSecrets.remoteRefs.databaseUrl.property Optional JSON property containing the database URL
+      property: database-url
+    encryptionKey:
+      # @param externalSecrets.remoteRefs.encryptionKey.key Remote secret key for the encryption key (empty defaults to the release fullname)
+      key: ""
+      # @param externalSecrets.remoteRefs.encryptionKey.property Optional JSON property containing the encryption key
+      property: encryption-key
 rollout:
   reloader:
     # @param rollout.reloader.enabled Add Stakater Reloader annotations so pod restarts follow Secret/ConfigMap updates

@@ -452,6 +452,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    apply_enforced_service_tier_model_fallback,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_invalid_payload_error,
@@ -1653,10 +1654,14 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
-        apply_api_key_enforcement(
+        service_tier_was_enforced = apply_api_key_enforcement(
             responses_payload,
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
+        )
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
         )
         normalized_payload = responses_payload.to_payload()
         body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)

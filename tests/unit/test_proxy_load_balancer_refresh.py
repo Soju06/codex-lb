@@ -46,8 +46,10 @@ from app.modules.proxy.load_balancer import (
     RuntimeState,
 )
 from app.modules.proxy.repo_bundle import ProxyRepositories
-from app.modules.proxy.request_policy import apply_api_key_enforcement
-from app.modules.proxy.service import _service_tier_is_api_key_enforced
+from app.modules.proxy.request_policy import (
+    apply_api_key_enforcement,
+    apply_enforced_service_tier_model_fallback,
+)
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -1823,11 +1825,10 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
         *,
         model: str | None,
         service_tier: str | None = None,
-        service_tier_enforced: bool = False,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ):
-        del model, service_tier, service_tier_enforced, additional_limit_name, account_ids
+        del model, service_tier, additional_limit_name, account_ids
         return load_balancer_module._SelectionInputs(
             accounts=[account],
             latest_primary={account.id: primary_entry},
@@ -2086,7 +2087,6 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
         *,
         model: str | None,
         service_tier: str | None = None,
-        service_tier_enforced: bool = False,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ):
@@ -2229,7 +2229,6 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
         *,
         model: str | None,
         service_tier: str | None = None,
-        service_tier_enforced: bool = False,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ):
@@ -2316,7 +2315,6 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
         *,
         model: str | None,
         service_tier: str | None = None,
-        service_tier_enforced: bool = False,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ):
@@ -4090,6 +4088,22 @@ def _single_account_repos(account: Account) -> tuple[Any, Any, Any]:
     return StubAccountsRepository([account]), usage_repo, StubStickySessionsRepository()
 
 
+def _service_tier_enforcement_key(service_tier: str) -> ApiKeyData:
+    return ApiKeyData(
+        id=f"key-enforced-{service_tier}",
+        name=f"enforced {service_tier}",
+        key_prefix="sk-test-enforced-tier",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=service_tier,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_select_account_ignores_enforced_service_tier_the_model_never_advertises(monkeypatch) -> None:
     """An enforced tier must not exclude accounts from a model that lacks the tier.
@@ -4114,10 +4128,26 @@ async def test_select_account_ignores_enforced_service_tier_the_model_never_adve
             service_tier_plans={},
         )
     )
+    assert registry.model_advertises_service_tier(model, "priority") is False
+    assert registry.model_advertises_service_tier("source-only-model", "priority") is True
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+    monkeypatch.setattr("app.modules.proxy._service.support.get_model_registry", lambda: registry)
+
+    payload = ResponsesRequest(model=model, instructions="ping", input=[])
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        _service_tier_enforcement_key("priority"),
+    )
+    assert service_tier_was_enforced is True
+    assert apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+        registry=registry,
+    )
+    assert payload.service_tier is None
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
-    selection = await balancer.select_account(model=model, service_tier="priority", service_tier_enforced=True)
+    selection = await balancer.select_account(model=model, service_tier=payload.service_tier)
 
     assert selection.error_code is None
     assert selection.account is not None
@@ -4126,10 +4156,35 @@ async def test_select_account_ignores_enforced_service_tier_the_model_never_adve
     # A tier the CLIENT asked for explicitly must still be rejected, so the
     # fallback cannot be used to silently downgrade a caller's own request.
     # This is the behavior #1248 pinned down for the quota-override path.
-    client_requested = await balancer.select_account(model=model, service_tier="priority")
+    for explicit_tier in ("priority", "fast"):
+        explicit_payload = ResponsesRequest(
+            model=model,
+            instructions="ping",
+            input=[],
+            service_tier=explicit_tier,
+        )
+        explicitly_requested = apply_api_key_enforcement(
+            explicit_payload,
+            _service_tier_enforcement_key("priority"),
+        )
+        assert explicitly_requested is False
+        assert not apply_enforced_service_tier_model_fallback(
+            explicit_payload,
+            service_tier_was_enforced=explicitly_requested,
+            registry=registry,
+        )
+        assert explicit_payload.service_tier == "priority"
 
-    assert client_requested.account is None
-    assert client_requested.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+        client_requested = await balancer.select_account(model=model, service_tier=explicit_payload.service_tier)
+        assert client_requested.account is None
+        assert client_requested.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+    bridge_session = cast(Any, SimpleNamespace(account=account, catalog_omission_quota_admission=None))
+    assert _http_bridge_session_supports_service_tier(
+        bridge_session,
+        request_model=model,
+        request_service_tier=payload.service_tier,
+    )
 
 
 @pytest.mark.asyncio
@@ -4156,8 +4211,16 @@ async def test_select_account_reports_the_service_tier_when_the_model_advertises
     )
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
 
+    payload = ResponsesRequest(model=model, instructions="ping", input=[], service_tier="priority")
+    assert not apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=True,
+        registry=registry,
+    )
+    assert payload.service_tier == "priority"
+
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
-    selection = await balancer.select_account(model=model, service_tier="priority")
+    selection = await balancer.select_account(model=model, service_tier=payload.service_tier)
 
     assert selection.account is None
     assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
@@ -4202,19 +4265,20 @@ async def test_api_key_enforced_priority_tier_still_routes_a_model_without_prior
         last_used_at=None,
     )
     payload = ResponsesRequest(model=model, instructions="ping", input=[])
-    apply_api_key_enforcement(payload, api_key)
+    service_tier_was_enforced = apply_api_key_enforcement(payload, api_key)
     assert payload.service_tier == "priority"
-
-    # Derive the enforced-vs-requested signal the same way the proxy does,
-    # rather than asserting it by hand.
-    service_tier_enforced = _service_tier_is_api_key_enforced(api_key, payload.service_tier)
-    assert service_tier_enforced is True
+    assert service_tier_was_enforced is True
+    assert apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+        registry=registry,
+    )
+    assert payload.service_tier is None
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     selection = await balancer.select_account(
         model=model,
         service_tier=payload.service_tier,
-        service_tier_enforced=service_tier_enforced,
     )
 
     assert selection.error_code is None

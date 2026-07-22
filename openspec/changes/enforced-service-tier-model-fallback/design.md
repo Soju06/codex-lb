@@ -14,25 +14,25 @@ explicit-request rule by accident rather than by decision.
 
 ## Decision
 
-Carry the distinction into selection rather than changing what an explicit
-request means.
+Capture the distinction before API-key enforcement mutates the request, then
+resolve the account-route effective tier after model-source selection.
 
-- `_service_tier_is_api_key_enforced` in the proxy derives the signal from the
-  `ApiKeyData` that `_select_account_with_budget` already receives, so no new
-  plumbing crosses the proxy boundary.
-- `select_account(..., service_tier_enforced=False)` passes it to the account
-  filter. The default preserves current behavior for every other caller.
+- `apply_api_key_enforcement` reports whether it supplied the tier by observing
+  the original request value before the enforced value is written. Equal values
+  and canonical aliases therefore remain client-explicit when the client sent
+  them.
+- Source-routed requests keep the enforced tier. The fallback is an
+  authoritative subscription-account catalog decision and does not describe an
+  external model source's capabilities.
 - `ModelRegistry.model_advertises_service_tier` answers whether the catalog
   lists the tier for the model at all, which is deliberately different from "no
   account carries it". It returns `True` whenever the answer is unknown (no
-  snapshot, non-authoritative catalogs) so an unknown catalog never triggers the
-  fallback.
+  snapshot, non-authoritative catalogs, or a model absent from the account
+  catalog) so an unknown catalog never triggers the fallback.
 - Only when the tier is enforced **and** the model does not advertise it is the
-  tier constraint dropped.
-
-The selection-inputs cache key gains the flag: the same tier string now resolves
-different account pools depending on its origin, so the two must not share an
-entry.
+  tier removed from the account-routed request. Account selection, HTTP bridge
+  compatibility, API-key reservation and settlement, request logging, and the
+  upstream wire payload then all consume that same effective request tier.
 
 ## Alternatives considered
 

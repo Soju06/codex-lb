@@ -634,6 +634,19 @@ class ModelRegistry:
         if not normalized_slug or not normalized_service_tier:
             return True
 
+        model_is_known = (
+            slug in self._snapshot.model_plans
+            or normalized_slug in self._snapshot.model_plans
+            or slug in self._snapshot.model_accounts
+            or normalized_slug in self._snapshot.model_accounts
+        )
+        if not model_is_known:
+            # An authoritative subscription snapshot cannot describe the tier
+            # capabilities of an operator-mapped or source-routed model that it
+            # does not contain. Keep the enforced tier when model identity is
+            # unknown instead of broadening fallback beyond catalog evidence.
+            return True
+
         tier_accounts = self._snapshot.model_service_tier_accounts.get(
             slug
         ) or self._snapshot.model_service_tier_accounts.get(normalized_slug)

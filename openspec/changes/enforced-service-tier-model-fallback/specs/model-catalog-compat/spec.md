@@ -13,11 +13,16 @@ an HTTP bridge session.
 A service tier imposed by an API key's enforced service tier is not an explicit
 request for that tier. When the requested tier originates from API key
 enforcement and the model's catalog does not advertise that tier at all, the
-system MUST NOT apply the tier as an account filter for that model, and MUST
-select accounts using model-only filtering instead. When the model's catalog
+system MUST remove the tier from the account-routed request, MUST select
+accounts and reuse HTTP bridge sessions using model-only filtering, MUST
+reserve, settle, and log API-key usage at the effective default tier, and MUST
+omit the unsupported tier from the upstream request. This account-catalog
+fallback MUST NOT alter a request selected for an external model source, and an
+unknown or account-catalog-absent model MUST retain the enforced tier. When the model's catalog
 does advertise the tier, account-level tier filtering MUST continue to apply
 regardless of the tier's origin. A tier supplied explicitly by the client MUST
-continue to filter accounts even when the model does not advertise it. When an
+continue to filter accounts even when it equals the enforced value or uses an
+equivalent alias and the model does not advertise it. When an
 unavailable service tier is what excluded every account, the selection error
 MUST name that tier.
 
@@ -42,14 +47,22 @@ MUST name that tier.
 - **AND** the model's catalog advertises no `priority` service tier
 - **AND** an API key sets `enforced_service_tier` to `priority`
 - **WHEN** account selection is requested for that model
-- **THEN** the enforced tier is not applied as an account filter
+- **THEN** the enforced tier is removed from the account-routed request
+- **AND** API-key accounting, bridge compatibility, and upstream forwarding use the effective default tier
 - **AND** the advertising account is selected
+
+#### Scenario: Account-catalog fallback does not alter a model source
+
+- **GIVEN** an API key enforces the `priority` service tier
+- **AND** the selected model is routed through an external model source
+- **WHEN** the subscription-account catalog does not advertise `priority` for that model
+- **THEN** the source-routed request retains `priority`
 
 #### Scenario: Explicitly requested unadvertised tier is still rejected
 
 - **GIVEN** an active account advertises a model at its default tier
 - **AND** the model's catalog advertises no `priority` service tier
-- **WHEN** a client explicitly requests that model with `priority`
+- **WHEN** a client explicitly requests that model with `priority` or an equivalent `fast` alias
 - **THEN** no account is selected
 
 #### Scenario: Unavailable advertised tier names the tier in the error

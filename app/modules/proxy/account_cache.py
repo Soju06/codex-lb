@@ -22,9 +22,7 @@ if TYPE_CHECKING:
     from app.modules.proxy.load_balancer import SelectionInputs
 
 _AssignedAccountsKey = tuple[str, ...] | None
-# (model, service_tier, service_tier_enforced, additional_limit_name,
-#  additional_quota_routing_policies, assigned_accounts)
-_CacheKey = tuple[str | None, str | None, bool, str | None, str, _AssignedAccountsKey]
+_CacheKey = tuple[str | None, str | None, str | None, str, _AssignedAccountsKey]
 
 
 @dataclass(slots=True)
@@ -50,7 +48,7 @@ class AccountSelectionCache:
     def generation(self) -> int:
         return self._generation
 
-    async def get(self, key: _CacheKey = (None, None, False, None, "", None)) -> SelectionInputs | None:
+    async def get(self, key: _CacheKey = (None, None, None, "", None)) -> SelectionInputs | None:
         if self._ttl_seconds == 0:
             return None
         entry = self._cache.get(key)
@@ -63,7 +61,7 @@ class AccountSelectionCache:
     async def set(
         self,
         data: SelectionInputs,
-        key: _CacheKey = (None, None, False, None, "", None),
+        key: _CacheKey = (None, None, None, "", None),
         *,
         generation: int | None = None,
     ) -> None:

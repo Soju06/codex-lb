@@ -188,6 +188,7 @@ from app.modules.proxy.images_observability import record_images_route_observabi
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
+    apply_enforced_service_tier_model_fallback,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     model_alias_requests_fast_mode,
@@ -642,7 +643,9 @@ async def responses(
         return _logged_error_json_response(request, 400, error)
 
     raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
-    prohibit_fast_mode = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
+    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+        responses_payload, api_key
+    )
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -675,6 +678,11 @@ async def responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
         )
+
+    apply_enforced_service_tier_model_fallback(
+        responses_payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
 
     return await _stream_responses(
         request,
@@ -761,7 +769,9 @@ async def v1_responses(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
     raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
-    prohibit_fast_mode = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
+    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+        responses_payload, api_key
+    )
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -793,6 +803,10 @@ async def v1_responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
         )
+    apply_enforced_service_tier_model_fallback(
+        responses_payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     if responses_payload.stream:
         return await _stream_responses(
             request,
@@ -1440,10 +1454,14 @@ async def _hide_upstream_quota_for_api_key_clients(api_key: ApiKeyData | None) -
 async def _apply_api_key_enforcement_with_fast_mode_policy(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
-) -> bool:
+) -> tuple[bool, bool]:
     prohibit_fast_mode = await _prohibit_fast_mode_enabled()
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
-    return prohibit_fast_mode
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    return prohibit_fast_mode, service_tier_was_enforced
 
 
 async def _prohibit_fast_mode_enabled() -> bool:
@@ -3232,7 +3250,9 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
-    prohibit_fast_mode = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
+    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+        responses_payload, api_key
+    )
     if prohibit_fast_mode and _is_fast_mode_model_alias(effective_model):
         effective_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -3249,6 +3269,10 @@ async def v1_chat_completions(
     source = source_selection[0] if source_selection is not None else None
     request_model = source_selection[1] if source_selection is not None else responses_payload.model
     if source is None:
+        apply_enforced_service_tier_model_fallback(
+            responses_payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
         # not reject them.
@@ -4259,7 +4283,15 @@ async def _stream_responses(
     enforce_openai_sdk_contract: bool = True,
     prohibit_fast_mode: bool = False,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
     if codex_session_affinity:
@@ -4492,7 +4524,15 @@ async def _collect_responses(
     prefer_http_bridge: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
@@ -4633,7 +4673,15 @@ async def _compact_responses(
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> JSONResponse:
-    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        api_key,
+        prohibit_fast_mode=prohibit_fast_mode,
+    )
+    apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+    )
     validate_model_access(api_key, payload.model)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)

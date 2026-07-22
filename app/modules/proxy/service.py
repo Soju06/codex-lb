@@ -1723,7 +1723,6 @@ class ProxyService(
                 "%s request budget exhausted before account selection request_id=%s", kind.title(), request_id
             )
             _raise_proxy_budget_exhausted()
-        service_tier_enforced = _service_tier_is_api_key_enforced(api_key, service_tier)
         scoped_account_ids = (
             set(api_key.assigned_account_ids)
             if api_key is not None and api_key.account_assignment_scope_enabled
@@ -1842,7 +1841,6 @@ class ProxyService(
                         relative_availability_top_k=_relative_availability_top_k(settings),
                         model=model,
                         service_tier=service_tier,
-                        service_tier_enforced=service_tier_enforced,
                         additional_limit_name=additional_limit_name,
                         account_ids=scoped_account_ids,
                         required_account_id=preferred_account_id,
@@ -1897,7 +1895,6 @@ class ProxyService(
                     relative_availability_top_k=_relative_availability_top_k(settings),
                     model=model,
                     service_tier=service_tier,
-                    service_tier_enforced=service_tier_enforced,
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
                     required_account_id=single_account_routing_id,
@@ -2282,21 +2279,6 @@ def _sticky_reallocation_primary_budget_threshold_pct(settings: DashboardSetting
 def _sticky_reallocation_secondary_budget_threshold_pct(settings: DashboardSettings) -> float:
     value = getattr(settings, "sticky_reallocation_secondary_budget_threshold_pct", None)
     return float(value if value is not None else 100.0)
-
-
-def _service_tier_is_api_key_enforced(api_key: ApiKeyData | None, service_tier: str | None) -> bool:
-    """Report whether ``service_tier`` was imposed by the API key, not the client.
-
-    ``apply_api_key_enforcement`` overwrites the payload's ``service_tier`` with
-    the key's enforced value, so by selection time the two are indistinguishable
-    by value alone. Account routing needs the distinction: an operator-wide
-    enforced tier must not make a model that never advertises that tier
-    unroutable, while an explicit client request for an unadvertised tier is
-    still rejected.
-    """
-    if api_key is None or api_key.enforced_service_tier is None or service_tier is None:
-        return False
-    return service_tier.strip().lower() == api_key.enforced_service_tier.strip().lower()
 
 
 def _remaining_budget_seconds(deadline: float) -> float:

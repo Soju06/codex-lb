@@ -26,6 +26,18 @@ When upstream returns a temporary model-capacity failure whose message says that
 - **THEN** the proxy MUST surface the stream failure to the downstream client
 - **AND** the proxy MUST NOT transparently re-POST the request as a model-capacity retry.
 
+#### Scenario: Websocket connect failure retries before request dispatch
+
+- **WHEN** an upstream websocket handshake raises a typed connector failure or connect timeout before the `response.create` frame is sent
+- **THEN** the proxy MUST preserve typed pre-dispatch provenance and MAY retry or fail over before any downstream-visible output
+- **AND** a websocket transport selection MUST NOT turn that failure into a terminal serialized SSE event.
+
+#### Scenario: Direct HTTP TLS verification failure is not retried
+
+- **WHEN** a direct HTTP stream raises a certificate or TLS connector failure before request dispatch
+- **THEN** the proxy MUST surface the TLS failure without transparently retrying or failing over
+- **AND** pre-dispatch provenance MUST NOT classify the non-transient TLS failure as retryable.
+
 #### Scenario: Quota and rate-limit codes retain their stronger classification
 
 - **WHEN** upstream returns a quota or rate-limit error code

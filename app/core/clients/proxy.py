@@ -3203,8 +3203,13 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        retryable_same_contract = transport == "http" and is_pre_dispatch_connection_failure(exc)
-        failure_phase = "connect" if retryable_same_contract else "upstream"
+        pre_dispatch_connection_failure = is_pre_dispatch_connection_failure(exc)
+        # Typed connector failures prove that neither the HTTP request nor the
+        # websocket response.create frame was dispatched. TLS verification is
+        # also pre-dispatch, but it is a stable configuration failure rather
+        # than a transient condition worth retrying on another account.
+        retryable_same_contract = pre_dispatch_connection_failure and not isinstance(exc, aiohttp.ClientSSLError)
+        failure_phase = "connect" if pre_dispatch_connection_failure else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
         # Direct HTTP streams and direct upstream WebSockets both use this

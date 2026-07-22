@@ -6615,6 +6615,113 @@ async def test_stream_responses_preserves_connect_timeout_retry_provenance(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["connector", "timeout"])
+async def test_stream_responses_websocket_pre_dispatch_connect_failure_is_retryable(
+    monkeypatch,
+    failure_kind: str,
+):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 5.0
+        upstream_stream_transport = "websocket"
+
+    connection_key = ConnectionKey("chatgpt.com", 443, True, True, None, None, None)
+    connect_error: aiohttp.ClientError = (
+        aiohttp.ClientConnectorError(connection_key, ConnectionRefusedError("connection refused"))
+        if failure_kind == "connector"
+        else aiohttp.ConnectionTimeoutError("connect timed out")
+    )
+
+    class _WebsocketConnectFailureSession:
+        def ws_connect(self, *_args: object, **_kwargs: object):
+            raise connect_error
+
+    session = _WebsocketConnectFailureSession()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_module.stream_responses(
+                payload,
+                headers={},
+                access_token="token",
+                account_id="acc_ws_connect_failure",
+                session=cast(proxy_module.aiohttp.ClientSession, session),
+                raise_for_status=True,
+            )
+        ]
+
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failed_session is session
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_direct_http_tls_connect_failure_is_not_retryable(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 5.0
+        upstream_stream_transport = "http"
+
+    certificate_error = _client_connector_certificate_error()
+
+    class _TlsFailureSseSession:
+        def post(self, *_args: object, **_kwargs: object):
+            raise certificate_error
+
+    completions: list[dict[str, object]] = []
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(
+        proxy_module,
+        "_maybe_log_upstream_request_complete",
+        lambda **kwargs: completions.append(dict(kwargs)),
+    )
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_http_tls_failure",
+            session=cast(proxy_module.aiohttp.ClientSession, _TlsFailureSseSession()),
+            raise_for_status=True,
+        )
+    ]
+
+    assert len(events) == 1
+    failed = cast(dict[str, object], parse_sse_data_json(events[0]))
+    response = cast(dict[str, object], failed["response"])
+    error = cast(dict[str, object], response["error"])
+    assert error["code"] == "upstream_unavailable"
+    assert error["message"] == str(certificate_error)
+    assert completions[-1]["failure_phase"] == "connect"
+    assert completions[-1]["failure_exception_type"] == "ClientConnectorCertificateError"
+    assert completions[-1]["retryable_same_contract"] is False
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_maps_typed_dns_failure_with_failed_session_provenance(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -12193,7 +12300,12 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("post_refresh_failure", ["model_capacity", "connect"])
-async def test_stream_with_retry_post_refresh_http_failure_retries_same_account(monkeypatch, post_refresh_failure: str):
+@pytest.mark.parametrize("upstream_transport", ["http", "websocket"])
+async def test_stream_with_retry_post_refresh_transport_failure_retries_same_account(
+    monkeypatch,
+    post_refresh_failure: str,
+    upstream_transport: str,
+):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_refresh_model_capacity")
@@ -12216,6 +12328,7 @@ async def test_stream_with_retry_post_refresh_http_failure_retries_same_account(
     async def fake_stream_once(*_args: object, **kwargs: object):
         nonlocal stream_once_calls
         stream_once_calls += 1
+        assert kwargs["upstream_stream_transport"] == upstream_transport
         if stream_once_calls == 1:
             raise proxy_module.ProxyResponseError(
                 401,
@@ -12255,7 +12368,7 @@ async def test_stream_with_retry_post_refresh_http_failure_retries_same_account(
             api_key_reservation=None,
             suppress_text_done_events=False,
             request_transport="http",
-            upstream_stream_transport_override="http",
+            upstream_stream_transport_override=upstream_transport,
         )
     ]
 

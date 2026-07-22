@@ -554,6 +554,7 @@ from app.modules.proxy._service.support import (
     _request_log_useragent_fields,  # noqa: F401
     _RequestLogFailureMetadata,
     _RetryableStreamError,  # noqa: F401
+    _security_lineage_ids,
     _stream_settlement_error_payload,  # noqa: F401
     _StreamSettlement,  # noqa: F401
     _supported_optional_kwargs,  # noqa: F401
@@ -1726,6 +1727,7 @@ class ProxyService(
         preferred_account_id: str | None = None,
         preferred_account_is_continuity_owner: bool = False,
         require_security_work_authorized: bool = False,
+        security_lineage_ids: Collection[str] = (),
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
@@ -1773,17 +1775,19 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
-                if sticky_kind == StickySessionKind.CODEX_SESSION:
-                    lineage_ids = tuple(key for key in (sticky_key, legacy_sticky_key) if key)
-                    if lineage_ids:
-                        async with self._repo_factory() as repos:
-                            persisted_security_requirement = await repos.sticky_sessions.security_work_required(
-                                lineage_ids,
-                                api_key_scope=durable_bridge_api_key_scope(api_key.id if api_key is not None else None),
-                            )
-                        require_security_work_authorized = (
-                            require_security_work_authorized or persisted_security_requirement is True
+                lineage_ids = _security_lineage_ids(
+                    *security_lineage_ids,
+                    *((sticky_key, legacy_sticky_key) if sticky_kind == StickySessionKind.CODEX_SESSION else ()),
+                )
+                if lineage_ids:
+                    async with self._repo_factory() as repos:
+                        persisted_security_requirement = await repos.sticky_sessions.security_work_required(
+                            lineage_ids,
+                            api_key_scope=durable_bridge_api_key_scope(api_key.id if api_key is not None else None),
                         )
+                    require_security_work_authorized = (
+                        require_security_work_authorized or persisted_security_requirement is True
+                    )
                 concurrency_caps = effective_account_concurrency_caps(settings)
                 stream_reserve_slots = (
                     (

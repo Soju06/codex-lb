@@ -788,6 +788,7 @@ class _StreamingRetryMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
+                            security_lineage_ids=security_lineage_ids,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
                             # Keep stored-object and file ownership strict. The

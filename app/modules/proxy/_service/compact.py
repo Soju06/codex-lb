@@ -873,6 +873,7 @@ class _CompactMixin:
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    security_lineage_ids=security_lineage_ids,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,

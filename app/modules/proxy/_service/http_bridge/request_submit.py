@@ -18,8 +18,11 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ProxyResponseError,
     UpstreamProxyRouteTrace,
     _as_image_fetch_session,
+    _finalize_responses_lite_reasoning_context,
     _inline_content_images,
     _inline_input_image_urls,
+    _payload_has_responses_lite_websocket_marker,
+    _payload_uses_responses_lite,
     _ws_transport_payload_budget_bytes,
     apply_codex_installation_metadata,
     filter_inbound_headers,
@@ -317,6 +320,13 @@ class _HTTPBridgeRequestSubmitMixin:
             upstream_payload["type"] = "response.create"
         if client_metadata:
             upstream_payload["client_metadata"] = client_metadata
+        _finalize_responses_lite_reasoning_context(
+            upstream_payload,
+            responses_lite=(
+                _payload_uses_responses_lite(upstream_payload)
+                or _payload_has_responses_lite_websocket_marker(upstream_payload)
+            ),
+        )
         forwarded_service_tier = _normalize_service_tier_value(upstream_payload.get("service_tier"))
         input_item_count = 0
         input_full_fingerprint: str | None = None

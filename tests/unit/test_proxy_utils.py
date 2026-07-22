@@ -11,6 +11,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
@@ -3784,6 +3785,68 @@ def test_response_create_client_metadata_preserves_trusted_incremental_responses
     assert metadata == {"keep": "yes", marker: "true"}
 
 
+@pytest.mark.parametrize(
+    ("reasoning_present", "reasoning"),
+    [
+        pytest.param(False, None, id="omitted-reasoning"),
+        pytest.param(True, None, id="null-reasoning"),
+        pytest.param(True, {}, id="absent-context"),
+        pytest.param(True, {"context": None}, id="null-context"),
+        pytest.param(True, {"context": ""}, id="blank-context"),
+        pytest.param(True, {"context": "ALL_TURNS"}, id="differently-cased-context"),
+        pytest.param(
+            True,
+            {
+                "context": "last_turn",
+                "effort": "high",
+                "summary": "auto",
+                "vendor_hint": 7,
+            },
+            id="different-context-with-siblings",
+        ),
+        pytest.param(True, {"context": 7}, id="non-string-context"),
+        pytest.param(True, {"context": "all_turns"}, id="already-canonical"),
+    ],
+)
+def test_finalize_responses_lite_reasoning_context(
+    reasoning_present: bool,
+    reasoning: JsonValue,
+) -> None:
+    payload: dict[str, JsonValue] = {"input": []}
+    if reasoning_present:
+        payload["reasoning"] = reasoning
+
+    proxy_module._finalize_responses_lite_reasoning_context(payload, responses_lite=True)
+
+    finalized_reasoning = cast(Mapping[str, JsonValue], payload["reasoning"])
+    assert finalized_reasoning["context"] == "all_turns"
+    if isinstance(reasoning, Mapping):
+        reasoning_mapping = cast(Mapping[str, JsonValue], reasoning)
+        for key, value in reasoning_mapping.items():
+            if key != "context":
+                assert finalized_reasoning[key] == value
+    once_finalized = deepcopy(payload)
+    proxy_module._finalize_responses_lite_reasoning_context(payload, responses_lite=True)
+    assert payload == once_finalized
+
+
+def test_finalize_responses_lite_reasoning_context_is_non_lite_noop() -> None:
+    payload: dict[str, JsonValue] = {
+        "input": [],
+        "reasoning": {
+            "context": "last_turn",
+            "effort": "high",
+            "summary": "auto",
+            "vendor_hint": 7,
+        },
+    }
+    original_payload = deepcopy(payload)
+
+    proxy_module._finalize_responses_lite_reasoning_context(payload, responses_lite=False)
+
+    assert payload == original_payload
+
+
 def test_response_create_client_metadata_replaces_installation_id():
     metadata = proxy_service._response_create_client_metadata(
         {
@@ -6699,6 +6762,12 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
                 proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
                 "keep": "yes",
             },
+            "reasoning": {
+                "context": "last_turn",
+                "effort": "high",
+                "summary": "auto",
+                "vendor_hint": 7,
+            },
         }
     )
     session = _WsSession(
@@ -6725,6 +6794,13 @@ async def test_stream_responses_derives_lite_http_header_from_additional_tools(m
     assert upstream_payload["client_metadata"] == {
         "keep": "yes",
     }
+    assert upstream_payload["reasoning"] == {
+        "context": "all_turns",
+        "effort": "high",
+        "summary": "auto",
+        "vendor_hint": 7,
+    }
+    assert cast(Mapping[str, JsonValue], payload.to_payload()["reasoning"])["context"] == "last_turn"
 
 
 @pytest.mark.asyncio
@@ -6770,6 +6846,7 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
                 proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
                 "keep": "yes",
             },
+            "reasoning": {"context": None, "effort": "high", "vendor_hint": 7},
         }
     )
 
@@ -6794,7 +6871,13 @@ async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(
         "keep": "yes",
         proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "true",
     }
+    expected_request_payload["reasoning"] = {
+        "context": "all_turns",
+        "effort": "high",
+        "vendor_hint": 7,
+    }
     assert request_payload == expected_request_payload
+    assert "context" not in cast(Mapping[str, JsonValue], payload.to_payload()["reasoning"])
     upstream_headers = cast(dict[str, str], session.ws_calls[0]["headers"])
     assert proxy_module.CODEX_RESPONSES_LITE_HEADER not in {key.lower() for key in upstream_headers}
     expected_created = (
@@ -8539,8 +8622,18 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
     session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']))
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
     payload = ResponsesRequest.model_validate(
-        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [additional_tools, {"role": "user", "content": "hi"}],
+            "reasoning": {"context": "last_turn", "effort": "high"},
+        }
     )
 
     events = [
@@ -8556,6 +8649,13 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
 
     assert attempts["websocket"] == 1
     assert session.calls
+    upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
+    upstream_payload = cast(dict[str, JsonValue], session.calls[0]["json"])
+    assert upstream_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
+    assert proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY not in cast(
+        Mapping[str, JsonValue], upstream_payload.get("client_metadata", {})
+    )
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']
 
 
@@ -9004,6 +9104,7 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
                 {"role": "assistant", "content": "middle context " + "y" * 500_000},
                 {"role": "user", "content": "inspect"},
             ],
+            "reasoning": {"context": "turn", "effort": "high", "vendor_hint": 7},
         }
     )
     session = _CompactSession(
@@ -9025,6 +9126,11 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
     upstream_payload = cast(dict[str, object], session.calls[0]["json"])
     assert cast(list[object], upstream_payload["input"])[0] == additional_tools
     assert cast(list[object], upstream_payload["input"])[1] == developer_instructions
+    assert upstream_payload["reasoning"] == {
+        "context": "all_turns",
+        "effort": "high",
+        "vendor_hint": 7,
+    }
 
 
 @pytest.mark.asyncio
@@ -16974,6 +17080,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     first_payload = json.loads(first.text_data)
     assert first_payload["generate"] is False
     assert first_payload["client_metadata"][marker] == "true"
+    assert first_payload["reasoning"] == {"context": "all_turns"}
     assert first.request_state.request_kind == "prewarm"
     assert first.request_state.generate_false_prewarm is True
     assert continuity_state.responses_lite_model is None
@@ -17015,6 +17122,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
                     marker: "true",
                     "x-codex-turn-metadata": json.dumps({"request_kind": "turn"}),
                 },
+                "reasoning": {"context": "last_turn", "effort": "high"},
             },
         ),
         headers=prewarm_headers,
@@ -17029,6 +17137,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     incremental_payload = json.loads(incremental.text_data)
     assert incremental.request_state.request_kind == "prewarm"
     assert incremental_payload["client_metadata"][marker] == "true"
+    assert incremental_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
     incremental_turn_metadata = json.loads(incremental_payload["client_metadata"]["x-codex-turn-metadata"])
     assert incremental_turn_metadata["request_kind"] == "turn"
 
@@ -17041,6 +17150,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
                 "instructions": "",
                 "input": [{"role": "user", "content": "ordinary request"}],
                 "client_metadata": {marker: "true"},
+                "reasoning": {"context": "last_turn", "effort": "high"},
             },
         ),
         headers=prewarm_headers,
@@ -17055,6 +17165,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     incompatible_payload = json.loads(incompatible.text_data)
     assert incompatible_payload["model"] == "gpt-5.4"
     assert marker not in incompatible_payload["client_metadata"]
+    assert incompatible_payload["reasoning"] == {"context": "last_turn", "effort": "high"}
     assert "x-codex-turn-metadata" in incompatible_payload["client_metadata"]
     assert continuity_state.responses_lite_model == "gpt-5.6-sol"
     proxy_service._record_websocket_responses_lite_acceptance(
@@ -17111,6 +17222,7 @@ async def test_websocket_lite_incremental_requires_previous_response_linkage(
         "instructions": "",
         "input": [{"role": "user", "content": "continue"}],
         "client_metadata": {marker: "true"},
+        "reasoning": {"context": "last_turn", "effort": "high"},
     }
     if previous_response_id is not None:
         payload["previous_response_id"] = previous_response_id
@@ -17128,6 +17240,7 @@ async def test_websocket_lite_incremental_requires_previous_response_linkage(
 
     prepared_payload = json.loads(prepared.text_data)
     assert marker not in prepared_payload.get("client_metadata", {})
+    assert prepared_payload["reasoning"] == {"context": "last_turn", "effort": "high"}
     assert prepared.request_state.responses_lite_model is None
     assert continuity_state.responses_lite_model == "gpt-5.6-sol"
     assert continuity_state.responses_lite_response_id == "resp_ws_lite_prewarm"
@@ -17177,6 +17290,7 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
                     {"role": "user", "content": "with details"},
                 ],
                 "client_metadata": {marker: "true", "keep": "yes"},
+                "reasoning": {"context": "last_turn", "effort": "high"},
             },
         ),
         headers={},
@@ -17190,12 +17304,14 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
 
     trusted_payload = json.loads(trusted.text_data)
     assert trusted_payload["client_metadata"][marker] == "true"
+    assert trusted_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
     assert trusted.request_state.fresh_upstream_request_is_retry_safe
     assert trusted.request_state.fresh_upstream_request_text is not None
     replay_payload = json.loads(trusted.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == trusted_payload["input"]
     assert replay_payload["client_metadata"] == {"keep": "yes"}
+    assert replay_payload["reasoning"] == {"context": "last_turn", "effort": "high"}
     # The marker-stripped fresh body is non-Lite, so swapping to it for a
     # transparent replay must also clear the Lite acceptance flag.
     assert trusted.request_state.responses_lite_model == "gpt-5.6-sol"
@@ -17218,6 +17334,7 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
                     {"role": "user", "content": "continue"},
                 ],
                 "client_metadata": {marker: "stale", "keep": "yes"},
+                "reasoning": {"context": 7, "summary": "auto", "vendor_hint": 9},
             },
         ),
         headers={},
@@ -17231,10 +17348,20 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
 
     body_lite_payload = json.loads(body_lite.text_data)
     assert body_lite_payload["client_metadata"][marker] == "true"
+    assert body_lite_payload["reasoning"] == {
+        "context": "all_turns",
+        "summary": "auto",
+        "vendor_hint": 9,
+    }
     assert body_lite.request_state.fresh_upstream_request_text is not None
     body_lite_replay = json.loads(body_lite.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in body_lite_replay
     assert body_lite_replay["client_metadata"][marker] == "true"
+    assert body_lite_replay["reasoning"] == {
+        "context": "all_turns",
+        "summary": "auto",
+        "vendor_hint": 9,
+    }
     assert body_lite.request_state.fresh_upstream_request_responses_lite_model == "gpt-5.6-sol"
 
 
@@ -17838,7 +17965,7 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
         id="key_ws_trim_replay_size",
         name="ws-trim-replay-size",
         key_prefix="sk-ws-trim-size",
-        allowed_models=["gpt-5.1"],
+        allowed_models=["gpt-5.6-sol"],
         enforced_model=None,
         enforced_reasoning_effort=None,
         enforced_service_tier=None,
@@ -17853,6 +17980,11 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
         openai_prompt_cache_key_derivation_enabled = True
 
     historical_input: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
         {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
         {"type": "function_call_output", "call_id": "call_large", "output": "A" * 40000},
     ]
@@ -17875,8 +18007,9 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
             dict[str, JsonValue],
             {
                 "type": "response.create",
-                "model": "gpt-5.1",
+                "model": "gpt-5.6-sol",
                 "input": [*historical_input, new_input],
+                "reasoning": {"context": "last_turn", "effort": "high"},
             },
         ),
         headers={"session_id": "turn_ws_trim_size"},
@@ -17892,12 +18025,14 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
     fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
     fresh_input = cast(list[JsonValue], fresh_payload["input"])
     assert len(prepared.request_state.fresh_upstream_request_text.encode("utf-8")) <= 2048
-    assert fresh_input[1] == {
+    assert next(item for item in fresh_input if isinstance(item, dict) and item.get("call_id") == "call_large") == {
         "type": "function_call_output",
         "call_id": "call_large",
         "output": proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(bytes=40000),
     }
     assert fresh_input[-1] == new_input
+    assert fresh_payload["client_metadata"][proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] == "true"
+    assert fresh_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
 
 
 @pytest.mark.asyncio

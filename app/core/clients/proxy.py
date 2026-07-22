@@ -1483,6 +1483,21 @@ def _payload_has_responses_lite_websocket_marker(payload: Mapping[str, JsonValue
     return is_json_mapping(raw_metadata) and _client_metadata_uses_responses_lite(raw_metadata)
 
 
+def _finalize_responses_lite_reasoning_context(
+    payload: dict[str, JsonValue],
+    *,
+    responses_lite: bool,
+) -> None:
+    if not responses_lite:
+        return
+    raw_reasoning = payload.get("reasoning")
+    if raw_reasoning is not None and not is_json_mapping(raw_reasoning):
+        return
+    reasoning = dict(raw_reasoning) if is_json_mapping(raw_reasoning) else {}
+    reasoning["context"] = "all_turns"
+    payload["reasoning"] = reasoning
+
+
 def _normalize_responses_lite_websocket_client_metadata(
     payload: Mapping[str, JsonValue],
     client_metadata: Mapping[str, JsonValue],
@@ -2698,8 +2713,16 @@ async def _stream_responses_with_session(
         )
     http_payload_dict = dict(payload_dict)
     _strip_responses_lite_websocket_client_metadata(http_payload_dict)
+    _finalize_responses_lite_reasoning_context(
+        http_payload_dict,
+        responses_lite=_payload_uses_responses_lite(http_payload_dict),
+    )
     websocket_payload_dict = dict(payload_dict)
     _set_responses_lite_websocket_client_metadata(websocket_payload_dict)
+    _finalize_responses_lite_reasoning_context(
+        websocket_payload_dict,
+        responses_lite=_payload_has_responses_lite_websocket_marker(websocket_payload_dict),
+    )
     payload_json = json.dumps(websocket_payload_dict, ensure_ascii=True, separators=(",", ":"))
     payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     transport_mode = _configured_stream_transport(
@@ -3505,13 +3528,17 @@ class _CompactCommandTransport:
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = self.payload.to_payload()
+        payload_dict = dict(self.payload.to_payload())
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
                 _as_image_fetch_session(self.session),
                 effective_connect_timeout,
             )
+        _finalize_responses_lite_reasoning_context(
+            payload_dict,
+            responses_lite=_payload_uses_responses_lite(payload_dict),
+        )
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
         try:
             validate_compact_input_wire_budget(payload_dict)

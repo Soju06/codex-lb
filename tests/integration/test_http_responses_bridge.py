@@ -5354,6 +5354,12 @@ async def test_backend_responses_http_bridge_lite_request_omits_synthesized_tool
             {"type": "message", "role": "developer", "content": "use repository tools"},
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
         ],
+        "reasoning": {
+            "context": "last_turn",
+            "effort": "high",
+            "summary": "auto",
+            "vendor_hint": 7,
+        },
         "stream": True,
     }
     events = await _collect_sse_events(async_client, "/backend-api/codex/responses", json_body=payload)
@@ -5363,9 +5369,15 @@ async def test_backend_responses_http_bridge_lite_request_omits_synthesized_tool
     bridge_body = json.loads(fake_upstream.sent_text[0])
     assert "tools" not in bridge_body
     # The Lite input prefix must survive and keep signaling Responses Lite.
-    assert bridge_body["input"][0]["type"] == "additional_tools"
+    assert bridge_body["input"] == payload["input"]
     client_metadata = bridge_body["client_metadata"]
     assert client_metadata["ws_request_header_x_openai_internal_codex_responses_lite"] == "true"
+    assert bridge_body["reasoning"] == {
+        "context": "all_turns",
+        "effort": "high",
+        "summary": "auto",
+        "vendor_hint": 7,
+    }
 
 
 @pytest.mark.asyncio

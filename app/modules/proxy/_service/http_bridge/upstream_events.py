@@ -760,24 +760,35 @@ class _HTTPBridgeUpstreamEventsMixin:
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                terminal_request_state = _pop_terminal_websocket_request_state(
-                    session.pending_requests,
-                    response_id=response_id,
-                    fallback_request_state=matched_request_state,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event
-                    or is_missing_tool_output_event,
-                    previous_response_id_hint=previous_response_id_hint,
-                    error_message=error_message,
-                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
-                    allow_precreated_terminal_fallback=event_type
-                    in {
-                        "response.completed",
-                        "response.failed",
-                        "response.incomplete",
-                        "error",
-                    },
-                    prefer_draining_requests=anonymous_event_prefers_draining,
+                early_retry_error_code = _websocket_precreated_retry_error_code(
+                    matched_request_state,
+                    event_type=event_type,
+                    payload=payload,
+                    has_other_pending_requests=False,
                 )
+                reserve_terminal_for_model_capacity_retry = bool(
+                    matched_request_state is not None
+                    and early_retry_error_code is not None
+                    and early_retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                    and not is_previous_response_not_found_event
+                    and is_upstream_model_capacity_error(error_message)
+                    and _websocket_request_can_replay_before_visible_output(matched_request_state)
+                )
+                if reserve_terminal_for_model_capacity_retry:
+                    terminal_request_state = matched_request_state
+                else:
+                    terminal_request_state = _pop_terminal_websocket_request_state(
+                        session.pending_requests,
+                        response_id=response_id,
+                        fallback_request_state=matched_request_state,
+                        prefer_previous_response_not_found=is_previous_response_not_found_event
+                        or is_missing_tool_output_event,
+                        previous_response_id_hint=previous_response_id_hint,
+                        error_message=error_message,
+                        allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                        allow_precreated_terminal_fallback=True,
+                        prefer_draining_requests=anonymous_event_prefers_draining,
+                    )
                 if (
                     matched_request_state is None
                     and terminal_request_state is not None
@@ -794,8 +805,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and terminal_request_state.response_id == response_id
                 ):
                     matched_request_state = terminal_request_state
-                if terminal_request_state is not None and _http_bridge_request_counts_against_queue(
-                    terminal_request_state
+                if (
+                    terminal_request_state is not None
+                    and not reserve_terminal_for_model_capacity_retry
+                    and _http_bridge_request_counts_against_queue(terminal_request_state)
                 ):
                     session.queued_request_count = max(0, session.queued_request_count - 1)
                 elif is_previous_response_not_found_event or is_missing_tool_output_event:
@@ -843,7 +856,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                             0,
                             session.queued_request_count - grouped_counted_requests,
                         )
-                has_other_pending_requests = bool(session.pending_requests)
+                has_other_pending_requests = any(
+                    pending_request is not terminal_request_state for pending_request in session.pending_requests
+                )
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
@@ -1051,9 +1066,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     status_request_state.awaiting_response_created = True
                 retry_after_wait = await _wait_before_http_bridge_model_capacity_retry(
                     status_request_state,
-                    emit_keepalives=not (
-                        status_request_state.propagate_http_errors and status_request_state.enforce_openai_sdk_contract
-                    ),
+                    emit_keepalives=not status_request_state.propagate_http_errors,
                     error_message=retry_error_message,
                     cancel_when_detached=True,
                 )

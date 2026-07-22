@@ -2596,7 +2596,7 @@ async def test_http_bridge_model_capacity_wait_suppresses_keepalive_when_errors_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_model_capacity_wait_keeps_keepalive_for_non_sdk_propagated_streams(
+async def test_http_bridge_model_capacity_wait_hides_keepalive_for_non_sdk_propagated_streams(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -2652,12 +2652,7 @@ async def test_http_bridge_model_capacity_wait_keeps_keepalive_for_non_sdk_propa
     )
 
     assert request_state.event_queue is not None
-    keepalive_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
-    assert keepalive_block is not None
-    keepalive = proxy_service.parse_sse_data_json(keepalive_block)
-    assert isinstance(keepalive, dict)
-    assert keepalive["status"] == "waiting_for_account_capacity"
-    assert keepalive["request_id"] == "req-model-capacity-propagate-non-sdk"
+    assert request_state.event_queue.empty()
     retry_precreated.assert_awaited_once_with(session, request_state=request_state)
 
 

@@ -12450,8 +12450,24 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     handle_stream_error = AsyncMock()
     record_errors = AsyncMock()
     settlement_order: list[str] = []
+    stream_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
+    api_key = _make_api_key_data("key_post_refresh_transient_failover")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_post_refresh_transient_failover",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock()
 
-    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert stream_account_ids[-1] == account_b.id
         settlement_order.append("settle")
         return True
 
@@ -12473,6 +12489,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     handle_stream_error.side_effect = record_health
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
     monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
 
@@ -12483,6 +12500,9 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
         return AccountSelection(account=account, error_message=None)
 
     async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_reservations.append(
+            cast(proxy_service.ApiKeyUsageReservationData | None, _kwargs["api_key_reservation"])
+        )
         stream_account_ids.append(account.id)
         if stream_account_ids == [account_a.id]:
             raise proxy_module.ProxyResponseError(
@@ -12517,8 +12537,8 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
             codex_session_affinity=False,
             propagate_http_errors=False,
             openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
+            api_key=api_key,
+            api_key_reservation=reservation,
             suppress_text_done_events=False,
             request_transport="http",
             upstream_stream_transport_override="http",
@@ -12534,7 +12554,12 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     ]
     assert len(transient_penalties) == 1
     assert transient_penalties[0].args[0] is account_a
-    assert settlement_order.index("settle") < settlement_order.index("health:invalid_request_error")
+    assert [entry for entry in settlement_order if entry != "health:invalid_api_key"] == [
+        "health:invalid_request_error",
+        "settle",
+    ]
+    assert stream_reservations == [reservation] * 5
+    release_unsettled.assert_not_awaited()
     record_errors.assert_any_await(account_a, 2)
 
 
@@ -12687,7 +12712,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_preserves_err
     }
     assert stream_once_calls == 2
     assert selections == 2
-    assert any(call.args[2] == "invalid_request_error" for call in handle_stream_error.await_args_list)
+    assert all(call.args[2] != "invalid_request_error" for call in handle_stream_error.await_args_list)
     service._load_balancer.record_errors.assert_not_awaited()
 
 

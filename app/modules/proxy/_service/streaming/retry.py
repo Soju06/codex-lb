@@ -364,6 +364,7 @@ class _StreamingRetryMixin:
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
+        pending_post_refresh_transient_penalty: tuple[Account, UpstreamError, str, int, int] | None = None
         require_security_work_authorized = False
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
@@ -1208,6 +1209,24 @@ class _StreamingRetryMixin:
                         client_ip=client_ip,
                     )
                     return
+
+                if pending_post_refresh_transient_penalty is not None:
+                    (
+                        failed_account,
+                        transient_error_payload,
+                        transient_error_code,
+                        transient_http_status,
+                        transient_retry_count,
+                    ) = pending_post_refresh_transient_penalty
+                    pending_post_refresh_transient_penalty = None
+                    await proxy._handle_stream_error(
+                        failed_account,
+                        transient_error_payload,
+                        transient_error_code,
+                        http_status=transient_http_status,
+                    )
+                    if transient_retry_count > 1:
+                        await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
 
                 account_id_value = account.id
                 if last_account_model_rejection is not None and account.id != last_account_model_rejection_account_id:
@@ -2286,24 +2305,14 @@ class _StreamingRetryMixin:
                             )
                             if getattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, False):
                                 transient_error_payload = _stream_settlement_error_payload(settlement)
-                                settled = await proxy._settle_stream_api_key_usage(
-                                    api_key,
-                                    api_key_reservation,
-                                    settlement,
-                                    request_id,
-                                )
                                 if settlement.account_health_error:
-                                    await proxy._handle_stream_error(
+                                    pending_post_refresh_transient_penalty = (
                                         account,
                                         transient_error_payload,
                                         settlement.error_code or "upstream_error",
-                                        http_status=retry_exc.status_code,
+                                        retry_exc.status_code,
+                                        int(getattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, 1)),
                                     )
-                                    transient_retry_count = int(
-                                        getattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, 1)
-                                    )
-                                    if transient_retry_count > 1:
-                                        await proxy._load_balancer.record_errors(account, transient_retry_count - 1)
                                 last_transient_exc = retry_exc
                                 last_retryable_stream_error = _RetryableStreamError(
                                     settlement.error_code or error_code or "upstream_error",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -44,6 +45,7 @@ _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", 
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
+_COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"data:image/[^,\s]+,[A-Za-z0-9+/=_-]+")
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -1065,6 +1067,15 @@ def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
             rewritten.append(rewritten_item)
             changed = changed or item_changed
         return rewritten, changed
+    if isinstance(value, str) and "data:image/" in value:
+        rewritten_value, replacements = _COMPACT_INLINE_IMAGE_DATA_URL_RE.subn(
+            lambda match: (
+                f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(match.group(0))} encoded characters)."
+            ),
+            value,
+        )
+        if replacements:
+            return rewritten_value, True
     return value, False
 
 

@@ -12,10 +12,12 @@ MUST NOT weaken fail-closed handling for oversized textual state.
 #### Scenario: Oversized inline image does not poison terminal compaction
 
 - **WHEN** compact input exceeds the upstream limit because a required latest
-  tool output contains an inline data-URL image that the model already observed
+  eligible required tool output contains an inline data-URL image that the model already observed
 - **THEN** compact preparation retains the tool call and output identities
 - **AND** replaces only the inline image bytes with an explicit textual omission marker
 - **AND** preserves the other textual parts of the tool output
-- **AND** file-backed image references remain unchanged
+- **AND** accepted file-backed `input_file` references remain unchanged
+- **AND** hosted `computer_call_output` screenshots remain fail-closed until a
+  schema-valid compact placeholder is defined
 - **AND** non-image required content that cannot fit still returns
   `responses_compact_input_too_large`

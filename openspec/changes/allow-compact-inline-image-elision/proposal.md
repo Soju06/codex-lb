@@ -9,10 +9,13 @@ with `responses_compact_input_too_large`.
 
 ## What Changes
 
-- Replace inline data-URL image parts with an explicit textual omission marker
-  only while preparing an oversized compact request.
+- Replace inline data-URL images inside required function, custom, and
+  apply-patch tool outputs with an explicit textual omission marker only while
+  preparing an oversized compact request.
 - Preserve the surrounding tool call/output identities and all textual content.
-- Leave file-backed image references and ordinary non-compact requests unchanged.
+- Leave accepted `input_file` references and ordinary non-compact requests unchanged.
+- Keep hosted `computer_call_output` screenshots fail-closed until a
+  schema-valid compact placeholder is defined.
 - Keep fail-closed behavior for required oversized non-image content.
 
 ## Impact

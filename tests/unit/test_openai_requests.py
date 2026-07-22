@@ -1460,14 +1460,21 @@ def test_compact_trimming_elides_mapping_shaped_required_tool_image_output():
     }
 
 
-def test_compact_trimming_keeps_file_backed_image_reference():
-    file_image = {"type": "input_image", "file_id": "file-canvas"}
+def test_compact_trimming_keeps_accepted_file_reference_while_eliding_inline_image():
+    file_reference = {"type": "input_file", "file_id": "file-canvas"}
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
         "input": [
-            {"role": "assistant", "content": "x" * 500_000},
-            {"role": "user", "content": [file_image]},
+            {"type": "custom_tool_call", "name": "view_image", "call_id": "call-file", "input": "{}"},
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call-file",
+                "output": [
+                    file_reference,
+                    {"type": "input_image", "image_url": "data:image/png;base64," + "A" * 500_000},
+                ],
+            },
         ],
     }
 
@@ -1475,7 +1482,61 @@ def test_compact_trimming_keeps_file_backed_image_reference():
 
     assert isinstance(dumped_input, list)
     latest_item = cast(Mapping[str, object], dumped_input[-1])
-    assert file_image in cast(list[object], latest_item["content"])
+    assert file_reference in cast(list[object], latest_item["output"])
+    assert "data:image/png;base64" not in json.dumps(dumped_input)
+
+
+def test_compact_trimming_keeps_hosted_computer_screenshot_fail_closed():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "computer_call",
+                "call_id": "call-computer",
+                "action": {"type": "screenshot"},
+            },
+            {
+                "type": "computer_call_output",
+                "call_id": "call-computer",
+                "output": {
+                    "type": "computer_screenshot",
+                    "image_url": "data:image/png;base64," + "A" * 500_000,
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(ClientPayloadError) as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.code == "responses_compact_input_too_large"
+    assert raised.value.param == "input"
+
+
+def test_compact_trimming_elides_data_url_inside_string_tool_output():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"type": "function_call", "name": "capture", "call_id": "call-string", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-string",
+                "output": "prefix data:image/png;base64," + "A" * 500_000 + " suffix",
+            },
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    dumped_output = cast(Mapping[str, object], dumped_input[-1])
+    output = cast(str, dumped_output["output"])
+    assert output.startswith("prefix ")
+    assert output.endswith(" suffix")
+    assert "Omitted inline image bytes" in output
+    assert "data:image/png;base64" not in output
 
 
 def test_compact_trimming_keeps_latest_unobserved_user_inline_image():

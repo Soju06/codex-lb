@@ -655,8 +655,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
                     return
-                if event_type in _MODEL_OUTPUT_EVENT_TYPES:
-                    matched_request_state.upstream_model_output_seen = True
                 if event_type in _TEXT_DELTA_EVENT_TYPES:
                     matched_request_state.downstream_visible = True
                 if event_type == "response.created" and matched_request_state.suppress_next_created_downstream:
@@ -670,6 +668,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.upstream_model_output_seen = True
                     suppress_downstream_event = True
                     deferred_reasoning_prelude_event = True
+                elif event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    matched_request_state.upstream_model_output_seen = True
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:

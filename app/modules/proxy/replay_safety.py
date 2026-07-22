@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -16,6 +17,11 @@ _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "apply_patch_call_output": "apply_patch_call",
 }
 _TOOL_CALL_TYPES = frozenset(_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
+_ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
+    {"reasoning", "tool_search_call", "tool_search_output", "web_search_call"}
+)
+_INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
+_ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
     "custom": frozenset({"description", "format", "name", "type"}),
@@ -46,7 +52,9 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
 _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES = frozenset(
     {"input_file", "input_image", "input_text", "output_text", "refusal", "text"}
 )
-_ACCOUNT_NEUTRAL_MESSAGE_FIELDS = frozenset({"content", "id", "phase", "role", "status", "type"})
+_ACCOUNT_NEUTRAL_MESSAGE_FIELDS = frozenset(
+    {"content", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "phase", "role", "status", "type"}
+)
 _ACCOUNT_NEUTRAL_CONTENT_FIELDS = {
     "input_file": frozenset({"file_data", "file_id", "file_url", "filename", "type"}),
     "input_image": frozenset({"detail", "file_id", "image_url", "type"}),
@@ -57,12 +65,34 @@ _ACCOUNT_NEUTRAL_CONTENT_FIELDS = {
 }
 _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
     "additional_tools": frozenset({"role", "tools", "type"}),
-    "apply_patch_call": frozenset({"call_id", "caller", "id", "input", "operation", "patch", "status", "type"}),
-    "apply_patch_call_output": frozenset({"call_id", "caller", "id", "output", "status", "type"}),
-    "custom_tool_call": frozenset({"call_id", "caller", "id", "input", "name", "status", "type"}),
-    "custom_tool_call_output": frozenset({"call_id", "caller", "id", "output", "status", "type"}),
-    "function_call": frozenset({"arguments", "call_id", "caller", "id", "name", "status", "type"}),
-    "function_call_output": frozenset({"call_id", "caller", "id", "output", "status", "type"}),
+    "apply_patch_call": frozenset(
+        {
+            "call_id",
+            "caller",
+            "id",
+            "input",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "operation",
+            "patch",
+            "status",
+            "type",
+        }
+    ),
+    "apply_patch_call_output": frozenset(
+        {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
+    ),
+    "custom_tool_call": frozenset(
+        {"call_id", "caller", "id", "input", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "name", "status", "type"}
+    ),
+    "custom_tool_call_output": frozenset(
+        {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
+    ),
+    "function_call": frozenset(
+        {"arguments", "call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "name", "status", "type"}
+    ),
+    "function_call_output": frozenset(
+        {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
+    ),
 }
 _ACCOUNT_NEUTRAL_ITEM_STATUSES = frozenset({"completed", "failed"})
 _ACCOUNT_NEUTRAL_APPLY_PATCH_OPERATION_FIELDS = {
@@ -116,15 +146,66 @@ _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class AccountNeutralReplayProjection:
+    input_items: list[JsonValue]
+    stored_prefix_count: int
+
+
+def project_responses_input_for_account_neutral_fresh_replay(
+    input_items: list[JsonValue],
+    *,
+    stored_count: int,
+) -> AccountNeutralReplayProjection | None:
+    """Remove known response-owned bookkeeping after durable prefix proof."""
+
+    if stored_count <= 0 or stored_count > len(input_items):
+        return None
+
+    projected_items: list[JsonValue] = []
+    projected_stored_count = 0
+    for index, item in enumerate(input_items):
+        projected_item = _project_account_neutral_replay_item(item)
+        if projected_item is not None:
+            projected_items.append(projected_item)
+        if index + 1 == stored_count:
+            projected_stored_count = len(projected_items)
+
+    return AccountNeutralReplayProjection(
+        input_items=projected_items,
+        stored_prefix_count=projected_stored_count,
+    )
+
+
+def _project_account_neutral_replay_item(item: JsonValue) -> JsonValue | None:
+    if not isinstance(item, dict):
+        return item
+
+    item_type = item.get("type")
+    if item_type == "reasoning" or (
+        item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
+    ):
+        return None
+
+    if "id" not in item:
+        return item
+    projected_item = dict(item)
+    projected_item.pop("id")
+    return projected_item
+
+
 def responses_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
-    seen_call_ids_by_type: dict[str, set[str]] = {item_type: set() for item_type in _TOOL_CALL_TYPES}
+    unsettled_call_ids_by_type: dict[str, set[str]] = {item_type: set() for item_type in _TOOL_CALL_TYPES}
     seen_call_ids: set[str] = set()
+    settled_call_ids: set[str] = set()
     for item in input_items:
         if not isinstance(item, dict):
             return False
         if "type" in item and not _is_nonblank_string(item.get("type")):
             return False
         if item.get("id") not in (None, ""):
+            return False
+        if not _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)):
             return False
         item_type_value = item.get("type")
         item_type = item_type_value if isinstance(item_type_value, str) else None
@@ -141,18 +222,31 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
             ):
                 return False
             seen_call_ids.add(call_id)
-            seen_call_ids_by_type[item_type].add(call_id)
+            unsettled_call_ids_by_type[item_type].add(call_id)
             continue
         call_item_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type or "")
         if call_item_type is not None:
             if (
                 call_id is None
-                or call_id not in seen_call_ids_by_type[call_item_type]
+                or call_id not in unsettled_call_ids_by_type[call_item_type]
+                or call_id in settled_call_ids
                 or not _caller_is_self_contained(item)
                 or not _tool_output_is_self_contained(item_type or "", item)
             ):
                 return False
-    return True
+            unsettled_call_ids_by_type[call_item_type].remove(call_id)
+            settled_call_ids.add(call_id)
+    return all(not call_ids for call_ids in unsettled_call_ids_by_type.values())
+
+
+def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
+    if value is None:
+        return True
+    return (
+        isinstance(value, dict)
+        and set(value) == _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS
+        and _is_nonblank_string(value.get("turn_id"))
+    )
 
 
 def responses_input_suffix_retains_prior_output(
@@ -164,17 +258,15 @@ def responses_input_suffix_retains_prior_output(
 
     if stored_count <= 0 or len(input_items) <= stored_count:
         return False
+    prefix_state = _direct_tool_call_prefix_state(input_items[:stored_count])
+    if prefix_state is None:
+        return False
+    pending_suffix_calls, seen_suffix_call_ids = prefix_state
     retained_output_seen = False
     fresh_followup_seen = False
-    pending_suffix_calls: deque[tuple[str, str]] = deque()
-    seen_suffix_call_ids: set[str] = set()
     for item in input_items[stored_count:]:
         if not isinstance(item, dict):
             return False
-        if fresh_followup_seen:
-            if not _is_fresh_followup_input(item):
-                return False
-            continue
         item_type_value = item.get("type")
         item_type = item_type_value if isinstance(item_type_value, str) else None
         if item_type in _TOOL_CALL_TYPES:
@@ -189,6 +281,7 @@ def responses_input_suffix_retains_prior_output(
             # prove that an omitted parallel call was not part of the response.
             # Require a later completed assistant message as the turn boundary.
             retained_output_seen = False
+            fresh_followup_seen = False
             continue
         call_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type or "")
         if call_type is not None:
@@ -205,6 +298,7 @@ def responses_input_suffix_retains_prior_output(
             if pending_suffix_calls or not _is_retained_response_message(item):
                 return False
             retained_output_seen = True
+            fresh_followup_seen = False
             continue
         if _is_fresh_followup_input(item):
             if not retained_output_seen or pending_suffix_calls:
@@ -213,6 +307,44 @@ def responses_input_suffix_retains_prior_output(
             continue
         return False
     return retained_output_seen and fresh_followup_seen and not pending_suffix_calls
+
+
+def _direct_tool_call_prefix_state(
+    input_items: list[JsonValue],
+) -> tuple[deque[tuple[str, str]], set[str]] | None:
+    pending_calls: deque[tuple[str, str]] = deque()
+    seen_call_ids: set[str] = set()
+    for item in input_items:
+        if not isinstance(item, dict):
+            return None
+        item_type_value = item.get("type")
+        item_type = item_type_value if isinstance(item_type_value, str) else None
+        if item_type in _TOOL_CALL_TYPES:
+            if item.get("status") not in (None, "completed"):
+                return None
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
+                return None
+            seen_call_ids.add(call_id)
+            pending_calls.append((item_type, call_id))
+            continue
+        call_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type or "")
+        if call_type is not None:
+            if item.get("status") not in (None, "completed", "failed"):
+                return None
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not pending_calls:
+                return None
+            if pending_calls[0] != (call_type, call_id):
+                return None
+            pending_calls.popleft()
+            continue
+        if pending_calls and (
+            (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
+            or item_type in {"input_file", "input_image", "input_text"}
+        ):
+            return None
+    return pending_calls, seen_call_ids
 
 
 def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:

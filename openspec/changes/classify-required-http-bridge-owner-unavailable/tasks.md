@@ -12,6 +12,7 @@
 - [x] 2.3 Remove previous-response and stale affinity state, exclude the failed owner, and create a local namespaced recovery lane.
 - [x] 2.4 Preserve fail-closed behavior for unsafe state, policy conflicts, post-selection failures, and partial output.
 - [x] 2.5 Require completed retained response output and ordered fresh input after the durable prefix proof.
+- [x] 2.6 Project verified full resends to portable plaintext by removing reasoning, upstream item identities, and completed search bookkeeping while validating retained client turn metadata.
 
 ## 3. Durable Recovery Ownership
 
@@ -28,3 +29,5 @@
 - [x] 4.3 Add route coverage proving A-unavailable to B-success to B-next-turn behavior and stale-header removal.
 - [x] 4.4 Run formatting, lint, type, architecture, strict OpenSpec, focused, and broader regression gates.
 - [x] 4.5 Complete a fresh independent multi-agent review pass with no new actionable findings.
+- [x] 4.6 Add unit and route regressions for encrypted-reasoning projection, multiple retained turns, and a direct call/output split across the durable boundary.
+- [x] 4.7 Re-run formatting, lint, type, architecture, strict OpenSpec, focused, and broader regression gates for the projection change.

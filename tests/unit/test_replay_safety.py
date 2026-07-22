@@ -9,6 +9,7 @@ from app.modules.proxy.continuity import (
     make_http_bridge_account_neutral_replay_key,
 )
 from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -90,6 +91,9 @@ from app.modules.proxy.replay_safety import (
                     "call_id": "call_update",
                     "operation": {"type": "update_file", "path": "app.py", "diff": "@@\n-old\n+new\n"},
                 },
+                {"type": "apply_patch_call_output", "call_id": "call_create", "output": "created"},
+                {"type": "apply_patch_call_output", "call_id": "call_delete", "output": "deleted"},
+                {"type": "apply_patch_call_output", "call_id": "call_update", "output": "updated"},
             ]
         },
         {"input": [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]},
@@ -146,6 +150,183 @@ def test_account_neutral_fresh_replay_accepts_self_contained_payloads(
     assert responses_payload_is_account_neutral_fresh_replay(payload) is True
 
 
+def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() -> None:
+    metadata = {"turn_id": "turn_owner_a"}
+    input_items: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "reasoning",
+            "id": "rs_owner_a",
+            "encrypted_content": "owner-a-ciphertext",
+            "summary": [],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_owner_a",
+            "call_id": "call_boundary",
+            "name": "exec",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_owner_a",
+            "call_id": "call_boundary",
+            "output": "/workspace",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_call",
+            "id": "tsc_owner_a",
+            "call_id": "call_search",
+            "arguments": {"query": "github"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "web_search_call",
+            "id": "ws_owner_a",
+            "action": {"type": "search", "query": "github"},
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "message",
+            "id": "msg_owner_a",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_next"},
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=3)
+
+    assert projection is not None
+    assert projection.stored_prefix_count == 2
+    assert projection.input_items == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_boundary",
+            "name": "exec",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_boundary",
+            "output": "/workspace",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_next"},
+        },
+    ]
+    assert (
+        responses_input_suffix_retains_prior_output(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+        )
+        is True
+    )
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
+
+
+def test_account_neutral_replay_projection_rejects_invalid_stored_boundary() -> None:
+    assert (
+        project_responses_input_for_account_neutral_fresh_replay(
+            [{"role": "user", "content": "hello"}],
+            stored_count=2,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "search_item",
+    [
+        {
+            "type": "web_search_call",
+            "id": "ws_in_progress",
+            "action": {"type": "search", "query": "pending"},
+            "status": "in_progress",
+        },
+        {
+            "type": "tool_search_call",
+            "id": "tsc_in_progress",
+            "call_id": "call_search",
+            "arguments": {"query": "pending"},
+            "status": "in_progress",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "status": "incomplete",
+            "tools": [],
+        },
+    ],
+)
+def test_account_neutral_replay_projection_preserves_noncompleted_search_state_to_fail_closed(
+    search_item: dict[str, JsonValue],
+) -> None:
+    input_items: list[JsonValue] = [
+        {"role": "user", "content": "old question"},
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
+        search_item,
+        {"role": "user", "content": "next question"},
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
+
+    assert projection is not None
+    assert any(isinstance(item, dict) and item.get("type") == search_item["type"] for item in projection.input_items)
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is False
+
+
 @pytest.mark.parametrize(
     "suffix",
     [
@@ -171,6 +352,20 @@ def test_account_neutral_fresh_replay_accepts_self_contained_payloads(
                 "content": [{"type": "output_text", "text": "tool result summarized"}],
             },
             {"role": "user", "content": "next question"},
+        ],
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "first retained answer"}],
+            },
+            {"role": "user", "content": "intermediate question"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "second retained answer"}],
+            },
+            {"role": "user", "content": "current question"},
         ],
     ],
 )
@@ -431,6 +626,26 @@ def test_full_resend_suffix_rejects_missing_or_misordered_context(
         },
         {
             "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_duplicate_output",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_duplicate_output",
+                    "output": "first",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_duplicate_output",
+                    "output": "duplicate",
+                },
+            ]
+        },
+        {
+            "input": [
                 {"type": "function_call", "call_id": "call_1"},
                 {"type": "function_call_output", "call_id": "call_1", "output": "underspecified"},
             ]
@@ -581,6 +796,15 @@ def test_full_resend_suffix_rejects_missing_or_misordered_context(
             ]
         },
         {"input": [{"role": "user", "content": "hello", "future_account_handle": "acct-A"}]},
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": 123},
+                }
+            ]
+        },
         {
             "input": [
                 {

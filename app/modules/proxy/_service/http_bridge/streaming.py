@@ -206,6 +206,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
 from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -862,6 +863,7 @@ class _HTTPBridgeStreamingMixin:
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
         durable_full_resend_anchor_fingerprint: str | None = None
+        durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_retains_prior_output = False
         force_local_recovery_creation = False
@@ -874,13 +876,6 @@ class _HTTPBridgeStreamingMixin:
         if durable_lookup is not None and payload_looks_like_full_resend and durable_anchor_trimmable:
             durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
             durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
-            durable_full_resend_retains_prior_output = isinstance(
-                payload.input,
-                list,
-            ) and responses_input_suffix_retains_prior_output(
-                cast(list[JsonValue], payload.input),
-                stored_count=durable_full_resend_anchor_count or 0,
-            )
         durable_model_transition_lookup = (
             durable_lookup
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
@@ -1110,7 +1105,9 @@ class _HTTPBridgeStreamingMixin:
         fresh_replay_excluded_account_ids: set[str] = set()
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+            nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
+            nonlocal durable_full_resend_retains_prior_output
 
             if (
                 not _http_bridge_is_previous_response_owner_unavailable(exc)
@@ -1118,12 +1115,29 @@ class _HTTPBridgeStreamingMixin:
                 or rewritten_file_account_id is not None
                 or durable_full_resend_anchor_count is None
                 or durable_full_resend_anchor_fingerprint is None
-                or not durable_full_resend_retains_prior_output
             ):
+                return False
+            if durable_full_resend_fresh_payload is None:
+                if not isinstance(payload.input, list):
+                    return False
+                replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=durable_full_resend_anchor_count,
+                )
+                if replay_projection is None:
+                    return False
+                durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
+                    payload
+                ).model_copy(update={"input": replay_projection.input_items})
+                durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
+                    replay_projection.input_items,
+                    stored_count=replay_projection.stored_prefix_count,
+                )
+            if not durable_full_resend_retains_prior_output:
                 return False
             if durable_full_resend_is_account_neutral is None:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
-                    _http_bridge_payload_without_previous_response_id(payload)
+                    durable_full_resend_fresh_payload
                 )
             return durable_full_resend_is_account_neutral
 
@@ -1133,6 +1147,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal bridge_session_key
             nonlocal durable_full_resend_anchor_count
             nonlocal durable_full_resend_anchor_fingerprint
+            nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
             nonlocal durable_lookup
             nonlocal effective_payload
@@ -1155,7 +1170,7 @@ class _HTTPBridgeStreamingMixin:
                 bridge_session_key,
                 account_id=failed_owner_id,
                 model=payload.model,
-                detail="outcome=fresh_full_resend_without_anchor",
+                detail="outcome=projected_plaintext_full_resend_without_anchor",
                 cache_key_family=bridge_session_key.affinity_kind,
                 model_class=_extract_model_class(payload.model) if payload.model else None,
             )
@@ -1169,7 +1184,9 @@ class _HTTPBridgeStreamingMixin:
             bridge_session_key = _HTTPBridgeSessionKey(replay_kind, replay_key, bridge_session_key.api_key_id)
             account_neutral_recovery = True
             force_local_recovery_creation = True
-            fresh_payload = _http_bridge_payload_without_previous_response_id(payload)
+            fresh_payload = durable_full_resend_fresh_payload
+            if fresh_payload is None:
+                raise RuntimeError("account-neutral replay projection missing after eligibility check")
             request_state, text_data = prepare_bridge_request(fresh_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
@@ -1191,6 +1208,7 @@ class _HTTPBridgeStreamingMixin:
             previous_response_trimmed_input_fingerprint = None
             durable_full_resend_anchor_count = None
             durable_full_resend_anchor_fingerprint = None
+            durable_full_resend_fresh_payload = None
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
             file_required_preferred_account = False

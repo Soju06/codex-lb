@@ -16458,14 +16458,13 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         (None, False, "gpt-5.3"),
         (None, True, None),
         ("conversation", False, None),
-        ("encrypted", False, None),
         ("file", False, None),
         ("missing_prior_output", False, None),
         ("orphan_output", False, None),
         ("missing_owner", False, None),
     ],
 )
-async def test_stream_via_http_bridge_replays_only_plaintext_durable_full_resend_when_owner_is_unavailable(
+async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_when_owner_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     unsafe_replay_input: str | None,
     replace_retired_gate: bool,
@@ -16480,25 +16479,22 @@ async def test_stream_via_http_bridge_replays_only_plaintext_durable_full_resend
         "_http_bridge_payload_is_account_neutral_fresh_replay",
         account_neutral_classifier,
     )
+    owner_metadata: proxy_service.JsonValue = {"turn_id": "turn-owner"}
     historical_input: list[proxy_service.JsonValue] = [
-        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
         {
-            "type": "function_call",
-            "call_id": "call_old",
-            "name": "lookup",
-            "arguments": "{}",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
         },
-        {"type": "function_call_output", "call_id": "call_old", "output": "old output"},
+        {
+            "type": "reasoning",
+            "id": "rs_owner",
+            "encrypted_content": "encrypted-owner-scoped-reasoning",
+            "summary": [],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
     ]
-    if unsafe_replay_input == "encrypted":
-        historical_input.append(
-            {
-                "type": "reasoning",
-                "encrypted_content": "encrypted-owner-scoped-reasoning",
-                "summary": [],
-            }
-        )
-    elif unsafe_replay_input == "file":
+    if unsafe_replay_input == "file":
         historical_input.append(
             {
                 "role": "user",
@@ -16507,21 +16503,68 @@ async def test_stream_via_http_bridge_replays_only_plaintext_durable_full_resend
         )
     elif unsafe_replay_input == "orphan_output":
         historical_input.append({"type": "function_call_output", "call_id": "call_missing", "output": "orphan output"})
+    historical_input.append(
+        {
+            "type": "function_call",
+            "id": "fc_owner",
+            "call_id": "call_old",
+            "name": "lookup",
+            "arguments": "{}",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        }
+    )
+    retained_boundary_output: proxy_service.JsonValue = {
+        "type": "function_call_output",
+        "call_id": "call_old",
+        "output": "old output",
+        "internal_chat_message_metadata_passthrough": owner_metadata,
+    }
     new_input: proxy_service.JsonValue = {
         "role": "user",
         "content": [{"type": "input_text", "text": "next question"}],
+        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
     }
     retained_prior_output: proxy_service.JsonValue = {
         "type": "message",
+        "id": "msg_owner",
         "role": "assistant",
         "status": "completed",
         "content": [{"type": "output_text", "text": "old answer"}],
+        "internal_chat_message_metadata_passthrough": owner_metadata,
     }
+    completed_search_bookkeeping: list[proxy_service.JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "id": "tsc_owner",
+            "call_id": "call_search",
+            "arguments": {"query": "docs"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "web_search_call",
+            "id": "ws_owner",
+            "action": {"type": "search", "query": "docs"},
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+    ]
     payload_data: dict[str, proxy_service.JsonValue] = {
         "model": "gpt-5.4",
         "instructions": "hi",
         "input": [
             *historical_input,
+            retained_boundary_output,
+            *completed_search_bookkeeping,
             *([] if unsafe_replay_input == "missing_prior_output" else [retained_prior_output]),
             new_input,
         ],
@@ -16677,7 +16720,7 @@ async def test_stream_via_http_bridge_replays_only_plaintext_durable_full_resend
             last_call = get_or_create.await_args
             assert last_call is not None
             assert last_call.kwargs["previous_response_id"] is None
-        if unsafe_replay_input in {"missing_owner", "missing_prior_output"}:
+        if unsafe_replay_input in {"missing_owner", "missing_prior_output", "orphan_output"}:
             account_neutral_classifier.assert_not_called()
         else:
             account_neutral_classifier.assert_called_once()
@@ -16716,7 +16759,40 @@ async def test_stream_via_http_bridge_replays_only_plaintext_durable_full_resend
     assert captured_request_states[0].enforce_openai_sdk_contract is False
     replay_payload = json.loads(captured_text_data[0])
     assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == [*historical_input, retained_prior_output, new_input]
+    assert replay_payload["input"] == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_old",
+            "name": "lookup",
+            "arguments": "{}",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_old",
+            "output": "old output",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "old answer"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+        },
+    ]
+    assert "encrypted_content" not in captured_text_data[0]
+    assert all("id" not in item for item in replay_payload["input"])
     account_neutral_classifier.assert_called_once()
 
 

@@ -7543,7 +7543,7 @@ async def test_backend_responses_http_bridge_real_selector_recovers_full_resend_
 
 
 @pytest.mark.asyncio
-async def test_backend_responses_does_not_replay_retained_encrypted_reasoning_to_available_account(
+async def test_backend_responses_projects_retained_encrypted_reasoning_before_replaying_to_available_account(
     async_client,
     monkeypatch,
 ):
@@ -7601,11 +7601,13 @@ async def test_backend_responses_does_not_replay_retained_encrypted_reasoning_to
     )
     first_response = first_events[-1]["response"]
 
-    await _import_account(
+    alternate_account_id = await _import_account(
         async_client,
         "acc_backend_encrypted_alternate",
         "backend-encrypted-alternate@example.com",
     )
+    alternate_account = await _get_account(alternate_account_id)
+    alternate_chatgpt_account_id = cast(str, alternate_account.chatgpt_account_id)
     pause = await async_client.post(f"/api/accounts/{owner_account_id}/pause")
     assert pause.status_code == 200, pause.text
 
@@ -7613,8 +7615,17 @@ async def test_backend_responses_does_not_replay_retained_encrypted_reasoning_to
         *historical_input,
         {
             "type": "reasoning",
+            "id": "rs_owner_scoped",
             "encrypted_content": "owner-scoped-ciphertext",
             "summary": [],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-owner"},
+        },
+        {
+            "type": "web_search_call",
+            "id": "ws_owner_scoped",
+            "action": {"type": "search", "query": "portable result"},
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-owner"},
         },
         first_response["output"][0],
         {
@@ -7622,26 +7633,28 @@ async def test_backend_responses_does_not_replay_retained_encrypted_reasoning_to
             "content": [{"type": "input_text", "text": "second question"}],
         },
     ]
-    second = await asyncio.wait_for(
-        async_client.post(
-            "/backend-api/codex/responses",
-            json={
-                "model": "gpt-5.1",
-                "instructions": "Return exactly OK.",
-                "input": full_resend,
-                "prompt_cache_key": "backend-http-bridge-encrypted-replay",
-                "previous_response_id": first_response["id"],
-                "stream": True,
-            },
-        ),
-        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    second_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": full_resend,
+            "prompt_cache_key": "backend-http-bridge-encrypted-replay",
+            "previous_response_id": first_response["id"],
+            "stream": True,
+        },
     )
 
-    assert second.status_code == 502, second.text
-    assert second.json()["error"]["code"] == "previous_response_owner_unavailable"
-    assert connected_account_ids == [owner_chatgpt_account_id]
+    assert second_events[-1]["response"]["id"] == "resp_backend_encrypted_alternate_1"
+    assert connected_account_ids == [owner_chatgpt_account_id, alternate_chatgpt_account_id]
     assert len(owner_upstream.sent_text) == 1
-    assert alternate_upstream.sent_text == []
+    assert len(alternate_upstream.sent_text) == 1
+    replay_payload = json.loads(alternate_upstream.sent_text[0])
+    assert "previous_response_id" not in replay_payload
+    assert all(item.get("type") not in {"reasoning", "web_search_call"} for item in replay_payload["input"])
+    assert all("id" not in item for item in replay_payload["input"])
+    assert "encrypted_content" not in alternate_upstream.sent_text[0]
     assert degraded_reasons == []
 
 

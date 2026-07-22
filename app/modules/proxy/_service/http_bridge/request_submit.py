@@ -1715,6 +1715,7 @@ class _HTTPBridgeRequestSubmitMixin:
         reconnected = False
         try:
             request_state.precreated_replay_account_id = session.account.id
+            await self._release_request_state_account_response_create_lease(request_state)
             await _call_with_supported_optional_kwargs(
                 self._reconnect_http_bridge_session,
                 session,
@@ -1726,6 +1727,14 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized=True,
             )
             reconnected = True
+            settings = await _service_get_settings_cache().get()
+            request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
+                account_id=session.account.id,
+                request_id=request_state.request_id,
+                surface="http_bridge_security_retry",
+                concurrency_caps=effective_account_concurrency_caps(settings),
+            )
+            request_state.account_response_create_release = self._load_balancer.release_account_lease
             if session.account.id != owner_account_id:
                 if (
                     previous_session_affinity.codex_session_source == "session_header"

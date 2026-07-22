@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -51,6 +52,7 @@ _COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE: dict[str, str] = {
 _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset(_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE)
 _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES = frozenset({"apply_patch_call", "apply_patch_call_output"})
+_COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"""data:image/[^,\s]+,[^\s"'<>]+""")
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -157,7 +159,7 @@ def _input_image_file_reference(item: Mapping[str, JsonValue]) -> str | None:
 def extract_input_file_ids(input_value: JsonValue) -> set[str]:
     """Return all ``file_id`` strings referenced by ``input_file`` / ``input_image`` items.
 
-    Walks both top-level items and nested role-message ``content`` parts,
+    Walks top-level items and nested request values,
     matching the shapes accepted by ``ResponsesRequest.input`` /
     ``ResponsesCompactRequest.input``. Returns an empty set when the
     input is a plain string or has no ``input_file`` parts. Used by the
@@ -169,34 +171,23 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
     if not is_json_list(input_value):
         return set()
     file_ids: set[str] = set()
-    for item in input_value:
-        if not is_json_mapping(item):
-            continue
-        item_mapping = item
-        if _is_input_file_with_id(item_mapping):
-            file_id = item_mapping.get("file_id")
-            if isinstance(file_id, str) and file_id:
-                file_ids.add(file_id)
-        image_file_id = _input_image_file_reference(item_mapping)
-        if image_file_id is not None:
-            file_ids.add(image_file_id)
-        content = item_mapping.get("content")
-        if is_json_list(content):
-            parts: list[JsonValue] = content
-        elif is_json_mapping(content):
-            parts = [content]
-        else:
-            parts = []
-        for part in parts:
-            if not is_json_mapping(part):
-                continue
-            if _is_input_file_with_id(part):
-                file_id = part.get("file_id")
+
+    def collect(value: JsonValue) -> None:
+        if is_json_mapping(value):
+            if _is_input_file_with_id(value):
+                file_id = value.get("file_id")
                 if isinstance(file_id, str) and file_id:
                     file_ids.add(file_id)
-            image_file_id = _input_image_file_reference(part)
+            image_file_id = _input_image_file_reference(value)
             if image_file_id is not None:
                 file_ids.add(image_file_id)
+            for child in value.values():
+                collect(child)
+        elif is_json_list(value):
+            for child in value:
+                collect(child)
+
+    collect(input_value)
     return file_ids
 
 
@@ -993,12 +984,15 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             prospective_required_indices,
         )
         prospective_required_tokens = _estimated_json_tokens(prospective_required_input)
-        if not terminal_is_required and (prospective_required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS):
-            rewritten_input, images_elided = _compact_elide_required_tool_output_images(
-                input_value,
-                required_indices=prospective_required_indices,
-            )
-            if images_elided:
+        rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+            input_value,
+            required_indices=prospective_required_indices,
+        )
+        if images_elided:
+            if _estimated_json_tokens(rewritten_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                payload["input"] = rewritten_input
+                return
+            if prospective_required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
                 rewritten_token_counts = [_estimated_json_array_item_tokens(item) for item in rewritten_input]
                 rewritten_required_input = _compact_trimmed_input_with_markers(
                     rewritten_input,
@@ -1025,6 +1019,8 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         if images_elided:
             input_value = rewritten_input
             payload["input"] = input_value
+            if _estimated_json_tokens(input_value) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                return
             token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
             head_count = _compact_trim_prefix_count(token_counts)
             required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
@@ -1294,6 +1290,13 @@ def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
             rewritten.append(rewritten_item)
             changed = changed or item_changed
         return rewritten, changed
+    if isinstance(value, str) and "data:image/" in value:
+        rewritten_value, replacements = _COMPACT_INLINE_IMAGE_DATA_URL_RE.subn(
+            lambda match: f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(match.group(0))} encoded characters).",
+            value,
+        )
+        if replacements:
+            return rewritten_value, True
     return value, False
 
 

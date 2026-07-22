@@ -796,6 +796,9 @@ _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the la
 _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
 _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
+_COMPACT_OMITTED_INLINE_IMAGE_TEXT = (
+    "[compact trim] Omitted inline image bytes that were already observed before compaction"
+)
 
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
@@ -979,12 +982,43 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             token_counts,
             prospective_required_indices,
         )
-        if terminal_is_required or (
-            _estimated_json_tokens(prospective_required_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
-        ):
+        prospective_required_tokens = _estimated_json_tokens(prospective_required_input)
+        if not terminal_is_required and (prospective_required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS):
+            rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+                input_value,
+                required_indices=prospective_required_indices,
+            )
+            if images_elided:
+                rewritten_token_counts = [_estimated_json_array_item_tokens(item) for item in rewritten_input]
+                rewritten_required_input = _compact_trimmed_input_with_markers(
+                    rewritten_input,
+                    rewritten_token_counts,
+                    prospective_required_indices,
+                )
+                rewritten_required_tokens = _estimated_json_tokens(rewritten_required_input)
+                if rewritten_required_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                    input_value = rewritten_input
+                    payload["input"] = input_value
+                    token_counts = rewritten_token_counts
+                    head_count = _compact_trim_prefix_count(token_counts)
+                    prospective_required_input = rewritten_required_input
+                    prospective_required_tokens = rewritten_required_tokens
+        if terminal_is_required or (prospective_required_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS):
             required_indices = prospective_required_indices
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
+    if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+            input_value,
+            required_indices=required_indices,
+        )
+        if images_elided:
+            input_value = rewritten_input
+            payload["input"] = input_value
+            token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+            head_count = _compact_trim_prefix_count(token_counts)
+            required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+            required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         raise ClientPayloadError(
             "Compact input exceeds the upstream size limit and cannot be trimmed "
@@ -1088,7 +1122,7 @@ def _compact_terminal_required_indices(
         input_value,
         {latest_index},
         token_counts=token_counts,
-        token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
+        token_budget=sum(token_counts),
     )
     if latest_index in paired_tail:
         return paired_tail, False
@@ -1155,6 +1189,65 @@ def _compact_tool_call_is_side_effect(item: Mapping[str, JsonValue]) -> bool:
         and isinstance(argument_value, str)
         and is_downstream_side_effect_tool_call(name, argument_value)
     )
+
+
+def _compact_elide_required_tool_output_images(
+    input_value: list[JsonValue],
+    *,
+    required_indices: set[int],
+) -> tuple[list[JsonValue], bool]:
+    rewritten: list[JsonValue] = []
+    changed = False
+    for index, item in enumerate(input_value):
+        if (
+            index in required_indices
+            and is_json_mapping(item)
+            and item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        ):
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        else:
+            rewritten.append(item)
+    return rewritten, changed
+
+
+def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
+    """Replace inline image bytes with an explicit compact-only text marker.
+
+    The model has already observed these images during the live turn. Re-sending
+    their data URLs to the compact endpoint can make an otherwise recoverable
+    thread permanently uncompactable, especially when the latest required tool
+    output contains a screenshot. File-backed image references remain intact.
+    """
+
+    if is_json_mapping(value):
+        if value.get("type") == "input_image":
+            image_url = value.get("image_url")
+            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                return (
+                    {
+                        "type": "input_text",
+                        "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(image_url)} encoded characters).",
+                    },
+                    True,
+                )
+        rewritten_mapping: JsonObject = {}
+        changed = False
+        for key, item in value.items():
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten_mapping[key] = rewritten_item
+            changed = changed or item_changed
+        return rewritten_mapping, changed
+    if is_json_list(value):
+        rewritten: list[JsonValue] = []
+        changed = False
+        for item in value:
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        return rewritten, changed
+    return value, False
 
 
 def _compact_fit_selected_indices_to_wire_budget(

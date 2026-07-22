@@ -531,7 +531,10 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_compaction_trigger_streams_single_compaction_item(async_client, monkeypatch):
+async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and_streams_item(
+    async_client,
+    monkeypatch,
+):
     email = "compact-trigger@example.com"
     raw_account_id = "acc_compact_trigger"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -577,8 +580,9 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
 
     async def fake_compact(payload, headers, access_token, account_id, **kwargs):
         del headers, access_token, kwargs
-        seen_payload["payload"] = payload.model_dump(mode="json", exclude_none=True)
-        seen_payload["input"] = payload.input
+        wire_payload = payload.to_payload()
+        seen_payload["payload"] = wire_payload
+        seen_payload["input"] = wire_payload["input"]
         seen_payload["model"] = payload.model
         seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
         seen_payload["conversation"] = getattr(payload, "conversation", None)
@@ -603,6 +607,23 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
         "instructions": "compact this turn",
         "input": [
             {"role": "user", "content": "hello"},
+            {
+                "type": "custom_tool_call",
+                "name": "view_image",
+                "call_id": "call_route_image",
+                "input": "{}",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_route_image",
+                "output": [
+                    {"type": "input_text", "text": "Image Size: 1512x982."},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64," + "A" * 500_000,
+                    },
+                ],
+            },
             {"type": "compaction_trigger"},
         ],
         "previous_response_id": "resp_compact_anchor",
@@ -623,7 +644,14 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
     assert selection_preferred_ids == [owner_account.id]
     assert seen_payload["model"] == "gpt-5.1"
-    assert seen_payload["input"] == [{"role": "user", "content": "hello"}]
+    compact_input = cast(list[Mapping[str, object]], seen_payload["input"])
+    assert compact_input[0] == {"role": "user", "content": "hello"}
+    assert compact_input[1]["call_id"] == "call_route_image"
+    assert compact_input[2]["call_id"] == "call_route_image"
+    compact_input_json = json.dumps(compact_input)
+    assert "Image Size: 1512x982." in compact_input_json
+    assert "Omitted inline image bytes that were already observed before compaction" in compact_input_json
+    assert "data:image/png;base64" not in compact_input_json
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
     compact_payload = cast(Mapping[str, object], seen_payload["payload"])

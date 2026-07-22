@@ -3488,8 +3488,7 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
-                    penalize_account=message.error_code is not None
-                    and message.error_code != "proxy_network_unavailable",
+                    penalize_account=message.error_code != "proxy_network_unavailable",
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
                 if sequenced_downstream_replay_refused:
@@ -4664,13 +4663,61 @@ class _WebSocketMixin:
                     penalty_message = request_state.error_message_override or error_message
                     break
 
-        if (
-            remaining
+        health_penalty_will_run = (
+            bool(remaining)
             and penalize_account
             and account is not None
             and isinstance(account, Account)
             and penalty_code is not None
-        ):
+        )
+        if health_penalty_will_run:
+            # A keyed websocket health error must settle held API-key quota
+            # before the account health write.  Otherwise a concurrent retry
+            # can observe capacity that belongs to an already-terminal turn.
+            for request_state in remaining:
+                proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                for settle_attempt in range(3):
+                    try:
+                        await proxy._release_websocket_request_state_reservation(request_state)
+                    except Exception:
+                        _facade().logger.warning(
+                            "Failed to settle websocket reservation before account-health penalty "
+                            "account_id=%s error_code=%s attempt=%d",
+                            account_id_value,
+                            penalty_code,
+                            settle_attempt + 1,
+                            exc_info=True,
+                        )
+                    else:
+                        request_state.api_key_reservation = None
+                        break
+
+            # The terminal-cleanup settlement used to happen after the health
+            # write (and, for SSE callers, after response.failed). Give every
+            # still-held reservation its final bounded attempt now so health
+            # cannot become visible while another terminal turn still owns
+            # quota.
+            for request_state in remaining:
+                if request_state.api_key_reservation is None:
+                    continue
+                try:
+                    await proxy._release_websocket_request_state_reservation(request_state)
+                except Exception:
+                    _facade().logger.warning(
+                        "Failed to settle websocket reservation during pre-health terminal cleanup "
+                        "account_id=%s error_code=%s",
+                        account_id_value,
+                        penalty_code,
+                        exc_info=True,
+                    )
+                else:
+                    request_state.api_key_reservation = None
+
+        health_penalty_ready = health_penalty_will_run and all(
+            request_state.api_key_reservation is None for request_state in remaining
+        )
+
+        if health_penalty_ready and account is not None and penalty_code is not None:
             try:
                 await proxy._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
             except Exception:
@@ -4742,7 +4789,19 @@ class _WebSocketMixin:
                     error_param=request_error_param,
                     downstream_activity=downstream_activity,
                 )
-            await proxy._release_websocket_request_state_reservation(request_state)
+            if request_state.api_key_reservation is not None and not health_penalty_will_run:
+                try:
+                    await proxy._release_websocket_request_state_reservation(request_state)
+                except Exception:
+                    _facade().logger.warning(
+                        "Failed to release websocket request reservation during terminal cleanup "
+                        "account_id=%s error_code=%s",
+                        account_id_value,
+                        request_error_code,
+                        exc_info=True,
+                    )
+                else:
+                    request_state.api_key_reservation = None
             if account_id_value is None or request_state.skip_request_log:
                 continue
             latency_ms = int((time.monotonic() - request_state.started_at) * 1000)

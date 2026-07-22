@@ -8,9 +8,9 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
-from app.modules.proxy.tool_call_dedupe import is_downstream_side_effect_tool_call
 
 type MutableJsonObject = dict[str, JsonValue]
 
@@ -1237,7 +1237,7 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
 
 
 def _compact_item_is_side_effect_anchor(item: Mapping[str, JsonValue]) -> bool:
-    return is_downstream_side_effect_tool_call(item)
+    return is_downstream_side_effect_tool_call_item(item)
 
 
 def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:

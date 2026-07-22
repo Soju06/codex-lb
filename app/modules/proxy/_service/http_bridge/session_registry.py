@@ -423,6 +423,8 @@ class _HTTPBridgeSessionRegistryMixin:
         *,
         allow_takeover: bool,
         force_owner_epoch_advance: bool = False,
+        claim_account_id: str | None = None,
+        clear_latest_turn_state: bool = False,
     ) -> None:
         current_instance = _service_get_settings().http_responses_session_bridge_instance_id
         try:
@@ -434,10 +436,10 @@ class _HTTPBridgeSessionRegistryMixin:
                     api_key_id=session.key.api_key_id,
                     instance_id=current_instance,
                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                    account_id=session.account.id,
+                    account_id=claim_account_id or session.account.id,
                     model=session.request_model,
                     service_tier=session.request_service_tier,
-                    latest_turn_state=session.downstream_turn_state,
+                    latest_turn_state=None if clear_latest_turn_state else session.downstream_turn_state,
                     latest_response_id=None,
                     allow_takeover=allow_takeover,
                     force_owner_epoch_advance=force_owner_epoch_advance or claim_attempt > 0,

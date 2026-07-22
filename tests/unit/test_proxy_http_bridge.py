@@ -191,10 +191,10 @@ async def test_http_bridge_send_replaces_timestamp_and_wakes_existing_reader(
 ) -> None:
     request_state = _make_eventless_http_bridge_owner(sent_at=1.0)
     session = _make_bridge_session()
-    seen_sent_ats: list[float | None] = []
+    seen_sent_ats: list[tuple[float | None, float | None]] = []
 
     async def send_text(_text: str) -> None:
-        seen_sent_ats.append(request_state.response_create_sent_at)
+        seen_sent_ats.append((request_state.response_create_sent_at, request_state.upstream_sent_at))
 
     session.upstream = cast(
         UpstreamResponsesWebSocket,
@@ -220,8 +220,9 @@ async def test_http_bridge_send_replaces_timestamp_and_wakes_existing_reader(
         "second",
     )
 
-    assert seen_sent_ats == [100.0, 200.0]
+    assert seen_sent_ats == [(100.0, 100.0), (200.0, 200.0)]
     assert request_state.response_create_sent_at == 200.0
+    assert request_state.upstream_sent_at == 200.0
     assert session.upstream_reader_wakeup.is_set() is True
 
 
@@ -257,6 +258,7 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
         )
 
     assert request_state.response_create_sent_at is None
+    assert request_state.upstream_sent_at is None
     assert session.upstream_reader_wakeup.is_set() is True
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
@@ -265,6 +267,69 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_enforces_response_created_timeout_after_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BlockingUpstream:
+        def __init__(self) -> None:
+            self.receive_cancelled = False
+            self.closed = False
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            try:
+                await asyncio.Event().wait()
+                raise AssertionError("the response-created timeout should cancel receive")
+            except asyncio.CancelledError:
+                self.receive_cancelled = True
+                raise
+
+        async def close(self) -> None:
+            self.closed = True
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _BlockingUpstream()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-response-created-timeout",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        upstream_sent_at=time.monotonic(),
+        # This narrows the regression to the configured startup cutoff rather
+        # than the separate eventless-gate watchdog.
+        skip_request_log=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_bridge_session(
+        key_value="response-created-timeout",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(UpstreamResponsesWebSocket, upstream)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        stream_idle_timeout_seconds=1.0,
+        http_responses_session_bridge_request_budget_seconds=1.0,
+        http_responses_session_bridge_response_created_timeout_seconds=0.01,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+
+    await asyncio.wait_for(service._relay_http_bridge_upstream_messages(session), timeout=0.5)
+
+    assert request_state.event_queue is not None
+    terminal_event = await request_state.event_queue.get()
+    assert terminal_event is not None
+    assert '"code":"response_created_timeout"' in terminal_event
+    assert await request_state.event_queue.get() is None
+    assert upstream.receive_cancelled is True
+    assert upstream.closed is True
 
 
 def _make_account_neutral_replay_session_key(

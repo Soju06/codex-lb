@@ -14236,12 +14236,11 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_treats_missing_security_work_pool_as_optional(monkeypatch):
+async def test_stream_responses_returns_original_security_denial_when_newly_classified_pool_is_empty(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     regular_account = _make_account("acc_regular_security_optional")
-    fallback_account = _make_account("acc_fallback_security_optional")
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "
         "If this seems wrong, try rephrasing your request. "
@@ -14256,7 +14255,6 @@ async def test_stream_responses_treats_missing_security_work_pool_as_optional(mo
                 error_message="No accounts marked as authorized for security work",
                 error_code="no_security_work_authorized_accounts",
             ),
-            AccountSelection(account=fallback_account, error_message=None),
         ]
     )
 
@@ -14288,10 +14286,7 @@ async def test_stream_responses_treats_missing_security_work_pool_as_optional(mo
                 + "\n\n"
             )
             return
-        yield (
-            'data: {"type":"response.completed","response":'
-            '{"id":"resp_ok_optional","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
-        )
+        raise AssertionError("classified requests must not fall back to an ordinary account")
 
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
 
@@ -14308,22 +14303,17 @@ async def test_stream_responses_treats_missing_security_work_pool_as_optional(mo
     assert retry_warning["warning"]["action"] == "retry_security_work_authorized"
     assert missing_pool_warning["type"] == "codex_lb.warning"
     assert missing_pool_warning["warning"]["code"] == "no_security_work_authorized_accounts"
-    assert missing_pool_warning["warning"]["action"] == "continue_normal_selection"
-    assert event["type"] == "response.completed"
+    assert missing_pool_warning["warning"]["action"] == "forward_original_security_work_error"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["message"] == cyber_message
     assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
         False,
         True,
-        False,
     ]
     assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {regular_account.id}
-    assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {regular_account.id}
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert [call["account_id"] for call in request_logs.calls] == [
-        regular_account.id,
-        fallback_account.id,
-    ]
+    assert [call["account_id"] for call in request_logs.calls] == [regular_account.id]
     assert request_logs.calls[0]["error_code"] == "security_work_authorization_required"
-    assert request_logs.calls[1]["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -14392,20 +14382,19 @@ async def test_stream_responses_security_work_retry_exhaustion_logs_useragent(mo
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "security_work_authorization_required"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert request_logs.calls[-1]["account_id"] is None
+    assert request_logs.calls[-1]["account_id"] == regular_account.id
     assert request_logs.calls[-1]["error_code"] == "security_work_authorization_required"
     assert request_logs.calls[-1]["useragent"] == "CodexCLI/1.2.3 linux"
     assert request_logs.calls[-1]["useragent_group"] == "CodexCLI"
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_missing_security_work_pool_preserves_failover_budget(monkeypatch):
+async def test_stream_responses_newly_classified_missing_pool_stops_before_ordinary_reselect(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     regular_account = _make_account("acc_regular_security_budget")
-    transient_account = _make_account("acc_transient_security_budget")
-    success_account = _make_account("acc_success_security_budget")
+    ordinary_fallback_account = _make_account("acc_ordinary_fallback_security_budget")
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "
         "If this seems wrong, try rephrasing your request. "
@@ -14420,8 +14409,7 @@ async def test_stream_responses_missing_security_work_pool_preserves_failover_bu
                 error_message="No accounts marked as authorized for security work",
                 error_code="no_security_work_authorized_accounts",
             ),
-            AccountSelection(account=transient_account, error_message=None),
-            AccountSelection(account=success_account, error_message=None),
+            AccountSelection(account=ordinary_fallback_account, error_message=None),
         ]
     )
 
@@ -14454,15 +14442,7 @@ async def test_stream_responses_missing_security_work_pool_preserves_failover_bu
                 + "\n\n"
             )
             return
-        if account_id == transient_account.chatgpt_account_id:
-            raise proxy_module.ProxyResponseError(
-                500,
-                openai_error("server_error", "transient upstream error", error_type="server_error"),
-            )
-        yield (
-            'data: {"type":"response.completed","response":'
-            '{"id":"resp_ok_budget","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
-        )
+        raise AssertionError("a classified lineage must not select an ordinary fallback account")
 
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
 
@@ -14471,22 +14451,14 @@ async def test_stream_responses_missing_security_work_pool_preserves_failover_bu
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[-1].split("data: ", 1)[1])
-    assert event["type"] == "response.completed"
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["message"] == cyber_message
     assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
         False,
         True,
-        False,
-        False,
     ]
-    assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {regular_account.id}
-    assert select_account.await_args_list[3].kwargs["exclude_account_ids"] == {
-        regular_account.id,
-        transient_account.id,
-    }
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert request_logs.calls[0]["account_id"] == regular_account.id
-    assert request_logs.calls[-1]["account_id"] == success_account.id
-    assert request_logs.calls[-1]["status"] == "success"
+    assert [call["account_id"] for call in request_logs.calls] == [regular_account.id]
 
 
 @pytest.mark.asyncio

@@ -232,7 +232,9 @@ async def _send_http_bridge_request_text_with_archive_id(
 ) -> None:
     token = set_request_id(request_state.archive_request_id)
     try:
-        request_state.response_create_sent_at = _service_time().monotonic()
+        sent_at = _service_time().monotonic()
+        request_state.response_create_sent_at = sent_at
+        request_state.upstream_sent_at = sent_at
         session.upstream_reader_wakeup.set()
         try:
             await session.upstream.send_text(text_data)
@@ -241,6 +243,7 @@ async def _send_http_bridge_request_text_with_archive_id(
             # owner watchdog before lifecycle ownership is released so the
             # reader cannot race that cleanup and settle the request twice.
             request_state.response_create_sent_at = None
+            request_state.upstream_sent_at = None
             session.upstream_reader_wakeup.set()
             raise
     finally:

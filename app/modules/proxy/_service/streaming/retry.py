@@ -978,7 +978,7 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     account = selection.account
-                    if selection.requires_security_work_authorized and last_security_work_retry_error is None:
+                    if selection.requires_security_work_authorized or security_lineage_requirement_marked:
                         security_requirement_preexisting = True
                     require_security_work_authorized = (
                         require_security_work_authorized or selection.requires_security_work_authorized

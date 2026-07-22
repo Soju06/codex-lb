@@ -2023,6 +2023,7 @@ class _HTTPBridgeMixin(
         # Clear the prior attempt first so an expired send timestamp cannot
         # retire the fresh socket before the next real send re-arms it.
         request_state.response_create_sent_at = None
+        request_state.upstream_sent_at = None
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,

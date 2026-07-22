@@ -12455,9 +12455,14 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
         settlement_order.append("settle")
         return True
 
-    async def record_health(*args: object, **kwargs: object) -> object:
-        settlement_order.append(f"health:{args[2]}")
-        return await original_handle_stream_error(*args, **kwargs)
+    async def record_health(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        settlement_order.append(f"health:{code}")
+        return await original_handle_stream_error(account, error, code, http_status=http_status)
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -12682,7 +12687,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_preserves_err
     }
     assert stream_once_calls == 2
     assert selections == 2
-    assert all(call.args[2] != "invalid_request_error" for call in handle_stream_error.await_args_list)
+    assert any(call.args[2] == "invalid_request_error" for call in handle_stream_error.await_args_list)
     service._load_balancer.record_errors.assert_not_awaited()
 
 

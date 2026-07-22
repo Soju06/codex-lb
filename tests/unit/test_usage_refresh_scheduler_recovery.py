@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -120,13 +120,26 @@ class StubUsageRepository:
         self._primary = primary or {}
         self._secondary = secondary or {}
         self._monthly = monthly or {}
+        self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
 
-    async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+    async def latest_by_account(
+        self,
+        window: str | None = None,
+        *,
+        account_ids: Collection[str] | None = None,
+    ) -> dict[str, UsageHistory]:
+        normalized_account_ids = tuple(account_ids) if account_ids is not None else None
+        self.queries.append((window, normalized_account_ids))
         if window == "secondary":
-            return self._secondary
-        if window == "monthly":
-            return self._monthly
-        return self._primary
+            rows = self._secondary
+        elif window == "monthly":
+            rows = self._monthly
+        else:
+            rows = self._primary
+        if normalized_account_ids is None:
+            return rows
+        allowed = set(normalized_account_ids)
+        return {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
 
 
 class MutatingAccountsRepository(StubAccountsRepository):
@@ -134,6 +147,51 @@ class MutatingAccountsRepository(StubAccountsRepository):
         account = next(iter(self._accounts.values()))
         account.reset_at = 42
         return await super().update_status_if_current(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_scopes_latest_usage_to_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    future_reset = int(now + 3600)
+    selected = _make_account(
+        "acc_selected",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=future_reset,
+        blocked_at=int(now - 30),
+    )
+    unrelated = _make_account("acc_unrelated", status=AccountStatus.ACTIVE)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=future_reset,
+                recorded_at=_epoch_to_naive_utc(now - 10),
+                window_minutes=300,
+            )
+            for account in (selected, unrelated)
+        }
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([selected, unrelated]),
+        usage_repo=usage_repo,
+        accounts=[selected, unrelated],
+    )
+
+    assert recovered == 0
+    assert usage_repo.queries == [
+        ("primary", (selected.id,)),
+        ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
+    ]
 
 
 @pytest.mark.asyncio
@@ -782,7 +840,13 @@ async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: 
         def __init__(self, _session: object) -> None:
             pass
 
-        async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            assert account_ids == [account.id]
             return {}
 
     class _AccountsRepo:
@@ -847,7 +911,12 @@ async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest
         def __init__(self, _session: object) -> None:
             pass
 
-        async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
             return {}
 
     class _AccountsRepo:
@@ -884,3 +953,144 @@ async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest
         await task
 
     await asyncio.wait_for(session_closed.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [
+        _make_account("acc_a", status=AccountStatus.ACTIVE),
+        _make_account("acc_b", status=AccountStatus.ACTIVE),
+    ]
+    usage = {
+        (account.id, window): _make_usage(
+            account.id,
+            window=window,
+            used_percent=10.0,
+            reset_at=1_800_000_000,
+            recorded_at=datetime(2026, 1, 1),
+            window_minutes=300 if window == "primary" else 10_080,
+        )
+        for account in accounts
+        for window in ("primary", "secondary")
+    }
+    open_sessions = 0
+    query_scopes: list[tuple[str | None, tuple[str, ...]]] = []
+    updater_calls: list[str] = []
+    warmup_calls: list[dict[str, object]] = []
+    invalidations = 0
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            assert account_ids is not None
+            normalized_ids = tuple(account_ids)
+            query_scopes.append((window, normalized_ids))
+            return {
+                account_id: usage[(account_id, window or "primary")]
+                for account_id in normalized_ids
+                if (account_id, window or "primary") in usage
+            }
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return accounts
+
+    class _SettingsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_or_create(self) -> object:
+            return object()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            selected_accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert open_sessions == 0
+            assert len(selected_accounts) == 1
+            selected = selected_accounts[0]
+            assert set(latest_usage) == {selected.id}
+            updater_calls.append(selected.id)
+            return len(updater_calls) == 2
+
+    class _WarmupService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run_after_usage_refresh(self, **kwargs: object) -> None:
+            assert open_sessions == 0
+            warmup_calls.append(kwargs)
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal open_sessions
+        open_sessions += 1
+        try:
+            yield _Session()
+        finally:
+            open_sessions -= 1
+
+    async def _invalidate() -> None:
+        nonlocal invalidations
+        invalidations += 1
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "SettingsRepository", _SettingsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+    monkeypatch.setattr(refresh_scheduler_module, "_invalidate_usage_refresh_caches", _invalidate)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 30.0
+    assert updater_calls == ["acc_a"]
+    assert query_scopes == [
+        ("primary", ("acc_a",)),
+        ("secondary", ("acc_a",)),
+    ]
+    assert warmup_calls == []
+    assert invalidations == 0
+
+    assert await scheduler._refresh_once() == 30.0
+    assert updater_calls == ["acc_a", "acc_b"]
+    assert query_scopes[-4:] == [
+        ("primary", ("acc_b",)),
+        ("secondary", ("acc_b",)),
+        ("primary", ("acc_b",)),
+        ("secondary", ("acc_b",)),
+    ]
+    assert len(warmup_calls) == 1
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_b"]
+    assert [account.id for account in cast("list[Account]", warmup_calls[0]["stagger_accounts"])] == [
+        "acc_a",
+        "acc_b",
+    ]
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
+    assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
+    assert invalidations == 1
+    assert open_sessions == 0

@@ -74,8 +74,10 @@ class FakeWarmupRepo:
     def __init__(self) -> None:
         self.rows: list[AccountLimitWarmup] = []
         self.next_id = 1
+        self.latest_requests: list[list[str]] = []
 
     async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
+        self.latest_requests.append(list(account_ids))
         result: dict[str, AccountLimitWarmup] = {}
         for row in self.rows:
             if row.account_id in account_ids:
@@ -1061,6 +1063,39 @@ async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> No
     assert repo.rows[0].window == "primary_idle"
     assert repo.rows[0].reset_at == 18_000
     assert repo.rows[0].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_cohort_does_not_widen_candidate_evaluation(monkeypatch) -> None:
+    now = datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    cohort = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    selected = cohort[1]
+
+    await service.run_after_usage_refresh(
+        accounts=[selected],
+        stagger_accounts=cohort,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={selected.id: _usage(selected.id, used_percent=0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={
+            selected.id: _usage(
+                selected.id,
+                used_percent=0,
+                reset_at=18_000,
+                recorded_at=now,
+            )
+        },
+        after_secondary={},
+        refresh_started_at=now,
+    )
+
+    assert repo.latest_requests == [[selected.id]]
+    assert sender.calls == [(selected.id, "gpt-5.1-codex-mini")]
+    assert [row.account_id for row in repo.rows] == [selected.id]
 
 
 @pytest.mark.asyncio

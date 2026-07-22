@@ -317,6 +317,7 @@ class LimitWarmupService:
         self,
         *,
         accounts: list[Account],
+        stagger_accounts: list[Account] | None = None,
         settings: DashboardSettings,
         before_primary: dict[str, UsageHistory],
         before_secondary: dict[str, UsageHistory],
@@ -338,8 +339,11 @@ class LimitWarmupService:
             raise RuntimeError("LimitWarmupService requires a sender")
         send_tasks: dict[asyncio.Task[LimitWarmupSendOutcome], AccountLimitWarmup] = {}
         send_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WARMUP_SENDS)
+        stagger_source = accounts if stagger_accounts is None else stagger_accounts
         staggered_accounts = [
-            account for account in accounts if _account_is_safe_candidate(account) and account.limit_warmup_enabled
+            account
+            for account in stagger_source
+            if _account_is_safe_candidate(account) and account.limit_warmup_enabled
         ]
         now = utcnow()
 

@@ -100,8 +100,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_allows_api_key,
     _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
+    _http_bridge_session_meets_security_requirement,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_lookup,
+    _http_bridge_session_reusable_for_previous_response,
     _http_bridge_session_reusable_for_request,
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
@@ -360,6 +362,7 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -392,6 +395,7 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -423,6 +427,7 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
@@ -602,17 +607,16 @@ class _HTTPBridgeMixin(
                             previous_session = None
                             if previous_key is not None:
                                 previous_session = self._http_bridge_sessions.get(previous_key)
-                            if (
-                                previous_session is not None
-                                and not previous_session.closed
-                                and _http_bridge_session_account_active(previous_session)
-                                and _http_bridge_compatible(previous_session, request_model, request_service_tier, True)
-                                and _http_bridge_session_matches_preferred_account(
-                                    session=previous_session,
-                                    previous_response_id=previous_response_id,
-                                    preferred_account_id=preferred_account_id,
-                                    require_preferred_account=require_preferred_account,
-                                )
+                            if _http_bridge_session_reusable_for_previous_response(
+                                previous_session,
+                                request_model,
+                                request_service_tier,
+                                require_security_work_authorized,
+                            ) and _http_bridge_session_matches_preferred_account(
+                                session=previous_session,
+                                previous_response_id=previous_response_id,
+                                preferred_account_id=preferred_account_id,
+                                require_preferred_account=require_preferred_account,
                             ):
                                 key = previous_session.key
                                 self._promote_http_bridge_session_to_codex_affinity(
@@ -675,16 +679,20 @@ class _HTTPBridgeMixin(
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
-                reusable = existing is not None and _http_bridge_session_reusable_for_lookup(
-                    session=existing,
-                    key=key,
-                    api_key=api_key,
-                    incoming_turn_state=incoming_turn_state,
-                    previous_response_id=previous_response_id,
-                    preferred_account_id=preferred_account_id,
-                    require_preferred_account=require_preferred_account,
-                    service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
-                    allow_closed_admission_handoff=retained_handoff,
+                reusable = (
+                    existing is not None
+                    and _http_bridge_session_meets_security_requirement(existing, require_security_work_authorized)
+                    and _http_bridge_session_reusable_for_lookup(
+                        session=existing,
+                        key=key,
+                        api_key=api_key,
+                        incoming_turn_state=incoming_turn_state,
+                        previous_response_id=previous_response_id,
+                        preferred_account_id=preferred_account_id,
+                        require_preferred_account=require_preferred_account,
+                        service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
+                        allow_closed_admission_handoff=retained_handoff,
+                    )
                 )
                 fork_key = _http_bridge_parallel_fork_key(
                     key=key,
@@ -2027,6 +2035,7 @@ class _HTTPBridgeMixin(
         session.api_key = request_state.api_key
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+        abandoned_account_ids: set[str] = set()
         requested_preferred_account_id = (
             request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
         )
@@ -2093,6 +2102,7 @@ class _HTTPBridgeMixin(
             if selected_account.id == session.account.id:
                 retry_same_account_once = False
             excluded_account_ids.add(selected_account.id)
+            abandoned_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
 

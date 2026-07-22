@@ -872,6 +872,15 @@ class _HTTPBridgeStreamingMixin:
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
         durable_full_resend_anchor_fingerprint: str | None = None
+        request_contains_input_file_ids = bool(extract_input_file_ids(effective_payload.input))
+        require_security_work_authorized = not request_contains_input_file_ids and bool(
+            durable_lookup is not None and durable_lookup.requires_security_work_authorized
+        )
+        if not request_contains_input_file_ids and not require_security_work_authorized:
+            require_security_work_authorized = await self._security_lineage_requires_security_work_authorized(
+                _sticky_key_from_session_header(headers),
+                api_key_id=api_key.id if api_key is not None else None,
+            )
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_retains_prior_output = False
@@ -938,6 +947,7 @@ class _HTTPBridgeStreamingMixin:
                 incoming_turn_state=incoming_turn_state_header,
                 api_key=api_key,
                 durable_lookup=durable_lookup,
+                require_security_work_authorized=require_security_work_authorized,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
             if (
@@ -993,6 +1003,7 @@ class _HTTPBridgeStreamingMixin:
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
         request_state, text_data = prepare_bridge_request(effective_payload)
+        request_state.require_security_work_authorized = require_security_work_authorized
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
         if downstream_turn_state is not None:
@@ -1273,6 +1284,7 @@ class _HTTPBridgeStreamingMixin:
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,
                     exclude_account_ids=fresh_replay_excluded_account_ids or None,
+                    require_security_work_authorized=request_state.require_security_work_authorized,
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
@@ -1476,6 +1488,7 @@ class _HTTPBridgeStreamingMixin:
                             session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            require_security_work_authorized=request_state.require_security_work_authorized,
                         )
                     except ProxyResponseError as capacity_exc:
                         if owner_unavailable_allows_account_neutral_replay(capacity_exc):
@@ -1896,6 +1909,7 @@ class _HTTPBridgeStreamingMixin:
                             request_deadline=request_deadline,
                             session_header_fallback_key=session_header_fallback_key,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            require_security_work_authorized=request_state.require_security_work_authorized,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -1999,6 +2013,7 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=request_state.request_usage_budget,
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            require_security_work_authorized=request_state.require_security_work_authorized,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2187,6 +2202,7 @@ class _HTTPBridgeStreamingMixin:
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                         request_deadline=request_deadline,
                         exclude_account_ids=request_state.excluded_account_ids or None,
+                        require_security_work_authorized=request_state.require_security_work_authorized,
                     )
                 except ProxyResponseError as capacity_exc:
                     wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)

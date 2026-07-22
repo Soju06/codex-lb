@@ -579,14 +579,49 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
                         receive_task = None
-                    retried = await self._retry_http_bridge_precreated_request(session)
-                    if retried:
-                        continue
+                    retried_startup_request = False
+                    terminal_error_code = receive_timeout.error_code
+                    terminal_error_message = receive_timeout.error_message
+                    if receive_timeout.response_created_request_ids:
+                        async with session.pending_lock:
+                            has_pending_sibling = any(
+                                request_state.request_id not in receive_timeout.response_created_request_ids
+                                for request_state in session.pending_requests
+                            )
+                        if not has_pending_sibling:
+                            retried_startup_request = True
+                            retried = await self._retry_http_bridge_precreated_request(session)
+                            if retried:
+                                continue
+                        await self._fail_response_created_timeout_requests(
+                            session,
+                            request_ids=receive_timeout.response_created_request_ids,
+                            timeout_seconds=(
+                                runtime_settings.http_responses_session_bridge_response_created_timeout_seconds
+                            ),
+                            error_code=receive_timeout.error_code,
+                            error_message=receive_timeout.error_message,
+                        )
+                        if has_pending_sibling:
+                            # A late response.created for the request removed
+                            # above has no correlation key on this multiplexed
+                            # transport. Keeping the socket alive could assign
+                            # it to a healthy sibling, so retire the bridge and
+                            # fail the remaining work explicitly instead.
+                            terminal_error_code = "stream_incomplete"
+                            terminal_error_message = (
+                                "Upstream bridge retired after another request timed out before response.created"
+                            )
+                            retried_startup_request = True
+                    if not retried_startup_request:
+                        retried = await self._retry_http_bridge_precreated_request(session)
+                        if retried:
+                            continue
                     async with session.lifecycle_lock:
                         await self._fail_http_bridge_reader_and_maybe_retire(
                             session,
-                            error_code=receive_timeout.error_code,
-                            error_message=receive_timeout.error_message,
+                            error_code=terminal_error_code,
+                            error_message=terminal_error_message,
                         )
                     break
 

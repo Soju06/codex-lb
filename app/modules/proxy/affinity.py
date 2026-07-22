@@ -87,14 +87,7 @@ class _AffinityPolicy:
         str | None,
     ]:
         if sticky_source != "session_header":
-            return (
-                sticky_key,
-                sticky_kind,
-                reallocate_sticky,
-                sticky_max_age_seconds,
-                sticky_source,
-                legacy_sticky_key,
-            )
+            return None, None, False, sticky_max_age_seconds, None, None
         # A resolved response/file/bridge owner bypasses the new soft row, but
         # the raw compatibility row still has to be checked for conflicting
         # legacy hard ownership. Selection receives no writable sticky key, so

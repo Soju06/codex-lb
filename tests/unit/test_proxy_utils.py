@@ -3674,6 +3674,48 @@ async def test_compact_turn_state_owner_is_a_strict_selection_constraint(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_compact_previous_response_owner_ignores_legacy_session_header_affinity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_compact_previous_response_owner")
+    request_logs.response_owner_by_id[("resp_compact_owner", None, "sid-root")] = owner.id
+    select_account = AsyncMock(return_value=AccountSelection(account=owner, error_message=None))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=owner))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": [],
+            "previous_response_id": "resp_compact_owner",
+        }
+    )
+    await service.compact_responses(payload, {"session_id": "sid-root"}, codex_session_affinity=True)
+
+    assert request_logs.lookup_calls == [("resp_compact_owner", None, "sid-root")]
+    assert select_account.await_count == 1
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["required_account_id"] == owner.id
+    assert select_account.await_args.kwargs["sticky_key"] is None
+    assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
+    assert select_account.await_args.kwargs["sticky_source"] == "session_header"
+    assert select_account.await_args.kwargs["legacy_sticky_key"] == "sid-root"
+
+
+@pytest.mark.asyncio
 async def test_compact_registered_synthesized_turn_state_is_a_strict_selection_constraint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9997,8 +10039,8 @@ def test_logged_error_json_response_emits_proxy_error_log(caplog):
     assert response.status_code == 502
     assert "proxy_error_response request_id=req_proxy_error_1" in caplog.text
     assert "method=POST path=/v1/responses status=502" in caplog.text
-    assert "code=upstream_error" not in caplog.text
-    assert "message=provider failed" not in caplog.text
+    assert 'code="upstream_error"' in caplog.text
+    assert 'message="provider failed"' in caplog.text
 
 
 @pytest.mark.asyncio
@@ -14937,7 +14979,9 @@ async def test_http_bridge_reports_missing_security_work_pool_before_original_wa
 
     assert list(session.pending_requests) == []
     assert session.queued_request_count == 0
-    assert request_state.replay_count == 1
+    # The reconnect failed before replacement ownership was established, so
+    # the retry bookkeeping returns to the original safe state.
+    assert request_state.replay_count == 0
     assert request_state.event_queue is not None
     retry_warning_block = await request_state.event_queue.get()
     missing_pool_warning_block = await request_state.event_queue.get()
@@ -30150,18 +30194,27 @@ async def test_select_account_with_budget_intersects_cap_spillover_with_request_
     assert select_account.await_args.kwargs["spill_bare_session_on_account_cap"] is expected_spillover
 
 
+@pytest.mark.parametrize(
+    ("sticky_source", "sticky_key"),
+    [
+        ("session_header", "bare-session"),
+        ("turn_state", "turn-state-session"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_select_account_with_budget_ignores_bare_mapping_for_preferred_owner(
+async def test_select_account_with_budget_ignores_sticky_mapping_for_preferred_owner(
     monkeypatch: pytest.MonkeyPatch,
+    sticky_source: proxy_service._CodexSessionSource,
+    sticky_key: str,
 ) -> None:
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     owner = _make_account("acc-cap-preferred-owner")
     select_account = AsyncMock(return_value=AccountSelection(account=owner, error_message=None))
     session_policy = proxy_service._AffinityPolicy(
-        key="bare-session",
+        key=sticky_key,
         kind=proxy_service.StickySessionKind.CODEX_SESSION,
-        codex_session_source="session_header",
+        codex_session_source=sticky_source,
     )
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -30187,9 +30240,14 @@ async def test_select_account_with_budget_ignores_bare_mapping_for_preferred_own
     assert select_account.await_args.kwargs["account_ids"] is None
     assert select_account.await_args.kwargs["required_account_id"] == owner.id
     assert select_account.await_args.kwargs["sticky_key"] is None
-    assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
-    assert select_account.await_args.kwargs["sticky_source"] == "session_header"
-    assert select_account.await_args.kwargs["legacy_sticky_key"] == "bare-session"
+    if sticky_source == "session_header":
+        assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
+        assert select_account.await_args.kwargs["sticky_source"] == "session_header"
+        assert select_account.await_args.kwargs["legacy_sticky_key"] == sticky_key
+    else:
+        assert select_account.await_args.kwargs["sticky_kind"] is None
+        assert select_account.await_args.kwargs["sticky_source"] is None
+        assert select_account.await_args.kwargs["legacy_sticky_key"] is None
 
 
 @pytest.mark.asyncio

@@ -83,7 +83,25 @@ class DurableBridgeSessionCoordinator:
                 if snapshot is not None:
                     resolved_aliases.append((alias_kind, snapshot))
             resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
+            resolved_account_ids = {
+                snapshot.account_id for _alias_kind, snapshot in resolved_aliases if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for _alias_kind, snapshot in resolved_aliases)
             if len(resolved_identities) > 1:
+                same_account_handoff = len(resolved_account_ids) == 1 and not has_ownerless_snapshot
+                if same_account_handoff:
+                    account_id = next(iter(resolved_account_ids))
+                    same_account_snapshots = [
+                        snapshot for _alias_kind, snapshot in resolved_aliases if snapshot.account_id == account_id
+                    ]
+                    account_snapshot = next(
+                        (snapshot for snapshot in same_account_snapshots if snapshot.latest_response_id is not None),
+                        same_account_snapshots[0],
+                    )
+                    # Alias priority decides otherwise equivalent snapshots, but
+                    # an existing response anchor is continuity state and must
+                    # survive a same-account blue-green handoff.
+                    return _to_lookup(account_snapshot)
                 specific_aliases = [
                     (alias_kind, snapshot)
                     for alias_kind, snapshot in resolved_aliases

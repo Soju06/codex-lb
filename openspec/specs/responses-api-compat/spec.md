@@ -2299,6 +2299,10 @@ state anchors and the current required item remain mandatory; if they leave no
 room for a historical pair, the service MAY drop that pair together and retain a
 trim marker instead.
 
+A recognised side-effect call without a non-empty `call_id` MUST NOT be
+retained as a historical side-effect anchor, because it cannot form a verified
+call/output pair.
+
 #### Scenario: Code-mode side effect survives an oversized compact input
 
 - **WHEN** an oversized compact input contains a historical custom `exec` or
@@ -2313,6 +2317,13 @@ trim marker instead.
   for a historical side-effect call and its matching output
 - **THEN** compact trimming drops the entire historical pair
 - **AND** it does not retain only one member of that pair
+
+#### Scenario: Side-effect call lacks a usable pair key
+
+- **WHEN** an oversized compact input contains a recognised historical
+  side-effect call without a non-empty `call_id`
+- **THEN** compact trimming does not preserve that call as a side-effect anchor
+- **AND** it does not emit an unpaired historical side-effect call upstream
 
 #### Scenario: Final compact wire expansion is rejected locally
 

@@ -921,7 +921,17 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
 
     head_count = _compact_trim_prefix_count(token_counts)
     state_anchor_indices = _compact_state_anchor_indices(input_value)
+    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
+    wire_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens)
+
     side_effect_indices = _compact_side_effect_anchor_indices(input_value)
+    unusable_side_effect_indices = {
+        index
+        for index, item in enumerate(input_value)
+        if is_json_mapping(item)
+        and _compact_item_is_side_effect_anchor(item)
+        and (not isinstance(item.get("call_id"), str) or not item["call_id"])
+    }
     # Keep priority side effects as complete call/output units before spending
     # the remaining budget on ordinary head/tail context.  Otherwise a large
     # recent message can leave room for a call but not its output, causing
@@ -936,6 +946,12 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     required_indices = set(state_anchor_indices)
     if input_value:
         required_indices.add(len(input_value) - 1)
+    if required_indices & unusable_side_effect_indices:
+        raise ClientPayloadError(
+            "Compact input cannot retain a required side-effect call without a usable call_id.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
         required_indices,
@@ -952,10 +968,16 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             param="input",
             code="responses_compact_input_too_large",
         )
+    side_effect_indices &= _compact_reconciled_tool_call_indices(
+        input_value,
+        required_indices | side_effect_indices,
+        token_counts=token_counts,
+        token_budget=wire_budget,
+        required_indices=required_indices,
+    )
     selected_indices = set(state_anchor_indices)
     selected_indices.update(side_effect_indices)
     selected_indices.update(range(head_count))
-    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
     selected_indices.update(
@@ -967,12 +989,13 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         )
     )
     selected_indices.update(required_indices)
+    selected_indices.difference_update(unusable_side_effect_indices)
     selected_indices = _compact_reconciled_tool_call_indices(
         input_value,
         selected_indices,
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
-        required_indices=required_indices,
+        required_indices=required_indices | side_effect_indices,
     )
     selected_indices = _compact_fit_selected_indices_to_wire_budget(
         input_value,
@@ -1088,7 +1111,12 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
 def _compact_side_effect_anchor_indices(input_value: list[JsonValue]) -> set[int]:
     preserved_indices: set[int] = set()
     for index, item in enumerate(input_value):
-        if is_json_mapping(item) and _compact_item_is_side_effect_anchor(item):
+        if (
+            is_json_mapping(item)
+            and _compact_item_is_side_effect_anchor(item)
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"]
+        ):
             preserved_indices.add(index)
     return preserved_indices
 

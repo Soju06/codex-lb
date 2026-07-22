@@ -12,6 +12,7 @@ from app.core.openai.requests import (
     _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     ResponsesCompactRequest,
     ResponsesRequest,
+    _estimated_json_tokens,
     _input_image_file_reference,
     extract_input_file_ids,
     extract_input_image_file_references,
@@ -1631,6 +1632,132 @@ def test_compact_trimming_preserves_historical_code_mode_side_effect_pair(tool_n
     assert side_effect_call in dumped_input
     assert side_effect_output in dumped_input
     assert ordinary_tail not in dumped_input
+
+
+def test_compact_trimming_drops_side_effect_call_without_a_usable_pair_key():
+    orphaned_side_effect_call = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "input": json.dumps({"command": "git status --short"}),
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "prefix " + "x" * 500_000},
+            orphaned_side_effect_call,
+            {"role": "assistant", "content": "ordinary tail " + "y" * 500_000},
+            {"role": "user", "content": "continue after compaction"},
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert orphaned_side_effect_call not in dumped_input
+
+
+def test_compact_trimming_never_emits_unkeyed_side_effect_from_ordinary_head_retention():
+    orphaned_side_effect_call = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "input": json.dumps({"command": "git status --short"}),
+    }
+    filler = {"role": "assistant", "content": "oversized " + "x" * 500_000}
+    latest = {"role": "user", "content": "continue after compaction"}
+    input_items = [orphaned_side_effect_call, filler, latest]
+
+    dumped_input = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
+    ).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert orphaned_side_effect_call not in dumped_input
+
+
+def test_compact_trimming_rejects_unkeyed_required_latest_side_effect():
+    orphaned_side_effect_call = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "input": json.dumps({"command": "git status --short"}),
+    }
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [
+                {"role": "assistant", "content": "oversized " + "x" * 500_000},
+                {"role": "user", "content": "continue after compaction"},
+                orphaned_side_effect_call,
+            ],
+        }
+    )
+
+    with pytest.raises(ClientPayloadError) as exc_info:
+        request.to_payload()
+
+    assert exc_info.value.code == "responses_compact_input_too_large"
+    assert exc_info.value.param == "input"
+
+
+def test_compact_final_wire_fit_drops_side_effect_pairs_atomically():
+    pairs: list[tuple[JsonValue, JsonValue]] = []
+    input_items: list[JsonValue] = []
+    for index in range(3):
+        input_items.append({"role": "assistant", "content": f"omit-{index} " + "z" * 500_000})
+        call = {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": f"call-wire-fit-{index}",
+            "input": "{}",
+        }
+        output = {
+            "type": "custom_tool_call_output",
+            "call_id": f"call-wire-fit-{index}",
+            "output": "x" * 132_900,
+        }
+        pairs.append((call, output))
+        input_items.extend([call, output])
+    latest = {"role": "user", "content": "continue after compaction"}
+    input_items.append(latest)
+
+    dumped_input = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
+    ).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert latest in dumped_input
+    assert all((call in dumped_input) == (output in dumped_input) for call, output in pairs)
+    assert _estimated_json_tokens(dumped_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+
+
+def test_compact_trimming_drops_optional_head_before_historical_side_effect_pair():
+    side_effect_call = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call-historical-exec",
+        "input": json.dumps({"command": "git status --short"}),
+    }
+    side_effect_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call-historical-exec",
+        "output": "historical output " + "x" * 350_000,
+    }
+    optional_head = {"role": "user", "content": "optional head " + "y" * 60_000}
+    latest_request = {"role": "user", "content": "continue after compaction"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [optional_head, side_effect_call, side_effect_output, latest_request],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert side_effect_call in dumped_input
+    assert side_effect_output in dumped_input
+    assert optional_head not in dumped_input
+    assert latest_request in dumped_input
 
 
 def test_compact_trimming_drops_old_side_effect_pairs_when_anchor_set_exceeds_budget():

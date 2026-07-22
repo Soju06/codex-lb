@@ -224,7 +224,7 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
         "call_id": "call-code-mode-exec",
         "output": "clean",
     }
-    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 300_000}
+    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 500_000}
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -246,7 +246,14 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
     assert isinstance(upstream_input, list)
     assert side_effect_call in upstream_input
     assert side_effect_output in upstream_input
-    assert ordinary_tail not in upstream_input
+    assert all(
+        not (
+            isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and item.get("content") == [{"type": "output_text", "text": ordinary_tail["content"]}]
+        )
+        for item in upstream_input
+    )
 
 
 @pytest.mark.asyncio

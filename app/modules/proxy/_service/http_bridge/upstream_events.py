@@ -426,13 +426,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                         error_code=message.error_code,
                         error_message=message.error,
                     )
-                    if capacity_retry_code is not None and archive_request_state is not None:
+                    capacity_retry_attempted = capacity_retry_code is not None and archive_request_state is not None
+                    if capacity_retry_attempted and archive_request_state is not None:
                         retried = await self._retry_http_bridge_terminal_capacity_request(
                             session,
                             archive_request_state,
                             error_code=capacity_retry_code,
+                            preserve_for_reader_failure=True,
                         )
-                    if not retried:
+                    if not retried and not capacity_retry_attempted:
                         retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue

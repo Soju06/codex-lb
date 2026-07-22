@@ -1233,6 +1233,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
         *,
         error_code: str,
+        preserve_for_reader_failure: bool = False,
     ) -> bool:
         original_account_id = session.account.id
         original_response_id = request_state.response_id
@@ -1339,12 +1340,18 @@ class _HTTPBridgeRequestSubmitMixin:
         finally:
             if not retry_sent and not preserve_pending_for_reader_failure:
                 async with session.pending_lock:
-                    if request_state in session.pending_requests:
+                    preserve_pending_for_reader_failure = preserve_for_reader_failure and (
+                        len(session.pending_requests) == 1
+                        and session.pending_requests[0] is request_state
+                        and not request_state.draining_until_terminal
+                        and request_state.event_queue is not None
+                    )
+                    if not preserve_pending_for_reader_failure and request_state in session.pending_requests:
                         counted_request = _http_bridge_request_counts_against_queue(request_state)
                         session.pending_requests.remove(request_state)
                         if counted_request:
                             session.queued_request_count = max(0, session.queued_request_count - 1)
-                if (
+                if not preserve_pending_for_reader_failure and (
                     request_state.response_create_gate_acquired
                     or request_state.account_response_create_lease is not None
                     or request_state.response_create_admission is not None
@@ -1364,12 +1371,14 @@ class _HTTPBridgeRequestSubmitMixin:
                 ) = original_error_overrides
 
     async def _retry_http_bridge_precreated_request(self: Any, session: "_HTTPBridgeSession") -> bool:
+        now = _service_time().monotonic()
         async with session.pending_lock:
             retryable_requests = [
                 request_state
                 for request_state in session.pending_requests
                 if not request_state.draining_until_terminal
                 and _websocket_request_can_replay_before_visible_output(request_state)
+                and (request_state.bridge_request_deadline is None or request_state.bridge_request_deadline > now)
             ]
             if len(retryable_requests) != 1:
                 return False

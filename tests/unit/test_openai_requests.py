@@ -1503,6 +1503,188 @@ def test_compact_trimming_preserves_latest_anchored_output_without_matching_call
     assert output in dumped_input
 
 
+def _compact_call_item(item_type: str, call_id: str) -> dict[str, JsonValue]:
+    item: dict[str, JsonValue] = {
+        "type": item_type,
+        "name": "read_file",
+        "call_id": call_id,
+    }
+    if item_type == "function_call":
+        item["arguments"] = "{}"
+    elif item_type == "custom_tool_call":
+        item["input"] = "{}"
+    elif item_type == "apply_patch_call":
+        item["operation"] = {"patch": "noop"}
+    else:
+        raise AssertionError(f"unexpected compact call type: {item_type}")
+    return item
+
+
+@pytest.mark.parametrize(
+    ("supplied_call_type", "terminal_output_type"),
+    [
+        ("function_call", "custom_tool_call_output"),
+        ("function_call", "apply_patch_call_output"),
+        ("custom_tool_call", "function_call_output"),
+        ("custom_tool_call", "apply_patch_call_output"),
+        ("apply_patch_call", "function_call_output"),
+        ("apply_patch_call", "custom_tool_call_output"),
+    ],
+)
+def test_compact_anchored_output_ignores_reused_call_id_from_incompatible_tool_variant(
+    supplied_call_type: str,
+    terminal_output_type: str,
+):
+    supplied_call = _compact_call_item(supplied_call_type, "call-reused-across-variants")
+    terminal_output = {
+        "type": terminal_output_type,
+        "call_id": "call-reused-across-variants",
+        "output": "result from the call in the previous response",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [
+            {"role": "assistant", "content": "old " + "x" * 500_000},
+            supplied_call,
+            {"role": "assistant", "content": "middle " + "y" * 500_000},
+            terminal_output,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert terminal_output in dumped_input
+    assert supplied_call not in dumped_input
+
+
+@pytest.mark.parametrize(
+    ("matching_call_type", "intervening_call_type", "terminal_output_type"),
+    [
+        ("function_call", "custom_tool_call", "function_call_output"),
+        ("custom_tool_call", "apply_patch_call", "custom_tool_call_output"),
+        ("apply_patch_call", "function_call", "apply_patch_call_output"),
+    ],
+)
+def test_compact_reused_call_id_selects_type_compatible_pair(
+    matching_call_type: str,
+    intervening_call_type: str,
+    terminal_output_type: str,
+):
+    matching_call = _compact_call_item(matching_call_type, "call-reused-across-variants")
+    intervening_call = _compact_call_item(intervening_call_type, "call-reused-across-variants")
+    terminal_output = {
+        "type": terminal_output_type,
+        "call_id": "call-reused-across-variants",
+        "output": "result from the matching supplied call",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [
+            {"role": "assistant", "content": "old " + "x" * 500_000},
+            matching_call,
+            intervening_call,
+            {"role": "assistant", "content": "middle " + "y" * 500_000},
+            terminal_output,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert matching_call in dumped_input
+    assert terminal_output in dumped_input
+    assert intervening_call not in dumped_input
+
+
+@pytest.mark.parametrize(
+    ("supplied_call_type", "terminal_output_type"),
+    [
+        ("custom_tool_call", "function_call_output"),
+        ("function_call", "custom_tool_call_output"),
+    ],
+)
+def test_compact_rejects_oversized_anchored_output_with_only_incompatible_supplied_call(
+    supplied_call_type: str,
+    terminal_output_type: str,
+):
+    supplied_call = _compact_call_item(supplied_call_type, "call-reused-across-variants")
+    terminal_output = {
+        "type": terminal_output_type,
+        "call_id": "call-reused-across-variants",
+        "output": "x" * 450_000,
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [supplied_call, terminal_output],
+    }
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_rejects_oversized_anchored_output_when_reused_call_id_is_already_consumed():
+    historical_call = _compact_call_item("function_call", "call-reused")
+    historical_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "historical result",
+    }
+    terminal_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "x" * 450_000,
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [historical_call, historical_output, {"role": "assistant", "content": "middle"}, terminal_output],
+    }
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_anchored_output_does_not_reattach_consumed_reused_call_pair():
+    historical_call = _compact_call_item("function_call", "call-reused")
+    historical_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "historical " + "x" * 450_000,
+    }
+    terminal_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "current result",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [historical_call, historical_output, {"role": "assistant", "content": "middle"}, terminal_output],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert terminal_output in dumped_input
+    assert historical_call not in dumped_input
+    assert historical_output not in dumped_input
+
+
 def test_compact_trimming_rejects_oversized_latest_apply_patch_pair():
     call = {
         "type": "apply_patch_call",

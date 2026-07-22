@@ -7,9 +7,11 @@ and trim markers included. Compact trimming MAY omit a complete terminal
 non-state, non-side-effecting tool pair only when the pair plus required anchors
 and trim markers cannot fit the upstream wire budget. A latest output anchored
 by `previous_response_id` remains required only when its matching call is absent
-from supplied input. An unmatched latest tool call and a terminal side-effecting
-tool call or matching pair remain required compact context and MUST fail closed
-with `responses_compact_input_too_large` when they cannot fit.
+from supplied input. A supplied call matches an output only when both `call_id`
+and the function/custom/apply-patch protocol variant are compatible. An
+unmatched latest tool call and a terminal side-effecting tool call or matching
+pair remain required compact context and MUST fail closed with
+`responses_compact_input_too_large` when they cannot fit.
 
 #### Scenario: Marker framing omits an otherwise fitting non-state tool pair
 
@@ -22,6 +24,14 @@ with `responses_compact_input_too_large` when they cannot fit.
 - **WHEN** a compact request carries `previous_response_id` and its latest
   ordinary tool output has a matching call in supplied input
 - **THEN** compact trimming MAY omit the complete pair when it cannot fit
+
+#### Scenario: Reused call ID from another tool variant does not satisfy continuity
+
+- **WHEN** a compact request carries `previous_response_id` and its latest tool
+  output reuses the `call_id` of an incompatible function/custom/apply-patch
+  call variant in supplied input
+- **THEN** the latest output remains required as continuity from the previous response
+- **AND** the incompatible supplied call is not retained as its pair
 
 #### Scenario: Unpaired and side-effecting tails fail closed
 

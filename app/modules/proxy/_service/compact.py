@@ -46,6 +46,7 @@ from app.modules.proxy.affinity import (
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _resolve_prompt_cache_key,
+    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -612,9 +613,12 @@ class _CompactMixin:
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = (
-                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
-            )
+            if _sticky_key_from_turn_state_header(headers) is not None:
+                sticky_key_source = "turn_state_header"
+            elif _sticky_key_from_session_header(headers) is not None:
+                sticky_key_source = "session_header"
+            else:
+                sticky_key_source = "payload"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
         _maybe_log_proxy_request_shape(

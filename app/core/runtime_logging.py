@@ -21,6 +21,10 @@ _SENSITIVE_LOG_VALUE_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
     re.compile(r"(?i)(authorization\s*[=:]\s*)(?!\s*bearer\b)([^,&]+)"),
 )
+_JSON_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
+    r'(?i)("(?:password|passwd|pwd|token|secret|api[_-]?key|authorization)"\s*:\s*")'
+    r'(?:\\.|[^"\\])*(")'
+)
 _LOG_REDACTION = "[REDACTED]"
 
 
@@ -29,6 +33,7 @@ def _redact_log_value(value: str | None) -> str | None:
     if collapsed is None:
         return None
     redacted = collapsed
+    redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
     return _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
@@ -36,6 +41,10 @@ def _redact_log_value(value: str | None) -> str | None:
 
 def _redact_keyed_secret(match: re.Match[str]) -> str:
     return f"{match.group(1)}{match.group(2)}{_LOG_REDACTION}"
+
+
+def _redact_json_secret(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_LOG_REDACTION}{match.group(2)}"
 
 
 def _redact_bearer_token(match: re.Match[str]) -> str:
@@ -197,14 +206,23 @@ def log_error_response(
     level = logging.ERROR if status_code >= 500 else logging.WARNING
     logger.log(
         level,
-        "%s request_id=%s method=%s path=%s status=%s",
+        "%s request_id=%s method=%s path=%s status=%s code=%s message=%s",
         category,
         get_request_id(),
         request.method,
         request.url.path,
         status_code,
+        _error_log_field(code),
+        _error_log_field(message),
         exc_info=exc_info,
     )
+
+
+def _error_log_field(value: str | None) -> str:
+    redacted = _redact_log_value(value)
+    if redacted is None:
+        return "-"
+    return json.dumps(redacted)
 
 
 def _collapse_log_value(value: str | None) -> str | None:

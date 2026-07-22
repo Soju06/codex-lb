@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections import deque
+from dataclasses import replace
 from typing import Any, Literal, Mapping, TypeVar, cast
 from uuid import uuid4
 
@@ -1438,13 +1439,40 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
         if request_state.file_required_preferred_account:
             return False
+        if not _websocket_request_can_replay_before_visible_output(request_state):
+            return False
+
+        owner_account_id = session.account.id
+        previous_replay_count = request_state.replay_count
+        previous_response_id = request_state.response_id
+        previous_response_event_count = request_state.response_event_count
+        previous_upstream_model_output_seen = request_state.upstream_model_output_seen
+        previous_affinity_policy = request_state.affinity_policy
+        previous_session_upstream_turn_state = session.upstream_turn_state
+        previous_session_downstream_turn_state = session.downstream_turn_state
+        previous_session_headers = session.headers
         if request_state.previous_response_id is not None:
             retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
             if retry_text is None:
                 return False
 
+        request_state.preferred_account_id = None
+        request_state.excluded_account_ids.add(owner_account_id)
+        request_state.affinity_policy = replace(
+            request_state.affinity_policy,
+            key=None,
+            kind=None,
+            reallocate_sticky=True,
+        )
+        session.upstream_turn_state = None
+        session.downstream_turn_state = None
+        session.headers = {key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"}
+
         request_state.replay_count += 1
         request_state.response_id = None
+        request_state.response_event_count = 0
+        request_state.upstream_model_output_seen = False
+        request_state.deferred_reasoning_downstream_texts = []
         request_state.awaiting_response_created = True
         if retry_text != request_state.request_text:
             request_state.previous_response_id = None
@@ -1466,6 +1494,7 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
+            request_state.precreated_replay_account_id = session.account.id
             await self._reconnect_http_bridge_session(
                 session,
                 request_state=request_state,
@@ -1497,4 +1526,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 if request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
+            request_state.replay_count = previous_replay_count
+            request_state.response_id = previous_response_id
+            request_state.response_event_count = previous_response_event_count
+            request_state.upstream_model_output_seen = previous_upstream_model_output_seen
+            request_state.deferred_reasoning_downstream_texts = []
+            request_state.affinity_policy = previous_affinity_policy
+            session.upstream_turn_state = previous_session_upstream_turn_state
+            session.downstream_turn_state = previous_session_downstream_turn_state
+            session.headers = previous_session_headers
             return False

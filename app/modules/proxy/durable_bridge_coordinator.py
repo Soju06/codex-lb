@@ -79,11 +79,16 @@ class DurableBridgeSessionCoordinator:
                 )
                 if snapshot is not None:
                     resolved_snapshots.append(snapshot)
-            resolved_identities = {(snapshot.id, snapshot.account_id) for snapshot in resolved_snapshots}
-            if len(resolved_identities) > 1:
-                # Turn-state/response/session aliases are independent hard
-                # evidence. Returning the first match would silently discard a
-                # conflicting durable owner based on source ordering.
+            resolved_account_ids = {
+                snapshot.account_id for snapshot in resolved_snapshots if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for snapshot in resolved_snapshots)
+            if len(resolved_account_ids) > 1 or (has_ownerless_snapshot and resolved_account_ids):
+                # Turn-state/response/session aliases are independent account
+                # evidence. Session rows can legitimately diverge during
+                # blue-green drain only when they agree on the upstream account.
+                # Mixing a deleted-account row with a live owner would silently
+                # abandon one continuity source.
                 raise ProxyResponseError(
                     502,
                     openai_error(
@@ -93,6 +98,19 @@ class DurableBridgeSessionCoordinator:
                     ),
                 )
             if resolved_snapshots:
+                if resolved_account_ids:
+                    account_id = next(iter(resolved_account_ids))
+                    same_account_snapshots = [
+                        snapshot for snapshot in resolved_snapshots if snapshot.account_id == account_id
+                    ]
+                    account_snapshot = next(
+                        (snapshot for snapshot in same_account_snapshots if snapshot.latest_response_id is not None),
+                        same_account_snapshots[0],
+                    )
+                    # Alias priority decides otherwise equivalent snapshots, but
+                    # an existing response anchor is continuity state and must
+                    # survive a same-account blue-green handoff.
+                    return _to_lookup(account_snapshot)
                 return _to_lookup(resolved_snapshots[0])
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,

@@ -1422,6 +1422,31 @@ When an upstream Responses request fails because the work requires cybersecurity
 - **THEN** codex-lb releases the request's response-create gate before scheduling the replay
 - **AND** the replay can acquire the gate instead of blocking behind the failed first attempt
 
+### Requirement: HTTP bridge security retries fail closed after an anchor or output
+
+For HTTP bridge requests, the service MUST retry security-work authorization on
+another account only before `response.created` and before any upstream model
+output. A buffered reasoning prelude counts as upstream model output even while
+it is withheld from downstream pending the security decision. The retry MUST
+clear stale turn affinity before a permitted file-free replacement attempt and
+MUST restore the original safe state if reconnect fails. File-pinned requests
+MUST NOT migrate.
+
+#### Scenario: Created HTTP bridge response is not replayed
+
+- **WHEN** an HTTP bridge request has emitted `response.created` before a
+  security-work authorization denial
+- **THEN** the service does not reconnect or resend the request on another
+  account
+- **AND** it forwards the original terminal error
+
+#### Scenario: Deferred reasoning blocks replay
+
+- **WHEN** an HTTP bridge request buffers a reasoning prelude before a
+  security-work authorization denial
+- **THEN** that prelude blocks account-switch replay and is not emitted before
+  the terminal security decision
+
 ### Requirement: Responses request compatibility controls
 
 The system SHALL accept OpenAI-compatible Responses request controls that clients may send for `/v1/responses` and `/backend-api/codex/responses` when those controls can be safely normalized before the ChatGPT-backed upstream request. Specifically, `truncation` values `"auto"` and `"disabled"` MUST pass request validation and MUST be omitted from the upstream payload because the current ChatGPT-backed path does not consume the field. Unsupported `truncation` values MUST still be rejected with HTTP 400.

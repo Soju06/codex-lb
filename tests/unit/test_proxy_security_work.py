@@ -8,6 +8,7 @@ import anyio
 import pytest
 
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.support import _websocket_request_can_replay_before_visible_output
 from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
 
 pytestmark = pytest.mark.unit
@@ -71,3 +72,23 @@ async def test_process_websocket_security_retry_releases_response_create_gate() 
     assert request_state.response_create_gate is None
     await asyncio.wait_for(gate.acquire(), timeout=0.1)
     gate.release()
+
+
+def test_http_bridge_deferred_reasoning_blocks_previsible_replay() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http_security_deferred_reasoning",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        awaiting_response_created=False,
+        response_id="resp_security_deferred_reasoning",
+        response_event_count=1,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
+        upstream_model_output_seen=True,
+        deferred_reasoning_downstream_texts=['data: {"type":"response.output_item.added"}\n\n'],
+    )
+
+    assert not _websocket_request_can_replay_before_visible_output(request_state)

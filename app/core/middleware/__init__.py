@@ -2,6 +2,7 @@ from app.core.middleware.api_firewall import add_api_firewall_middleware
 from app.core.middleware.app_version import add_app_version_middleware
 from app.core.middleware.dashboard_auth_proxy import add_dashboard_auth_proxy_middleware
 from app.core.middleware.path_rewrite import add_backend_api_codex_v1_alias_middleware
+from app.core.middleware.request_body_limit import add_request_body_limit_middleware
 from app.core.middleware.request_decompression import add_request_decompression_middleware
 from app.core.middleware.request_id import add_request_id_middleware
 
@@ -10,6 +11,7 @@ __all__ = [
     "add_api_firewall_middleware",
     "add_backend_api_codex_v1_alias_middleware",
     "add_dashboard_auth_proxy_middleware",
+    "add_request_body_limit_middleware",
     "add_request_decompression_middleware",
     "add_request_id_middleware",
 ]

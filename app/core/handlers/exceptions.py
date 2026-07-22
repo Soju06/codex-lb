@@ -31,6 +31,11 @@ from app.core.exceptions import (
     ProxyRateLimitError,
     ProxyUpstreamError,
 )
+from app.core.middleware.request_body_limit import (
+    REQUEST_BODY_TOO_LARGE_MESSAGE,
+    request_body_limit_was_exceeded,
+    request_ingress_error_response,
+)
 from app.core.runtime_logging import log_error_response
 from app.modules.proxy.images_observability import ImageRoute, record_images_route_observability
 
@@ -261,6 +266,13 @@ def add_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: StarletteHTTPException,
     ) -> Response:
+        if request_body_limit_was_exceeded(request):
+            return request_ingress_error_response(
+                request,
+                status_code=413,
+                code="payload_too_large",
+                message=REQUEST_BODY_TOO_LARGE_MESSAGE,
+            )
         fmt = _error_format(request)
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
         if fmt == "dashboard":

@@ -609,6 +609,7 @@ async def wham_agent_identities_jwks(
     return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
 
 
+@router.post("/responses/", include_in_schema=False)
 @router.post(
     "/responses",
     responses={
@@ -731,6 +732,7 @@ async def responses_websocket(
     )
 
 
+@v1_router.post("/responses/", response_model=OpenAIResponseResult, include_in_schema=False)
 @v1_router.post(
     "/responses",
     response_model=OpenAIResponseResult,

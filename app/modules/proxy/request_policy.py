@@ -131,12 +131,19 @@ def apply_api_key_enforcement(
     *,
     registry: ModelRegistry | None = None,
     prohibit_fast_mode: bool = False,
-) -> None:
+) -> bool:
+    """Apply API-key policy and report whether it supplied the service tier.
+
+    The returned provenance is captured before mutating ``payload``. Callers
+    must not infer it later by comparing values: an explicit client request can
+    equal the enforced value (including after ``fast`` canonicalizes to
+    ``priority``).
+    """
     normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
         normalize_unsupported_reasoning_effort(payload)
-        return
+        return False
 
     if api_key.enforced_model:
         requested_model = payload.model
@@ -180,8 +187,12 @@ def apply_api_key_enforcement(
 
     normalize_unsupported_reasoning_effort(payload)
 
+    service_tier_was_enforced = False
     if api_key.enforced_service_tier is not None:
         requested_service_tier = getattr(payload, "service_tier", None)
+        service_tier_was_enforced = requested_service_tier is None or (
+            requested_service_tier.strip().lower() in _UPSTREAM_OMIT_SERVICE_TIERS
+        )
         # ``auto``/``default`` are accepted at the API-key surface but
         # the ChatGPT/Codex backend rejects them as literal values. Map
         # them onto the wire-level absence of ``service_tier`` (which
@@ -204,6 +215,39 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
+    return service_tier_was_enforced
+
+
+def apply_enforced_service_tier_model_fallback(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    service_tier_was_enforced: bool,
+    registry: ModelRegistry | None = None,
+) -> bool:
+    """Drop an enforced tier only when an account model truly lacks it.
+
+    This runs after model-source selection, and only on subscription-account
+    routes. Mutating the request at that boundary makes account selection,
+    bridge compatibility, API-key accounting, request logs, and the upstream
+    wire payload agree on the same effective tier.
+    """
+    service_tier = payload.service_tier
+    if not service_tier_was_enforced or service_tier is None:
+        return False
+
+    model_registry = registry or get_model_registry()
+    advertises_service_tier = getattr(model_registry, "model_advertises_service_tier", None)
+    if not callable(advertises_service_tier) or advertises_service_tier(payload.model, service_tier):
+        return False
+
+    logger.info(
+        "api_key_enforced_service_tier_model_fallback request_id=%s model=%s enforced_service_tier=%s",
+        get_request_id(),
+        payload.model,
+        service_tier,
+    )
+    payload.service_tier = None
+    return True
 
 
 def _model_responses_lite_capability(

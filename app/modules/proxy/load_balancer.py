@@ -189,6 +189,10 @@ class AccountSelection:
 class _ModelAccountFilterResult:
     accounts: list[Account]
     general_model_account_ids: frozenset[str] | None
+    # Tier actually applied to the filter, after dropping tiers the model does
+    # not advertise. Set only when the tier narrowed the pool, so an empty
+    # result can say the tier excluded the accounts rather than the model.
+    applied_service_tier: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -818,6 +822,7 @@ class LoadBalancer:
             accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
+            applied_service_tier: str | None = None
             if model and _mapped_model_has_registry_entry(model):
                 continuity_owner_candidates = _filter_accounts_for_model(
                     scoped_accounts,
@@ -835,6 +840,7 @@ class LoadBalancer:
                 )
                 accounts = model_filter.accounts
                 general_model_account_ids = model_filter.general_model_account_ids
+                applied_service_tier = model_filter.applied_service_tier
                 if canonical_quota_can_override_account_catalog and general_model_account_ids is not None:
                     model_catalog_omitted_account_ids = frozenset(
                         account.id for account in accounts if account.id not in general_model_account_ids
@@ -899,7 +905,11 @@ class LoadBalancer:
                     continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
-                    error_message=f"No accounts with a plan supporting model '{model}'",
+                    error_message=(
+                        f"No accounts with a plan supporting model '{model}' at service tier '{applied_service_tier}'"
+                        if applied_service_tier is not None
+                        else f"No accounts with a plan supporting model '{model}'"
+                    ),
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
                 await self._selection_inputs_cache.set(
@@ -2530,6 +2540,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
             return _ModelAccountFilterResult(
                 accounts=model_accounts,
                 general_model_account_ids=general_model_account_ids,
+                applied_service_tier=effective_service_tier,
             )
         allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
     else:
@@ -2541,6 +2552,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
     return _ModelAccountFilterResult(
         accounts=model_accounts,
         general_model_account_ids=general_model_account_ids,
+        applied_service_tier=effective_service_tier,
     )
 
 

@@ -14,7 +14,13 @@ import pytest
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer.types import UpstreamError
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import ModelRegistry, ModelRegistrySnapshot, UpstreamModel
+from app.core.openai.model_registry import (
+    ModelRegistry,
+    ModelRegistryExport,
+    ModelRegistrySnapshot,
+    UpstreamModel,
+)
+from app.core.openai.requests import ResponsesRequest
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -26,6 +32,7 @@ from app.db.models import (
 )
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _http_bridge_session_supports_service_tier
 from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.load_balancer import (
@@ -39,6 +46,10 @@ from app.modules.proxy.load_balancer import (
     RuntimeState,
 )
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.request_policy import (
+    apply_api_key_enforcement,
+    apply_enforced_service_tier_model_fallback,
+)
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -4026,3 +4037,270 @@ async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> N
     assert downgraded is True
     assert account.status == AccountStatus.REAUTH_REQUIRED
     assert is_account_routing_unavailable(account.id) is True
+
+
+def _authoritative_snapshot(
+    *,
+    account_id: str,
+    model: str,
+    service_tier_accounts: dict[str, dict[str, frozenset[str]]],
+    service_tier_plans: dict[str, dict[str, frozenset[str]]],
+) -> ModelRegistrySnapshot:
+    return ModelRegistrySnapshot(
+        models={},
+        model_plans={model: frozenset({"pro"})},
+        plan_models={"pro": frozenset({model})},
+        model_service_tier_plans=service_tier_plans,
+        model_service_tier_accounts=service_tier_accounts,
+        account_plans={account_id: "pro"},
+        fetched_at=time.monotonic(),
+        model_accounts={model: frozenset({account_id})},
+        account_catalogs_authoritative=True,
+    )
+
+
+async def _registry_with_snapshot(snapshot: ModelRegistrySnapshot) -> ModelRegistry:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.import_state(
+        ModelRegistryExport(snapshot=snapshot, metadata_models=None),
+        content_hash="test-enforced-tier",
+    )
+    return registry
+
+
+def _single_account_repos(account: Account) -> tuple[Any, Any, Any]:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: UsageHistory(
+                id=1,
+                account_id=account.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            )
+        },
+        secondary={},
+    )
+    return StubAccountsRepository([account]), usage_repo, StubStickySessionsRepository()
+
+
+def _service_tier_enforcement_key(service_tier: str) -> ApiKeyData:
+    return ApiKeyData(
+        id=f"key-enforced-{service_tier}",
+        name=f"enforced {service_tier}",
+        key_prefix="sk-test-enforced-tier",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=service_tier,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+
+@pytest.mark.parametrize("requested_service_tier", [None, "auto", "default", " Default "])
+def test_enforced_service_tier_provenance_treats_default_aliases_as_omitted(
+    requested_service_tier: str | None,
+) -> None:
+    payload = ResponsesRequest(
+        model="gpt-5.4-mini",
+        instructions="ping",
+        input=[],
+        service_tier=requested_service_tier,
+    )
+
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        _service_tier_enforcement_key("priority"),
+    )
+
+    assert service_tier_was_enforced is True
+    assert payload.service_tier == "priority"
+
+
+@pytest.mark.asyncio
+async def test_select_account_ignores_enforced_service_tier_the_model_never_advertises(monkeypatch) -> None:
+    """An enforced tier must not exclude accounts from a model that lacks the tier.
+
+    Reported in #1409: enforcing ``priority`` on an API key made ``gpt-5.4-mini``
+    unroutable with ``no_plan_support_for_model``, because the catalog answers
+    "no accounts carry priority for this model" authoritatively with an empty
+    set. The accounts do support the model, just at its default tier.
+    """
+    account = _make_account("acc-tier-not-advertised", "tier-not-advertised@example.com")
+    account.plan_type = "pro"
+    model = "gpt-5.4-mini"
+    accounts_repo, usage_repo, sticky_repo = _single_account_repos(account)
+
+    # The model carries no service-tier entries at all, which is exactly what an
+    # authoritative catalog reports for a model that never offers priority.
+    registry = await _registry_with_snapshot(
+        _authoritative_snapshot(
+            account_id=account.id,
+            model=model,
+            service_tier_accounts={},
+            service_tier_plans={},
+        )
+    )
+    assert registry.model_advertises_service_tier(model, "priority") is False
+    assert registry.model_advertises_service_tier("source-only-model", "priority") is True
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+    monkeypatch.setattr("app.modules.proxy._service.support.get_model_registry", lambda: registry)
+
+    payload = ResponsesRequest(model=model, instructions="ping", input=[])
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        _service_tier_enforcement_key("priority"),
+    )
+    assert service_tier_was_enforced is True
+    assert apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+        registry=registry,
+    )
+    assert payload.service_tier is None
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model=model, service_tier=payload.service_tier)
+
+    assert selection.error_code is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
+
+    # A tier the CLIENT asked for explicitly must still be rejected, so the
+    # fallback cannot be used to silently downgrade a caller's own request.
+    # This is the behavior #1248 pinned down for the quota-override path.
+    for explicit_tier in ("priority", "fast"):
+        explicit_payload = ResponsesRequest(
+            model=model,
+            instructions="ping",
+            input=[],
+            service_tier=explicit_tier,
+        )
+        explicitly_requested = apply_api_key_enforcement(
+            explicit_payload,
+            _service_tier_enforcement_key("priority"),
+        )
+        assert explicitly_requested is False
+        assert not apply_enforced_service_tier_model_fallback(
+            explicit_payload,
+            service_tier_was_enforced=explicitly_requested,
+            registry=registry,
+        )
+        assert explicit_payload.service_tier == "priority"
+
+        client_requested = await balancer.select_account(model=model, service_tier=explicit_payload.service_tier)
+        assert client_requested.account is None
+        assert client_requested.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+    bridge_session = cast(Any, SimpleNamespace(account=account, catalog_omission_quota_admission=None))
+    assert _http_bridge_session_supports_service_tier(
+        bridge_session,
+        request_model=model,
+        request_service_tier=payload.service_tier,
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_account_reports_the_service_tier_when_the_model_advertises_it(monkeypatch) -> None:
+    """When the tier IS advertised but no account carries it, say so.
+
+    This is the genuinely-unroutable case, and it must stay a failure. The
+    message names the tier so an operator is not sent hunting a plan problem
+    that does not exist.
+    """
+    account = _make_account("acc-tier-advertised-unheld", "tier-advertised-unheld@example.com")
+    account.plan_type = "pro"
+    model = "gpt-5.4-mini"
+    accounts_repo, usage_repo, sticky_repo = _single_account_repos(account)
+
+    # Priority is advertised for the model, but by a different account.
+    registry = await _registry_with_snapshot(
+        _authoritative_snapshot(
+            account_id=account.id,
+            model=model,
+            service_tier_accounts={model: {"priority": frozenset({"acc-somebody-else"})}},
+            service_tier_plans={model: {"priority": frozenset({"enterprise"})}},
+        )
+    )
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    payload = ResponsesRequest(model=model, instructions="ping", input=[], service_tier="priority")
+    assert not apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=True,
+        registry=registry,
+    )
+    assert payload.service_tier == "priority"
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model=model, service_tier=payload.service_tier)
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == (f"No accounts with a plan supporting model '{model}' at service tier 'priority'")
+
+
+@pytest.mark.asyncio
+async def test_api_key_enforced_priority_tier_still_routes_a_model_without_priority(monkeypatch) -> None:
+    """Drive the reported configuration: an API key that enforces ``priority``.
+
+    Starts from the operator-facing surface (``enforced_service_tier`` on the
+    key) and runs the enforcement that the proxy applies before selection, so
+    the regression covers the path the reporter actually configured rather than
+    a hand-passed tier string.
+    """
+    account = _make_account("acc-enforced-priority-key", "enforced-priority-key@example.com")
+    account.plan_type = "pro"
+    model = "gpt-5.4-mini"
+    accounts_repo, usage_repo, sticky_repo = _single_account_repos(account)
+
+    registry = await _registry_with_snapshot(
+        _authoritative_snapshot(
+            account_id=account.id,
+            model=model,
+            service_tier_accounts={},
+            service_tier_plans={},
+        )
+    )
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    api_key = ApiKeyData(
+        id="key_enforced_priority",
+        name="enforced priority",
+        key_prefix="sk-test-enforced-priority",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier="priority",
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    payload = ResponsesRequest(model=model, instructions="ping", input=[])
+    service_tier_was_enforced = apply_api_key_enforcement(payload, api_key)
+    assert payload.service_tier == "priority"
+    assert service_tier_was_enforced is True
+    assert apply_enforced_service_tier_model_fallback(
+        payload,
+        service_tier_was_enforced=service_tier_was_enforced,
+        registry=registry,
+    )
+    assert payload.service_tier is None
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(
+        model=model,
+        service_tier=payload.service_tier,
+    )
+
+    assert selection.error_code is None
+    assert selection.account is not None
+    assert selection.account.id == account.id

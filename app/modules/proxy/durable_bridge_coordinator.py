@@ -94,13 +94,25 @@ class DurableBridgeSessionCoordinator:
                     same_account_snapshots = [
                         snapshot for _alias_kind, snapshot in resolved_aliases if snapshot.account_id == account_id
                     ]
-                    account_snapshot = next(
-                        (snapshot for snapshot in same_account_snapshots if snapshot.latest_response_id is not None),
-                        same_account_snapshots[0],
+                    requested_response_snapshot = next(
+                        (
+                            snapshot
+                            for alias_kind, snapshot in resolved_aliases
+                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and snapshot.account_id == account_id
+                        ),
+                        None,
                     )
-                    # Alias priority decides otherwise equivalent snapshots, but
-                    # an existing response anchor is continuity state and must
-                    # survive a same-account blue-green handoff.
+                    account_snapshot = requested_response_snapshot or max(
+                        same_account_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.last_seen_at,
+                        ),
+                    )
+                    # Same-account aliases may point at different durable rows
+                    # during a handoff. Preserve an explicitly requested
+                    # response anchor; otherwise prefer the newest persisted
+                    # response anchor rather than alias-resolution order.
                     return _to_lookup(account_snapshot)
                 specific_aliases = [
                     (alias_kind, snapshot)

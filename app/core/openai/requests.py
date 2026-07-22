@@ -1069,9 +1069,7 @@ def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
         return rewritten, changed
     if isinstance(value, str) and "data:image/" in value:
         rewritten_value, replacements = _COMPACT_INLINE_IMAGE_DATA_URL_RE.subn(
-            lambda match: (
-                f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(match.group(0))} encoded characters)."
-            ),
+            lambda match: f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(match.group(0))} encoded characters).",
             value,
         )
         if replacements:

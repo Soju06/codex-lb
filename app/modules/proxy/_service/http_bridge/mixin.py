@@ -65,7 +65,6 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeAccountSessionsMixin
 from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityMixin
 from app.modules.proxy._service.http_bridge.helpers import (
-    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _bridge_selection_account,
@@ -266,31 +265,6 @@ class _HTTPBridgeMixin(
                 self._close_http_bridge_session_bounded(session, reason=reason),
                 action="http_bridge_session_close",
                 request_id=_hash_identifier(session.key.affinity_key),
-            )
-
-    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
-        tasks = [
-            task
-            for task in self._background_cleanup_tasks
-            if not task.done()
-            and (
-                task.get_name().startswith("proxy-http_bridge_session_close-")
-                or task.get_name().startswith("http-bridge-close-")
-            )
-        ]
-        if not tasks:
-            return
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
-                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
-                reason,
-                len(tasks),
-                _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
 
     async def _fail_http_bridge_inflight_session_creation(

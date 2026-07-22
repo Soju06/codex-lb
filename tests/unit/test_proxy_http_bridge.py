@@ -690,6 +690,30 @@ async def test_terminal_capacity_retry_does_not_reconnect_over_competing_pending
 
 
 @pytest.mark.asyncio
+async def test_terminal_capacity_retry_does_not_overtake_admission_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.queued_request_count = 1
+    session.admission_waiter_count = 1
+    request_state = _accepted_capacity_retry_state()
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    retried = await service._retry_http_bridge_terminal_capacity_request(
+        session,
+        request_state,
+        error_code="server_is_overloaded",
+    )
+
+    assert retried is False
+    reconnect.assert_not_awaited()
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
 async def test_terminal_capacity_close_retry_keeps_pending_request_for_terminal_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1436,6 +1436,12 @@ class _HTTPBridgeRequestSubmitMixin:
         async with session.pending_lock:
             if request_state.replay_count >= 1:
                 return False
+            request_already_counted = (
+                request_state in session.pending_requests and _http_bridge_request_counts_against_queue(request_state)
+            )
+            other_queued_requests = session.queued_request_count - int(request_already_counted)
+            if session.admission_waiter_count > 0 or other_queued_requests > 0:
+                return False
             if session.pending_requests:
                 if len(session.pending_requests) != 1 or session.pending_requests[0] is not request_state:
                     return False

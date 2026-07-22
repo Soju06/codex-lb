@@ -8,6 +8,7 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
@@ -44,6 +45,7 @@ _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", 
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
+_COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES = frozenset({"apply_patch_call", "apply_patch_call_output"})
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -920,16 +922,36 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
 
     head_count = _compact_trim_prefix_count(token_counts)
     preserved_indices = _compact_state_anchor_indices(input_value)
-    required_indices = set(preserved_indices)
-    if input_value:
-        required_indices.add(len(input_value) - 1)
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
-        required_indices,
+        preserved_indices,
         token_counts=token_counts,
         token_budget=sum(token_counts),
-        required_indices=required_indices,
+        required_indices=preserved_indices,
     )
+    terminal_indices, terminal_is_required = _compact_terminal_required_indices(
+        input_value,
+        token_counts=token_counts,
+        has_previous_response_anchor=_compact_has_previous_response_anchor(payload),
+    )
+    if terminal_indices:
+        prospective_required_indices = required_indices | terminal_indices
+        prospective_required_indices = _compact_reconciled_tool_call_indices(
+            input_value,
+            prospective_required_indices,
+            token_counts=token_counts,
+            token_budget=sum(token_counts),
+            required_indices=prospective_required_indices,
+        )
+        prospective_required_input = _compact_trimmed_input_with_markers(
+            input_value,
+            token_counts,
+            prospective_required_indices,
+        )
+        if terminal_is_required or (
+            _estimated_json_tokens(prospective_required_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+        ):
+            required_indices = prospective_required_indices
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
@@ -981,6 +1003,118 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     if trimmed_input is input_value:
         return
     payload["input"] = trimmed_input
+
+
+def _compact_has_previous_response_anchor(payload: Mapping[str, JsonValue]) -> bool:
+    previous_response_id = payload.get("previous_response_id")
+    return isinstance(previous_response_id, str) and bool(previous_response_id.strip())
+
+
+def _compact_terminal_required_indices(
+    input_value: list[JsonValue],
+    *,
+    token_counts: list[int],
+    has_previous_response_anchor: bool,
+) -> tuple[set[int], bool]:
+    """Return terminal context and whether it must remain even when oversized."""
+
+    if not input_value:
+        return set(), False
+
+    latest_index = len(input_value) - 1
+    latest_mapping = _json_mapping_or_none(input_value[latest_index])
+    latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+        return {latest_index}, True
+    if latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True
+    matching_call_index = _compact_matching_tool_call_index(input_value, latest_index)
+    if latest_mapping is not None and _compact_terminal_item_is_side_effect(
+        input_value,
+        latest_index,
+        matching_call_index=matching_call_index,
+    ):
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True
+    if (
+        latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        and has_previous_response_anchor
+        and matching_call_index is None
+    ):
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True
+    if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True
+
+    paired_tail = _compact_reconciled_tool_call_indices(
+        input_value,
+        {latest_index},
+        token_counts=token_counts,
+        token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
+    )
+    if latest_index in paired_tail:
+        return paired_tail, False
+    return set(), False
+
+
+def _compact_required_terminal_indices(
+    input_value: list[JsonValue], latest_index: int, token_counts: list[int]
+) -> set[int]:
+    return _compact_reconciled_tool_call_indices(
+        input_value,
+        {latest_index},
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+        required_indices={latest_index},
+    )
+
+
+def _compact_matching_tool_call_index(input_value: list[JsonValue], output_index: int) -> int | None:
+    output = _json_mapping_or_none(input_value[output_index])
+    if output is None:
+        return None
+    call_id = output.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    for index in range(output_index - 1, -1, -1):
+        item = _json_mapping_or_none(input_value[index])
+        if item is not None and item.get("type") in _COMPACT_TOOL_CALL_ITEM_TYPES and item.get("call_id") == call_id:
+            return index
+    return None
+
+
+def _compact_terminal_item_is_side_effect(
+    input_value: list[JsonValue],
+    latest_index: int,
+    *,
+    matching_call_index: int | None,
+) -> bool:
+    latest = _json_mapping_or_none(input_value[latest_index])
+    if latest is None:
+        return False
+    if latest.get("type") in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    tool_call = latest
+    if latest.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+        if matching_call_index is None:
+            return False
+        matched_call = _json_mapping_or_none(input_value[matching_call_index])
+        if matched_call is None:
+            return False
+        tool_call = matched_call
+    if tool_call.get("type") in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    return _compact_tool_call_is_side_effect(tool_call)
+
+
+def _compact_tool_call_is_side_effect(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    argument_field = "arguments" if item_type == "function_call" else "input"
+    argument_value = item.get(argument_field)
+    name = item.get("name")
+    return (
+        isinstance(name, str)
+        and isinstance(argument_value, str)
+        and is_downstream_side_effect_tool_call(name, argument_value)
+    )
 
 
 def _compact_fit_selected_indices_to_wire_budget(

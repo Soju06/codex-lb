@@ -1396,14 +1396,37 @@ def test_compact_trimming_preserves_latest_unmatched_tool_call():
     assert latest_call in dumped_input
 
 
-def test_compact_trimming_rejects_latest_tool_output_when_matching_call_cannot_fit():
+def test_compact_trimming_rejects_oversized_latest_unmatched_tool_call():
+    latest_call = {
+        "type": "function_call",
+        "name": "read_file",
+        "call_id": "call-pending",
+        "arguments": "x" * 450_000,
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "old " + "y" * 500_000},
+            latest_call,
+        ],
+    }
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_trimming_omits_self_contained_anchored_non_state_tool_pair_when_it_cannot_fit():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
         "input": [
             {
                 "type": "function_call",
-                "name": "exec",
+                "name": "read_file",
                 "call_id": "call-pair",
                 "arguments": "x" * 450_000,
             },
@@ -1416,10 +1439,200 @@ def test_compact_trimming_rejects_latest_tool_output_when_matching_call_cannot_f
         ],
     }
 
-    request = ResponsesCompactRequest.model_validate(payload)
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert payload["input"][0] not in dumped_input
+    assert payload["input"][2] not in dumped_input
+    assert any(
+        isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
+        for item in dumped_input
+    )
+
+
+def test_compact_trimming_omits_latest_non_state_tool_pair_when_marker_would_overflow_budget():
+    call = {
+        "type": "function_call",
+        "name": "read_file",
+        "call_id": "call-marker-budget",
+        "arguments": "x" * 399_600,
+    }
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-marker-budget",
+        "output": "ok",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [
+            {"role": "assistant", "content": "old " + "y" * 500_000},
+            call,
+            output,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert call not in dumped_input
+    assert output not in dumped_input
+    assert any("[compact trim]" in str(item) for item in dumped_input)
+
+
+def test_compact_trimming_preserves_latest_anchored_output_without_matching_call():
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-from-previous-response",
+        "output": "latest tool result",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "previous_response_id": "resp_anchor",
+        "input": [
+            {"role": "assistant", "content": "old " + "y" * 500_000},
+            output,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert output in dumped_input
+
+
+def test_compact_trimming_rejects_oversized_latest_apply_patch_pair():
+    call = {
+        "type": "apply_patch_call",
+        "call_id": "call-side-effect",
+        "operation": {"patch": "x" * 450_000},
+    }
+    output = {
+        "type": "apply_patch_call_output",
+        "call_id": "call-side-effect",
+        "output": "applied",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "old " + "y" * 500_000},
+            call,
+            output,
+        ],
+    }
 
     with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
-        request.to_payload()
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_trimming_keeps_latest_non_state_tool_pair_when_it_fits():
+    call = {
+        "type": "function_call",
+        "name": "read_file",
+        "call_id": "call-pair",
+        "arguments": "{}",
+    }
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-pair",
+        "output": "latest result",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "x" * 500_000},
+            call,
+            output,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert call in dumped_input
+    assert output in dumped_input
+
+
+@pytest.mark.parametrize(
+    ("item_type", "tool_name", "argument_field", "output_type"),
+    [
+        ("custom_tool_call", "exec", "input", "custom_tool_call_output"),
+        ("function_call", "exec_command", "arguments", "function_call_output"),
+        ("function_call", "write_stdin", "arguments", "function_call_output"),
+    ],
+)
+def test_compact_trimming_rejects_oversized_named_side_effect_tool_pair(
+    item_type: str, tool_name: str, argument_field: str, output_type: str
+):
+    call = {
+        "type": item_type,
+        "name": tool_name,
+        "call_id": "call-large-side-effect-output",
+        argument_field: "x" * 450_000,
+    }
+    output = {
+        "type": output_type,
+        "call_id": "call-large-side-effect-output",
+        "output": "applied",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "continue the task"},
+            call,
+            output,
+        ],
+    }
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_compact_trimming_rejects_oversized_parallel_code_mode_side_effect_pair(recipient_name: str):
+    call = {
+        "type": "function_call",
+        "name": "multi_tool_use.parallel",
+        "call_id": "call-large-parallel-side-effect-output",
+        "arguments": json.dumps(
+            {
+                "tool_uses": [
+                    {
+                        "recipient_name": recipient_name,
+                        "parameters": {"cmd": "touch must-remain-an-anchor"},
+                    }
+                ]
+            }
+        ),
+    }
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-large-parallel-side-effect-output",
+        "output": "x" * 450_000,
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "continue the task"},
+            call,
+            output,
+        ],
+    }
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
 
     assert raised.value.param == "input"
     assert raised.value.code == "responses_compact_input_too_large"
@@ -1600,7 +1813,7 @@ def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
 def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budget():
     optional_call = {
         "type": "function_call",
-        "name": "exec",
+        "name": "read_file",
         "call_id": "call-optional",
         "arguments": "{}",
     }
@@ -1641,7 +1854,7 @@ def test_compact_backtracking_skips_pair_mate_removed_by_cascade():
     optional_head = {"role": "user", "content": "h" * 2_300}
     optional_call = {
         "type": "function_call",
-        "name": "exec",
+        "name": "read_file",
         "call_id": "call-optional",
         "arguments": "{}",
     }

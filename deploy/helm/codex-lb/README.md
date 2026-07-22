@@ -112,7 +112,9 @@ Use External Secrets Operator to materialize credentials.
 Key properties:
 
 - `externalSecrets.enabled=true`
+- requires External Secrets Operator v0.17.0 or newer (the first release that serves `external-secrets.io/v1`)
 - DB credentials are not assumed to exist at render time
+- remote secret keys and optional JSON properties are configurable independently
 - migration Job remains `post-install,pre-upgrade`
 - application pods keep the schema gate initContainer enabled and wait for schema head before starting the app container
 
@@ -135,6 +137,26 @@ helm upgrade --install codex-lb deploy/helm/codex-lb/ \
 ```
 
 </details>
+
+By default, both values are read from JSON properties in a remote secret named
+after the release. Providers such as Infisical commonly store each value as an
+individual secret instead. Configure absolute keys and clear the property fields
+for that layout:
+
+```yaml
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: infisical
+    kind: ClusterSecretStore
+  remoteRefs:
+    databaseUrl:
+      key: /apps/codex-lb/DATABASE_URL
+      property: ""
+    encryptionKey:
+      key: /apps/codex-lb/ENCRYPTION_KEY
+      property: ""
+```
 
 ## Quick Start
 

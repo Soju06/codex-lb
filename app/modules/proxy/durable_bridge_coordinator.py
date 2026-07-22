@@ -120,23 +120,30 @@ class DurableBridgeSessionCoordinator:
                         ),
                     )
             if resolved_aliases:
-                return _to_lookup(
-                    next(
+                if resolved_account_ids:
+                    account_id = next(iter(resolved_account_ids))
+                    same_account_snapshots = [
+                        snapshot for snapshot in resolved_snapshots if snapshot.account_id == account_id
+                    ]
+                    requested_response_snapshot = next(
                         (
                             snapshot
                             for alias_kind, snapshot in resolved_aliases
-                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS
+                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and snapshot.account_id == account_id
                         ),
-                        next(
-                            (
-                                snapshot
-                                for alias_kind, snapshot in resolved_aliases
-                                if alias_kind == _DURABLE_TURN_STATE_ALIAS
-                            ),
-                            resolved_snapshots[0],
+                        None,
+                    )
+                    account_snapshot = requested_response_snapshot or max(
+                        same_account_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.last_seen_at,
                         ),
                     )
-                )
+                    # Preserve an explicitly requested response anchor. Without
+                    # one, prefer the newest same-account persisted response.
+                    return _to_lookup(account_snapshot)
+                return _to_lookup(resolved_snapshots[0])
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,

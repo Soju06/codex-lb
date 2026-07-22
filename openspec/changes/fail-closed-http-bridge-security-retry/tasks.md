@@ -1,3 +1,4 @@
 - [x] 1. Block security retry after a created anchor or deferred upstream reasoning output.
-- [x] 2. Clear stale turn affinity only for a permitted pre-created retry and restore it on reconnect failure.
+- [x] 2. Validate raw legacy ownership before one durable replacement claim and the session/alias swap for a permitted pre-created retry.
 - [x] 3. Cover deferred-output replay blocking and preserve pinned-request denial coverage.
+- [x] 4. Cover turn-state and session-header replacement success plus legacy-owner conflict rollback ordering.

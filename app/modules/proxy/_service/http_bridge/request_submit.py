@@ -76,9 +76,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _record_continuity_fail_closed,
     _record_http_bridge_prewarm_outcome,
+    _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
+    _call_with_supported_optional_kwargs,
     _classify_upstream_close,
     _count_external_image_urls,
     _enforce_response_create_size_limit,
@@ -164,6 +166,7 @@ from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
 from app.modules.proxy.affinity import (
+    _AffinityPolicy,
     _extract_model_class,
     _owner_lookup_session_id_from_headers,
 )
@@ -1646,8 +1649,14 @@ class _HTTPBridgeRequestSubmitMixin:
         previous_response_event_count = request_state.response_event_count
         previous_upstream_model_output_seen = request_state.upstream_model_output_seen
         previous_affinity_policy = request_state.affinity_policy
+        previous_session_affinity = session.affinity
+        previous_session_codex_session = session.codex_session
         previous_session_upstream_turn_state = session.upstream_turn_state
         previous_session_downstream_turn_state = session.downstream_turn_state
+        previous_session_turn_state_aliases = set(session.downstream_turn_state_aliases)
+        previous_session_turn_state_alias_registration_generations = dict(
+            session.turn_state_alias_registration_generations
+        )
         previous_session_headers = session.headers
         if request_state.previous_response_id is not None:
             retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
@@ -1662,9 +1671,13 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=None,
             reallocate_sticky=True,
         )
-        session.upstream_turn_state = None
-        session.downstream_turn_state = None
-        session.headers = {key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"}
+        replacement_session_affinity = replace(
+            session.affinity,
+            key=None,
+            kind=None,
+            reallocate_sticky=True,
+            codex_session_source=None,
+        )
 
         request_state.replay_count += 1
         request_state.response_id = None
@@ -1691,13 +1704,28 @@ class _HTTPBridgeRequestSubmitMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        reconnected = False
         try:
             request_state.precreated_replay_account_id = session.account.id
-            await self._reconnect_http_bridge_session(
+            await _call_with_supported_optional_kwargs(
+                self._reconnect_http_bridge_session,
                 session,
+                optional_kwargs={
+                    "owner_rebind_affinity": previous_session_affinity,
+                    "selection_affinity": replacement_session_affinity,
+                },
                 request_state=request_state,
                 require_security_work_authorized=True,
             )
+            reconnected = True
+            if session.account.id != owner_account_id:
+                if previous_session_affinity.selection_key is not None and previous_session_affinity.kind is not None:
+                    async with self._repo_factory() as repos:
+                        await repos.sticky_sessions.upsert(
+                            previous_session_affinity.selection_key,
+                            session.account.id,
+                            kind=previous_session_affinity.kind,
+                        )
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
@@ -1724,13 +1752,69 @@ class _HTTPBridgeRequestSubmitMixin:
                 if request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
-            request_state.replay_count = previous_replay_count
-            request_state.response_id = previous_response_id
-            request_state.response_event_count = previous_response_event_count
-            request_state.upstream_model_output_seen = previous_upstream_model_output_seen
-            request_state.deferred_reasoning_downstream_texts = []
-            request_state.affinity_policy = previous_affinity_policy
-            session.upstream_turn_state = previous_session_upstream_turn_state
-            session.downstream_turn_state = previous_session_downstream_turn_state
-            session.headers = previous_session_headers
+            if not reconnected:
+                request_state.replay_count = previous_replay_count
+                request_state.response_id = previous_response_id
+                request_state.response_event_count = previous_response_event_count
+                request_state.upstream_model_output_seen = previous_upstream_model_output_seen
+                request_state.deferred_reasoning_downstream_texts = []
+                request_state.affinity_policy = previous_affinity_policy
+                session.affinity = previous_session_affinity
+                session.codex_session = previous_session_codex_session
+                session.upstream_turn_state = previous_session_upstream_turn_state
+                session.downstream_turn_state = previous_session_downstream_turn_state
+                async with self._http_bridge_lock:
+                    session.downstream_turn_state_aliases.update(previous_session_turn_state_aliases)
+                    session.turn_state_alias_registration_generations.update(
+                        previous_session_turn_state_alias_registration_generations
+                    )
+                    _register_http_bridge_turn_state_aliases_locked(self, session)
+                session.headers = previous_session_headers
             return False
+
+    async def _claim_http_bridge_replacement_before_swap(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        account_id: str,
+        upstream: Any,
+        release_selected_account_lease: Any,
+        owner_rebind_affinity: _AffinityPolicy,
+    ) -> None:
+        if account_id == session.account.id:
+            return
+        try:
+            if owner_rebind_affinity.legacy_selection_key is not None and owner_rebind_affinity.kind is not None:
+                async with self._repo_factory() as repos:
+                    legacy_owner_id = await repos.sticky_sessions.get_account_id(
+                        owner_rebind_affinity.legacy_selection_key,
+                        kind=owner_rebind_affinity.kind,
+                        max_age_seconds=owner_rebind_affinity.max_age_seconds,
+                    )
+                if legacy_owner_id is not None and legacy_owner_id != account_id:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "continuity_owner_conflict",
+                            "Security retry conflicts with a legacy continuity owner.",
+                            error_type="server_error",
+                        ),
+                    )
+            if session.durable_session_id is not None:
+                await _call_with_supported_optional_kwargs(
+                    self._claim_durable_http_bridge_session,
+                    session,
+                    optional_kwargs={
+                        "claim_account_id": account_id,
+                        "clear_latest_turn_state": True,
+                    },
+                    allow_takeover=True,
+                    force_owner_epoch_advance=True,
+                )
+        except BaseException:
+            try:
+                await upstream.close()
+            except Exception:
+                logger.debug("Failed to close unclaimed HTTP bridge replacement websocket", exc_info=True)
+            await release_selected_account_lease()
+            raise

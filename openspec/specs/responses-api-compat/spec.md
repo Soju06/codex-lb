@@ -683,6 +683,20 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **AND** same-account takeover MUST preserve the latest persisted response anchor until a replacement response id is recorded
 - **AND** normal client retries MUST NOT be stranded waiting for the old instance lease to expire
 
+When request aliases resolve to different durable rows for the same account,
+an explicitly requested previous-response alias MUST select its row even if
+that row has since advanced to a newer response id. Without an explicitly
+resolved previous-response alias, recovery MUST select the freshest row that
+contains a persisted response anchor rather than using alias enumeration order.
+
+#### Scenario: requested durable response alias survives same-account row divergence
+
+- **GIVEN** turn-state and previous-response aliases resolve to different durable rows for the same account
+- **AND** the request names the previous-response alias whose row has since advanced to a newer response id
+- **WHEN** the service resolves durable continuity
+- **THEN** it selects the row resolved by the requested previous-response alias
+- **AND** it preserves that row's latest persisted response anchor
+
 ### Requirement: Responses account selection accounts for in-flight pressure
 
 For Responses API requests, usage-based routing MUST include immediate in-process account pressure in addition to persisted usage. Account selection MUST account for in-flight response-create work, active streams, leased token/cost estimates, recent selection pressure, account health, and configured account-local caps. Selection and lease acquisition MUST be atomic with respect to other in-process selections, and the critical section MUST NOT perform database calls, network calls, sleeps, or other blocking I/O.
@@ -1427,10 +1441,14 @@ When an upstream Responses request fails because the work requires cybersecurity
 For HTTP bridge requests, the service MUST retry security-work authorization on
 another account only before `response.created` and before any upstream model
 output. A buffered reasoning prelude counts as upstream model output even while
-it is withheld from downstream pending the security decision. The retry MUST
-clear stale turn affinity before a permitted file-free replacement attempt and
-MUST restore the original safe state if reconnect fails. File-pinned requests
-MUST NOT migrate.
+it is withheld from downstream pending the security decision. A permitted
+file-free retry MUST select the replacement with cleared request and session
+affinity, but MUST validate any raw legacy owner before changing the live
+session or its durable owner generation. On success it MUST make exactly one
+durable replacement claim before swapping the session, then clear or replace
+the session affinity and local turn-state aliases. A legacy-owner conflict MUST
+leave the original session open and unchanged. File-pinned requests MUST NOT
+migrate.
 
 #### Scenario: Created HTTP bridge response is not replayed
 
@@ -1446,6 +1464,14 @@ MUST NOT migrate.
   security-work authorization denial
 - **THEN** that prelude blocks account-switch replay and is not emitted before
   the terminal security decision
+
+#### Scenario: Legacy owner conflict fails before replacement mutation
+
+- **GIVEN** a session-header security retry selects an authorized replacement account
+- **AND** the raw legacy affinity row belongs to a different account
+- **WHEN** the service validates the replacement
+- **THEN** it does not claim the durable session for the replacement
+- **AND** it leaves the original account, upstream, owner generation, aliases, and open session unchanged
 
 ### Requirement: Responses request compatibility controls
 

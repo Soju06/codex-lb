@@ -1385,7 +1385,6 @@ class _HTTPBridgeMixin(
                 except Exception:
                     pass
                 continue
-
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1475,7 +1474,6 @@ class _HTTPBridgeMixin(
                     if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
-
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:

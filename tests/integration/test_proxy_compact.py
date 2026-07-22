@@ -196,13 +196,13 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_before_ordinary_tail(
-    async_client, monkeypatch
-):
-    email = "compact-side-effect@example.com"
-    raw_account_id = "acc_compact_side_effect"
-    files = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")}
-    response = await async_client.post("/api/accounts/import", files=files)
+async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(async_client, monkeypatch):
+    email = "compact-optional-tail@example.com"
+    raw_account_id = "acc_compact_optional_tail"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
     assert response.status_code == 200
 
     seen_payloads: list[dict[str, object]] = []
@@ -213,47 +213,33 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
-    side_effect_call = {
-        "type": "custom_tool_call",
-        "name": "exec",
-        "call_id": "call-code-mode-exec",
-        "input": json.dumps({"command": "git status --short"}),
+    call = {
+        "type": "function_call",
+        "name": "read_file",
+        "call_id": "call-route-tail",
+        "arguments": "x" * 450_000,
     }
-    side_effect_output = {
-        "type": "custom_tool_call_output",
-        "call_id": "call-code-mode-exec",
-        "output": "clean",
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-route-tail",
+        "output": "latest ordinary result",
     }
-    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 500_000}
-    payload = {
-        "model": "gpt-5.6-sol",
-        "instructions": "",
-        "input": [
-            {"role": "user", "content": "perform a code-mode action"},
-            {"role": "assistant", "content": "prefix " + "y" * 260_000},
-            side_effect_call,
-            side_effect_output,
-            ordinary_tail,
-            {"role": "user", "content": "continue after compaction"},
-        ],
-    }
-
-    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [call, {"role": "assistant", "content": "middle"}, output],
+        },
+    )
 
     assert response.status_code == 200
     assert len(seen_payloads) == 1
-    upstream_input = seen_payloads[0]["input"]
-    assert isinstance(upstream_input, list)
-    assert side_effect_call in upstream_input
-    assert side_effect_output in upstream_input
-    assert all(
-        not (
-            isinstance(item, dict)
-            and item.get("role") == "assistant"
-            and item.get("content") == [{"type": "output_text", "text": ordinary_tail["content"]}]
-        )
-        for item in upstream_input
-    )
+    compact_input = cast(list[object], seen_payloads[0]["input"])
+    assert call not in compact_input
+    assert output not in compact_input
+    assert "[compact trim]" in json.dumps(compact_input)
+    assert "most recent context" not in json.dumps(compact_input)
 
 
 @pytest.mark.asyncio
@@ -387,13 +373,7 @@ async def test_proxy_compact_normalizes_summary_output_for_codex_remote_v2(async
     assert response.status_code == 200
     compact_json = response.json()
     assert compact_json["object"] == "response.compaction"
-    assert compact_json["output"] == [
-        {
-            "id": "cmp_compact_v2",
-            "type": "compaction",
-            "encrypted_content": "enc_compact_v2",
-        }
-    ]
+    assert compact_json["output"] == [{"type": "compaction", "encrypted_content": "enc_compact_v2"}]
 
 
 @pytest.mark.asyncio

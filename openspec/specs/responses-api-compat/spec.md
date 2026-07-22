@@ -2377,7 +2377,7 @@ top-level `instructions` unchanged.
 
 ### Requirement: Responses Lite follow-up transformations fail closed
 
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
+After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
 
 #### Scenario: Oversized compact input keeps the Lite prelude
 
@@ -2396,21 +2396,22 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **WHEN** the latest input item is a non-state, non-side-effecting tool call or output whose complete pair cannot fit with required anchors and trim markers
 - **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
 - **AND** it does not return `responses_compact_input_too_large` solely because the pair fit before marker framing
+- **AND** the marker does not claim omitted terminal context was preserved
 
 #### Scenario: Continuity-anchored latest unpaired tool output remains required
 
-- **WHEN** a compact request carries `previous_response_id` and its latest input item is a tool output without a matching call in the supplied input
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest input item is a tool output without a matching call in the supplied input
 - **THEN** the output remains in the upstream input because its call belongs to the prior response
 - **AND** the service returns `responses_compact_input_too_large` when that required output cannot fit
 
 #### Scenario: Self-contained anchored ordinary pair remains optional
 
-- **WHEN** a compact request carries `previous_response_id` and its latest ordinary tool output has a matching call in supplied input
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest ordinary tool output has a matching call in supplied input
 - **THEN** compact trimming MAY omit the complete pair when it cannot fit
 
 #### Scenario: Reused call ID from another tool variant does not satisfy continuity
 
-- **WHEN** a compact request carries `previous_response_id` and its latest tool
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest tool
   output reuses the `call_id` of an incompatible function/custom/apply-patch
   call variant in supplied input
 - **THEN** the latest output remains required as continuity from the previous response

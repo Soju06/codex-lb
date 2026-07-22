@@ -969,7 +969,7 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     terminal_indices, terminal_is_required, reconcile_terminal_pairs = _compact_terminal_required_indices(
         input_value,
         token_counts=token_counts,
-        has_previous_response_anchor=_compact_has_previous_response_anchor(payload),
+        has_continuity_anchor=_compact_has_continuity_anchor(payload),
     )
     if terminal_is_required and terminal_indices & unusable_side_effect_indices:
         raise ClientPayloadError(
@@ -1097,16 +1097,18 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     payload["input"] = trimmed_input
 
 
-def _compact_has_previous_response_anchor(payload: Mapping[str, JsonValue]) -> bool:
-    previous_response_id = payload.get("previous_response_id")
-    return isinstance(previous_response_id, str) and bool(previous_response_id.strip())
+def _compact_has_continuity_anchor(payload: Mapping[str, JsonValue]) -> bool:
+    return any(
+        isinstance(payload.get(field), str) and bool(cast(str, payload[field]).strip())
+        for field in ("previous_response_id", "conversation")
+    )
 
 
 def _compact_terminal_required_indices(
     input_value: list[JsonValue],
     *,
     token_counts: list[int],
-    has_previous_response_anchor: bool,
+    has_continuity_anchor: bool,
 ) -> tuple[set[int], bool, bool]:
     """Return terminal context and whether it must remain even when oversized."""
 
@@ -1129,7 +1131,7 @@ def _compact_terminal_required_indices(
         return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
     if (
         latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
-        and has_previous_response_anchor
+        and has_continuity_anchor
         and matching_call_index is None
     ):
         return {latest_index}, True, False
@@ -1590,8 +1592,9 @@ def _compact_trim_marker(*, omitted_items: int, omitted_tokens: int) -> JsonObje
                 "text": (
                     "[compact trim] Omitted "
                     f"{omitted_items} input items (~{omitted_tokens} estimated tokens) "
-                    "before forwarding this oversized compact request upstream. The initial "
-                    "context, most recent context, and compact state anchors were preserved."
+                    "before forwarding this oversized compact request upstream. Required compact "
+                    "state anchors and retained input items remain in their original order; "
+                    "omitted items may include terminal context."
                 ),
             }
         ],

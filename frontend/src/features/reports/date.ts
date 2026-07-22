@@ -51,6 +51,13 @@ export function daysAgoLocalISO(days: number, date: Date = new Date()): string {
   return localDateISO(shifted);
 }
 
+export function isReportDateRangeValid(
+  startDate: string | undefined,
+  endDate: string | undefined,
+): boolean {
+  return !startDate || !endDate || startDate <= endDate;
+}
+
 export function formatReportBucketDate(date: string): string {
   const [year, month, day] = date.split("-");
   if (!year || !month || !day) {

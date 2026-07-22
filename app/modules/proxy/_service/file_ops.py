@@ -34,12 +34,6 @@ from app.modules.proxy._service.support import (
     _request_log_useragent_fields,
     _RequestLogFailureMetadata,
 )
-from app.modules.proxy.affinity import (
-    _is_synthesized_turn_state,
-    _prompt_cache_key_from_request_model,
-    _sticky_key_from_session_header,
-    _sticky_key_from_turn_state_header,
-)
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
 
@@ -239,56 +233,19 @@ class _FileOpsMixin:
         upload (the upstream contract is account-scoped via
         ``chatgpt-account-id``).
 
-        The pin is only skipped for stronger client-supplied
-        continuation signals: an explicit ``prompt_cache_key``, a Codex
-        session header, a client-supplied turn-state header, or a
-        ``previous_response_id``.
+        Live pins are account ownership evidence. Partial pin coverage and
+        files owned by different accounts fail closed; choosing a "best"
+        attachment would send at least one account-scoped object to the wrong
+        upstream account. When none of the IDs has a live pin, preserve the
+        established opaque-ID compatibility path and leave routing unpinned.
 
-        Note: ``_sticky_key_for_responses_request`` can *derive* and
-        write a ``prompt_cache_key`` onto the payload when openai cache
-        affinity is enabled. We must not treat that derived key as a
-        stronger signal -- it is itself the load balancer's choice to
-        route consistently, not a client-supplied continuation marker.
-        Inspect ``model_fields_set`` so we only honor an *explicit*
-        client-supplied cache key.
-
-        Tie-breaking when the payload references multiple ``file_id``s:
-        prefer the most-recently-pinned one (matches the most recent
-        upload in a multi-attachment thread). If two pins share the
-        same expiry timestamp, the lexicographically smallest
-        ``file_id`` wins for determinism.
+        Other hard sources are intentionally not inspected here. Callers merge
+        this result with previous-response, turn-state, or bridge ownership at
+        the shared continuity boundary so conflicts cannot hide behind source
+        precedence.
         """
         proxy = cast(_FileOpsServiceProtocol, self)
-        # Stronger affinity signals always win, but only when the
-        # client supplied them. Derived ``prompt_cache_key`` values
-        # added by the affinity helper itself must not block file-pin
-        # routing for first-turn upload-then-converse flows.
-        # Honor both the canonical ``prompt_cache_key`` and the
-        # OpenAI-compat camelCase ``promptCacheKey`` alias as
-        # client-supplied. Pydantic populates ``model_fields_set`` with
-        # the canonical name when V1 normalization runs ahead of us, but
-        # raw clients posting directly to ``/backend-api/codex/responses``
-        # bypass that normalization and we still want to respect their
-        # explicit cache key.
-        explicit_fields = getattr(payload, "model_fields_set", set())
-        explicit_cache_key = "prompt_cache_key" in explicit_fields or "promptCacheKey" in explicit_fields
-        if explicit_cache_key and _prompt_cache_key_from_request_model(payload) is not None:
-            return None
-        # ``ensure_downstream_turn_state`` / ``ensure_http_downstream_turn_state``
-        # synthesize a fresh ``x-codex-turn-state`` header on first turns when
-        # the client did not supply one (see
-        # ``app/modules/proxy/api.py`` websocket / HTTP handlers). Treat those
-        # synthetic values as "no client-supplied turn state" so the file-pin
-        # lookup still runs on first-turn upload-then-converse flows. Only a
-        # turn-state value that does *not* match the synthesizer prefix counts
-        # as a client-supplied continuation marker.
-        turn_state_value = _sticky_key_from_turn_state_header(headers)
-        if turn_state_value is not None and not _is_synthesized_turn_state(turn_state_value):
-            return None
-        if _sticky_key_from_session_header(headers) is not None:
-            return None
-        if getattr(payload, "previous_response_id", None):
-            return None
+        del headers
 
         file_ids = extract_input_file_ids(payload.input)
         if not file_ids:
@@ -296,20 +253,35 @@ class _FileOpsMixin:
 
         async with proxy._file_account_pin_lock:
             proxy._evict_expired_file_pins_locked()
-            best_account: str | None = None
-            best_expires_at = -1.0
-            best_file_id: str | None = None
-            for file_id in file_ids:
-                entry = proxy._file_account_pins.get(file_id)
-                if entry is None:
-                    continue
-                if entry.expires_at > best_expires_at or (
-                    entry.expires_at == best_expires_at and (best_file_id is None or file_id < best_file_id)
-                ):
-                    best_account = entry.account_id
-                    best_expires_at = entry.expires_at
-                    best_file_id = file_id
-            return best_account
+            entries = [proxy._file_account_pins.get(file_id) for file_id in file_ids]
+
+        pinned_entries = [entry for entry in entries if entry is not None]
+        if not pinned_entries:
+            # A raw file_id may have been registered directly with upstream or
+            # before this replica observed the upload. With zero local proof,
+            # it remains an opaque compatibility reference rather than a hard
+            # owner; callers forward it verbatim under ordinary routing.
+            return None
+        if len(pinned_entries) != len(entries):
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "file_owner_unavailable",
+                    "Input file owner metadata is unavailable; upload the file again and retry.",
+                    error_type="server_error",
+                ),
+            )
+        owner_account_ids = {entry.account_id for entry in pinned_entries}
+        if len(owner_account_ids) != 1:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "continuity_owner_conflict",
+                    "Input files resolve to conflicting upstream accounts; retry with files from one account.",
+                    error_type="server_error",
+                ),
+            )
+        return next(iter(owner_account_ids))
 
     def _raise_for_unsupported_input_image_references(self, payload: _ResponsesPayloadT) -> None:
         references = extract_input_image_file_references(payload.input)

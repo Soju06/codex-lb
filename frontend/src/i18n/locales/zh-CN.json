@@ -905,6 +905,7 @@
   "reports.errors.options": "加载 Model 和 User Agent 选项失败：{{error}}",
   "reports.errors.partial": "部分报表数据无法加载。请重试。",
   "reports.filters.endDate": "结束日期",
+  "reports.filters.invalidDateRange": "开始日期必须早于或等于结束日期。",
   "reports.filters.startDate": "开始日期",
   "reports.filters.userAgent": "User Agent",
   "reports.page.subtitle": "按日期范围查看使用历史",

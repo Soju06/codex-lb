@@ -149,6 +149,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSessionKey,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _ttft_event_visible_at,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -193,6 +194,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -201,10 +203,6 @@ from app.modules.proxy.helpers import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
-# TTFT anchors to the first model output of any kind, reasoning included.
-_FIRST_TOKEN_EVENT_TYPES = _TEXT_DELTA_EVENT_TYPES | frozenset(
-    {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}
-)
 _REQUEST_TRANSPORT_HTTP = "http"
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
@@ -518,6 +516,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_legacy_signature: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -540,6 +539,7 @@ class _HTTPBridgeStreamingMixin:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
@@ -562,6 +562,7 @@ class _HTTPBridgeStreamingMixin:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -572,7 +573,18 @@ class _HTTPBridgeStreamingMixin:
         payload_size_estimate_bytes = len(
             json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
-        rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
+        # File pins are process-local. A remote owner must trust only the
+        # origin-resolved value carried by the authenticated forward context;
+        # re-looking it up here would turn a valid cross-replica pin into a miss.
+        local_file_owner_account_id = (
+            None
+            if forwarded_file_owner_account_id is not None
+            else await self._resolve_file_account_for_responses(payload, headers)
+        )
+        rewritten_file_account_id = resolve_required_account_id(
+            ("signed forwarding context", forwarded_file_owner_account_id),
+            ("local file pin", local_file_owner_account_id),
+        )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             logger.info(
@@ -638,6 +650,7 @@ class _HTTPBridgeStreamingMixin:
                 forwarded_affinity_kind=forwarded_affinity_kind,
                 forwarded_affinity_key=forwarded_affinity_key,
                 rewritten_file_account_id=rewritten_file_account_id,
+                file_owner_already_resolved=True,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
@@ -673,6 +686,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         rewritten_file_account_id: str | None = None,
+        file_owner_already_resolved: bool = False,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -680,6 +694,8 @@ class _HTTPBridgeStreamingMixin:
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        if not file_owner_already_resolved and rewritten_file_account_id is None:
+            rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
         bridge_payload = payload.to_payload()
         bridge_client_metadata = _response_create_client_metadata(
             bridge_payload,
@@ -802,6 +818,11 @@ class _HTTPBridgeStreamingMixin:
                     ),
                     previous_response_id=payload.previous_response_id,
                 )
+            except ProxyResponseError:
+                # Conflicting durable aliases are a continuity decision, not a
+                # metadata outage. Never soften that fail-closed result into a
+                # non-durable first-match fallback.
+                raise
             except Exception:
                 logger.warning(
                     "Durable bridge lookup failed; falling back to non-durable request handling",
@@ -981,19 +1002,25 @@ class _HTTPBridgeStreamingMixin:
         )
         if request_state.preferred_account_id is None and durable_model_transition_lookup is not None:
             request_state.preferred_account_id = durable_model_transition_lookup.account_id
-        if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
-            request_state.preferred_account_id = await self._http_bridge_local_owner_account_id(
+        local_previous_response_owner: str | None = None
+        indexed_previous_response_owner: str | None = None
+        if request_state.previous_response_id is not None:
+            local_previous_response_owner = await self._http_bridge_local_owner_account_id(
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
                 previous_response_id=request_state.previous_response_id,
                 api_key=api_key,
             )
-        if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
-            request_state.preferred_account_id = await self._resolve_websocket_previous_response_owner(
+            indexed_previous_response_owner = await self._resolve_websocket_previous_response_owner(
                 previous_response_id=request_state.previous_response_id,
                 api_key=api_key,
                 session_id=request_state.session_id,
                 surface="http_bridge",
+            )
+            request_state.preferred_account_id = resolve_required_account_id(
+                ("durable bridge", request_state.preferred_account_id),
+                ("live bridge", local_previous_response_owner),
+                ("previous-response index", indexed_previous_response_owner),
             )
         if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
             message = "Previous response owner account is unavailable; retry later."
@@ -1008,22 +1035,15 @@ class _HTTPBridgeStreamingMixin:
                 502,
                 openai_error("previous_response_owner_unavailable", message),
             )
-        file_required_preferred_account = False
-        if request_state.preferred_account_id is None:
-            # ``input_file.file_id`` references must land on the account
-            # that registered the upload (chatgpt-account-id-scoped).
-            # The helper returns ``None`` when stronger affinity signals
-            # are present, so this never overrides existing routing.
-            if rewritten_file_account_id is not None:
-                request_state.preferred_account_id = rewritten_file_account_id
-                file_required_preferred_account = True
-                request_state.file_required_preferred_account = True
-        if request_state.preferred_account_id is None:
-            resolved_file_account_id = await self._resolve_file_account_for_responses(effective_payload, headers)
-            if resolved_file_account_id is not None:
-                request_state.preferred_account_id = resolved_file_account_id
-                file_required_preferred_account = True
-                request_state.file_required_preferred_account = True
+        # Existing bridge/response ownership and file ownership are equally
+        # hard. Merge them before transport creation; source ordering must not
+        # turn a conflict into an implicit account switch.
+        request_state.preferred_account_id = resolve_required_account_id(
+            ("previous response or bridge", request_state.preferred_account_id),
+            ("input file", rewritten_file_account_id),
+        )
+        file_required_preferred_account = rewritten_file_account_id is not None
+        request_state.file_required_preferred_account = file_required_preferred_account
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
@@ -1122,17 +1142,12 @@ class _HTTPBridgeStreamingMixin:
                     payload=payload,
                     durable_lookup=None,
                 )
-                file_required_preferred_account = False
-                if rewritten_file_account_id is not None:
-                    request_state.preferred_account_id = rewritten_file_account_id
-                    file_required_preferred_account = True
-                    request_state.file_required_preferred_account = True
-                if request_state.preferred_account_id is None:
-                    resolved_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
-                    if resolved_file_account_id is not None:
-                        request_state.preferred_account_id = resolved_file_account_id
-                        file_required_preferred_account = True
-                        request_state.file_required_preferred_account = True
+                request_state.preferred_account_id = resolve_required_account_id(
+                    ("replay owner", request_state.preferred_account_id),
+                    ("input file", rewritten_file_account_id),
+                )
+                file_required_preferred_account = rewritten_file_account_id is not None
+                request_state.file_required_preferred_account = file_required_preferred_account
                 effective_payload = payload
                 untrimmed_effective_payload = payload
                 proxy_injected_previous_response_id = False
@@ -1161,6 +1176,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
                     downstream_turn_state=downstream_turn_state,
+                    file_owner_account_id=rewritten_file_account_id,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
                     client_ip=client_ip,
@@ -1605,7 +1621,7 @@ class _HTTPBridgeStreamingMixin:
             downstream_turn_state=downstream_turn_state,
             request_deadline=request_deadline,
         )
-        request_state.file_required_preferred_account = file_required_preferred_account
+        file_required_preferred_account = request_state.file_required_preferred_account
         request_state.bridge_soft_capacity_reroute_allowed = (
             bridge_session_key.strength == "soft"
             and request_state.previous_response_id is None
@@ -2283,10 +2299,14 @@ class _HTTPBridgeStreamingMixin:
                 keepalive_count = 0
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
-                if request_state.latency_first_token_ms is None and block_event_type in _FIRST_TOKEN_EVENT_TYPES:
-                    request_state.latency_first_token_ms = int(
-                        (_service_time().monotonic() - request_state.started_at) * 1000
+                if request_state.latency_first_token_ms is None:
+                    ttft_visible_at = _ttft_event_visible_at(
+                        block_event_type, block_payload, request_state.ttft_reasoning_deltas
                     )
+                    if ttft_visible_at is not None:
+                        request_state.latency_first_token_ms = max(
+                            0, int((ttft_visible_at - request_state.started_at) * 1000)
+                        )
                 if not propagate_http_errors and _is_previous_response_not_found_error(
                     code=_normalize_error_code(
                         _websocket_event_error_code(block_event_type, block_payload),

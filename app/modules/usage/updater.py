@@ -473,7 +473,7 @@ class UsageUpdater:
             return False
         if (
             latest is not None
-            and (newest.recorded_at - latest.recorded_at).total_seconds() <= _SIBLING_FETCH_MARGIN_SECONDS
+            and (newest.recorded_at - latest.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
         ):
             return False
         if not _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds):
@@ -1140,11 +1140,6 @@ def _latest_usage_is_fresh(
             return False
     return True
 
-
-# Rows written by the same upstream fetch land within milliseconds of each
-# other; a sibling row only proves a *later* fetch (one that no longer
-# reported the stale window) when it is newer by more than this margin.
-_SIBLING_FETCH_MARGIN_SECONDS = 5.0
 
 _MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
 

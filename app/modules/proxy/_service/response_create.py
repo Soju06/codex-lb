@@ -27,6 +27,9 @@ from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
 from app.modules.proxy._service.support import (
+    _PENDING_TOOL_CALL_ITEM_TYPES,
+    _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE,
+    _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES,
     _WebSocketRequestState,
 )
 
@@ -266,15 +269,6 @@ def _slim_response_create_payload_for_upstream(
         "historical_tool_outputs_slimmed": tool_outputs_slimmed,
         "historical_images_slimmed": images_slimmed,
     }
-
-
-_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
-    "function_call": "function_call_output",
-    "custom_tool_call": "custom_tool_call_output",
-    "apply_patch_call": "apply_patch_call_output",
-}
-_PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
-_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
 
 
 def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:

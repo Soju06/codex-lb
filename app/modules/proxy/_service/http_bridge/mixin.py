@@ -1857,10 +1857,7 @@ class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixi
                 "kind": "http_bridge",
                 "request_stage": request_stage,
                 "api_key": api_key,
-                "sticky_key": affinity.key,
-                "sticky_kind": affinity.kind,
-                "reallocate_sticky": affinity.reallocate_sticky,
-                "sticky_max_age_seconds": affinity.max_age_seconds,
+                "affinity_policy": affinity,
                 "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
@@ -2185,10 +2182,7 @@ class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixi
                 kind="http_bridge",
                 request_stage="reattach",
                 api_key=session.api_key,
-                sticky_key=session.affinity.key,
-                sticky_kind=session.affinity.kind,
-                reallocate_sticky=session.affinity.reallocate_sticky,
-                sticky_max_age_seconds=session.affinity.max_age_seconds,
+                affinity_policy=session.affinity,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=_routing_strategy(settings),
@@ -2216,10 +2210,7 @@ class _HTTPBridgeMixin(_HTTPBridgeStreamingMixin, _HTTPBridgeAccountSessionsMixi
             if account is None:
                 await release_selected_account_lease()
                 if (
-                    (
-                        selection.error_code == "no_accounts"
-                        or (selection.error_message or "").startswith("No available accounts")
-                    )
+                    (selection.error_message or "").startswith("No available accounts")
                     and (
                         request_state.previous_response_id is None
                         or (

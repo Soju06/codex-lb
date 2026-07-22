@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.modules.reports.repository import DailyReportRangeTooLargeError, ReportsRepository
-from app.modules.reports.service import ReportsService
+from app.modules.reports.service import InvalidReportDateRangeError, ReportsService
 
 pytestmark = pytest.mark.unit
 
@@ -35,6 +35,36 @@ async def test_get_reports_rejects_oversized_range_after_applying_default_end_da
     repo.aggregate_daily_rows.assert_not_awaited()
     repo.aggregate_by_model.assert_not_awaited()
     repo.aggregate_by_account.assert_not_awaited()
+    repo.earliest_report_activity_at.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_reports_rejects_inverted_defaulted_range_before_repository_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = SimpleNamespace(
+        aggregate_summary=AsyncMock(),
+        aggregate_daily_rows=AsyncMock(),
+        aggregate_by_model=AsyncMock(),
+        aggregate_by_account=AsyncMock(),
+        aggregate_by_useragent=AsyncMock(),
+        earliest_report_activity_at=AsyncMock(),
+    )
+    service = ReportsService(cast(ReportsRepository, repo))
+    fixed_now = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.modules.reports.service.utcnow", lambda: fixed_now)
+
+    with pytest.raises(
+        InvalidReportDateRangeError,
+        match="start_date must be on or before end_date",
+    ):
+        await service.get_reports(start_date=date(2026, 6, 13))
+
+    repo.aggregate_summary.assert_not_awaited()
+    repo.aggregate_daily_rows.assert_not_awaited()
+    repo.aggregate_by_model.assert_not_awaited()
+    repo.aggregate_by_account.assert_not_awaited()
+    repo.aggregate_by_useragent.assert_not_awaited()
     repo.earliest_report_activity_at.assert_not_awaited()
 
 

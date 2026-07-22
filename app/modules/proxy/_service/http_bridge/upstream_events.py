@@ -428,10 +428,11 @@ class _HTTPBridgeUpstreamEventsMixin:
         if not expired_requests:
             return ()
         for request_state in expired_requests:
-            request_state.error_code_override = request_state.error_code_override or error_code
-            request_state.error_message_override = request_state.error_message_override or error_message
-            request_state.error_type_override = request_state.error_type_override or "server_error"
-            request_state.error_http_status_override = request_state.error_http_status_override or 502
+            if request_state.error_message_override != "No available accounts":
+                request_state.error_code_override = error_code
+                request_state.error_message_override = error_message
+                request_state.error_type_override = "server_error"
+                request_state.error_http_status_override = 502
             await self._fail_pending_websocket_requests(
                 account=session.account,
                 account_id_value=session.account.id,

@@ -247,6 +247,48 @@ def test_postgres_engine_kwargs_keep_pool_controls(monkeypatch) -> None:
     assert kwargs["pool_timeout"] == 30.0
 
 
+def test_postgres_connect_args_pin_session_timezone_to_utc(monkeypatch) -> None:
+    """Regression: the application writes naive UTC datetimes into timestamptz
+    columns, so the asyncpg session time zone MUST be UTC. Otherwise a container
+    running e.g. TZ=Europe/Amsterdam makes PostgreSQL interpret those naive
+    values in local time and shift every stored timestamp, which silently breaks
+    ring-membership staleness, leader election and bridge-session lease expiry.
+    """
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+
+    connect_args = session_module._postgres_async_connect_args("postgresql+asyncpg://u:p@h/db")
+
+    assert connect_args == {"server_settings": {"timezone": "UTC"}}
+
+
+def test_postgres_connect_args_pin_utc_and_keep_test_db_url_tuning(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_TEST_DATABASE_URL", "1")
+
+    connect_args = session_module._postgres_async_connect_args("postgresql+asyncpg://u:p@h/db")
+
+    assert connect_args == {
+        "server_settings": {"timezone": "UTC"},
+        "prepared_statement_cache_size": 0,
+    }
+
+
+def test_postgres_connect_args_none_for_non_postgres_url() -> None:
+    assert session_module._postgres_async_connect_args("sqlite+aiosqlite:///:memory:") is None
+
+
+def test_postgres_engine_kwargs_forward_utc_connect_args(monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url="postgresql+asyncpg://u:p@h/db"),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db")
+
+    assert kwargs["connect_args"] == {"server_settings": {"timezone": "UTC"}}
+
+
 @pytest.mark.asyncio
 async def test_close_session_rolls_back_open_transaction_before_close() -> None:
     calls: list[str] = []

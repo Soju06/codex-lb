@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +16,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -141,10 +144,13 @@ class _StubUsageRepository:
 class _StubStickySessionsRepository:
     def __init__(self) -> None:
         self.account_id: str | None = None
+        self.account_ids_by_key: dict[str, str] | None = None
         self.deleted: list[tuple[str, StickySessionKind | None]] = []
         self.upserts: list[tuple[str, str, StickySessionKind | None]] = []
 
     async def get_account_id(self, *args: Any, **kwargs: Any) -> str | None:
+        if self.account_ids_by_key is not None:
+            return self.account_ids_by_key.get(cast(str, args[0]))
         del args, kwargs
         return self.account_id
 
@@ -617,7 +623,513 @@ async def test_bound_codex_session_sticky_fails_closed_when_pinned_account_is_sa
 
 
 @pytest.mark.asyncio
-async def test_codex_session_sticky_reallocates_under_budget_pressure() -> None:
+def _make_cap_spillover_balancer(
+    prefix: str,
+    *,
+    include_alternate: bool = True,
+) -> tuple[LoadBalancer, Account, Account | None, _StubStickySessionsRepository]:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    owner = _make_account(f"{prefix}-owner")
+    alternate = _make_account(f"{prefix}-alternate") if include_alternate else None
+    accounts = [owner, *([alternate] if alternate is not None else [])]
+    usage_rows = {
+        account.id: _usage_row(index + 100, account.id, window="primary", reset_at=now_epoch + 300)
+        for index, account in enumerate(accounts)
+    }
+    secondary_rows = {
+        account.id: _usage_row(index + 200, account.id, window="secondary", reset_at=now_epoch + 3600)
+        for index, account in enumerate(accounts)
+    }
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = owner.id
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository(accounts),
+            _StubUsageRepository(usage_rows, secondary_rows),
+            sticky_repo,
+        )
+    )
+    return balancer, owner, alternate, sticky_repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("lease_kind", "cap"), [("stream", 8), ("response_create", 4)])
+async def test_bare_codex_session_spills_without_rebinding_when_owner_reaches_account_cap(
+    lease_kind: Literal["stream", "response_create"],
+    cap: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=load_balancer_module.__name__)
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer(f"cap-spill-{lease_kind}")
+    assert alternate is not None
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind=lease_kind) for _ in range(cap)]
+    raw_session = "bare-session-must-not-appear-in-log"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind=lease_kind,
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    assert selected.lease is not None
+    assert sticky_repo.account_id == owner.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+    assert "internal_soft_affinity_spillover" in caplog.text
+    assert raw_session not in caplog.text
+
+    for lease in [*saturated_leases, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lease_kind", ["stream", "response_create"])
+async def test_bare_codex_session_keeps_unsaturated_owner(
+    lease_kind: Literal["stream", "response_create"],
+) -> None:
+    balancer, owner, _, sticky_repo = _make_cap_spillover_balancer(f"cap-sticky-{lease_kind}")
+    raw_session = "bare-session-sticky"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind=lease_kind,
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    assert sticky_repo.account_id == owner.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_bare_codex_stream_avoids_owner_at_response_create_cap() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("cap-second-stage")
+    assert alternate is not None
+    create_leases = [await balancer.acquire_account_lease(owner.id, kind="response_create") for _ in range(4)]
+    raw_session = "bare-session-second-stage"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    assert sticky_repo.account_id == owner.id
+
+    for lease in [*create_leases, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lease_kind", "cap", "error_code"),
+    [
+        ("stream", 8, "account_stream_cap"),
+        ("response_create", 4, "account_response_create_cap"),
+    ],
+)
+async def test_bare_codex_session_preserves_mapping_when_no_alternate_is_below_cap(
+    lease_kind: Literal["stream", "response_create"],
+    cap: int,
+    error_code: str,
+) -> None:
+    balancer, owner, _, sticky_repo = _make_cap_spillover_balancer(
+        f"cap-no-alternate-{lease_kind}",
+        include_alternate=False,
+    )
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind=lease_kind) for _ in range(cap)]
+    raw_session = "bare-session-no-alternate"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind=lease_kind,
+    )
+
+    assert selected.account is None
+    assert selected.error_code == error_code
+    assert sticky_repo.account_id == owner.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_raw_codex_session_key_cannot_activate_cap_spillover() -> None:
+    balancer, owner, _, sticky_repo = _make_cap_spillover_balancer("cap-raw-key")
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(
+        sticky_key="legacy-or-owner-bearing-key",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert sticky_repo.account_id == owner.id
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_turn_state_that_looks_namespaced_remains_hard() -> None:
+    balancer, owner, _, sticky_repo = _make_cap_spillover_balancer("cap-crafted-turn-state")
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key("crafted-turn-state"),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="turn_state",
+        spill_bare_session_on_account_cap=True,
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert sticky_repo.account_id == owner.id
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_legacy_raw_session_mapping_remains_hard_during_upgrade() -> None:
+    balancer, owner, _, sticky_repo = _make_cap_spillover_balancer("cap-legacy-session")
+    raw_session = "legacy-bare-session"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo.account_ids_by_key = {raw_session: owner.id}
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert sticky_repo.account_ids_by_key == {raw_session: owner.id}
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_legacy_raw_session_mapping_wins_when_namespaced_row_also_exists() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("cap-legacy-coexist")
+    assert alternate is not None
+    raw_session = "legacy-coexisting-session"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo.account_ids_by_key = {
+        selection_key: alternate.id,
+        raw_session: owner.id,
+    }
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert sticky_repo.account_ids_by_key == {
+        selection_key: alternate.id,
+        raw_session: owner.id,
+    }
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_legacy_raw_owner_conflict_blocks_resolved_preferred_owner() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("legacy-preferred-conflict")
+    assert alternate is not None
+    raw_session = "legacy-preferred-session"
+    sticky_repo.account_ids_by_key = {raw_session: owner.id}
+
+    selected = await balancer.select_account(
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        required_account_id=alternate.id,
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "continuity_owner_conflict"
+    assert sticky_repo.account_ids_by_key == {raw_session: owner.id}
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_bare_session_mapping_does_not_prove_ambiguous_conversation_owner() -> None:
+    balancer, owner, _, sticky_repo = _make_cap_spillover_balancer("conversation-ambiguous")
+    raw_session = "conversation-session"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_conversation_owner_stays_ambiguous_when_one_account_is_capped() -> None:
+    balancer, owner, _, _ = _make_cap_spillover_balancer("conversation-capped-candidate")
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="response_create") for _ in range(4)]
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+    for lease in saturated_leases:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_conversation_owner_stays_ambiguous_when_one_account_is_excluded() -> None:
+    balancer, owner, _, _ = _make_cap_spillover_balancer("conversation-excluded-candidate")
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        exclude_account_ids={owner.id},
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_preferred_file_owner_does_not_narrow_conversation_ambiguity_pool() -> None:
+    balancer, _owner, alternate, _ = _make_cap_spillover_balancer("conversation-file-owner")
+    assert alternate is not None
+
+    selected = await balancer.select_account(
+        required_account_id=alternate.id,
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_account_still_counts_toward_conversation_ambiguity() -> None:
+    balancer, owner, _alternate, _ = _make_cap_spillover_balancer("conversation-paused-owner")
+    owner.status = AccountStatus.PAUSED
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_conversation_owner_ambiguity_uses_prequota_candidate_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balancer, owner, alternate, _ = _make_cap_spillover_balancer("conversation-prequota-candidates")
+    assert alternate is not None
+    monkeypatch.setattr(
+        balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=load_balancer_module.SelectionInputs(
+                accounts=[owner],
+                continuity_owner_candidates=[owner, alternate],
+                latest_primary={},
+                latest_secondary={},
+                latest_monthly={},
+            )
+        ),
+    )
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_additional_quota_error_cannot_hide_ambiguous_conversation_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balancer, owner, alternate, _ = _make_cap_spillover_balancer("conversation-empty-quota-pool")
+    assert alternate is not None
+    monkeypatch.setattr(
+        balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=load_balancer_module.SelectionInputs(
+                accounts=[],
+                continuity_owner_candidates=[owner, alternate],
+                latest_primary={},
+                latest_secondary={},
+                latest_monthly={},
+                error_message="No accounts have the requested additional quota",
+                error_code="additional_quota_unavailable",
+            )
+        ),
+    )
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        additional_limit_name="codex_other_models",
+        lease_kind="response_create",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_security_scope_filters_ownership_candidates_even_when_routing_pool_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balancer, authorized, unauthorized, _ = _make_cap_spillover_balancer("conversation-empty-security-pool")
+    assert unauthorized is not None
+    authorized.security_work_authorized = True
+    unauthorized.security_work_authorized = False
+    monkeypatch.setattr(
+        balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=load_balancer_module.SelectionInputs(
+                accounts=[],
+                continuity_owner_candidates=[authorized, unauthorized],
+                latest_primary={},
+                latest_secondary={},
+                latest_monthly={},
+                error_message="No accounts have the requested additional quota",
+                error_code="additional_quota_unavailable",
+            )
+        ),
+    )
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        require_security_work_authorized=True,
+        lease_kind="response_create",
+    )
+
+    # Security authorization is part of the ownership scope. Once it leaves
+    # one possible owner, the original routing error—not false ambiguity—wins.
+    assert selected.account is None
+    assert selected.error_code == "additional_quota_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_conversation_allows_only_eligible_account() -> None:
+    balancer, owner, _, _ = _make_cap_spillover_balancer(
+        "conversation-single-account",
+        include_alternate=False,
+    )
+
+    selected = await balancer.select_account(
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope_mode", ["excluded", "api_key_scope"])
+async def test_hard_codex_session_owner_outside_selection_pool_fails_closed(scope_mode: str) -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer(f"hard-owner-{scope_mode}")
+    assert alternate is not None
+    if scope_mode == "excluded":
+        selected = await balancer.select_account(
+            sticky_key="hard-owner-selection",
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            lease_kind="stream",
+            exclude_account_ids={owner.id},
+        )
+    else:
+        selected = await balancer.select_account(
+            sticky_key="hard-owner-selection",
+            sticky_kind=StickySessionKind.CODEX_SESSION,
+            lease_kind="stream",
+            account_ids={alternate.id},
+        )
+
+    assert selected.account is None
+    assert selected.error_code == "hard_affinity_saturated"
+    assert sticky_repo.account_id == owner.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_hard_codex_session_sticky_does_not_reallocate_under_budget_pressure() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     account_a = _make_account("acc-hard-sticky-a")
     account_b = _make_account("acc-hard-sticky-b")
@@ -651,10 +1163,52 @@ async def test_codex_session_sticky_reallocates_under_budget_pressure() -> None:
     )
 
     assert result.account is not None
-    assert result.account.id == account_b.id
-    assert sticky_repo.deleted == [("hard-session", StickySessionKind.CODEX_SESSION)]
-    assert sticky_repo.account_id == account_b.id
+    assert result.account.id == account_a.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.account_id == account_a.id
     await balancer.release_account_lease(result.lease)
+
+
+@pytest.mark.asyncio
+async def test_unusable_hard_codex_session_does_not_delete_mapping_under_budget_pressure() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    account_a = _make_account("acc-hard-unusable-a")
+    account_a.status = AccountStatus.QUOTA_EXCEEDED
+    account_b = _make_account("acc-hard-unusable-b")
+    accounts_repo = _StubAccountsRepository([account_a, account_b])
+    usage_repo = _StubUsageRepository(
+        primary={
+            account_a.id: _usage_row_with_percent(
+                44,
+                account_a.id,
+                used_percent=100.0,
+                reset_at=now_epoch + 300,
+            ),
+            account_b.id: _usage_row_with_percent(
+                45,
+                account_b.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = account_a.id
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    result = await balancer.select_account(
+        sticky_key="hard-unusable-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert result.account is None
+    assert result.error_code == "hard_affinity_saturated"
+    assert sticky_repo.account_id == account_a.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
 
 
 def test_effective_account_concurrency_caps_partitions_across_replicas(

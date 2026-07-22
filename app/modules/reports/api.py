@@ -5,10 +5,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
+from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import ReportsContext, get_reports_context
 from app.modules.reports.repository import DailyReportRangeTooLargeError
 from app.modules.reports.schemas import ReportsResponse
+from app.modules.reports.service import InvalidReportDateRangeError
 
 router = APIRouter(
     prefix="/api/reports",
@@ -36,5 +41,7 @@ async def get_reports(
             model=model,
             useragent_group=useragent_group,
         )
+    except InvalidReportDateRangeError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
     except DailyReportRangeTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

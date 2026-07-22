@@ -17,6 +17,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CLIENT_IP_HEADER,
     HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER,
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
+    HTTP_BRIDGE_FILE_OWNER_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
@@ -48,6 +49,24 @@ def _temp_bridge_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
 
 def _payload() -> ResponsesRequest:
     return ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+
+def _payload_with_file() -> ResponsesRequest:
+    return ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "read"},
+                        {"type": "input_file", "file_id": "file-owner-bound"},
+                    ],
+                }
+            ],
+        }
+    )
 
 
 def _use_legacy_forward_signature(
@@ -101,6 +120,78 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
     assert forwarded.context == context
     assert forwarded.context.original_affinity_kind is None
     assert forwarded.context.original_affinity_key is None
+
+
+def test_parse_forwarded_request_preserves_signed_file_owner_proof() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_file_owner",
+        file_owner_account_id="acc-file-owner",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.file_owner_account_id == "acc-file-owner"
+
+
+@pytest.mark.parametrize("downgrade", ["tamper", "strip_full_signature"])
+def test_parse_forwarded_request_rejects_unbound_file_owner_proof(downgrade: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        file_owner_account_id="acc-file-owner",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if downgrade == "tamper":
+        headers[HTTP_BRIDGE_FILE_OWNER_HEADER] = "acc-attacker"
+    else:
+        headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_rejects_file_payload_without_full_context_signature() -> None:
+    payload = _payload_with_file()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_FILE_OWNER_HEADER, None)
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
 
 
 def test_parse_forwarded_request_accepts_signed_internal_forward_with_client_ip() -> None:

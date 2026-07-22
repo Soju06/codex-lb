@@ -231,6 +231,55 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_weekly_primary_beats_no_data_secondary_placeholder(async_client, db_setup):
+    # Regression: upstream reports the weekly window in the primary slot and an
+    # empty no-data secondary placeholder (used_percent=0, no window duration, no
+    # reset). Both rows are written milliseconds apart in the same fetch. Before
+    # the data-aware tiebreak, the sub-second younger placeholder won and the
+    # dashboard weekly remaining jumped to 100%. The real weekly used_percent
+    # must drive the secondary remaining percent instead.
+    now = utcnow().replace(microsecond=0)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(days=2)))
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_weekly_placeholder", "weekly-placeholder@example.com"))
+
+        # Real weekly window reported in the primary slot.
+        await usage_repo.add_entry(
+            "acc_weekly_placeholder",
+            74.0,
+            window="primary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=now - timedelta(milliseconds=13),
+        )
+        # Empty secondary placeholder written ~13ms later in the same fetch.
+        await usage_repo.add_entry(
+            "acc_weekly_placeholder",
+            0.0,
+            window="secondary",
+            window_minutes=0,
+            reset_at=None,
+            recorded_at=now,
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    payload = response.json()
+
+    account = payload["accounts"][0]
+    # The weekly primary row (74% used) must be remapped onto the secondary
+    # slot, not the no-data placeholder (0% used -> 100% remaining).
+    assert account["windowMinutesPrimary"] is None
+    assert account["windowMinutesSecondary"] == 10080
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(26.0)
+    assert account["remainingCreditsSecondary"] == pytest.approx(7560.0 * 0.26)
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_exposes_monthly_only_free_account(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

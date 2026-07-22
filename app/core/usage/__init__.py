@@ -43,6 +43,15 @@ PLAN_CAPACITY_CREDITS_MONTHLY = {
     "free": 1134.0,
 }
 
+# Rows written by the same upstream fetch land within milliseconds of each
+# other; a sibling row only proves a *later* fetch (one that no longer
+# reported the stale window) when it is newer by more than this margin. This
+# is the same-fetch threshold shared by the weekly-primary remap tiebreak and
+# the usage updater's sibling-row freshness logic. (Other modules keep their
+# own private 5.0 s constants for unrelated sibling logic; consolidating those
+# is out of scope for the weekly-primary tiebreak fix.)
+SIBLING_FETCH_MARGIN_SECONDS = 5.0
+
 DEFAULT_WINDOW_MINUTES_PRIMARY = 300
 DEFAULT_WINDOW_MINUTES_SECONDARY = 10080
 DEFAULT_WINDOW_MINUTES_MONTHLY = 43200
@@ -281,17 +290,62 @@ def normalize_weekly_only_rows(
     return normalized_primary, list(normalized_secondary_by_account.values())
 
 
+def _has_real_quota_metadata(row: UsageWindowRow) -> bool:
+    """A row carries real quota metadata when it has a positive window
+    duration AND a reset deadline. Used by the weekly-primary remap tiebreak to
+    distinguish a real weekly sample from a no-data placeholder."""
+    return row.window_minutes is not None and row.window_minutes > 0 and row.reset_at is not None
+
+
+def _is_no_data_placeholder(row: UsageWindowRow) -> bool:
+    """A no-data placeholder is the absence of a measurement, not 0% used.
+
+    Such rows (no positive window duration AND no reset deadline) are written
+    when upstream omits a window slot entirely. Within the data-aware tiebreak
+    (same-fetch or indeterminate ordering), a placeholder must not displace a
+    row carrying real quota metadata. A newer cross-fetch placeholder can still
+    win via fetch ordering, which is intentional — the cross-fetch winner is
+    rendered per existing placeholder rules.
+    """
+    has_window = row.window_minutes is not None and row.window_minutes > 0
+    return not has_window and row.reset_at is None
+
+
 def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:
     primary_recorded_at = _normalize_recorded_at(primary_row.recorded_at)
     secondary_recorded_at = _normalize_recorded_at(secondary_row.recorded_at)
+
+    # Fetch ordering decides ONLY when both timestamps are present and differ
+    # by more than the sibling margin. A genuinely later fetch is more
+    # authoritative about what upstream currently reports, so the newer row
+    # wins — this preserves the pre-fix cross-fetch behavior and avoids
+    # freezing a stale real weekly primary over a fresh placeholder from a
+    # later fetch. When only one (or neither) timestamp is present we cannot
+    # determine fetch ordering, so we fall through to the data-aware tiebreak
+    # rather than letting timestamp presence alone decide (a timestamped
+    # no-data placeholder must not beat an untimestamped real weekly row).
     if primary_recorded_at is not None and secondary_recorded_at is not None:
         if primary_recorded_at != secondary_recorded_at:
-            return primary_recorded_at > secondary_recorded_at
-    elif primary_recorded_at is not None:
+            delta_seconds = abs((primary_recorded_at - secondary_recorded_at).total_seconds())
+            if delta_seconds > SIBLING_FETCH_MARGIN_SECONDS:
+                return primary_recorded_at > secondary_recorded_at
+            # Within the sibling margin: same fetch, fall through to the
+            # data-aware tiebreak below so sub-second write skew cannot flip
+            # the winner per refresh.
+
+    # Same-fetch, or one/both timestamps unavailable, or rows equidistant
+    # within the margin: a row carrying real quota metadata MUST win over a
+    # no-data placeholder. A placeholder is the absence of a measurement, not
+    # 0% used, so it must never displace a real weekly sample (otherwise the
+    # dashboard jumps to 100% remaining every refresh).
+    primary_has_real = _has_real_quota_metadata(primary_row)
+    if primary_has_real and _is_no_data_placeholder(secondary_row):
         return True
-    elif secondary_recorded_at is not None:
+    if _has_real_quota_metadata(secondary_row) and _is_no_data_placeholder(primary_row):
         return False
 
+    # Both real or both placeholder (same fetch / indeterminate ordering):
+    # reset-at precedence, then the stable weekly-primary default.
     if primary_row.reset_at is not None and secondary_row.reset_at is not None:
         if primary_row.reset_at != secondary_row.reset_at:
             return primary_row.reset_at > secondary_row.reset_at
@@ -300,7 +354,7 @@ def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: Usage
     elif secondary_row.reset_at is not None:
         return False
 
-    # Keep weekly-only semantics stable when timestamps are unavailable.
+    # Keep weekly-only semantics stable when no discriminator is available.
     return True
 
 

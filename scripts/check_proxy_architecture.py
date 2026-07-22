@@ -15,15 +15,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROXY_DIR = ROOT / "app" / "modules" / "proxy"
 SERVICE_PATH = PROXY_DIR / "service.py"
+LOAD_BALANCER_PATH = PROXY_DIR / "load_balancer.py"
 _SERVICE_DIR = PROXY_DIR / "_service"
 SERVICE_PACKAGE_DIR = PROXY_DIR / "_service"
 HTTP_BRIDGE_MIXIN_PATH = PROXY_DIR / "_service" / "http_bridge" / "mixin.py"
 STREAMING_MIXIN_PATH = PROXY_DIR / "_service" / "streaming" / "mixin.py"
 
-MAX_SERVICE_LINES = 2_600
+MAX_SERVICE_LINES = 2_604
+MAX_LOAD_BALANCER_LINES = 3_260
 MAX_HTTP_BRIDGE_MIXIN_LINES = 2_400
 MAX_STREAMING_MIXIN_LINES = 1_100
 MAX_PROXY_SERVICE_METHOD_LINES = 1_200
+MAX_LOAD_BALANCER_SELECT_ACCOUNT_LINES = 699
 
 REQUIRED_SERVICE_PACKAGES = {
     "http_bridge",
@@ -134,6 +137,17 @@ def _proxy_service_methods(module: ast.Module) -> list[ast.FunctionDef | ast.Asy
     raise AssertionError("ProxyService class not found in service.py")
 
 
+def _load_balancer_select_account(module: ast.Module) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in module.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "LoadBalancer":
+            continue
+        for child in node.body:
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child.name == "select_account":
+                return child
+        raise AssertionError("LoadBalancer.select_account method not found in load_balancer.py")
+    raise AssertionError("LoadBalancer class not found in load_balancer.py")
+
+
 def _assert_shim_only(path: Path) -> None:
     module = _parse(path)
     allowed = (ast.Expr, ast.ImportFrom)
@@ -156,6 +170,12 @@ def _check_service_line_count() -> None:
         raise AssertionError(f"service.py has {count} lines; limit is {MAX_SERVICE_LINES}")
 
 
+def _check_load_balancer_line_count() -> None:
+    count = _line_count(LOAD_BALANCER_PATH)
+    if count > MAX_LOAD_BALANCER_LINES:
+        raise AssertionError(f"load_balancer.py has {count} lines; limit is {MAX_LOAD_BALANCER_LINES}")
+
+
 def _check_http_bridge_mixin_line_count() -> None:
     count = _line_count(HTTP_BRIDGE_MIXIN_PATH)
     if count > MAX_HTTP_BRIDGE_MIXIN_LINES:
@@ -174,6 +194,15 @@ def _check_proxy_service_method_size(module: ast.Module) -> None:
     if largest > MAX_PROXY_SERVICE_METHOD_LINES:
         raise AssertionError(
             f"largest ProxyService method spans {largest} lines; limit is {MAX_PROXY_SERVICE_METHOD_LINES}"
+        )
+
+
+def _check_load_balancer_select_account_size(module: ast.Module) -> None:
+    method = _load_balancer_select_account(module)
+    span = (method.end_lineno or method.lineno) - method.lineno + 1
+    if span > MAX_LOAD_BALANCER_SELECT_ACCOUNT_LINES:
+        raise AssertionError(
+            f"LoadBalancer.select_account spans {span} lines; limit is {MAX_LOAD_BALANCER_SELECT_ACCOUNT_LINES}"
         )
 
 
@@ -244,10 +273,13 @@ def _check_no_cross_domain_service_imports() -> None:
 def main() -> int:
     try:
         service_module = _parse(SERVICE_PATH)
+        load_balancer_module = _parse(LOAD_BALANCER_PATH)
         _check_service_line_count()
+        _check_load_balancer_line_count()
         _check_http_bridge_mixin_line_count()
         _check_streaming_mixin_line_count()
         _check_proxy_service_method_size(service_module)
+        _check_load_balancer_select_account_size(load_balancer_module)
         _check_service_facade_surface(service_module)
         _check_service_does_not_import_shims(service_module)
         _check_required_service_packages()

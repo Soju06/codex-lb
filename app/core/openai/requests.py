@@ -794,6 +794,9 @@ _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the la
 _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
 _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
+_COMPACT_OMITTED_INLINE_IMAGE_TEXT = (
+    "[compact trim] Omitted inline image bytes that were already observed before compaction"
+)
 
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
@@ -933,6 +936,29 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+            input_value,
+            required_indices=required_indices,
+        )
+        if images_elided:
+            input_value = rewritten_input
+            payload["input"] = input_value
+            token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+            head_count = _compact_trim_prefix_count(token_counts)
+            preserved_indices = _compact_state_anchor_indices(input_value)
+            required_indices = set(preserved_indices)
+            if input_value:
+                required_indices.add(len(input_value) - 1)
+            required_indices = _compact_reconciled_tool_call_indices(
+                input_value,
+                required_indices,
+                token_counts=token_counts,
+                token_budget=sum(token_counts),
+                required_indices=required_indices,
+            )
+            required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+            required_tokens = _estimated_json_tokens(required_input)
+    if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         raise ClientPayloadError(
             "Compact input exceeds the upstream size limit and cannot be trimmed "
             "without removing required state anchors.",
@@ -981,6 +1007,65 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     if trimmed_input is input_value:
         return
     payload["input"] = trimmed_input
+
+
+def _compact_elide_required_tool_output_images(
+    input_value: list[JsonValue],
+    *,
+    required_indices: set[int],
+) -> tuple[list[JsonValue], bool]:
+    rewritten: list[JsonValue] = []
+    changed = False
+    for index, item in enumerate(input_value):
+        if (
+            index in required_indices
+            and is_json_mapping(item)
+            and item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        ):
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        else:
+            rewritten.append(item)
+    return rewritten, changed
+
+
+def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
+    """Replace inline image bytes with an explicit compact-only text marker.
+
+    The model has already observed these images during the live turn. Re-sending
+    their data URLs to the compact endpoint can make an otherwise recoverable
+    thread permanently uncompactable, especially when the latest required tool
+    output contains a screenshot. File-backed image references remain intact.
+    """
+
+    if is_json_mapping(value):
+        if value.get("type") == "input_image":
+            image_url = value.get("image_url")
+            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                return (
+                    {
+                        "type": "input_text",
+                        "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(image_url)} encoded characters).",
+                    },
+                    True,
+                )
+        rewritten_mapping: JsonObject = {}
+        changed = False
+        for key, item in value.items():
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten_mapping[key] = rewritten_item
+            changed = changed or item_changed
+        return rewritten_mapping, changed
+    if is_json_list(value):
+        rewritten: list[JsonValue] = []
+        changed = False
+        for item in value:
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        return rewritten, changed
+    return value, False
 
 
 def _compact_fit_selected_indices_to_wire_budget(

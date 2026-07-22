@@ -1374,6 +1374,132 @@ def test_compact_trimming_rejects_oversized_latest_item():
     assert raised.value.code == "responses_compact_input_too_large"
 
 
+def test_compact_trimming_elides_inline_image_from_required_latest_tool_output():
+    latest_call = {
+        "type": "custom_tool_call",
+        "name": "view_image",
+        "call_id": "call-latest-image",
+        "input": "{}",
+    }
+    latest_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call-latest-image",
+        "output": [
+            {"type": "input_text", "text": "Image Size: 1512x982."},
+            {
+                "type": "input_image",
+                "detail": "original",
+                "image_url": "data:image/png;base64," + "A" * 500_000,
+            },
+        ],
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "inspect the canvas"},
+            latest_call,
+            latest_output,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert latest_call in dumped_input
+    dumped_output = next(
+        item for item in dumped_input if isinstance(item, dict) and item.get("type") == "custom_tool_call_output"
+    )
+    assert dumped_output["output"] == [
+        {"type": "input_text", "text": "Image Size: 1512x982."},
+        {
+            "type": "input_text",
+            "text": (
+                "[compact trim] Omitted inline image bytes that were already observed before compaction "
+                "(500022 encoded characters)."
+            ),
+        },
+    ]
+    assert "data:image/png;base64" not in json.dumps(dumped_input)
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
+def test_compact_trimming_elides_mapping_shaped_required_tool_image_output():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "name": "view_image",
+                "call_id": "call-mapping-image",
+                "input": "{}",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call-mapping-image",
+                "output": {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64," + "A" * 500_000,
+                },
+            },
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    dumped_output = cast(Mapping[str, object], dumped_input[-1])
+    assert dumped_output["output"] == {
+        "type": "input_text",
+        "text": (
+            "[compact trim] Omitted inline image bytes that were already observed before compaction "
+            "(500022 encoded characters)."
+        ),
+    }
+
+
+def test_compact_trimming_keeps_file_backed_image_reference():
+    file_image = {"type": "input_image", "file_id": "file-canvas"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "x" * 500_000},
+            {"role": "user", "content": [file_image]},
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    latest_item = cast(Mapping[str, object], dumped_input[-1])
+    assert file_image in cast(list[object], latest_item["content"])
+
+
+def test_compact_trimming_keeps_latest_unobserved_user_inline_image():
+    latest_image = {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,AAAA",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "x" * 500_000},
+            {"role": "user", "content": [latest_image]},
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    latest_item = cast(Mapping[str, object], dumped_input[-1])
+    assert latest_image in cast(list[object], latest_item["content"])
+    assert "Omitted inline image bytes" not in json.dumps(dumped_input)
+
+
 def test_compact_trimming_preserves_latest_unmatched_tool_call():
     latest_call = {
         "type": "function_call",

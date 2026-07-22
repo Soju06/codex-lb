@@ -82,6 +82,13 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+def _proxy_response_error_is_transient_stream_retry(exc: ProxyResponseError) -> bool:
+    error = _parse_openai_error(exc.payload)
+    code = _normalize_error_code(error.code if error else None, error.type if error else None)
+    message = error.message if error else None
+    return _facade()._should_retry_transient_stream_error(code, message)
+
+
 def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mapping[str, str]) -> bool:
     return (
         payload.previous_response_id is not None
@@ -347,6 +354,7 @@ class _StreamingRetryMixin:
         network_recovery = ProcessNetworkRecovery(transport="stream", request_id=request_id)
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        last_exhausted_transient_exc: ProxyResponseError | None = None
         last_account_model_rejection: ProxyResponseError | None = None
         last_account_model_rejection_account_id: str | None = None
         account_model_replacement_account_id: str | None = None
@@ -1673,7 +1681,11 @@ class _StreamingRetryMixin:
                                     request_id,
                                 )
                                 return
-                            if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
+                            if (
+                                isinstance(tex, ProxyResponseError)
+                                and tex.status_code != 500
+                                and not _proxy_response_error_is_transient_stream_retry(tex)
+                            ):
                                 error = _parse_openai_error(tex.payload)
                                 code = _normalize_error_code(
                                     error.code if error else None,
@@ -1824,12 +1836,19 @@ class _StreamingRetryMixin:
                                     )
                                     break
                                 raise
-                            error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
-                            error_payload: UpstreamError = (
-                                tex.error
-                                if isinstance(tex, _TransientStreamError)
-                                else _upstream_error_from_openai(_parse_openai_error(tex.payload))
-                            )
+                            if isinstance(tex, _TransientStreamError):
+                                error_code = tex.code
+                                error_payload: UpstreamError = tex.error
+                            else:
+                                parsed_error = _parse_openai_error(tex.payload)
+                                error_code = (
+                                    _normalize_error_code(
+                                        parsed_error.code if parsed_error else None,
+                                        parsed_error.type if parsed_error else None,
+                                    )
+                                    or "server_error"
+                                )
+                                error_payload = _upstream_error_from_openai(parsed_error)
                             error_message = str(error_payload.get("message") or "")
                             recovery_decision = await _wait_for_process_network_recovery(
                                 account,
@@ -1880,6 +1899,13 @@ class _StreamingRetryMixin:
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
+                                last_exhausted_transient_exc = tex
+                            else:
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    error_code,
+                                    error_payload,
+                                    exclude_account=True,
+                                )
                             await _release_tracked_stream_lease(current_account_lease)
                             current_account_lease = None
                             excluded_account_ids.add(account.id)
@@ -2498,6 +2524,20 @@ class _StreamingRetryMixin:
                     _apply_error_metadata(event["response"]["error"], error)
                     yield format_sse_event(event)
                     return
+            if last_exhausted_transient_exc is not None:
+                error = _parse_openai_error(last_exhausted_transient_exc.payload)
+                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                error_message = error.message if error else None
+                event = response_failed_event(
+                    error_code or "upstream_error",
+                    error_message or "Upstream error",
+                    error_type=(error.type if error else None) or "server_error",
+                    response_id=request_id,
+                    error_param=error.param if error else None,
+                )
+                _apply_error_metadata(event["response"]["error"], error)
+                yield format_sse_event(event)
+                return
 
             retries_exhausted_msg = "No available accounts after retries"
             _facade().logger.warning(

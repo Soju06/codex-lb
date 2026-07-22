@@ -810,6 +810,7 @@ class _WebSocketRequestState:
     upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    upstream_model_output_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
@@ -1068,6 +1069,14 @@ def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequest
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
+    if event_type not in {
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    }:
+        request_state.upstream_model_output_seen = True
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1

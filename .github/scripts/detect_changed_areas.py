@@ -82,6 +82,8 @@ def _pull_request_files(event: dict[str, Any]) -> list[str]:
         try:
             payload, link = request_json(url)
         except GitHubApiError as exc:
+            if not exc.transient:
+                raise SystemExit(f"GitHub PR files request failed: {exc}") from exc
             print(
                 f"warning: GitHub PR files request failed after retries; falling back to the full CI suite: {exc}",
                 flush=True,

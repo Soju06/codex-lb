@@ -1,13 +1,13 @@
 # pyright: reportGeneralTypeIssues=false
+# ruff: noqa: I001
 from __future__ import annotations
 
+# fmt: off
 import asyncio
 import sys
 import time
 from typing import Any, AsyncIterator, Mapping, cast
-
 import aiohttp
-
 from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -32,30 +32,21 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_CODE as PREVIOUS_RESPONSE_STALE_CODE,
-)
-from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_MESSAGE as PREVIOUS_RESPONSE_STALE_MESSAGE,
-)
-from app.core.errors import (
-    response_failed_event,
-)
+from app.core.errors import PREVIOUS_RESPONSE_STALE_CODE as PREVIOUS_RESPONSE_STALE_CODE
+from app.core.errors import PREVIOUS_RESPONSE_STALE_MESSAGE as PREVIOUS_RESPONSE_STALE_MESSAGE
+from app.core.errors import response_failed_event
 from app.core.openai.parsing import parse_sse_event_payload
-from app.core.openai.requests import (
-    ResponsesRequest,
-)
+from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
-    AccountStatus,  # noqa: F401
+    AccountStatus,  # noqa: F401,
 )
 from app.modules.api_keys.service import (
-    ApiKeyData,
-    ApiKeyUsageReservationData,
+    ApiKeyData, ApiKeyUsageReservationData,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -63,12 +54,8 @@ from app.modules.proxy._service.api_key_usage import (
 from app.modules.proxy._service.compact import (
     _service_tier_from_compact_payload as _service_tier_from_compact_payload,
 )
-from app.modules.proxy._service.compact import (
-    _sticky_key_for_compact_request as _sticky_key_for_compact_request,
-)
-from app.modules.proxy._service.compact import (
-    _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
-)
+from app.modules.proxy._service.compact import _sticky_key_for_compact_request as _sticky_key_for_compact_request
+from app.modules.proxy._service.compact import _sticky_key_from_compact_payload as _sticky_key_from_compact_payload
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -123,15 +110,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_is_previous_response_owner_unavailable as _http_bridge_is_previous_response_owner_unavailable,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_key_strength as _http_bridge_key_strength,
-)
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_key_strength as _http_bridge_key_strength
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_check_required as _http_bridge_owner_check_required,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_owner_instance as _http_bridge_owner_instance,
-)
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_owner_instance as _http_bridge_owner_instance
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_lookup_unavailable_error_envelope as _http_bridge_owner_lookup_unavailable_error_envelope,
 )
@@ -153,15 +136,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_request_stage as _http_bridge_request_stage,
-)
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_stage as _http_bridge_request_stage
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_requires_cluster_registration as _http_bridge_requires_cluster_registration,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_runtime_config as _http_bridge_runtime_config,
-)
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_runtime_config as _http_bridge_runtime_config
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_allows_api_key as _http_bridge_session_allows_api_key,
 )
@@ -181,7 +160,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_bootstrap_rebind as _http_bridge_should_attempt_local_bootstrap_rebind,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
+    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute as _http_bridge_should_attempt_soft_affinity_reroute,
@@ -204,9 +183,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _is_missing_durable_bridge_table_error as _is_missing_durable_bridge_table_error,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _log_http_bridge_event as _log_http_bridge_event,
-)
+from app.modules.proxy._service.http_bridge.helpers import _log_http_bridge_event as _log_http_bridge_event
 from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_startup_wait_timeout as _log_http_bridge_startup_wait_timeout,
 )
@@ -228,56 +205,32 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_first_turn_timeout as _record_bridge_first_turn_timeout,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _record_bridge_reattach as _record_bridge_reattach,
-)
+from app.modules.proxy._service.http_bridge.helpers import _record_bridge_reattach as _record_bridge_reattach
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
-from app.modules.proxy._service.observability import (
-    _hash_identifier as _hash_identifier,
-)
-from app.modules.proxy._service.observability import (
-    _hash_identifier_or_none as _hash_identifier_or_none,
-)
-from app.modules.proxy._service.observability import (
-    _interesting_header_keys as _interesting_header_keys,
-)
+from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
+from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
+from app.modules.proxy._service.observability import _interesting_header_keys as _interesting_header_keys
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )
-from app.modules.proxy._service.observability import (
-    _maybe_log_proxy_request_shape as _maybe_log_proxy_request_shape,
-)
+from app.modules.proxy._service.observability import _maybe_log_proxy_request_shape as _maybe_log_proxy_request_shape
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
-from app.modules.proxy._service.observability import (
-    _record_continuity_fail_closed as _record_continuity_fail_closed,
-)
+from app.modules.proxy._service.observability import _record_continuity_fail_closed as _record_continuity_fail_closed
 from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
-from app.modules.proxy._service.observability import (
-    _summarize_input as _summarize_input,
-)
-from app.modules.proxy._service.observability import (
-    _tools_hash as _tools_hash,
-)
-from app.modules.proxy._service.observability import (
-    _truncate_identifier as _truncate_identifier,
-)
+from app.modules.proxy._service.observability import _summarize_input as _summarize_input
+from app.modules.proxy._service.observability import _tools_hash as _tools_hash
+from app.modules.proxy._service.observability import _truncate_identifier as _truncate_identifier
+from app.modules.proxy._service.streaming.helpers import _handle_stream_error as _handle_stream_error_helper
 from app.modules.proxy._service.streaming.helpers import (
-    _handle_stream_error as _handle_stream_error_helper,
+    _mark_downstream_stream_cancelled, _mark_upstream_stream_incomplete, _raw_stream_error_code_or_upstream,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _mark_downstream_stream_cancelled,
-    _mark_upstream_stream_incomplete,
-    _raw_stream_error_code_or_upstream,
-)
-from app.modules.proxy._service.streaming.helpers import (
-    _raw_stream_error_fields as _raw_error_fields,
-)
+from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_route_for_account as _resolve_upstream_route_for_account_helper,
 )
@@ -287,141 +240,98 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
-    _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
-    _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
-    _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
-    _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
-    _ApiKeyReservationTouchState,
-    _event_type_from_payload,
-    _finalize_ttft_latency_ms,
-    _RequestLogFailureMetadata,
-    _RetryableStreamError,
-    _StreamSettlement,
-    _TerminalStreamError,
-    _TransientStreamError,
-    _ttft_event_latency_ms,
+    _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401,
+    _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401,
+    _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401,
+    _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401,
+    _ApiKeyReservationTouchState, _event_type_from_payload, _finalize_ttft_latency_ms,
+    _RequestLogFailureMetadata, _RetryableStreamError, _StreamSettlement,
+    _TerminalStreamError, _TransientStreamError, _ttft_event_latency_ms,
     _WebSocketUpstreamControl,
 )
-from app.modules.proxy._service.support import (
-    _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
-)
-from app.modules.proxy._service.support import (
-    _record_websocket_route_metadata as _record_websocket_route_metadata,
-)
-from app.modules.proxy._service.support import (
-    _websocket_route_log_kwargs as _websocket_route_log_kwargs,
-)
-from app.modules.proxy._service.warmup import (
-    WarmupExecutionData as WarmupExecutionData,
-)
-from app.modules.proxy._service.warmup import (
-    WarmupFailedAccountData as WarmupFailedAccountData,
-)
-from app.modules.proxy._service.warmup import (
-    WarmupSkippedAccountData as WarmupSkippedAccountData,
-)
-from app.modules.proxy._service.warmup import (
-    WarmupSubmittedAccountData as WarmupSubmittedAccountData,
-)
-from app.modules.proxy._service.warmup import (
-    _is_warmup_usage_eligible as _is_warmup_usage_eligible,
-)
-from app.modules.proxy._service.warmup import (
-    _materialize_warmup_account as _materialize_warmup_account,
-)
-from app.modules.proxy._service.warmup import (
-    _snapshot_warmup_account as _snapshot_warmup_account,
-)
-from app.modules.proxy._service.warmup import (
-    _WarmupAccountSnapshot as _WarmupAccountSnapshot,
-)
-from app.modules.proxy._service.warmup import (
-    _WarmupSubmitResult as _WarmupSubmitResult,
-)
-from app.modules.proxy._service.warmup import (
-    _WarmupUsageSnapshot as _WarmupUsageSnapshot,
-)
+from app.modules.proxy._service.support import _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward
+from app.modules.proxy._service.support import _record_websocket_route_metadata as _record_websocket_route_metadata
+from app.modules.proxy._service.support import _websocket_route_log_kwargs as _websocket_route_log_kwargs
+from app.modules.proxy._service.warmup import WarmupExecutionData as WarmupExecutionData
+from app.modules.proxy._service.warmup import WarmupFailedAccountData as WarmupFailedAccountData
+from app.modules.proxy._service.warmup import WarmupSkippedAccountData as WarmupSkippedAccountData
+from app.modules.proxy._service.warmup import WarmupSubmittedAccountData as WarmupSubmittedAccountData
+from app.modules.proxy._service.warmup import _is_warmup_usage_eligible as _is_warmup_usage_eligible
+from app.modules.proxy._service.warmup import _materialize_warmup_account as _materialize_warmup_account
+from app.modules.proxy._service.warmup import _snapshot_warmup_account as _snapshot_warmup_account
+from app.modules.proxy._service.warmup import _WarmupAccountSnapshot as _WarmupAccountSnapshot
+from app.modules.proxy._service.warmup import _WarmupSubmitResult as _WarmupSubmitResult
+from app.modules.proxy._service.warmup import _WarmupUsageSnapshot as _WarmupUsageSnapshot
 from app.modules.proxy._service.websocket.helpers import (
-    _app_error_to_websocket_event,  # noqa: F401
-    _assign_websocket_response_id,  # noqa: F401
-    _draining_websocket_request_states,  # noqa: F401
-    _find_websocket_request_state_by_response_id,  # noqa: F401
-    _is_websocket_previous_response_output_item,  # noqa: F401
-    _is_websocket_response_create,  # noqa: F401
-    _match_websocket_request_state_for_anonymous_event,  # noqa: F401
-    _match_websocket_request_state_for_precreated_terminal_event,  # noqa: F401
-    _match_websocket_request_state_for_previous_response_error,  # noqa: F401
-    _matching_websocket_request_states_for_missing_tool_output_error,  # noqa: F401
-    _matching_websocket_request_states_for_previous_response_error,  # noqa: F401
-    _maybe_rewrite_websocket_previous_response_not_found_event,  # noqa: F401
-    _parse_websocket_payload,  # noqa: F401
-    _pop_matching_websocket_request_states,  # noqa: F401
-    _pop_replayable_precreated_websocket_request_state,  # noqa: F401
-    _pop_terminal_websocket_request_state,  # noqa: F401
-    _prepare_websocket_request_state_for_auth_replay,  # noqa: F401
-    _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401
-    _record_websocket_continuity_completion,  # noqa: F401
-    _refresh_websocket_request_input_fingerprint_from_text,  # noqa: F401
-    _release_websocket_response_create_gate,  # noqa: F401
-    _rewrite_websocket_continuity_corruption_event,  # noqa: F401
-    _rewrite_websocket_downstream_response_id,  # noqa: F401
-    _rewrite_websocket_previous_response_owner_unavailable_event,  # noqa: F401
-    _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,  # noqa: F401
-    _sanitize_websocket_connect_failure,  # noqa: F401
-    _sanitize_websocket_previous_response_error,  # noqa: F401
-    _sanitize_websocket_terminal_error_fields,  # noqa: F401
-    _serialize_websocket_error_event,  # noqa: F401
-    _trim_websocket_previous_response_input_items,  # noqa: F401
-    _upstream_websocket_disconnect_message,  # noqa: F401
-    _websocket_auth_failure_permanent_code,  # noqa: F401
-    _websocket_auth_failure_requires_reauth,  # noqa: F401
-    _websocket_auth_request_can_switch_account,  # noqa: F401
-    _websocket_client_previous_response_full_resend_is_retry_safe,  # noqa: F401
-    _websocket_connect_deadline,  # noqa: F401
-    _websocket_continuity_anchor_for_payload,  # noqa: F401
-    _websocket_continuity_error_fields,  # noqa: F401
-    _websocket_continuity_response_ids,  # noqa: F401
-    _websocket_downstream_response_id,  # noqa: F401
-    _websocket_full_resend_conflicts_with_visible_pending,  # noqa: F401
-    _websocket_input_item_type,  # noqa: F401
-    _websocket_owner_pinned_quota_error_code,  # noqa: F401
-    _websocket_precreated_auth_error_code,  # noqa: F401
-    _websocket_precreated_retry_error_code,  # noqa: F401
-    _websocket_receive_timeout_for_pending_requests,  # noqa: F401
-    _websocket_response_id,  # noqa: F401
-    _websocket_top_level_error_payload,  # noqa: F401
-    _wrapped_websocket_error_event,  # noqa: F401
+    _app_error_to_websocket_event,  # noqa: F401,
+    _assign_websocket_response_id,  # noqa: F401,
+    _draining_websocket_request_states,  # noqa: F401,
+    _find_websocket_request_state_by_response_id,  # noqa: F401,
+    _is_websocket_previous_response_output_item,  # noqa: F401,
+    _is_websocket_response_create,  # noqa: F401,
+    _match_websocket_request_state_for_anonymous_event,  # noqa: F401,
+    _match_websocket_request_state_for_precreated_terminal_event,  # noqa: F401,
+    _match_websocket_request_state_for_previous_response_error,  # noqa: F401,
+    _matching_websocket_request_states_for_missing_tool_output_error,  # noqa: F401,
+    _matching_websocket_request_states_for_previous_response_error,  # noqa: F401,
+    _maybe_rewrite_websocket_previous_response_not_found_event,  # noqa: F401,
+    _parse_websocket_payload,  # noqa: F401,
+    _pop_matching_websocket_request_states,  # noqa: F401,
+    _pop_replayable_precreated_websocket_request_state,  # noqa: F401,
+    _pop_terminal_websocket_request_state,  # noqa: F401,
+    _prepare_websocket_request_state_for_auth_replay,  # noqa: F401,
+    _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401,
+    _record_websocket_continuity_completion,  # noqa: F401,
+    _refresh_websocket_request_input_fingerprint_from_text,  # noqa: F401,
+    _release_websocket_response_create_gate,  # noqa: F401,
+    _rewrite_websocket_continuity_corruption_event,  # noqa: F401,
+    _rewrite_websocket_downstream_response_id,  # noqa: F401,
+    _rewrite_websocket_previous_response_owner_unavailable_event,  # noqa: F401,
+    _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,  # noqa: F401,
+    _sanitize_websocket_connect_failure,  # noqa: F401,
+    _sanitize_websocket_previous_response_error,  # noqa: F401,
+    _sanitize_websocket_terminal_error_fields,  # noqa: F401,
+    _serialize_websocket_error_event,  # noqa: F401,
+    _trim_websocket_previous_response_input_items,  # noqa: F401,
+    _upstream_websocket_disconnect_message,  # noqa: F401,
+    _websocket_auth_failure_permanent_code,  # noqa: F401,
+    _websocket_auth_failure_requires_reauth,  # noqa: F401,
+    _websocket_auth_request_can_switch_account,  # noqa: F401,
+    _websocket_client_previous_response_full_resend_is_retry_safe,  # noqa: F401,
+    _websocket_connect_deadline,  # noqa: F401,
+    _websocket_continuity_anchor_for_payload,  # noqa: F401,
+    _websocket_continuity_error_fields,  # noqa: F401,
+    _websocket_continuity_response_ids,  # noqa: F401,
+    _websocket_downstream_response_id,  # noqa: F401,
+    _websocket_full_resend_conflicts_with_visible_pending,  # noqa: F401,
+    _websocket_input_item_type,  # noqa: F401,
+    _websocket_owner_pinned_quota_error_code,  # noqa: F401,
+    _websocket_precreated_auth_error_code,  # noqa: F401,
+    _websocket_precreated_retry_error_code,  # noqa: F401,
+    _websocket_receive_timeout_for_pending_requests,  # noqa: F401,
+    _websocket_response_id,  # noqa: F401,
+    _websocket_top_level_error_payload,  # noqa: F401,
+    _wrapped_websocket_error_event,  # noqa: F401,
 )
 from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
-    _sticky_key_from_session_header,  # noqa: F401
+    _sticky_key_from_session_header,  # noqa: F401,
 )
-from app.modules.proxy.durable_bridge_coordinator import (
-    DurableBridgeLookup as DurableBridgeLookup,
-)
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup as DurableBridgeLookup
 from app.modules.proxy.helpers import (
-    _header_account_id,
-    _normalize_error_code,
-    _parse_openai_error,
+    _header_account_id, _normalize_error_code, _parse_openai_error,
     _upstream_error_from_openai,
 )
-from app.modules.proxy.http_bridge_forwarding import (
-    HTTPBridgeForwardContext as HTTPBridgeForwardContext,
-)
-from app.modules.proxy.http_bridge_forwarding import (
-    OwnerForwardRelayFailure as OwnerForwardRelayFailure,
-)
+from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext as HTTPBridgeForwardContext
+from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure as OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
 from app.modules.proxy.tool_call_dedupe import mark_duplicate_tool_call_downstream_event
-from app.modules.proxy.tool_call_dedupe import (
-    response_id_from_payload as tool_call_response_id_from_payload,
-)
-from app.modules.proxy.tool_call_dedupe import (
-    rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line,
-)
+from app.modules.proxy.tool_call_dedupe import response_id_from_payload as tool_call_response_id_from_payload
+from app.modules.proxy.tool_call_dedupe import rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line
 from app.modules.proxy.work_admission import AdmissionLease
 
 
+# fmt: on
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 

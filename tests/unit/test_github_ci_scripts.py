@@ -170,6 +170,72 @@ def test_github_api_request_json_retries_403_secondary_rate_limit_body(monkeypat
     assert payload == [{"login": "octocat"}]
 
 
+def test_github_api_request_json_sleeps_and_retries_rate_limit_429(monkeypatch) -> None:
+    github_api = _load_script_module("github_api")
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_urlopen(request: Any, timeout: float) -> _Response:
+        del timeout
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                Message(),
+                io.BytesIO(b'{"message":"rate limited"}'),
+            )
+        return _Response()
+
+    monkeypatch.setattr(github_api.urllib.request, "urlopen", fake_urlopen)
+
+    payload, _link = github_api.request_json(
+        "https://api.github.test/repos/example/project/pulls/1/files",
+        token=None,
+        attempts=2,
+        sleep=sleeps.append,
+    )
+
+    assert calls == [
+        "https://api.github.test/repos/example/project/pulls/1/files",
+        "https://api.github.test/repos/example/project/pulls/1/files",
+    ]
+    assert sleeps == [2.0]
+    assert payload == [{"login": "octocat"}]
+
+
+def test_github_api_request_json_fails_closed_on_permission_403(monkeypatch) -> None:
+    github_api = _load_script_module("github_api")
+    headers = Message()
+    headers["x-ratelimit-remaining"] = "42"
+
+    def fake_urlopen(request: Any, timeout: float) -> _Response:
+        del timeout
+        raise urllib.error.HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            headers,
+            io.BytesIO(b'{"message":"Resource not accessible by integration"}'),
+        )
+
+    monkeypatch.setattr(github_api.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        github_api.request_json(
+            "https://api.github.test/repos/example/project/pulls/1/files",
+            token=None,
+            attempts=2,
+            sleep=lambda _delay: None,
+        )
+    except github_api.GitHubApiError as exc:
+        assert exc.transient is False
+        assert "Resource not accessible" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected permission 403 to fail closed")
+
+
 def test_detect_changed_areas_falls_back_to_full_suite_after_github_outage(monkeypatch) -> None:
     detect_changed_areas = _load_script_module("detect_changed_areas")
 

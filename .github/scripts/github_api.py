@@ -66,6 +66,8 @@ def _retry_delay(attempt_index: int, base_delay_seconds: float) -> float:
 def _is_transient_http_error(exc: urllib.error.HTTPError, detail: str) -> bool:
     if exc.code in RETRY_STATUS_CODES:
         return True
+    if _is_rate_limit_http_error(exc, detail):
+        return True
     if exc.code != 403:
         return False
     remaining = exc.headers.get("x-ratelimit-remaining") if exc.headers is not None else None

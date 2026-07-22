@@ -44,6 +44,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
@@ -718,7 +719,7 @@ class _HTTPBridgeStreamingMixin:
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
                 )
-            return self._prepare_http_bridge_request(
+            request_state, text_data = self._prepare_http_bridge_request(
                 request_payload,
                 headers,
                 api_key=api_key,
@@ -726,6 +727,14 @@ class _HTTPBridgeStreamingMixin:
                 request_id=request_id,
                 client_ip=client_ip,
             )
+            request_state.original_request_contains_input_file_ids = bool(extract_input_file_ids(request_payload.input))
+            if rewritten_file_account_id is not None and request_payload.previous_response_id is None:
+                request_state.preferred_account_id = resolve_required_account_id(
+                    ("prepared request", request_state.preferred_account_id),
+                    ("input file", rewritten_file_account_id),
+                )
+                request_state.file_required_preferred_account = True
+            return request_state, text_data
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -1648,6 +1657,7 @@ class _HTTPBridgeStreamingMixin:
                 update={"previous_response_id": session.last_completed_response_id}
             )
             proxy_injected_previous_response_id = True
+            previous_request_state = request_state
             request_state, text_data = prepare_bridge_request(effective_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
@@ -1657,7 +1667,22 @@ class _HTTPBridgeStreamingMixin:
                 payload=effective_payload,
                 durable_lookup=durable_lookup,
             )
-            request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
+            request_state.require_security_work_authorized = (
+                previous_request_state.require_security_work_authorized
+            )
+            request_state.preferred_account_id = resolve_required_account_id(
+                ("prepared request", previous_request_state.preferred_account_id),
+                ("durable bridge", durable_lookup.account_id if durable_lookup is not None else None),
+                ("input file", rewritten_file_account_id),
+            )
+            request_state.file_required_preferred_account = (
+                previous_request_state.file_required_preferred_account
+                or rewritten_file_account_id is not None
+            )
+            request_state.original_request_contains_input_file_ids = (
+                previous_request_state.original_request_contains_input_file_ids
+                or request_state.original_request_contains_input_file_ids
+            )
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
@@ -1739,7 +1764,18 @@ class _HTTPBridgeStreamingMixin:
                 payload=submit_payload,
                 durable_lookup=durable_lookup,
             )
-            request_state.preferred_account_id = previous_request_state.preferred_account_id
+            request_state.preferred_account_id = resolve_required_account_id(
+                ("prepared request", previous_request_state.preferred_account_id),
+                ("input file", rewritten_file_account_id),
+            )
+            request_state.require_security_work_authorized = previous_request_state.require_security_work_authorized
+            request_state.file_required_preferred_account = (
+                file_required_preferred_account or previous_request_state.file_required_preferred_account
+            )
+            request_state.original_request_contains_input_file_ids = (
+                previous_request_state.original_request_contains_input_file_ids
+                or request_state.original_request_contains_input_file_ids
+            )
             request_state.excluded_account_ids.update(previous_request_state.excluded_account_ids)
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
@@ -1763,6 +1799,11 @@ class _HTTPBridgeStreamingMixin:
                 request_state.fresh_upstream_request_is_retry_safe = (
                     True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
+        request_state.bridge_soft_capacity_reroute_allowed = (
+            bridge_session_key.strength == "soft"
+            and request_state.previous_response_id is None
+            and not file_required_preferred_account
+        )
         initial_handoff_session = session
         initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
         if initial_handoff_scope_id is not None:

@@ -880,7 +880,7 @@ async def test_http_bridge_security_retry_never_marks_or_migrates_file_pinned_ow
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_security_retry_after_response_created_replays_with_original_downstream_id(
+async def test_http_bridge_security_retry_after_reasoning_output_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _make_proxy_settings()
@@ -904,6 +904,7 @@ async def test_http_bridge_security_retry_after_response_created_replays_with_or
         awaiting_response_created=False,
         response_event_count=1,
         downstream_visible=False,
+        upstream_model_output_seen=True,
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
         deferred_reasoning_downstream_texts=['data: {"type":"response.output_item.added"}\n\n'],
     )
@@ -931,23 +932,23 @@ async def test_http_bridge_security_retry_after_response_created_replays_with_or
 
     retried = await service._retry_http_bridge_security_work_request(session, request_state)
 
-    assert retried is True
-    mark_durable.assert_awaited_once_with(session_id="durable-security-created")
-    reconnect_mock.assert_awaited_once()
-    retry_upstream.send_text.assert_awaited_once_with(request_state.request_text)
-    assert request_state.response_id is None
-    assert request_state.response_event_count == 0
-    assert request_state.upstream_model_output_seen is False
-    assert request_state.replay_downstream_response_id == "resp-created-before-cyber-denial"
-    assert request_state.suppress_next_created_downstream is True
-    assert request_state.deferred_reasoning_downstream_texts == []
-    assert request_state.require_security_work_authorized is True
-    assert session.requires_security_work_authorized is True
-    assert session.account is authorized_account
+    assert retried is False
+    mark_durable.assert_not_awaited()
+    reconnect_mock.assert_not_awaited()
+    retry_upstream.send_text.assert_not_awaited()
+    assert request_state.response_id == "resp-created-before-cyber-denial"
+    assert request_state.response_event_count == 1
+    assert request_state.upstream_model_output_seen is True
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
+    assert request_state.deferred_reasoning_downstream_texts == ['data: {"type":"response.output_item.added"}\n\n']
+    assert request_state.require_security_work_authorized is False
+    assert session.requires_security_work_authorized is False
+    assert session.account is regular_account
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_security_retry_reconnect_failure_does_not_restore_reasoning_prelude(
+async def test_http_bridge_security_retry_after_reasoning_output_does_not_reconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -967,6 +968,7 @@ async def test_http_bridge_security_retry_reconnect_failure_does_not_restore_rea
         awaiting_response_created=False,
         response_event_count=1,
         downstream_visible=False,
+        upstream_model_output_seen=True,
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
         deferred_reasoning_downstream_texts=['data: {"type":"response.output_item.added"}\n\n'],
     )
@@ -981,10 +983,11 @@ async def test_http_bridge_security_retry_reconnect_failure_does_not_restore_rea
     retried = await service._retry_http_bridge_security_work_request(session, request_state)
 
     assert retried is False
-    reconnect.assert_awaited_once()
-    assert request_state.deferred_reasoning_downstream_texts == []
-    assert request_state.require_security_work_authorized is True
-    assert session.requires_security_work_authorized is True
+    mark_durable.assert_not_awaited()
+    reconnect.assert_not_awaited()
+    assert request_state.deferred_reasoning_downstream_texts == ['data: {"type":"response.output_item.added"}\n\n']
+    assert request_state.require_security_work_authorized is False
+    assert session.requires_security_work_authorized is False
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1050,7 @@ async def test_http_bridge_security_retry_buffers_reasoning_prelude_before_cyber
 
     assert request_state.event_queue.empty()
     assert request_state.response_event_count == 1
-    assert request_state.upstream_model_output_seen is False
+    assert request_state.upstream_model_output_seen is True
     assert len(request_state.deferred_reasoning_downstream_texts) == 1
 
     await service._process_http_bridge_upstream_text(
@@ -1070,7 +1073,13 @@ async def test_http_bridge_security_retry_buffers_reasoning_prelude_before_cyber
     warning = json.loads(warning_block.split("data: ", 1)[1])
     assert warning["type"] == "codex_lb.warning"
     assert warning["warning"]["code"] == "security_work_authorization_required"
-    assert warning["warning"]["action"] == "retry_security_work_authorized"
+    assert warning["warning"]["action"] == "forward_original_security_work_error"
+
+    failed_block = await request_state.event_queue.get()
+    assert failed_block is not None
+    assert "response.failed" in failed_block
+    assert "cyber_policy" in failed_block
+    assert await request_state.event_queue.get() is None
     assert request_state.event_queue.empty()
     assert request_state.deferred_reasoning_downstream_texts == []
     persist_lineage.assert_awaited_once_with(
@@ -1079,11 +1088,7 @@ async def test_http_bridge_security_retry_buffers_reasoning_prelude_before_cyber
         api_key_id=None,
     )
     persist_durable.assert_awaited_once_with(session_id="durable-security-reasoning-prelude")
-    retry_security_work.assert_awaited_once_with(
-        session,
-        request_state,
-        durable_security_requirement_persisted=True,
-    )
+    retry_security_work.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1210,7 +1210,7 @@ async def test_proxy_stream_surfaces_and_logs_upstream_eof_without_terminal(asyn
 
 
 @pytest.mark.asyncio
-async def test_proxy_stream_retries_initial_upstream_eof_before_visible_output(async_client, monkeypatch):
+async def test_proxy_stream_initial_upstream_eof_surfaces_without_replay(async_client, monkeypatch):
     expected_account_id = await _import_account(
         async_client,
         "acc_stream_initial_eof_retry",
@@ -1244,10 +1244,9 @@ async def test_proxy_stream_retries_initial_upstream_eof_before_visible_output(a
     events = [
         json.loads(line[6:]) for line in lines if line.startswith("data: ") and not line.startswith("data: [DONE]")
     ]
-    assert events[-1]["type"] == "response.completed"
-    assert events[-1]["response"]["id"] == "resp_initial_eof_retry_ok"
-    assert not [event for event in events if event.get("type") == "response.failed"]
-    assert calls == 2
+    assert events[-1]["type"] == "response.failed"
+    assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
+    assert calls == 1
 
     async with SessionLocal() as session:
         result = await session.execute(
@@ -1256,11 +1255,10 @@ async def test_proxy_stream_retries_initial_upstream_eof_before_visible_output(a
             .order_by(RequestLog.requested_at.desc())
         )
         logs = list(result.scalars().all())
-        assert logs[0].status == "success"
-        initial_failure = next((item for item in logs if item.error_code == "stream_incomplete"), None)
-        assert initial_failure is not None
-        assert initial_failure.error_message == "Upstream websocket closed before response.completed"
-        assert initial_failure.latency_first_token_ms is None
+        assert logs[0].status == "error"
+        assert logs[0].error_code == "stream_incomplete"
+        assert logs[0].error_message == "Upstream websocket closed before response.completed"
+        assert logs[0].latency_first_token_ms is None
 
 
 @pytest.mark.asyncio

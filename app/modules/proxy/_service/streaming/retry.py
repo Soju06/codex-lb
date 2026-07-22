@@ -1954,7 +1954,9 @@ class _StreamingRetryMixin:
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
                                 last_exhausted_transient_exc = tex
-                            if not isinstance(tex, _TransientStreamError) or tex.preserve_on_selection_exhausted:
+                            if isinstance(tex, _TransientStreamError) and (
+                                tex.preserve_on_selection_exhausted or error_code == "stream_incomplete"
+                            ):
                                 last_retryable_stream_error = _RetryableStreamError(
                                     error_code,
                                     error_payload,

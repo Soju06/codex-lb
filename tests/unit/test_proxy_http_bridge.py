@@ -490,6 +490,22 @@ def test_response_event_tracking_distinguishes_lifecycle_from_model_output() -> 
     assert request_state.upstream_model_output_seen is True
 
 
+def test_deferred_reasoning_prelude_counts_as_upstream_model_output() -> None:
+    request_state = _accepted_capacity_retry_state(response_event_count=1)
+    payload = {"type": "response.output_item.added", "item": {"id": "rs_1", "type": "reasoning", "summary": []}}
+
+    assert proxy_support_module._websocket_should_defer_reasoning_prelude(
+        request_state,
+        "response.output_item.added",
+        payload,
+    )
+    request_state.deferred_reasoning_downstream_texts.append("event: response.output_item.added\n\n")
+    request_state.upstream_model_output_seen = True
+
+    assert request_state.upstream_model_output_seen is True
+    assert not proxy_service._websocket_request_can_replay_before_visible_output(request_state)
+
+
 @pytest.mark.asyncio
 async def test_detach_http_bridge_request_waits_for_lifecycle_reconnect_owner() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))

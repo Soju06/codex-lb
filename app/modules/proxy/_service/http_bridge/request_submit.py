@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections import deque
+from dataclasses import replace
 from typing import Any, Literal, Mapping, TypeVar, cast
 from uuid import uuid4
 
@@ -1640,6 +1641,7 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
+            request_state.precreated_replay_account_id = session.account.id
             if require_preferred_reconnect:
                 await self._reconnect_http_bridge_session(
                     session,
@@ -1844,7 +1846,7 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
         if not _websocket_request_can_replay_before_visible_output(
             request_state,
-            allow_created_downstream_anchor=require_security_work_authorized,
+            allow_created_downstream_anchor=False,
         ):
             return False
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -118,9 +119,9 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
-    _WebSocketReceiveTimeout,
     _websocket_request_can_replay_before_visible_output,
     _websocket_should_defer_reasoning_prelude,
+    _WebSocketReceiveTimeout,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -471,9 +472,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     timed_out = True
                 else:
                     wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
+                    wait_timeout_seconds = (
+                        receive_timeout.timeout_seconds
+                        if receive_timeout is not None
+                        else runtime_settings.http_responses_session_bridge_response_created_timeout_seconds
+                    )
                     done, _pending = await asyncio.wait(
                         (receive_task, wakeup_task),
-                        timeout=receive_timeout.timeout_seconds if receive_timeout is not None else None,
+                        timeout=wait_timeout_seconds,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if receive_task in done:
@@ -494,7 +500,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 if timed_out:
                     if receive_timeout is None:
-                        raise RuntimeError("HTTP bridge reader timed out without a timeout contract")
+                        continue
                     if receive_timeout.error_code == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL:
                         if receive_task is not None and receive_task.done():
                             continue
@@ -666,6 +672,57 @@ class _HTTPBridgeUpstreamEventsMixin:
             if session.upstream is relay_upstream:
                 session.closed = True
 
+    async def _fail_response_created_timeout_requests(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_ids: frozenset[str],
+        timeout_seconds: float,
+        error_code: str,
+        error_message: str,
+    ) -> tuple["_WebSocketRequestState", ...]:
+        now = _service_time().monotonic()
+        async with session.pending_lock:
+            expired_requests = tuple(
+                request_state
+                for request_state in session.pending_requests
+                if request_state.request_id in request_ids
+                and request_state.upstream_sent_at is not None
+                and request_state.response_id is None
+                and request_state.awaiting_response_created
+                and _http_bridge_request_counts_against_queue(request_state)
+                and now >= request_state.upstream_sent_at + timeout_seconds
+            )
+            for request_state in expired_requests:
+                session.pending_requests.remove(request_state)
+            session.queued_request_count = max(
+                0,
+                session.queued_request_count
+                - sum(
+                    1 for request_state in expired_requests if _http_bridge_request_counts_against_queue(request_state)
+                ),
+            )
+        if not expired_requests:
+            return ()
+        for request_state in expired_requests:
+            preserve_existing_terminal = timeout_seconds <= 0 and request_state.error_code_override is not None
+            if request_state.error_message_override != "No available accounts" and not preserve_existing_terminal:
+                request_state.error_code_override = error_code
+                request_state.error_message_override = error_message
+                request_state.error_type_override = "server_error"
+                request_state.error_http_status_override = 502
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=deque([request_state]),
+                pending_lock=asyncio.Lock(),
+                error_code=error_code,
+                error_message=error_message,
+                api_key=request_state.api_key,
+                response_create_gate=session.response_create_gate,
+            )
+        return expired_requests
+
     async def _process_http_bridge_upstream_text(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -779,6 +836,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_block = format_sse_event(payload)
                 if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
                     matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
+                    matched_request_state.upstream_model_output_seen = True
                     suppress_downstream_event = True
                     deferred_reasoning_prelude_event = True
 
@@ -1338,7 +1396,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and _websocket_auth_request_can_switch_account(terminal_request_state)
                     and _websocket_request_can_replay_before_visible_output(
                         terminal_request_state,
-                        allow_created_downstream_anchor=True,
+                        allow_created_downstream_anchor=False,
                     )
                 )
                 _clear_websocket_deferred_reasoning_downstream_texts(terminal_request_state)

@@ -2086,10 +2086,12 @@ class _HTTPBridgeMixin(
             await self._load_balancer.release_account_lease(lease)
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
-            nonlocal preferred_candidate_id
+            nonlocal preferred_candidate_id, retry_same_account_once
             if hard_close_account_bound or selected_account_model_replacement:
                 await release_selected_account_lease()
                 raise
+            if selected_account.id == session.account.id:
+                retry_same_account_once = False
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
@@ -2128,6 +2130,36 @@ class _HTTPBridgeMixin(
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
+                    (selection.error_message or "").startswith("No available accounts")
+                    and (
+                        request_state.previous_response_id is None
+                        or (
+                            request_state.proxy_injected_previous_response_id
+                            and request_state.fresh_upstream_request_is_retry_safe
+                            and request_state.fresh_upstream_request_text
+                        )
+                    )
+                    and request_state.precreated_replay_reason is None
+                    and session.account.id in excluded_account_ids
+                    and retry_same_account_once
+                    and not hard_close_account_bound
+                    and required_preferred_account_id is None
+                    and forced_refresh_account_id is None
+                    and _remaining_budget_seconds(deadline) > 0
+                ):
+                    excluded_account_ids.discard(session.account.id)
+                    request_state.excluded_account_ids.discard(session.account.id)
+                    preferred_candidate_id = session.account.id
+                    retry_same_account_once = False
+                    logger.info(
+                        "HTTP bridge pre-created reattach exhausted alternate accounts; "
+                        "retrying current account once request_id=%s account_id=%s model=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        session.account.id,
+                        session.request_model,
+                    )
+                    continue
+                if (
                     reuse_current_account_lease
                     and not hard_close_account_bound
                     and required_preferred_account_id is None
@@ -2152,7 +2184,11 @@ class _HTTPBridgeMixin(
                     _require_http_bridge_bound_account_not_excluded(
                         hard_close_account_bound, session.account.id, excluded_account_ids
                     )
-                    retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
+                    retry_same_account_once = (
+                        retry_same_account_once
+                        and not skip_same_account
+                        and session.account.id not in excluded_account_ids
+                    )
                     if skip_same_account:
                         preferred_candidate_id = None
                     elif hard_close_account_bound and session.account.id not in excluded_account_ids:
@@ -2163,7 +2199,7 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = forced_refresh_account_id
                     elif request_state.preferred_account_id is not None:
                         preferred_candidate_id = request_state.preferred_account_id
-                    elif session.account.id not in excluded_account_ids:
+                    elif retry_same_account_once and session.account.id not in excluded_account_ids:
                         preferred_candidate_id = session.account.id
                     else:
                         preferred_candidate_id = None

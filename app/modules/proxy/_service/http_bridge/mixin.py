@@ -2140,7 +2140,10 @@ class _HTTPBridgeMixin(
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
-                    (selection.error_message or "").startswith("No available accounts")
+                    (
+                        selection.error_code == "hard_affinity_saturated"
+                        or (selection.error_message or "").startswith("No available accounts")
+                    )
                     and (
                         request_state.previous_response_id is None
                         or (

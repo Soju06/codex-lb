@@ -1598,6 +1598,41 @@ def test_compact_trimming_preserves_historical_side_effect_tool_pair():
     assert input_items[4] not in dumped_input
 
 
+@pytest.mark.parametrize("tool_name", ["exec", "collaboration"])
+def test_compact_trimming_preserves_historical_code_mode_side_effect_pair(tool_name: str):
+    side_effect_call = {
+        "type": "custom_tool_call",
+        "name": tool_name,
+        "call_id": f"call-{tool_name}",
+        "input": json.dumps({"command": "git status --short"}),
+    }
+    side_effect_output = {
+        "type": "custom_tool_call_output",
+        "call_id": f"call-{tool_name}",
+        "output": "clean",
+    }
+    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 300_000}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "perform a code-mode action"},
+            {"role": "assistant", "content": "prefix " + "y" * 260_000},
+            side_effect_call,
+            side_effect_output,
+            ordinary_tail,
+            {"role": "user", "content": "continue after compaction"},
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert side_effect_call in dumped_input
+    assert side_effect_output in dumped_input
+    assert ordinary_tail not in dumped_input
+
+
 def test_compact_trimming_drops_old_side_effect_pairs_when_anchor_set_exceeds_budget():
     input_items: list[JsonValue] = [{"role": "user", "content": "initial request"}]
     old_side_effect_pairs: list[tuple[JsonValue, JsonValue]] = []
@@ -1724,7 +1759,7 @@ def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budge
     assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
 
 
-def test_compact_backtracking_skips_pair_mate_removed_by_cascade():
+def test_compact_backtracking_keeps_code_mode_pair_before_optional_head_context():
     optional_head = {"role": "user", "content": "h" * 2_300}
     optional_call = {
         "type": "function_call",
@@ -1756,8 +1791,8 @@ def test_compact_backtracking_skips_pair_mate_removed_by_cascade():
 
     assert isinstance(dumped_input, list)
     assert optional_head not in dumped_input
-    assert optional_call not in dumped_input
-    assert optional_output not in dumped_input
+    assert optional_call in dumped_input
+    assert optional_output in dumped_input
     assert all(anchor in dumped_input for anchor in anchors)
     assert latest in dumped_input
 

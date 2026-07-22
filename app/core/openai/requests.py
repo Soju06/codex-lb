@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
+from app.modules.proxy.tool_call_dedupe import is_downstream_side_effect_tool_call
 
 type MutableJsonObject = dict[str, JsonValue]
 
@@ -43,36 +44,6 @@ _COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal",
 _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
-)
-_COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES = frozenset({"apply_patch_call", "apply_patch_call_output"})
-_COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES = frozenset(
-    {
-        "apply_patch",
-        "close_agent",
-        "create_goal",
-        "exec_command",
-        "request_user_input",
-        "resume_agent",
-        "send_input",
-        "spawn_agent",
-        "update_goal",
-        "update_plan",
-        "wait_agent",
-        "write_stdin",
-    }
-)
-_COMPACT_SIDE_EFFECT_TOOL_NAMES = frozenset(
-    {
-        "multi_tool_use.parallel",
-        *_COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES,
-        *(f"functions.{name}" for name in _COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES),
-    }
-)
-_COMPACT_PARALLEL_SIDE_EFFECT_RECIPIENT_NAMES = frozenset(
-    {
-        "multi_tool_use.parallel",
-        *(f"functions.{name}" for name in _COMPACT_DIRECT_SIDE_EFFECT_TOOL_NAMES),
-    }
 )
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
@@ -951,6 +922,17 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     head_count = _compact_trim_prefix_count(token_counts)
     state_anchor_indices = _compact_state_anchor_indices(input_value)
     side_effect_indices = _compact_side_effect_anchor_indices(input_value)
+    # Keep priority side effects as complete call/output units before spending
+    # the remaining budget on ordinary head/tail context.  Otherwise a large
+    # recent message can leave room for a call but not its output, causing
+    # reconciliation to drop the historical side effect that would fit after
+    # trimming that ordinary message.
+    side_effect_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        side_effect_indices,
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+    )
     required_indices = set(state_anchor_indices)
     if input_value:
         required_indices.add(len(input_value) - 1)
@@ -1227,36 +1209,7 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
 
 
 def _compact_item_is_side_effect_anchor(item: Mapping[str, JsonValue]) -> bool:
-    item_type = item.get("type")
-    if item_type in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
-        return True
-    if item_type not in _COMPACT_TOOL_CALL_ITEM_TYPES:
-        return False
-    name = item.get("name")
-    if not isinstance(name, str):
-        return False
-    argument_field = "arguments" if item_type == "function_call" else "input"
-    argument_value = item.get(argument_field)
-    if not isinstance(argument_value, str):
-        return False
-    if name != "multi_tool_use.parallel":
-        return name in _COMPACT_SIDE_EFFECT_TOOL_NAMES
-    try:
-        decoded_arguments = json.loads(argument_value)
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(decoded_arguments, dict):
-        return False
-    tool_uses = decoded_arguments.get("tool_uses")
-    if not isinstance(tool_uses, list):
-        return False
-    for tool_use in cast(list[JsonValue], tool_uses):
-        if not isinstance(tool_use, dict):
-            continue
-        recipient_name = tool_use.get("recipient_name")
-        if isinstance(recipient_name, str) and recipient_name in _COMPACT_PARALLEL_SIDE_EFFECT_RECIPIENT_NAMES:
-            return True
-    return False
+    return is_downstream_side_effect_tool_call(item)
 
 
 def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:

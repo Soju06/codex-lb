@@ -20127,7 +20127,7 @@ async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monk
     release_reservation = AsyncMock()
 
     monkeypatch.setattr(service, "_emit_websocket_terminal_error", emit_terminal_error)
-    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
 
     expired_request = proxy_service._WebSocketRequestState(
@@ -20164,7 +20164,7 @@ async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monk
 
     assert list(pending_requests) == [newer_request]
     emit_terminal_error.assert_awaited_once()
-    release_reservation.assert_awaited_once_with(None)
+    release_reservation.assert_not_awaited()
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_expired"
@@ -20340,6 +20340,227 @@ async def test_fail_pending_websocket_requests_logs_even_when_penalty_fails(monk
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_ws_penalty_fail"
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_settles_reservation_before_health_penalty(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_settle_before_penalty")
+    ordering: list[str] = []
+
+    async def release_reservation(request_state):
+        assert request_state.api_key_reservation is not None
+        ordering.append("settle")
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        ordering.append("health")
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_settle_before_penalty",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
+        started_at=time.monotonic(),
+        skip_request_log=True,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert ordering == ["settle", "health"]
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_continues_terminal_cleanup_when_settlement_fails(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_settlement_failure_cleanup")
+    handle_stream_error = AsyncMock()
+    release_attempts = 0
+
+    async def fail_release(_request_state):
+        nonlocal release_attempts
+        release_attempts += 1
+        raise RuntimeError("reservation store unavailable")
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", fail_release)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_settlement_failure_cleanup",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        skip_request_log=True,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    handle_stream_error.assert_not_awaited()
+    assert release_attempts == 4
+    assert request_state.event_queue is not None
+    assert await request_state.event_queue.get() is not None
+    assert await request_state.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_penalizes_after_settlement_retry_recovers(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_settlement_retry_recovers")
+    ordering: list[str] = []
+    release_attempts = 0
+
+    async def release_reservation(_request_state):
+        nonlocal release_attempts
+        release_attempts += 1
+        if release_attempts == 1:
+            ordering.append("settle_failed")
+            raise RuntimeError("transient reservation failure")
+        ordering.append("settle")
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        ordering.append("health")
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_settlement_retry_recovers",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
+        started_at=time.monotonic(),
+        skip_request_log=True,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert ordering == ["settle_failed", "settle", "health"]
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_applies_deferred_penalty_after_cleanup_settlement(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_deferred_penalty")
+    ordering: list[str] = []
+    release_attempts = 0
+
+    async def release_reservation(_request_state):
+        nonlocal release_attempts
+        release_attempts += 1
+        if release_attempts <= 3:
+            raise RuntimeError("transient reservation failure")
+        ordering.append("settle")
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        ordering.append("health")
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_deferred_penalty",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        skip_request_log=True,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert ordering == ["settle", "health"]
+    assert request_state.api_key_reservation is None
+    assert await event_queue.get() is not None
+    assert await event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_settles_all_reservations_before_health(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_all_settled_before_health")
+    unsettled = {"ws_req_first", "ws_req_second"}
+    ordering: list[str] = []
+
+    async def release_reservation(request_state):
+        ordering.append(f"settle:{request_state.request_id}")
+        unsettled.remove(request_state.request_id)
+
+    async def handle_stream_error(*args, **kwargs):
+        del args, kwargs
+        assert not unsettled
+        ordering.append("health")
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    pending_requests = deque(
+        proxy_service._WebSocketRequestState(
+            request_id=request_id,
+            model="gpt-5.5",
+            service_tier="auto",
+            reasoning_effort=None,
+            api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
+            started_at=time.monotonic(),
+            skip_request_log=True,
+        )
+        for request_id in ("ws_req_first", "ws_req_second")
+    )
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert ordering == ["settle:ws_req_first", "settle:ws_req_second", "health"]
 
 
 @pytest.mark.asyncio
@@ -24315,6 +24536,80 @@ async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incom
     )
 
     assert upstream_control.reconnect_requested is False
+    assert list(pending_requests) == []
+    terminal = json.loads(downstream.sent_text[-1])
+    assert terminal["response"]["error"]["code"] == "stream_incomplete"
+    handle_stream_error.assert_awaited_once()
+    handle_stream_error_args = handle_stream_error.await_args
+    assert handle_stream_error_args is not None
+    assert handle_stream_error_args.args[0] is account
+    assert handle_stream_error_args.args[2] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_classified_stream_incomplete_drop_is_penalized(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _ClassifiedStreamIncompleteDrop:
+        async def receive(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                kind="error",
+                text=None,
+                data=None,
+                close_code=None,
+                error="upstream stream ended before response.completed",
+                error_code="stream_incomplete",
+            )
+
+        async def close(self) -> None:
+            return None
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_classified_drop",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"hi"}',
+        awaiting_response_created=True,
+        downstream_visible=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    downstream = _FakeDownstreamWebSocket()
+    account = _make_account("acc_ws_classified_drop")
+
+    await service._relay_upstream_websocket_messages(
+        cast(WebSocket, downstream),
+        cast(proxy_service.UpstreamResponsesWebSocket, _ClassifiedStreamIncompleteDrop()),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+        proxy_request_budget_seconds=5.0,
+        stream_idle_timeout_seconds=5.0,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
     assert list(pending_requests) == []
     terminal = json.loads(downstream.sent_text[-1])
     assert terminal["response"]["error"]["code"] == "stream_incomplete"

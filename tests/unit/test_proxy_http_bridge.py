@@ -5000,6 +5000,7 @@ async def test_stream_via_http_bridge_file_pin_queue_full_does_not_reroute(
     assert create_call is not None
     assert create_call.kwargs["preferred_account_id"] == "acc-file"
     assert create_call.kwargs["fallback_on_preferred_account_unavailable"] is False
+    assert create_call.kwargs["allow_security_lineage_account_migration"] is False
 
 
 @pytest.mark.asyncio

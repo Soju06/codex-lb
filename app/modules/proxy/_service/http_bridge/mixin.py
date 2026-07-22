@@ -365,6 +365,7 @@ class _HTTPBridgeMixin(
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -398,6 +399,7 @@ class _HTTPBridgeMixin(
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -430,6 +432,7 @@ class _HTTPBridgeMixin(
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
@@ -1504,6 +1507,7 @@ class _HTTPBridgeMixin(
                     "request_deadline": request_deadline,
                     "exclude_account_ids": exclude_account_ids,
                     "require_security_work_authorized": require_security_work_authorized,
+                    "allow_security_lineage_account_migration": allow_security_lineage_account_migration,
                 }
                 try:
                     create_signature = inspect.signature(create_session)
@@ -1521,6 +1525,7 @@ class _HTTPBridgeMixin(
                         "exclude_account_ids",
                         "preferred_account_is_continuity_owner",
                         "require_security_work_authorized",
+                        "allow_security_lineage_account_migration",
                     ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
@@ -1743,6 +1748,7 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession":
         request_state = _http_bridge_connect_request_state(
             headers=headers,
@@ -1786,6 +1792,7 @@ class _HTTPBridgeMixin(
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
                 "require_security_work_authorized": require_security_work_authorized,
                 "security_lineage_id": request_state.security_lineage_id,
+                "allow_security_lineage_account_migration": allow_security_lineage_account_migration,
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
             selected_account_lease = selection.lease
@@ -2024,6 +2031,13 @@ class _HTTPBridgeMixin(
         # retire the fresh socket before the next real send re-arms it.
         request_state.response_create_sent_at = None
         request_state.upstream_sent_at = None
+        require_security_work_authorized = (
+            require_security_work_authorized
+            or request_state.require_security_work_authorized
+            or session.requires_security_work_authorized
+        )
+        request_state.require_security_work_authorized = require_security_work_authorized
+        session.requires_security_work_authorized = require_security_work_authorized
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -2142,6 +2156,7 @@ class _HTTPBridgeMixin(
                 preferred_account_id=preferred_candidate_id,
                 preferred_account_is_continuity_owner=account_neutral_recovery,
                 require_security_work_authorized=require_security_work_authorized,
+                allow_security_lineage_account_migration=not request_state.file_required_preferred_account,
                 lease_kind=None if reuse_current_account_lease else "stream",
                 estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
                     request_state.request_usage_budget

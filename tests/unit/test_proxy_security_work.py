@@ -320,7 +320,22 @@ async def test_approved_account_cyber_denial_persists_root_without_ordinary_repl
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_reconnect_selects_security_work_authorized_account(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("explicit_requirement", "request_requirement", "session_requirement", "expected_requirement"),
+    [
+        (True, False, False, True),
+        (False, True, False, True),
+        (False, False, True, True),
+        (False, False, False, False),
+    ],
+)
+async def test_http_bridge_reconnect_preserves_security_work_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_requirement: bool,
+    request_requirement: bool,
+    session_requirement: bool,
+    expected_requirement: bool,
+) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     regular_account = _make_account("acc_security_regular")
     authorized_account = _make_account("acc_security_authorized")
@@ -328,6 +343,7 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
     session = _make_bridge_session()
     session.account = regular_account
     session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
+    session.requires_security_work_authorized = session_requirement
     request_state = proxy_service._WebSocketRequestState(
         request_id="security_reconnect",
         model="gpt-5.6-sol",
@@ -337,6 +353,7 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
         started_at=time.monotonic(),
         transport="http",
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
+        require_security_work_authorized=request_requirement,
     )
     selection = proxy_service.AccountSelection(account=authorized_account, error_message=None, error_code=None)
     select_account = AsyncMock(return_value=selection)
@@ -356,12 +373,14 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
     await service._reconnect_http_bridge_session(
         session,
         request_state=request_state,
-        require_security_work_authorized=True,
+        require_security_work_authorized=explicit_requirement,
     )
 
     select_args = select_account.await_args
     assert select_args is not None
-    assert select_args.kwargs["require_security_work_authorized"] is True
+    assert select_args.kwargs["require_security_work_authorized"] is expected_requirement
+    assert request_state.require_security_work_authorized is expected_requirement
+    assert session.requires_security_work_authorized is expected_requirement
     assert session.account is authorized_account
     assert session.upstream is new_upstream
 
@@ -374,10 +393,12 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
         ({}, None),
     ],
 )
+@pytest.mark.parametrize("allow_security_lineage_account_migration", [False, True])
 async def test_http_bridge_create_passes_security_work_requirement_to_selection(
     monkeypatch: pytest.MonkeyPatch,
     headers: dict[str, str],
     expected_security_lineage_id: str | None,
+    allow_security_lineage_account_migration: bool,
 ) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     authorized_account = _make_account("acc_security_create_authorized")
@@ -414,11 +435,16 @@ async def test_http_bridge_create_passes_security_work_requirement_to_selection(
         request_model="gpt-5.6-sol",
         idle_ttl_seconds=120.0,
         require_security_work_authorized=True,
+        allow_security_lineage_account_migration=allow_security_lineage_account_migration,
     )
 
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["require_security_work_authorized"] is True
     assert select_account.await_args.kwargs["security_lineage_id"] == expected_security_lineage_id
+    assert (
+        select_account.await_args.kwargs["allow_security_lineage_account_migration"]
+        is allow_security_lineage_account_migration
+    )
     assert session.upstream_reader is not None
     await session.upstream_reader
 

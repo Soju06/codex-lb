@@ -1704,8 +1704,38 @@ def test_dedupe_replayed_side_effect_input_items_keeps_distinct_code_mode_calls(
 
     deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
 
+    assert tool_call_dedupe.replayed_side_effect_tool_call_key(cast(dict[str, JsonValue], input_items[0])) is not None
     assert removed_count == 0
     assert deduped_items == input_items
+
+
+@pytest.mark.parametrize("tool_name", ["exec", "collaboration"])
+def test_dedupe_replayed_side_effect_input_items_suppresses_exact_code_mode_replay(tool_name: str):
+    repeated_call: dict[str, JsonValue] = {
+        "type": "custom_tool_call",
+        "name": tool_name,
+        "input": "const result = await tools.exec_command({cmd: 'pwd'}); text(result.output);",
+        "call_id": "call_code_mode_replayed",
+    }
+    input_items: list[JsonValue] = [
+        repeated_call,
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_code_mode_replayed",
+            "output": "first result",
+        },
+        dict(repeated_call),
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_code_mode_replayed",
+            "output": "replayed result",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert sum(1 for item in deduped_items if isinstance(item, dict) and item.get("type") == "custom_tool_call") == 1
 
 
 @pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])

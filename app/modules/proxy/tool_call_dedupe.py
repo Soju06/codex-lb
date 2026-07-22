@@ -550,9 +550,14 @@ def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> Replaye
     namespace_value = item.get("namespace")
     namespace = namespace_value if isinstance(namespace_value, str) else None
     call_id_value = item.get("call_id")
-    identity_scoped = namespace is not None or (
-        item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME
-        and parallel_argument_has_code_mode_side_effect(argument_value)
+    normalized_item_name = normalize_tool_call_name(item_name)
+    identity_scoped = (
+        namespace is not None
+        or normalized_item_name in tool_call_safety.CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+        or (
+            item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME
+            and parallel_argument_has_code_mode_side_effect(argument_value)
+        )
     )
     call_id = call_id_value if identity_scoped and isinstance(call_id_value, str) and call_id_value else None
     return (item_type, namespace, item_name, call_id, argument_key)
@@ -560,7 +565,11 @@ def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> Replaye
 
 def _replayed_side_effect_key_has_stable_identity(key: ReplayedSideEffectToolCallKey) -> bool:
     _, namespace, item_name, call_id, _ = key
-    return call_id is not None and (namespace is not None or item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME)
+    return call_id is not None and (
+        namespace is not None
+        or normalize_tool_call_name(item_name) in tool_call_safety.CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+        or item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME
+    )
 
 
 def _clear_legacy_replayed_side_effect_keys(

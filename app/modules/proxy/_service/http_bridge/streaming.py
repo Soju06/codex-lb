@@ -1318,6 +1318,7 @@ class _HTTPBridgeStreamingMixin:
                     session_header_fallback_key=session_header_fallback_key,
                     exclude_account_ids=fresh_replay_excluded_account_ids or None,
                     require_security_work_authorized=request_state.require_security_work_authorized,
+                    allow_security_lineage_account_migration=not file_required_preferred_account,
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
@@ -1522,6 +1523,7 @@ class _HTTPBridgeStreamingMixin:
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
                             require_security_work_authorized=request_state.require_security_work_authorized,
+                            allow_security_lineage_account_migration=not file_required_preferred_account,
                         )
                     except ProxyResponseError as capacity_exc:
                         if owner_unavailable_allows_account_neutral_replay(capacity_exc):
@@ -1940,6 +1942,7 @@ class _HTTPBridgeStreamingMixin:
                             session_header_fallback_key=session_header_fallback_key,
                             exclude_account_ids=request_state.excluded_account_ids or None,
                             require_security_work_authorized=request_state.require_security_work_authorized,
+                            allow_security_lineage_account_migration=not file_required_preferred_account,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2233,6 +2236,7 @@ class _HTTPBridgeStreamingMixin:
                         request_deadline=request_deadline,
                         exclude_account_ids=request_state.excluded_account_ids or None,
                         require_security_work_authorized=request_state.require_security_work_authorized,
+                        allow_security_lineage_account_migration=not file_required_preferred_account,
                     )
                 except ProxyResponseError as capacity_exc:
                     wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)

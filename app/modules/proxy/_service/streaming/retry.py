@@ -571,7 +571,9 @@ class _StreamingRetryMixin:
                     settlement.error_code = exc.code
                     settlement.error_message = error_message
                     settlement.error = exc.error
-                    settlement.account_health_error = _facade()._should_penalize_stream_error(exc.code)
+                    settlement.account_health_error = _facade()._should_penalize_stream_error(
+                        exc.code
+                    ) or is_upstream_model_capacity_error(error_message)
                     if can_try_other_account:
                         retry_exc = ProxyResponseError(502, openai_error(exc.code, error_message))
                         setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
@@ -1100,6 +1102,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
                         return
@@ -2283,6 +2286,12 @@ class _StreamingRetryMixin:
                             )
                             if getattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, False):
                                 transient_error_payload = _stream_settlement_error_payload(settlement)
+                                settled = await proxy._settle_stream_api_key_usage(
+                                    api_key,
+                                    api_key_reservation,
+                                    settlement,
+                                    request_id,
+                                )
                                 if settlement.account_health_error:
                                     await proxy._handle_stream_error(
                                         account,

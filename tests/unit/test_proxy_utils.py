@@ -12442,12 +12442,22 @@ async def test_stream_with_retry_post_refresh_transport_failure_retries_same_acc
 async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    original_handle_stream_error = service._handle_stream_error
     account_a = _make_account("acc_post_refresh_transient_a")
     account_b = _make_account("acc_post_refresh_transient_b")
     stream_account_ids: list[str] = []
     excluded_snapshots: list[set[str]] = []
     handle_stream_error = AsyncMock()
     record_errors = AsyncMock()
+    settlement_order: list[str] = []
+
+    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+        settlement_order.append("settle")
+        return True
+
+    async def record_health(*args: object, **kwargs: object) -> object:
+        settlement_order.append(f"health:{args[2]}")
+        return await original_handle_stream_error(*args, **kwargs)
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -12455,7 +12465,9 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
     monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    handle_stream_error.side_effect = record_health
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
     monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
 
@@ -12476,12 +12488,12 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
             account_id == account_a.id for account_id in stream_account_ids[1:]
         ):
             raise proxy_service._TransientStreamError(
-                "server_error",
+                "invalid_request_error",
                 cast(
                     UpstreamError,
                     {
                         "message": "Selected model is at capacity. Please try a different model.",
-                        "code": "server_error",
+                        "code": "invalid_request_error",
                     },
                 ),
             )
@@ -12512,10 +12524,13 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     assert completed["response"]["id"] == "resp_post_refresh_transient_b_ok"
     assert stream_account_ids == [account_a.id, account_a.id, account_a.id, account_a.id, account_b.id]
     assert excluded_snapshots == [set(), {account_a.id}]
-    transient_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] == "server_error"]
+    transient_penalties = [
+        call for call in handle_stream_error.await_args_list if call.args[2] == "invalid_request_error"
+    ]
     assert len(transient_penalties) == 1
     assert transient_penalties[0].args[0] is account_a
-    record_errors.assert_awaited_once_with(account_a, 2)
+    assert settlement_order.index("settle") < settlement_order.index("health:invalid_request_error")
+    record_errors.assert_any_await(account_a, 2)
 
 
 @pytest.mark.asyncio

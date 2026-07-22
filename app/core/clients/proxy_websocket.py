@@ -138,6 +138,24 @@ def normalize_realtime_call_id(value: str) -> str | None:
     return normalized.lower()
 
 
+def _consume_connection_lost_exception(done: asyncio.Future[Any]) -> None:
+    """Retrieve close exceptions before websockets shields the waiter.
+
+    websockets 16 waits on ``connection_lost_waiter`` through
+    ``asyncio.shield`` while completing ``ClientConnection.recv``.  A peer
+    keepalive/protocol close therefore leaves an exception on the waiter,
+    which asyncio reports as an ``exception in shielded future`` even though
+    ``recv`` translates it into an ``UpstreamWebSocketMessage``.  Consume it
+    at the adapter boundary; ``receive`` still classifies the close normally.
+    """
+    if done.cancelled():
+        return
+    try:
+        done.exception()
+    except asyncio.CancelledError:
+        return
+
+
 @dataclass(slots=True)
 class UpstreamWebSocketMessage:
     kind: str
@@ -223,6 +241,9 @@ class WebsocketsUpstreamWebSocket:
         self._connection = connection
         self._uses_proxy = uses_proxy
         self._preserve_close_semantics = preserve_close_semantics
+        connection_lost_waiter = getattr(connection, "connection_lost_waiter", None)
+        if isinstance(connection_lost_waiter, asyncio.Future):
+            connection_lost_waiter.add_done_callback(_consume_connection_lost_exception)
 
     async def send_text(self, text: str) -> None:
         try:

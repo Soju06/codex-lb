@@ -264,14 +264,19 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     api_key_limit_reset_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
+    call_order: list[str] = []
+
+    async def _mark_stale(*args, **kwargs) -> None:
+        _ = (args, kwargs)
+        call_order.append("mark_ring_stale")
+
     ring_service = SimpleNamespace(
         register=AsyncMock(),
-        mark_stale=AsyncMock(),
+        mark_stale=AsyncMock(side_effect=_mark_stale),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
         list_active=AsyncMock(return_value=[]),
     )
-    call_order: list[str] = []
 
     async def _init_db() -> None:
         call_order.append("init_db")
@@ -279,12 +284,28 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     def _init_background_db() -> None:
         call_order.append("init_background_db")
 
+    async def _drain_audit_tasks(timeout_seconds: float) -> bool:
+        assert timeout_seconds == settings.shutdown_drain_timeout_seconds
+        call_order.append("drain_audit_tasks")
+        return True
+
+    async def _drain_fleet_tasks(timeout_seconds: float) -> bool:
+        assert timeout_seconds == settings.shutdown_drain_timeout_seconds
+        call_order.append("drain_fleet_tasks")
+        return True
+
+    async def _close_http_client() -> None:
+        call_order.append("close_http_client")
+
+    async def _close_db() -> None:
+        call_order.append("close_db")
+
     init_db = AsyncMock()
     init_db.side_effect = _init_db
     init_background_db = Mock(side_effect=_init_background_db)
     init_http_client = AsyncMock()
-    close_http_client = AsyncMock()
-    close_db = AsyncMock()
+    close_http_client = AsyncMock(side_effect=_close_http_client)
+    close_db = AsyncMock(side_effect=_close_db)
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
@@ -298,6 +319,8 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
+    monkeypatch.setattr(main, "drain_audit_log_tasks", _drain_audit_tasks)
+    monkeypatch.setattr(main.fleet_api, "drain_background_refresh_tasks", _drain_fleet_tasks)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
     monkeypatch.setattr(main, "build_api_key_limit_reset_scheduler", lambda: api_key_limit_reset_scheduler)
     monkeypatch.setattr(main, "build_model_refresh_scheduler", lambda: model_scheduler)
@@ -320,6 +343,12 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     settings_cache.invalidate.assert_awaited_once()
     rate_limit_cache.invalidate.assert_awaited_once()
     assert call_order[:2] == ["init_db", "init_background_db"]
+    assert call_order.index("mark_ring_stale") < call_order.index("drain_audit_tasks")
+    assert call_order.index("mark_ring_stale") < call_order.index("drain_fleet_tasks")
+    assert call_order.index("drain_audit_tasks") < call_order.index("close_http_client")
+    assert call_order.index("drain_fleet_tasks") < call_order.index("close_http_client")
+    assert call_order.index("drain_audit_tasks") < call_order.index("close_db")
+    assert call_order.index("drain_fleet_tasks") < call_order.index("close_db")
     assert usage_scheduler.stopped is True
     assert api_key_limit_reset_scheduler.stopped is True
     assert model_scheduler.stopped is True

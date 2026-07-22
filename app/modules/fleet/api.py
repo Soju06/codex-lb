@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Security
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_usage_api_key
 from app.core.config.settings_cache import get_settings_cache
+from app.core.shutdown import wait_for_tasks_to_drain
 from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
 from app.db.session import get_background_session
@@ -136,6 +137,13 @@ async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str]
             attempted_count=len(eligible_accounts),
             generated_at=utcnow(),
         )
+
+
+async def drain_background_refresh_tasks(timeout_seconds: float) -> bool:
+    pending = await wait_for_tasks_to_drain(_BACKGROUND_REFRESH_TASKS, timeout_seconds)
+    for task in sorted(pending, key=lambda pending_task: pending_task.get_name()):
+        logger.warning("Fleet refresh task did not drain before shutdown: %s", task.get_name())
+    return not pending
 
 
 def _handle_cancelled_refresh_task_done(task: asyncio.Task[FleetRefreshResponse]) -> None:

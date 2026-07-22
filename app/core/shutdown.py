@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Collection
+from typing import TypeVar
+
+_TaskResultT = TypeVar("_TaskResultT")
 
 _draining: bool = False
 _bridge_drain_active: bool = False
@@ -52,3 +56,29 @@ async def wait_for_in_flight_drain(timeout_seconds: float, poll_interval_seconds
     while get_in_flight() > 0 and time.monotonic() < deadline:
         await asyncio.sleep(poll_interval_seconds)
     return get_in_flight() == 0
+
+
+async def wait_for_tasks_to_drain(
+    tasks: Collection[asyncio.Task[_TaskResultT]],
+    timeout_seconds: float,
+) -> set[asyncio.Task[_TaskResultT]]:
+    """Wait until a live task collection is stable or its deadline expires."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while True:
+        pending = {task for task in tasks if not task.done()}
+        if not pending:
+            # Let done callbacks run before declaring a live registry empty.
+            await asyncio.sleep(0)
+            pending = {task for task in tasks if not task.done()}
+            if not pending:
+                return set()
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return pending
+
+        _, still_pending = await asyncio.wait(pending, timeout=remaining)
+        if still_pending:
+            return still_pending

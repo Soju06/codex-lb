@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
+from app.core.audit.service import drain_audit_log_tasks
 from app.core.auth.guardian import build_auth_guardian_scheduler
 from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
@@ -132,6 +133,21 @@ async def _release_leader_lease_within(timeout: float) -> None:
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+
+
+async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
+    results = await asyncio.gather(
+        drain_audit_log_tasks(timeout_seconds),
+        fleet_api.drain_background_refresh_tasks(timeout_seconds),
+        return_exceptions=True,
+    )
+    for task_kind, result in zip(("audit log", "fleet refresh"), results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Failed to drain %s tasks during shutdown",
+                task_kind,
+                exc_info=(type(result), result, result.__traceback__),
+            )
 
 
 class _MetricsServer(Protocol):
@@ -519,6 +535,12 @@ async def lifespan(app: FastAPI):
 
         if metrics_server is not None:
             metrics_server.should_exit = True
+
+        # Detached control-plane work must finish while usage singleflight,
+        # shared HTTP clients, and both database engines are still available.
+        # The replica heartbeat is already stopped/staled so this grace period
+        # does not extend its active bridge-ring lifetime.
+        await _drain_detached_control_plane_tasks(settings.shutdown_drain_timeout_seconds)
 
         # Start the single process-level lease-renewal keeper BEFORE stopping any
         # scheduler. Schedulers are stopped one at a time and only the final

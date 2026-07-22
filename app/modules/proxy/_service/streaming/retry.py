@@ -89,6 +89,14 @@ def _proxy_response_error_is_transient_stream_retry(exc: ProxyResponseError) -> 
     return _facade()._should_retry_transient_stream_error(code, message)
 
 
+def _transient_stream_retry_delay(deadline: float, retry_count: int) -> float | None:
+    """Return a backoff only when it leaves budget for the next attempt."""
+
+    remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+    delay = backoff_seconds(retry_count)
+    return delay if 0 <= delay < remaining_budget_seconds else None
+
+
 def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mapping[str, str]) -> bool:
     return (
         payload.previous_response_id is not None
@@ -1790,19 +1798,20 @@ class _StreamingRetryMixin:
                                 and _facade()._remaining_budget_seconds(deadline) > 0
                                 and not settlement.downstream_visible
                             ):
-                                delay = backoff_seconds(transient_retries)
-                                _facade().logger.info(
-                                    "Transient stream error, retrying same account "
-                                    "request_id=%s account_id=%s retry=%s/%s delay=%.2fs code=%s",
-                                    request_id,
-                                    account.id,
-                                    transient_retries,
-                                    _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES,
-                                    delay,
-                                    error_code,
-                                )
-                                await asyncio.sleep(delay)
-                                continue  # inner loop: retry same account
+                                delay = _transient_stream_retry_delay(deadline, transient_retries)
+                                if delay is not None:
+                                    _facade().logger.info(
+                                        "Transient stream error, retrying same account "
+                                        "request_id=%s account_id=%s retry=%s/%s delay=%.2fs code=%s",
+                                        request_id,
+                                        account.id,
+                                        transient_retries,
+                                        _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES,
+                                        delay,
+                                        error_code,
+                                    )
+                                    await asyncio.sleep(delay)
+                                    continue  # inner loop: retry same account
                             # Exhausted same-account retries — penalize and failover
                             _facade().logger.warning(
                                 "Transient retries exhausted for account "

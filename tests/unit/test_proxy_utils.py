@@ -4801,6 +4801,22 @@ def test_http_downstream_always_websocket_policy_keeps_websocket_without_sticky_
     )
 
 
+@pytest.mark.parametrize(
+    ("remaining_budget", "backoff", "expected_delay"),
+    [(1.0, 0.25, 0.25), (0.25, 0.25, None), (0.1, 0.25, None), (0.1, 0.0, 0.0)],
+)
+def test_transient_stream_retry_reserves_budget_for_next_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    remaining_budget: float,
+    backoff: float,
+    expected_delay: float | None,
+) -> None:
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: remaining_budget)
+    monkeypatch.setattr(streaming_retry_module, "backoff_seconds", lambda _attempt: backoff)
+
+    assert streaming_retry_module._transient_stream_retry_delay(123.0, 1) == expected_delay
+
+
 async def _capture_stream_retry_transport(
     monkeypatch: pytest.MonkeyPatch,
     *,

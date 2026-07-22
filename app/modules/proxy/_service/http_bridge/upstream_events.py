@@ -196,6 +196,9 @@ def _http_bridge_terminal_payload_contains_output(payload: dict[str, JsonValue] 
     response = payload.get("response")
     if isinstance(response, dict):
         candidates.append(response.get("output"))
+    usage_candidates: list[JsonValue | None] = [payload.get("usage")]
+    if isinstance(response, dict):
+        usage_candidates.append(response.get("usage"))
     for output in candidates:
         if output is None:
             continue
@@ -204,6 +207,22 @@ def _http_bridge_terminal_payload_contains_output(payload: dict[str, JsonValue] 
                 return True
             continue
         return True
+    for usage in usage_candidates:
+        if not isinstance(usage, dict):
+            continue
+        output_tokens = usage.get("output_tokens")
+        if isinstance(output_tokens, (int, float)) and not isinstance(output_tokens, bool) and output_tokens > 0:
+            return True
+        output_token_details = usage.get("output_tokens_details")
+        if not isinstance(output_token_details, dict):
+            continue
+        reasoning_tokens = output_token_details.get("reasoning_tokens")
+        if (
+            isinstance(reasoning_tokens, (int, float))
+            and not isinstance(reasoning_tokens, bool)
+            and reasoning_tokens > 0
+        ):
+            return True
     return False
 
 

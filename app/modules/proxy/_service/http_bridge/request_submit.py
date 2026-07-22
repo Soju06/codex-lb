@@ -1485,6 +1485,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 error_code,
             )
             await asyncio.sleep(delay)
+            if (
+                request_state.bridge_request_deadline is not None
+                and request_state.bridge_request_deadline <= _service_time().monotonic()
+            ):
+                return False
             async with session.lifecycle_lock:
                 if not await retry_still_owns_session():
                     return False

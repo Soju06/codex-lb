@@ -356,6 +356,31 @@ def test_terminal_capacity_retry_accepts_native_output_free_continuation() -> No
     )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_server_overloaded_event_payload(), "usage": {"output_tokens": 1}},
+        {
+            "type": "response.failed",
+            "response": {
+                "error": _server_overloaded_event_payload()["error"],
+                "usage": {"output_tokens_details": {"reasoning_tokens": 1}},
+            },
+        },
+    ],
+)
+def test_terminal_capacity_retry_rejects_terminal_usage_output(payload: dict[str, object]) -> None:
+    assert (
+        http_bridge_upstream_events_module._http_bridge_terminal_capacity_retry_error_code(
+            _accepted_capacity_retry_state(),
+            event_type=cast(str, payload["type"]),
+            payload=cast(Any, payload),
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
 def test_terminal_capacity_retry_rejects_generic_model_change_message() -> None:
     payload = {
         "type": "error",
@@ -571,6 +596,52 @@ async def test_terminal_capacity_retry_stops_after_downstream_detach_without_dou
     reconnect.assert_not_awaited()
     assert list(session.pending_requests) == [other_request]
     assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_capacity_retry_stops_when_backoff_exhausts_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_capacity_retry_state(bridge_request_deadline=1.0)
+    session = _make_bridge_session()
+    clock = {"now": 0.9}
+
+    async def fake_acquire(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **kwargs: object,
+    ) -> None:
+        del kwargs
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    async def fake_sleep(delay: float) -> None:
+        assert delay == pytest.approx(0.1)
+        clock["now"] += delay
+
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", fake_acquire)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(http_bridge_request_submit_module, "backoff_seconds", lambda _attempt: 0.25)
+    monkeypatch.setattr(http_bridge_request_submit_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: clock["now"]),
+    )
+
+    retried = await service._retry_http_bridge_terminal_capacity_request(
+        session,
+        request_state,
+        error_code="server_is_overloaded",
+    )
+
+    assert retried is False
+    reconnect.assert_not_awaited()
 
 
 @pytest.mark.asyncio

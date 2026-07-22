@@ -1043,11 +1043,7 @@ def _compact_terminal_required_indices(
         matching_call_index=matching_call_index,
     ):
         return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
-    if (
-        latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
-        and has_continuity_anchor
-        and matching_call_index is None
-    ):
+    if latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES and has_continuity_anchor and matching_call_index is None:
         return {latest_index}, True, False
     if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
         return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True

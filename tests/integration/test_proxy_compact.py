@@ -196,6 +196,53 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(async_client, monkeypatch):
+    email = "compact-optional-tail@example.com"
+    raw_account_id = "acc_compact_optional_tail"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    call = {
+        "type": "function_call",
+        "name": "read_file",
+        "call_id": "call-route-tail",
+        "arguments": "x" * 450_000,
+    }
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-route-tail",
+        "output": "latest ordinary result",
+    }
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [call, {"role": "assistant", "content": "middle"}, output],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    compact_input = cast(list[object], seen_payloads[0]["input"])
+    assert call not in compact_input
+    assert output not in compact_input
+    assert "[compact trim]" in json.dumps(compact_input)
+    assert "most recent context" not in json.dumps(compact_input)
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_surfaces_additional_quota_exhausted(async_client):
     email = "compact-gated@example.com"
     raw_account_id = "acc_compact_gated"

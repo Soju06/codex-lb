@@ -1189,7 +1189,8 @@ def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_ma
     marker_text = content[0]["text"]
     assert marker_text.startswith("[compact trim] Omitted 1 input items")
     assert "estimated tokens" in marker_text
-    assert "initial context, most recent context, and compact state anchors were preserved" in marker_text
+    assert "Required compact state anchors and retained input items remain in their original order" in marker_text
+    assert "most recent context" not in marker_text
     assert "codex-lb" not in marker_text
 
 
@@ -1448,6 +1449,7 @@ def test_compact_trimming_omits_self_contained_anchored_non_state_tool_pair_when
         isinstance(item, dict) and item.get("type") == "message" and "[compact trim]" in str(item.get("content"))
         for item in dumped_input
     )
+    assert "most recent context" not in json.dumps(dumped_input)
 
 
 def test_compact_trimming_omits_latest_non_state_tool_pair_when_marker_would_overflow_budget():
@@ -1481,7 +1483,14 @@ def test_compact_trimming_omits_latest_non_state_tool_pair_when_marker_would_ove
     assert any("[compact trim]" in str(item) for item in dumped_input)
 
 
-def test_compact_trimming_preserves_latest_anchored_output_without_matching_call():
+@pytest.mark.parametrize(
+    ("anchor_field", "anchor_value"),
+    [("previous_response_id", "resp_anchor"), ("conversation", "conv_anchor")],
+)
+def test_compact_trimming_preserves_latest_anchored_output_without_matching_call(
+    anchor_field: str,
+    anchor_value: str,
+):
     output = {
         "type": "function_call_output",
         "call_id": "call-from-previous-response",
@@ -1490,7 +1499,7 @@ def test_compact_trimming_preserves_latest_anchored_output_without_matching_call
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
-        "previous_response_id": "resp_anchor",
+        anchor_field: anchor_value,
         "input": [
             {"role": "assistant", "content": "old " + "y" * 500_000},
             output,

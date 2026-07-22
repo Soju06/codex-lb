@@ -6,6 +6,7 @@
   `proxy_network_unavailable` failures.
 - [x] 1.3 Cover a classified `stream_incomplete` relay failure through
   `_relay_upstream_websocket_messages` and assert the health handler runs.
+- [x] 1.4 Document and preserve the replay-safe precreated close-race exception.
 
 ## 2. Validation
 

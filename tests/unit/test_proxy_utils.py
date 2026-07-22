@@ -19085,7 +19085,7 @@ async def test_fail_pending_websocket_requests_continues_terminal_cleanup_when_s
     )
 
     handle_stream_error.assert_not_awaited()
-    assert release_attempts == 4
+    assert release_attempts == 6
     assert request_state.event_queue is not None
     assert await request_state.event_queue.get() is not None
     assert await request_state.event_queue.get() is None
@@ -19154,9 +19154,14 @@ async def test_fail_pending_websocket_requests_applies_deferred_penalty_after_cl
         del args, kwargs
         ordering.append("health")
 
+    class _RecordingQueue(asyncio.Queue[str | None]):
+        async def put(self, item: str | None) -> None:
+            ordering.append("terminal" if item is not None else "terminal_end")
+            await super().put(item)
+
     monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
-    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    event_queue: asyncio.Queue[str | None] = _RecordingQueue()
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_deferred_penalty",
         model="gpt-5.5",
@@ -19178,7 +19183,7 @@ async def test_fail_pending_websocket_requests_applies_deferred_penalty_after_cl
         api_key=None,
     )
 
-    assert ordering == ["settle", "health"]
+    assert ordering == ["terminal", "terminal_end", "settle", "health"]
     assert request_state.api_key_reservation is None
     assert await event_queue.get() is not None
     assert await event_queue.get() is None
@@ -23149,7 +23154,7 @@ async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incom
         downstream_activity=proxy_service._DownstreamWebSocketActivity(),
     )
 
-    assert upstream_control.reconnect_requested is False
+    assert upstream_control.reconnect_requested is True
     assert list(pending_requests) == []
     terminal = json.loads(downstream.sent_text[-1])
     assert terminal["response"]["error"]["code"] == "stream_incomplete"
@@ -23166,7 +23171,12 @@ async def test_relay_upstream_websocket_classified_stream_incomplete_drop_is_pen
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     handle_stream_error = AsyncMock()
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
-    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+    release_observed_reconnect: list[bool] = []
+
+    async def release_reservation(_request_state):
+        release_observed_reconnect.append(upstream_control.reconnect_requested)
+
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
 
     class _FakeDownstreamWebSocket:
         def __init__(self) -> None:
@@ -23197,7 +23207,7 @@ async def test_relay_upstream_websocket_classified_stream_incomplete_drop_is_pen
         model="gpt-5.1",
         service_tier=None,
         reasoning_effort=None,
-        api_key_reservation=None,
+        api_key_reservation=cast(proxy_service.ApiKeyUsageReservationData, SimpleNamespace()),
         started_at=time.monotonic(),
         request_text='{"type":"response.create","model":"gpt-5.1","input":"hi"}',
         awaiting_response_created=True,
@@ -23225,6 +23235,8 @@ async def test_relay_upstream_websocket_classified_stream_incomplete_drop_is_pen
     )
 
     assert list(pending_requests) == []
+    assert release_observed_reconnect == [True]
+    assert upstream_control.reconnect_requested is True
     terminal = json.loads(downstream.sent_text[-1])
     assert terminal["response"]["error"]["code"] == "stream_incomplete"
     handle_stream_error.assert_awaited_once()

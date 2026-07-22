@@ -9,6 +9,8 @@ selection. Only a classified process-wide network failure is account-neutral.
 
 - Preserve the existing account-health signal for unclassified upstream
   WebSocket receive closes.
+- Preserve transparent replay for a single replay-safe precreated request when
+  the receive close races with response creation.
 - Keep `proxy_network_unavailable` account-neutral, with no replay of an
   ambiguously delivered request.
 - Cover both the direct/routed unclassified receive path and a classified relay

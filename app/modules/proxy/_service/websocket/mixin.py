@@ -3276,6 +3276,7 @@ class _WebSocketMixin:
                     if receive_timeout is None:
                         raise
                     if receive_timeout.fail_all_pending:
+                        upstream_control.reconnect_requested = True
                         await proxy._fail_pending_websocket_requests(
                             account=account,
                             account_id_value=account_id_value,
@@ -3288,7 +3289,6 @@ class _WebSocketMixin:
                             client_send_lock=client_send_lock,
                             response_create_gate=response_create_gate,
                         )
-                        upstream_control.reconnect_requested = True
                         try:
                             await upstream.close()
                         except Exception:
@@ -3476,6 +3476,11 @@ class _WebSocketMixin:
                         _facade().logger.debug("Failed to close upstream websocket for replay", exc_info=True)
                     break
                 sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
+                if message.error_code != "proxy_network_unavailable":
+                    # Stop the downstream loop from sending another create on
+                    # this socket while the dropped account's reservation is
+                    # settled and its health penalty is recorded.
+                    upstream_control.reconnect_requested = True
                 await proxy._fail_pending_websocket_requests(
                     account=account,
                     account_id_value=account_id_value,
@@ -3505,6 +3510,7 @@ class _WebSocketMixin:
                 account_id_value,
                 exc,
             )
+            upstream_control.reconnect_requested = True
             await proxy._fail_pending_websocket_requests(
                 account=account,
                 account_id_value=account_id_value,
@@ -3533,6 +3539,7 @@ class _WebSocketMixin:
                 account_id_value,
                 exc_info=True,
             )
+            upstream_control.reconnect_requested = True
             await proxy._fail_pending_websocket_requests(
                 account=account,
                 account_id_value=account_id_value,
@@ -4692,27 +4699,6 @@ class _WebSocketMixin:
                         request_state.api_key_reservation = None
                         break
 
-            # The terminal-cleanup settlement used to happen after the health
-            # write (and, for SSE callers, after response.failed). Give every
-            # still-held reservation its final bounded attempt now so health
-            # cannot become visible while another terminal turn still owns
-            # quota.
-            for request_state in remaining:
-                if request_state.api_key_reservation is None:
-                    continue
-                try:
-                    await proxy._release_websocket_request_state_reservation(request_state)
-                except Exception:
-                    _facade().logger.warning(
-                        "Failed to settle websocket reservation during pre-health terminal cleanup "
-                        "account_id=%s error_code=%s",
-                        account_id_value,
-                        penalty_code,
-                        exc_info=True,
-                    )
-                else:
-                    request_state.api_key_reservation = None
-
         health_penalty_ready = health_penalty_will_run and all(
             request_state.api_key_reservation is None for request_state in remaining
         )
@@ -4856,6 +4842,47 @@ class _WebSocketMixin:
                 sticky=request_state.affinity_policy.key is not None or request_state.previous_response_id is not None,
                 status=status,
             )
+
+        if health_penalty_will_run and not health_penalty_ready:
+            # The terminal error has now been signalled. Keep this upstream
+            # reader alive for a second bounded release phase so the downstream
+            # loop cannot reuse the dropped socket, and so a transient store
+            # failure does not leave quota attached until reservation expiry.
+            for request_state in remaining:
+                if request_state.api_key_reservation is None:
+                    continue
+                for cleanup_attempt in range(3):
+                    try:
+                        await proxy._release_websocket_request_state_reservation(request_state)
+                    except Exception:
+                        _facade().logger.warning(
+                            "Failed to settle websocket reservation after terminal signal "
+                            "account_id=%s error_code=%s attempt=%d",
+                            account_id_value,
+                            penalty_code,
+                            cleanup_attempt + 1,
+                            exc_info=True,
+                        )
+                    else:
+                        request_state.api_key_reservation = None
+                        break
+
+            health_penalty_ready = all(request_state.api_key_reservation is None for request_state in remaining)
+            if health_penalty_ready and account is not None and penalty_code is not None:
+                try:
+                    await proxy._handle_stream_error(
+                        account,
+                        {"message": penalty_message or error_message},
+                        penalty_code,
+                    )
+                except Exception:
+                    _facade().logger.warning(
+                        "Failed to record deferred websocket pending-request health penalty "
+                        "account_id=%s error_code=%s",
+                        account_id_value,
+                        penalty_code,
+                        exc_info=True,
+                    )
 
     async def _emit_websocket_terminal_error(
         self,

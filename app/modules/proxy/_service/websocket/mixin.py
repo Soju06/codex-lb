@@ -866,14 +866,21 @@ class _WebSocketMixin:
                         )
                         await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
-                    async with pending_lock:
-                        pending_requests.append(request_state)
-                    proxy._start_request_state_api_key_reservation_heartbeat(
-                        request_state,
-                        api_key=request_state.api_key or api_key,
-                        surface="websocket",
-                    )
-                    request_state_registered = True
+                    if request_state.response_create_gate_acquired:
+                        # Ordinary pre-created replay retains its create gate.
+                        # Re-register it without trying to acquire the same
+                        # non-reentrant semaphore a second time.
+                        async with pending_lock:
+                            pending_requests.append(request_state)
+                        proxy._start_request_state_api_key_reservation_heartbeat(
+                            request_state,
+                            api_key=request_state.api_key or api_key,
+                            surface="websocket",
+                        )
+                        request_state_registered = True
+                    # A terminal security event released the create gate and
+                    # account admission.  Leave that replay unregistered so the
+                    # normal block below reacquires both before queue and send.
                 else:
                     downstream_idle_timeout_seconds = runtime_settings.proxy_downstream_websocket_idle_timeout_seconds
                     message: Any | None = None

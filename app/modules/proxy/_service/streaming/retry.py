@@ -2440,17 +2440,13 @@ class _StreamingRetryMixin:
                             if getattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, False):
                                 transient_error_payload = _stream_settlement_error_payload(settlement)
                                 if settlement.account_health_error:
-                                    await proxy._handle_stream_error(
+                                    pending_post_refresh_transient_penalty = (
                                         account,
                                         transient_error_payload,
                                         settlement.error_code or "upstream_error",
-                                        http_status=retry_exc.status_code,
+                                        retry_exc.status_code,
+                                        int(getattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, 1)),
                                     )
-                                    transient_retry_count = int(
-                                        getattr(retry_exc, _POST_REFRESH_TRANSIENT_RETRY_COUNT_ATTR, 1)
-                                    )
-                                    if transient_retry_count > 1:
-                                        await proxy._load_balancer.record_errors(account, transient_retry_count - 1)
                                 last_transient_exc = retry_exc
                                 last_retryable_stream_error = _RetryableStreamError(
                                     settlement.error_code or error_code or "upstream_error",

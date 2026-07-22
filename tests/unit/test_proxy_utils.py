@@ -14568,6 +14568,11 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(
             return False
 
     service = proxy_service.ProxyService(_TrackingRepoContext)
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "require_security_work_authorized",
+        AsyncMock(return_value=object()),
+    )
     regular_account = _make_account("acc_bridge_security_regular")
     authorized_account = _make_account("acc_bridge_security_authorized")
     authorized_account.security_work_authorized = True

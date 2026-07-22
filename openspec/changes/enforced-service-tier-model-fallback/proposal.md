@@ -21,3 +21,4 @@ None.
 ### Modified Capabilities
 
 - `model-catalog-compat`: Distinguish an operator-enforced service tier from an explicitly requested one when an authoritative account catalog constrains routing.
+- `responses-api-compat`: Preserve API-key tier enforcement while allowing the account-catalog fallback to remove an unsupported enforced tier from the effective upstream request.

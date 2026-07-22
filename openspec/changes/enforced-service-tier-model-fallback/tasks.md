@@ -16,3 +16,4 @@
 - [x] 3.2 Cover the same configuration driven from an `ApiKeyData` with `enforced_service_tier`
 - [x] 3.3 Cover an advertised-but-unheld tier still failing, with the tier named in the message
 - [x] 3.4 Cover explicit equal/alias tiers, bridge reuse, API-key accounting/logging, wire omission, and source routing
+- [x] 3.5 Align the Responses API enforcement contract with account-catalog fallback semantics

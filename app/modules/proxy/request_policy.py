@@ -190,7 +190,9 @@ def apply_api_key_enforcement(
     service_tier_was_enforced = False
     if api_key.enforced_service_tier is not None:
         requested_service_tier = getattr(payload, "service_tier", None)
-        service_tier_was_enforced = requested_service_tier is None
+        service_tier_was_enforced = requested_service_tier is None or (
+            requested_service_tier.strip().lower() in _UPSTREAM_OMIT_SERVICE_TIERS
+        )
         # ``auto``/``default`` are accepted at the API-key surface but
         # the ChatGPT/Codex backend rejects them as literal values. Map
         # them onto the wire-level absence of ``service_tier`` (which

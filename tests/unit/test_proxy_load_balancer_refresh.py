@@ -4104,6 +4104,26 @@ def _service_tier_enforcement_key(service_tier: str) -> ApiKeyData:
     )
 
 
+@pytest.mark.parametrize("requested_service_tier", [None, "auto", "default", " Default "])
+def test_enforced_service_tier_provenance_treats_default_aliases_as_omitted(
+    requested_service_tier: str | None,
+) -> None:
+    payload = ResponsesRequest(
+        model="gpt-5.4-mini",
+        instructions="ping",
+        input=[],
+        service_tier=requested_service_tier,
+    )
+
+    service_tier_was_enforced = apply_api_key_enforcement(
+        payload,
+        _service_tier_enforcement_key("priority"),
+    )
+
+    assert service_tier_was_enforced is True
+    assert payload.service_tier == "priority"
+
+
 @pytest.mark.asyncio
 async def test_select_account_ignores_enforced_service_tier_the_model_never_advertises(monkeypatch) -> None:
     """An enforced tier must not exclude accounts from a model that lacks the tier.

@@ -836,7 +836,12 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_enforced_unadvertised_tier_uses_effective_tier_for_accounting_and_forwarding(async_client, monkeypatch):
+@pytest.mark.parametrize("requested_service_tier", [None, "auto", "default"])
+async def test_enforced_unadvertised_tier_uses_effective_tier_for_accounting_and_forwarding(
+    async_client,
+    monkeypatch,
+    requested_service_tier,
+):
     await _populate_test_registry()
     model = _TEST_MODELS[0]
 
@@ -897,11 +902,15 @@ async def test_enforced_unadvertised_tier_uses_effective_tier_for_accounting_and
     monkeypatch.setattr(proxy_api, "_enforce_request_limits", fake_enforce_limits)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
+    request_payload = {"model": model, "instructions": "hi", "input": [], "stream": True}
+    if requested_service_tier is not None:
+        request_payload["service_tier"] = requested_service_tier
+
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
         headers={"Authorization": f"Bearer {key}"},
-        json={"model": model, "instructions": "hi", "input": [], "stream": True},
+        json=request_payload,
     ) as response:
         assert response.status_code == 200
         _ = [line async for line in response.aiter_lines() if line]

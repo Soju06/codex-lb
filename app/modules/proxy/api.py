@@ -4283,15 +4283,24 @@ async def _stream_responses(
     enforce_openai_sdk_contract: bool = True,
     prohibit_fast_mode: bool = False,
 ) -> Response:
+    # Owner-forwarded payloads have already passed API-key enforcement,
+    # account-catalog fallback, reservation, and signing on the origin
+    # instance. Re-validate the key's other policy here, but retain the
+    # signed effective tier: an owner with an older/staler model snapshot must
+    # not re-add a tier that the origin authoritatively removed.
+    forwarded_effective_service_tier = payload.service_tier if forwarded_request else None
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
     )
-    apply_enforced_service_tier_model_fallback(
-        payload,
-        service_tier_was_enforced=service_tier_was_enforced,
-    )
+    if forwarded_request:
+        payload.service_tier = forwarded_effective_service_tier
+    else:
+        apply_enforced_service_tier_model_fallback(
+            payload,
+            service_tier_was_enforced=service_tier_was_enforced,
+        )
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
     if codex_session_affinity:

@@ -365,6 +365,83 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_preserves_forwarded_effective_service_tier(monkeypatch):
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+            "client": ("10.0.0.12", 12345),
+        }
+    )
+    # The origin removed an API-key-enforced priority tier because its
+    # authoritative catalog says this model never advertises it.
+    payload = ResponsesRequest(model="gpt-5.4-mini", instructions="hi", input="hi", service_tier=None)
+    api_key = ApiKeyData(
+        id="key_priority",
+        name="Priority key",
+        key_prefix="sk-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier="priority",
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 7, 22),
+        last_used_at=None,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_rate_limit_headers():
+        return {}
+
+    def fake_stream_http_responses(forwarded_payload, _headers, **_kwargs):
+        observed["service_tier"] = forwarded_payload.service_tier
+
+        async def body():
+            yield (
+                'data: {"type":"response.completed","response":'
+                '{"id":"resp_1","object":"response","status":"completed","output":[]}}\n\n'
+            )
+
+        return body()
+
+    fallback = AsyncMock(side_effect=AssertionError("forwarded effective tier must not be recomputed"))
+    monkeypatch.setattr(proxy_api_module, "apply_enforced_service_tier_model_fallback", fallback)
+    monkeypatch.setattr(
+        proxy_api_module.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_enabled=True),
+    )
+    context = cast(
+        proxy_api_module.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                rate_limit_headers=fake_rate_limit_headers,
+                stream_http_responses=fake_stream_http_responses,
+            )
+        ),
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        context,
+        api_key,
+        prefer_http_bridge=True,
+        skip_limit_enforcement=True,
+        include_rate_limit_headers=False,
+        forwarded_request=True,
+    )
+
+    assert response.status_code == 200
+    assert observed["service_tier"] is None
+    assert payload.service_tier is None
+    fallback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_does_not_release_forwarded_reservation_on_internal_bridge_error(monkeypatch):
     request = Request(
         {

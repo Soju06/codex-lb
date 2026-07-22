@@ -366,6 +366,8 @@ gatewayApi:
   hostnames: []
   # @param gatewayApi.annotations HTTPRoute annotations
   annotations: {}
+  # @param gatewayApi.rules Optional HTTPRoute rules with per-rule matches and filters; the chart adds the codex-lb backend to every rule
+  rules: []
 
 # @section Observability parameters
 metrics:

@@ -83,7 +83,24 @@
     "gatewayApi": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "matches": {
+                "type": "array",
+                "items": { "type": "object" }
+              },
+              "filters": {
+                "type": "array",
+                "items": { "type": "object" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
       }
     },
     "metrics": {

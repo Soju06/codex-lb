@@ -18,6 +18,43 @@ The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica
 
 In multi-replica setups, replicas must share the same encryption key (the Helm chart default) for bootstrap-token restart recovery and encrypted-data access to work.
 
+## Gateway API path filters
+
+Set `gatewayApi.rules` when different request paths need different Gateway API
+filters. The chart renders each rule's `matches` and `filters` in order and
+adds the codex-lb Service backend automatically. For example, this keeps API
+traffic direct while applying a Traefik forward-auth middleware to the
+dashboard catch-all:
+
+```yaml
+gatewayApi:
+  enabled: true
+  parentRefs:
+    - name: gateway
+      namespace: gateway-system
+  hostnames:
+    - codex-lb.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: oauth-forward-auth
+```
+
+The default empty `rules` list preserves the chart's catch-all HTTPRoute.
+Extension resources must be valid for the release namespace according to the
+Gateway implementation.
+
 ## Full chart reference
 
 For external database, production config, ingress, observability, and more see the
@@ -25,4 +62,4 @@ For external database, production config, ingress, observability, and more see t
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*

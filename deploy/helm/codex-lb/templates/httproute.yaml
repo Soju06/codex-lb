@@ -18,7 +18,23 @@ spec:
     {{- toYaml .Values.gatewayApi.hostnames | nindent 4 }}
   {{- end }}
   rules:
+    {{- if .Values.gatewayApi.rules }}
+    {{- range .Values.gatewayApi.rules }}
+    - {{- with .matches }}
+      matches:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ include "codex-lb.fullname" $ }}
+          port: {{ $.Values.service.port }}
+    {{- end }}
+    {{- else }}
     - backendRefs:
         - name: {{ include "codex-lb.fullname" . }}
           port: {{ .Values.service.port }}
+    {{- end }}
 {{- end }}

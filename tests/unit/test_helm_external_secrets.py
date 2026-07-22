@@ -456,6 +456,62 @@ def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None
     assert "path: /backend-api/codex/responses" in rendered
 
 
+def test_gateway_api_defaults_to_catch_all_backend_rule() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+    )
+
+    (route,) = _helm_documents(rendered)
+    assert route["spec"]["rules"] == [{"backendRefs": [{"name": "codex-lb", "port": 2455}]}]
+
+
+def test_gateway_api_renders_ordered_path_matches_and_filters() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set-string",
+        "gatewayApi.rules[0].matches[0].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[0].path.value=/v1",
+        "--set-string",
+        "gatewayApi.rules[1].matches[0].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[1].matches[0].path.value=/",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].type=ExtensionRef",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.group=traefik.io",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.kind=Middleware",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.name=oauth-forward-auth",
+    )
+
+    (route,) = _helm_documents(rendered)
+    rules = route["spec"]["rules"]
+    assert rules[0] == {
+        "matches": [{"path": {"type": "PathPrefix", "value": "/v1"}}],
+        "backendRefs": [{"name": "codex-lb", "port": 2455}],
+    }
+    assert rules[1]["matches"] == [{"path": {"type": "PathPrefix", "value": "/"}}]
+    assert rules[1]["filters"] == [
+        {
+            "type": "ExtensionRef",
+            "extensionRef": {
+                "group": "traefik.io",
+                "kind": "Middleware",
+                "name": "oauth-forward-auth",
+            },
+        }
+    ]
+    assert rules[1]["backendRefs"] == [{"name": "codex-lb", "port": 2455}]
+
+
 def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
     script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
 

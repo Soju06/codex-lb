@@ -699,7 +699,7 @@ class LoadBalancer:
                 )
             if required_continuity_owner and selection_error_code in (None, "hard_affinity_saturated"):
                 selection_error_code = CONTINUITY_OWNER_UNAVAILABLE
-            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and not required_continuity_owner:
+            if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and error_message and selection_error_code is None:
                 return AccountSelection(
                     account=None,
                     error_message=error_message,

@@ -15750,6 +15750,12 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
             return False
 
     service = proxy_service.ProxyService(_TrackingRepoContext)
+    require_security_work_authorized = AsyncMock(return_value=object())
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "require_security_work_authorized",
+        require_security_work_authorized,
+    )
     rejected_account = _make_account("acc_bridge_security_rejected")
     authorized_account = _make_account("acc_bridge_security_authorized")
     authorized_account.security_work_authorized = True
@@ -15869,6 +15875,7 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
     monkeypatch.setattr(proxy_http_bridge_request_submit, "_send_http_bridge_request_text_with_archive_id", AsyncMock())
 
     assert await service._retry_http_bridge_security_work_request(session, request_state)
+    require_security_work_authorized.assert_awaited_once_with(session_id="durable-security-rejected")
     assert session.account is authorized_account
     assert durable_claims == [(authorized_account.id, True)]
     assert session.durable_owner_epoch == 5

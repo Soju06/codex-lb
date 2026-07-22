@@ -431,8 +431,12 @@ class _StreamingRetryMixin:
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
         ) -> None:
-            nonlocal settled
-            if post_refresh_transient_replacement_selected and pending_post_refresh_transient_penalty is not None:
+            nonlocal post_refresh_transient_replacement_selected, settled
+            if pending_post_refresh_transient_penalty is not None:
+                # A failed replacement selection still ends the request. Mark
+                # it as terminal so the deferred failure is settled and
+                # recorded before this path returns or re-raises.
+                post_refresh_transient_replacement_selected = True
                 settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
 
         async def _wait_for_process_network_recovery(
@@ -1062,6 +1066,7 @@ class _StreamingRetryMixin:
                     break
                 if not account:
                     if last_account_model_rejection is not None:
+                        await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         if propagate_http_errors:
                             raise last_account_model_rejection
                         yield await _render_account_model_rejection(
@@ -1070,6 +1075,7 @@ class _StreamingRetryMixin:
                         )
                         return
                     if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
+                        await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         no_accounts_msg = selection.error_message or "Local account capacity is exhausted"
                         error_code = selection.error_code
                         event = response_failed_event(
@@ -1124,6 +1130,7 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                         continue
+                    await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                     if propagate_http_errors and last_transient_exc is not None:
                         raise last_transient_exc
                     if last_retryable_stream_error is not None:

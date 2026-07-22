@@ -12677,13 +12677,29 @@ async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_penali
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_post_refresh_transient_exhaustion_preserves_error_without_replacement(monkeypatch):
+@pytest.mark.parametrize("propagate_http_errors", [False, True])
+async def test_stream_with_retry_post_refresh_transient_exhaustion_penalizes_without_replacement(
+    monkeypatch,
+    propagate_http_errors: bool,
+):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_refresh_transient_no_replacement")
     stream_once_calls = 0
     selections = 0
-    handle_stream_error = AsyncMock()
+    settlement_order: list[str] = []
+
+    async def settle_usage(*_args: object, **_kwargs: object) -> bool:
+        assert _kwargs["wait_for_settlement"] is True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(*args: object, **kwargs: object) -> object:
+        del kwargs
+        if args[2] == "invalid_request_error":
+            assert args[0] is account
+            settlement_order.append("health")
+        return {"failure_class": "non_retryable"}
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -12693,6 +12709,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_preserves_err
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
 
     async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
@@ -12727,32 +12744,50 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_preserves_err
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_with_retry(
-            payload,
-            {"session_id": "sid-post-refresh-transient-no-replacement"},
-            codex_session_affinity=False,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            request_transport="http",
-            upstream_stream_transport_override="http",
-        )
-    ]
+    if propagate_http_errors:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            async for _chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-post-refresh-transient-no-replacement"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            ):
+                pass
+        assert exc_info.value.status_code == 502
+    else:
+        chunks = [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-post-refresh-transient-no-replacement"},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
 
-    failed = json.loads(chunks[-1].split("data: ", 1)[1])
-    assert failed["type"] == "response.failed"
-    assert failed["response"]["error"] == {
-        "message": "Selected model is at capacity. Please try a different model.",
-        "type": "server_error",
-        "code": "invalid_request_error",
-    }
+        failed = json.loads(chunks[-1].split("data: ", 1)[1])
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["error"] == {
+            "message": "Selected model is at capacity. Please try a different model.",
+            "type": "server_error",
+            "code": "invalid_request_error",
+        }
+
     assert stream_once_calls == 2
     assert selections == 2
-    assert all(call.args[2] != "invalid_request_error" for call in handle_stream_error.await_args_list)
+    assert settlement_order == ["settle", "health"]
     service._load_balancer.record_errors.assert_not_awaited()
 
 

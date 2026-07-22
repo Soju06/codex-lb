@@ -12317,12 +12317,45 @@ async def test_stream_with_retry_post_refresh_http_failure_retries_same_account(
 async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    original_handle_stream_error = service._handle_stream_error
     account_a = _make_account("acc_post_refresh_transient_a")
     account_b = _make_account("acc_post_refresh_transient_b")
     stream_account_ids: list[str] = []
     excluded_snapshots: list[set[str]] = []
     handle_stream_error = AsyncMock()
     record_errors = AsyncMock()
+    settlement_order: list[str] = []
+    settlement_wait_flags: list[bool] = []
+    stream_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
+    api_key = _make_api_key_data("key_post_refresh_transient_failover")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_post_refresh_transient_failover",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock()
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert stream_account_ids[-1] == account_b.id
+        settlement_wait_flags.append(bool(_kwargs.get("wait_for_settlement")))
+        settlement_order.append("settle")
+        return True
+
+    async def record_health(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        settlement_order.append(f"health:{code}")
+        return await original_handle_stream_error(account, error, code, http_status=http_status)
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -12330,7 +12363,10 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
     monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    handle_stream_error.side_effect = record_health
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
     monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
 
@@ -12341,6 +12377,9 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
         return AccountSelection(account=account, error_message=None)
 
     async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_reservations.append(
+            cast(proxy_service.ApiKeyUsageReservationData | None, _kwargs["api_key_reservation"])
+        )
         stream_account_ids.append(account.id)
         if stream_account_ids == [account_a.id]:
             raise proxy_module.ProxyResponseError(
@@ -12375,8 +12414,8 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
             codex_session_affinity=False,
             propagate_http_errors=False,
             openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
+            api_key=api_key,
+            api_key_reservation=reservation,
             suppress_text_done_events=False,
             request_transport="http",
             upstream_stream_transport_override="http",
@@ -12390,11 +12429,18 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(mo
     transient_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] == "server_error"]
     assert len(transient_penalties) == 1
     assert transient_penalties[0].args[0] is account_a
-    record_errors.assert_awaited_once_with(account_a, 2)
+    assert [entry for entry in settlement_order if entry != "health:invalid_api_key"] == [
+        "settle",
+        "health:server_error",
+    ]
+    assert settlement_wait_flags == [True]
+    assert stream_reservations == [reservation] * 5
+    release_unsettled.assert_not_awaited()
+    record_errors.assert_any_await(account_a, 2)
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_post_refresh_transient_exhaustion_terminal_penalizes_once(monkeypatch):
+async def test_stream_with_retry_post_refresh_connect_exhaustion_terminal_penalizes_once(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_refresh_transient_terminal")
@@ -12424,15 +12470,11 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_terminal_pena
                 401,
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
-        raise proxy_service._TransientStreamError(
-            "server_error",
-            cast(
-                UpstreamError,
-                {
-                    "message": "Selected model is at capacity. Please try a different model.",
-                    "code": "server_error",
-                },
-            ),
+        raise proxy_module.ProxyResponseError(
+            502,
+            proxy_module.openai_error("upstream_unavailable", "proxy cannot connect"),
+            failure_phase="connect",
+            retryable_same_contract=True,
         )
         yield ""  # pragma: no cover
 
@@ -12458,9 +12500,11 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_terminal_pena
 
     failed = json.loads(chunks[-1].split("data: ", 1)[1])
     assert failed["type"] == "response.failed"
-    assert failed["response"]["error"]["message"] == "Selected model is at capacity. Please try a different model."
+    assert failed["response"]["error"]["message"] == "proxy cannot connect"
     assert stream_once_calls == 2
-    transient_penalties = [call for call in handle_stream_error.await_args_list if call.args[2] == "server_error"]
+    transient_penalties = [
+        call for call in handle_stream_error.await_args_list if call.args[2] == "upstream_unavailable"
+    ]
     assert len(transient_penalties) == 1
     assert transient_penalties[0].args[0] is account
     service._load_balancer.record_errors.assert_not_awaited()

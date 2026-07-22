@@ -375,6 +375,8 @@ class _StreamingRetryMixin:
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
+        pending_post_refresh_transient_penalty: tuple[Account, UpstreamError, str, int, int] | None = None
+        post_refresh_transient_replacement_selected = False
         require_security_work_authorized = False
         security_requirement_preexisting = False
         security_lineage_requirement_marked = False
@@ -397,6 +399,47 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        async def _settle_stream_usage_before_pending_penalty(
+            current_settlement: _StreamSettlement,
+        ) -> bool:
+            nonlocal pending_post_refresh_transient_penalty
+            apply_pending_penalty = (
+                post_refresh_transient_replacement_selected and pending_post_refresh_transient_penalty is not None
+            )
+            if apply_pending_penalty:
+                settled_result = await proxy._settle_stream_api_key_usage(
+                    api_key,
+                    api_key_reservation,
+                    current_settlement,
+                    request_id,
+                    wait_for_settlement=True,
+                )
+                pending_penalty = pending_post_refresh_transient_penalty
+                pending_post_refresh_transient_penalty = None
+                assert pending_penalty is not None
+                (
+                    failed_account,
+                    transient_error_payload,
+                    transient_error_code,
+                    transient_http_status,
+                    transient_retry_count,
+                ) = pending_penalty
+                await proxy._handle_stream_error(
+                    failed_account,
+                    transient_error_payload,
+                    transient_error_code,
+                    http_status=transient_http_status,
+                )
+                if transient_retry_count > 1:
+                    await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
+                return settled_result
+            return await proxy._settle_stream_api_key_usage(
+                api_key,
+                api_key_reservation,
+                current_settlement,
+                request_id,
+            )
 
         async def _wait_for_process_network_recovery(
             account: Account,
@@ -442,12 +485,7 @@ class _StreamingRetryMixin:
                 conversation_id=conversation_id,
                 client_ip=client_ip,
             )
-            settled = await proxy._settle_stream_api_key_usage(
-                api_key,
-                api_key_reservation,
-                settlement,
-                request_id,
-            )
+            settled = await _settle_stream_usage_before_pending_penalty(settlement)
 
         async def _mark_security_lineage_requirement_once(account: Account) -> None:
             nonlocal security_lineage_requirement_marked
@@ -539,6 +577,7 @@ class _StreamingRetryMixin:
                         raise _TransientStreamError(
                             error_code or "upstream_error",
                             _upstream_error_from_openai(error),
+                            account_health_error=retryable_connect_failure,
                         ) from exc
                     raise
 
@@ -595,7 +634,11 @@ class _StreamingRetryMixin:
                     settlement.error_code = exc.code
                     settlement.error_message = error_message
                     settlement.error = exc.error
-                    settlement.account_health_error = _facade()._should_penalize_stream_error(exc.code)
+                    settlement.account_health_error = (
+                        _facade()._should_penalize_stream_error(exc.code)
+                        or is_upstream_model_capacity_error(error_message)
+                        or exc.account_health_error
+                    )
                     if can_try_other_account:
                         retry_exc = ProxyResponseError(502, openai_error(exc.code, error_message))
                         setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
@@ -1304,6 +1347,9 @@ class _StreamingRetryMixin:
                     )
                     return
 
+                if pending_post_refresh_transient_penalty is not None:
+                    post_refresh_transient_replacement_selected = True
+
                 account_id_value = account.id
                 if last_account_model_rejection is not None and account.id != last_account_model_rejection_account_id:
                     # The original 400 is only the fallback when account
@@ -1781,12 +1827,7 @@ class _StreamingRetryMixin:
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
                                     )
-                                settled = await proxy._settle_stream_api_key_usage(
-                                    api_key,
-                                    api_key_reservation,
-                                    settlement,
-                                    request_id,
-                                )
+                                settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 return
                             if (
                                 isinstance(tex, ProxyResponseError)
@@ -2031,12 +2072,7 @@ class _StreamingRetryMixin:
                         elif settlement.record_success:
                             await proxy._load_balancer.record_success(account)
                         network_recovery.log_recovered()
-                        settled = await proxy._settle_stream_api_key_usage(
-                            api_key,
-                            api_key_reservation,
-                            settlement,
-                            request_id,
-                        )
+                        settled = await _settle_stream_usage_before_pending_penalty(settlement)
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
                         return
@@ -2394,12 +2430,7 @@ class _StreamingRetryMixin:
                                         settlement.error_code or "upstream_error",
                                         http_status=retry_exc.status_code,
                                     )
-                                settled = await proxy._settle_stream_api_key_usage(
-                                    api_key,
-                                    api_key_reservation,
-                                    settlement,
-                                    request_id,
-                                )
+                                settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 return
                             error = _parse_openai_error(retry_exc.payload)
                             error_code = _normalize_error_code(
@@ -2517,12 +2548,7 @@ class _StreamingRetryMixin:
                             )
                         elif settlement.record_success:
                             await proxy._load_balancer.record_success(account)
-                        settled = await proxy._settle_stream_api_key_usage(
-                            api_key,
-                            api_key_reservation,
-                            settlement,
-                            request_id,
-                        )
+                        settled = await _settle_stream_usage_before_pending_penalty(settlement)
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
                         return

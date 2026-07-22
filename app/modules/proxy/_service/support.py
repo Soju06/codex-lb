@@ -640,11 +640,13 @@ class _TransientStreamError(Exception):
         error: UpstreamError,
         *,
         preserve_on_selection_exhausted: bool = False,
+        account_health_error: bool = False,
     ) -> None:
         super().__init__(code)
         self.code = code
         self.error = error
         self.preserve_on_selection_exhausted = preserve_on_selection_exhausted
+        self.account_health_error = account_health_error
 
 
 class _TerminalStreamError(Exception):

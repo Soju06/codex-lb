@@ -274,10 +274,7 @@ class CodexClient:
                         failure_phase="connect",
                         # No response.create frame can be delivered before the
                         # websocket open returns to its caller.
-                        retryable_same_contract=is_process_network_failure(
-                            exc,
-                            include_permanent_dns=False,
-                        ),
+                        retryable_same_contract=is_pre_dispatch_connection_failure(exc),
                     ) from None
         raise RuntimeError("unreachable Codex client websocket fallback state")
 

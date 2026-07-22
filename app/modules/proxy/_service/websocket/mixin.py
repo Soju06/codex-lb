@@ -1460,6 +1460,13 @@ class _WebSocketMixin:
                             continuity_state=continuity_state,
                             proxy_request_budget_seconds=websocket_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                            response_created_timeout_seconds=float(
+                                getattr(
+                                    runtime_settings,
+                                    "http_responses_session_bridge_response_created_timeout_seconds",
+                                    120.0,
+                                )
+                            ),
                             downstream_activity=downstream_activity,
                             codex_session_affinity=codex_session_affinity,
                         )
@@ -1505,10 +1512,23 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
+                    response_create_send = (
+                        text_data is not None
+                        and request_state is not None
+                        and payload is not None
+                        and _is_websocket_response_create(payload)
+                    )
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
-                        with _websocket_archive_request_context(archive_request_id):
-                            await upstream.send_text(text_data)
+                        if response_create_send:
+                            request_state.upstream_sent_at = time.monotonic()
+                        try:
+                            with _websocket_archive_request_context(archive_request_id):
+                                await upstream.send_text(text_data)
+                        except BaseException:
+                            if response_create_send:
+                                request_state.upstream_sent_at = None
+                            raise
                     elif bytes_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         with _websocket_archive_request_context(archive_request_id):
@@ -3308,6 +3328,7 @@ class _WebSocketMixin:
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
         downstream_activity: _DownstreamWebSocketActivity,
+        response_created_timeout_seconds: float | None = None,
         codex_session_affinity: bool = True,
         continuity_state: "_WebSocketContinuityState | None" = None,
     ) -> None:
@@ -3320,6 +3341,7 @@ class _WebSocketMixin:
                     pending_lock=pending_lock,
                     proxy_request_budget_seconds=proxy_request_budget_seconds,
                     stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+                    response_created_timeout_seconds=response_created_timeout_seconds,
                 )
                 receive_deadline = (
                     None if receive_timeout is None else time.monotonic() + receive_timeout.timeout_seconds
@@ -4358,6 +4380,9 @@ class _WebSocketMixin:
             timeout_seconds=max(0.0, next_response_created_deadline - time.monotonic()),
             error_code="response_created_timeout",
             error_message="Upstream did not create a response within the startup window",
+            # A late anonymous response.created cannot be correlated safely on
+            # the multiplexed socket after its owning request times out.
+            fail_all_pending=True,
             response_created_request_ids=frozenset(
                 request_id
                 for deadline, request_id in response_created_deadlines

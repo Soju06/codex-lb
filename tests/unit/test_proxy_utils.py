@@ -20925,6 +20925,36 @@ async def test_next_websocket_receive_timeout_ignores_draining_requests(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_next_websocket_receive_timeout_enforces_response_created_deadline(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    awaiting_created = proxy_service._WebSocketRequestState(
+        request_id="req-awaiting-created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.0,
+        upstream_sent_at=98.0,
+        awaiting_response_created=True,
+    )
+
+    timeout = await service._next_websocket_receive_timeout(
+        deque([awaiting_created]),
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=60.0,
+        stream_idle_timeout_seconds=30.0,
+        response_created_timeout_seconds=3.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == pytest.approx(1.0)
+    assert timeout.error_code == "response_created_timeout"
+    assert timeout.fail_all_pending is True
+    assert timeout.response_created_request_ids == frozenset({awaiting_created.request_id})
+
+
+@pytest.mark.asyncio
 async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -27280,10 +27310,14 @@ async def test_proxy_responses_websocket_uses_stream_specific_budget_for_all_gat
     assert relay_args is not None
     assert relay_args.kwargs["proxy_request_budget_seconds"] == 7200.0
     assert relay_args.kwargs["stream_idle_timeout_seconds"] == 7200.0
+    assert relay_args.kwargs["response_created_timeout_seconds"] == (
+        getattr(settings, "http_responses_session_bridge_response_created_timeout_seconds", 120.0)
+    )
     wait_for_continuity.assert_awaited_once()
     assert wait_for_continuity.await_args is not None
     assert wait_for_continuity.await_args.kwargs["timeout_seconds"] == 7200.0
     upstream.send_text.assert_awaited_once()
+    assert request_state.upstream_sent_at is not None
 
 
 @pytest.mark.asyncio

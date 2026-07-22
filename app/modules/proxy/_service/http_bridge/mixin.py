@@ -1505,6 +1505,7 @@ class _HTTPBridgeMixin(
                     "request_usage_budget": request_usage_budget,
                     "request_deadline": request_deadline,
                     "exclude_account_ids": exclude_account_ids,
+                    "require_security_work_authorized": require_security_work_authorized,
                 }
                 try:
                     create_signature = inspect.signature(create_session)

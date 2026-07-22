@@ -11836,6 +11836,7 @@ async def test_get_or_create_http_bridge_session_preserves_verified_replay_kind_
         max_sessions=8,
         previous_response_id="resp_replay_parent" if continuity_source != "turn_state" else None,
         preferred_account_id=parent.account.id,
+        require_security_work_authorized=True,
     )
 
     assert resolved is child
@@ -11849,6 +11850,7 @@ async def test_get_or_create_http_bridge_session_preserves_verified_replay_kind_
     create_kwargs = cast(dict[str, Any], captured["kwargs"])
     assert create_kwargs["headers"] == {"authorization": "Bearer local-token"}
     assert create_kwargs["affinity"] == proxy_service._AffinityPolicy()
+    assert create_kwargs["require_security_work_authorized"] is True
 
 
 @pytest.mark.asyncio

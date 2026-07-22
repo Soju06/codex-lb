@@ -16,15 +16,40 @@ branch_labels = None
 depends_on = None
 
 
+# SQLite and PostgreSQL do not expose the same Unicode whitespace behavior as
+# Python's str.strip(). Keep the database trim set aligned with the parser.
+_PYTHON_STRIP_CODEPOINTS = (
+    9,
+    10,
+    11,
+    12,
+    13,
+    28,
+    29,
+    30,
+    31,
+    32,
+    133,
+    160,
+    5760,
+    *range(8192, 8203),
+    8232,
+    8233,
+    8239,
+    8287,
+    12288,
+)
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        whitespace = r"E' \011\012\013\014\015'"
+        whitespace = " || ".join(f"chr({codepoint})" for codepoint in _PYTHON_STRIP_CODEPOINTS)
         useragent = f"btrim(useragent, {whitespace})"
         slash_position = f"strpos({useragent}, '/')"
         group = f"btrim(substr({useragent}, 1, {slash_position} - 1), {whitespace})"
     else:
-        whitespace = "char(32, 9, 10, 11, 12, 13)"
+        whitespace = f"char({', '.join(str(codepoint) for codepoint in _PYTHON_STRIP_CODEPOINTS)})"
         useragent = f"trim(useragent, {whitespace})"
         slash_position = f"instr({useragent}, '/')"
         group = f"trim(substr({useragent}, 1, {slash_position} - 1), {whitespace})"

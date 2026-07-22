@@ -1196,7 +1196,11 @@ async def test_request_log_useragent_group_migration_normalizes_existing_rows(tm
                          'stale-control-surrounding'),
                         ('control-only', 'gpt-5.4-mini', 'success',
                          char(9) || char(10) || char(11) || char(12) || char(13), 'stale-control-only'),
-                        ('empty-prefix', 'gpt-5.4-mini', 'success', ' /1.0 ', 'stale-empty-prefix')
+                        ('empty-prefix', 'gpt-5.4-mini', 'success', ' /1.0 ', 'stale-empty-prefix'),
+                        ('nbsp-padded', 'gpt-5.4-mini', 'success',
+                         char(160) || 'Codex Desktop/0.142.4' || char(160), 'stale-nbsp-padded'),
+                        ('nbsp-only', 'gpt-5.4-mini', 'success',
+                         char(160) || char(160), 'stale-nbsp-only')
                     """
                 )
             )
@@ -1219,6 +1223,8 @@ async def test_request_log_useragent_group_migration_normalizes_existing_rows(tm
             ("control-surrounding", "opencode"),
             ("control-only", None),
             ("empty-prefix", None),
+            ("nbsp-padded", "Codex Desktop"),
+            ("nbsp-only", None),
         ]
 
         config = _build_alembic_config(db_url)

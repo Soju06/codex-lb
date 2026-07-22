@@ -20,6 +20,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
     UpstreamWebSocketTransportError,
+    WebsocketsResponsesWebSocket,
     connect_responses_websocket,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -59,6 +60,18 @@ class _FakeConnection:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_websockets_response_websocket_consumes_connection_lost_waiter_error():
+    connection = _FakeConnection()
+    connection.connection_lost_waiter = asyncio.get_running_loop().create_future()
+
+    WebsocketsResponsesWebSocket(cast(Any, connection))
+    connection.connection_lost_waiter.set_exception(RuntimeError("keepalive ping timeout"))
+    await asyncio.sleep(0)
+
+    assert connection.connection_lost_waiter.exception() is not None
 
 
 async def _local_proxy_tunnel_handler(

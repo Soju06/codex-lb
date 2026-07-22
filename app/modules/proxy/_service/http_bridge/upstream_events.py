@@ -537,10 +537,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
-                # A process-network receive failure follows a successful send;
-                # replay is not safe merely because output is not visible.
-                if message.error_code != "proxy_network_unavailable":
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                # Let the bounded retry helper decide whether replay is safe.
+                # It rejects ambiguous continuations, but can recover a
+                # pre-created request whose fresh payload is explicitly
+                # replay-safe. This also covers process-network receive
+                # failures before surfacing a 502 to the client.
+                retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 close_classification = (

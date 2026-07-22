@@ -14361,6 +14361,76 @@ async def test_http_bridge_marks_every_visible_output_item_before_security_repla
     assert request_state.event_queue.empty() is expected_deferred
 
 
+@pytest.mark.parametrize(
+    "delta_type",
+    [
+        "response.reasoning_text.delta",
+        "response.reasoning_text.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_bridge_keeps_reasoning_deltas_buffered_after_prelude(
+    delta_type: str,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_reasoning_prelude",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp_reasoning_prelude",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"check"}',
+    )
+    upstream = AsyncMock()
+    upstream.archive_received = MagicMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "reasoning-prelude", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_reasoning_prelude"),
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    reasoning_item = {
+        "type": "response.output_item.added",
+        "response_id": request_state.response_id,
+        "item": {"id": "item_reasoning", "type": "reasoning"},
+    }
+    reasoning_delta = {
+        "type": delta_type,
+        "response_id": request_state.response_id,
+        "delta": "private reasoning",
+        "text": "private reasoning",
+    }
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(reasoning_item, separators=(",", ":")),
+    )
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(reasoning_delta, separators=(",", ":")),
+    )
+
+    assert len(request_state.deferred_reasoning_downstream_texts) == 2
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_token_invalidated_retries_then_fails_over(monkeypatch):
     request_logs = _RequestLogsRecorder()

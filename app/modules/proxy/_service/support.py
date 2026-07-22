@@ -1072,15 +1072,27 @@ def _websocket_should_defer_reasoning_prelude(
     event_type: str | None,
     payload: Mapping[str, JsonValue] | None,
 ) -> bool:
-    if request_state is None or not _websocket_is_reasoning_output_item_event(event_type, payload):
+    if request_state is None:
         return False
     if request_state.downstream_visible:
         return False
+    reasoning_output_item_event = _websocket_is_reasoning_output_item_event(event_type, payload)
     # Once a reasoning prelude starts, keep the whole prelude buffered.  The
     # first reasoning item marks upstream model output as seen so replay stays
-    # disabled; that marker must not make the next reasoning item visible.
-    if request_state.deferred_reasoning_downstream_texts:
+    # disabled; that marker must not make subsequent reasoning deltas visible.
+    if request_state.deferred_reasoning_downstream_texts and (
+        reasoning_output_item_event
+        or event_type
+        in {
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+        }
+    ):
         return True
+    if not reasoning_output_item_event:
+        return False
     if request_state.upstream_model_output_seen:
         return False
     if request_state.pending_function_call_ids or request_state.pending_tool_call_types:

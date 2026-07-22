@@ -187,6 +187,7 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
         return False
 
     candidate_keys: list[ToolCallDedupeKey] = []
+    outer_call_id = item.get("call_id")
     for tool_use in tool_uses:
         if not isinstance(tool_use, dict):
             continue
@@ -197,11 +198,18 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
         ):
             continue
         dedupe_response_id = response_id if scope_side_effects_by_response_id else None
+        identity_call_id = (
+            outer_call_id
+            if recipient_name.removeprefix("functions.")
+            in tool_call_safety.CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+            and isinstance(outer_call_id, str)
+            else None
+        )
         candidate_keys.append(
             (
                 dedupe_response_id or "",
                 "parallel_tool_use",
-                None,
+                identity_call_id,
                 recipient_name,
                 None,
                 canonical_parallel_tool_use_key(cast(dict[str, JsonValue], tool_use)),
@@ -221,10 +229,17 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
             kept_tool_uses.append(cast(JsonValue, tool_use))
             continue
         dedupe_response_id = response_id if scope_side_effects_by_response_id else None
+        identity_call_id = (
+            outer_call_id
+            if recipient_name.removeprefix("functions.")
+            in tool_call_safety.CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+            and isinstance(outer_call_id, str)
+            else None
+        )
         key = (
             dedupe_response_id or "",
             "parallel_tool_use",
-            None,
+            identity_call_id,
             recipient_name,
             None,
             canonical_parallel_tool_use_key(cast(dict[str, JsonValue], tool_use)),

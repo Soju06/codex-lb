@@ -526,6 +526,12 @@ gatewayApi:
         - path:
             type: PathPrefix
             value: /v1
+        - path:
+            type: PathPrefix
+            value: /backend-api/codex
+        - path:
+            type: PathPrefix
+            value: /backend-api/transcribe
     - matches:
         - path:
             type: PathPrefix

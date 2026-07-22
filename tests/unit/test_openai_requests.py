@@ -1460,6 +1460,49 @@ def test_compact_trimming_elides_mapping_shaped_required_tool_image_output():
     }
 
 
+def test_compact_trimming_elides_percent_encoded_image_url_in_string_output():
+    image_url = "data:image/svg+xml,%3Csvg%3E" + "%20" * 170_000 + "%3C/svg%3E"
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"type": "function_call", "name": "render", "call_id": "call-svg", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-svg",
+                "output": f"rendered {image_url}",
+            },
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert "data:image/svg+xml" not in json.dumps(dumped_input)
+    assert "Omitted inline image bytes" in json.dumps(dumped_input)
+
+
+def test_compact_image_elision_keeps_other_input_when_rewritten_request_fits():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "retain-middle-" + "x" * 250_000},
+            {"type": "function_call", "name": "render", "call_id": "call-fit", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-fit",
+                "output": "data:image/png;base64," + "A" * 300_000,
+            },
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0] == payload["input"][0]
+    assert not any(isinstance(item, dict) and item.get("type") == "message" for item in dumped_input)
+
+
 def test_compact_trimming_keeps_accepted_file_reference_while_eliding_inline_image():
     file_reference = {"type": "input_file", "file_id": "file-canvas"}
     payload = {
@@ -2418,8 +2461,13 @@ def test_extract_input_file_ids_finds_top_level_and_nested_ids():
         {"type": "input_file", "file_id": "file_a"},
         {"type": "input_file", "file_id": ""},
         {"type": "input_file"},
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call-file",
+            "output": [{"type": "input_file", "file_id": "file_tool_output"}],
+        },
     ]
-    assert extract_input_file_ids(input_value) == {"file_a", "file_b", "file_c"}
+    assert extract_input_file_ids(input_value) == {"file_a", "file_b", "file_c", "file_tool_output"}
 
 
 def test_input_image_file_reference_returns_file_id_from_input_image_file_id():

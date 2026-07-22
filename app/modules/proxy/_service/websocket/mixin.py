@@ -5154,6 +5154,7 @@ class _WebSocketMixin:
                             request_state.affinity_policy.selection_key,
                             request_state.affinity_policy.legacy_selection_key,
                             request_state.session_id,
+                            request_state.previous_response_id,
                         )
                         if value
                     )

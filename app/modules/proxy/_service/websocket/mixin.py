@@ -768,6 +768,10 @@ class _WebSocketMixin:
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
+        websocket_request_budget_seconds = _facade()._stream_request_budget_seconds(
+            runtime_settings,
+            request_transport="websocket",
+        )
         settings = await _facade().get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
@@ -981,7 +985,7 @@ class _WebSocketMixin:
                                     waited_for_anchor = await _wait_for_websocket_continuity_gap(
                                         pending_requests,
                                         pending_lock=pending_lock,
-                                        timeout_seconds=runtime_settings.proxy_request_budget_seconds,
+                                        timeout_seconds=websocket_request_budget_seconds,
                                     )
                                     _facade().logger.info(
                                         "websocket_full_replay_waited_for_continuity waited=%s elapsed_ms=%s "
@@ -1199,7 +1203,7 @@ class _WebSocketMixin:
                     # ownership-only check for every conversation frame; the
                     # existing socket account is a route, not owner proof.
                     ownership_selection = await proxy._select_account_with_budget_compatible(
-                        request_state.started_at + runtime_settings.proxy_request_budget_seconds,
+                        request_state.started_at + websocket_request_budget_seconds,
                         request_id=request_state.request_log_id or request_state.request_id,
                         kind="websocket",
                         request_stage=request_state.request_stage,
@@ -1454,10 +1458,7 @@ class _WebSocketMixin:
                             upstream_control=upstream_control,
                             response_create_gate=response_create_gate,
                             continuity_state=continuity_state,
-                            proxy_request_budget_seconds=_facade()._stream_request_budget_seconds(
-                                runtime_settings,
-                                request_transport="websocket",
-                            ),
+                            proxy_request_budget_seconds=websocket_request_budget_seconds,
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                             downstream_activity=downstream_activity,
                             codex_session_affinity=codex_session_affinity,
@@ -2015,7 +2016,10 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         deadline = _websocket_connect_deadline(
             request_state,
-            _facade().get_settings().proxy_request_budget_seconds,
+            _facade()._stream_request_budget_seconds(
+                _facade().get_settings(),
+                request_transport="websocket",
+            ),
         )
         selection = await proxy._select_account_with_budget_compatible(
             deadline,

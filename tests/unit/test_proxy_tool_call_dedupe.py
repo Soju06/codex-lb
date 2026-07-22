@@ -2009,3 +2009,33 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_goal_side_effects(
         "functions.update_plan",
         "functions.request_user_input",
     ]
+
+
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_rewrite_parallel_tool_call_payload_removes_duplicate_code_mode_side_effects(
+    recipient_name: str,
+) -> None:
+    tool_use = {
+        "recipient_name": recipient_name,
+        "parameters": {"cmd": "printf side-effect-once"},
+    }
+    payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_parallel_code_mode",
+        "item": {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": json.dumps({"tool_uses": [tool_use, dict(tool_use)]}),
+            "call_id": "call_parallel_code_mode",
+        },
+    }
+
+    rewritten_payload, changed, removed_count = tool_call_dedupe.rewrite_parallel_tool_call_payload(payload)
+
+    assert changed is True
+    assert removed_count == 1
+    assert isinstance(rewritten_payload, dict)
+    item = rewritten_payload["item"]
+    assert isinstance(item, dict)
+    rewritten_arguments = _loads_item_arguments(item)
+    assert rewritten_arguments["tool_uses"] == [tool_use]

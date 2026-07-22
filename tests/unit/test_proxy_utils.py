@@ -322,6 +322,10 @@ def test_websocket_owner_switch_detects_other_pending_request() -> None:
 @pytest.mark.asyncio
 async def test_revalidate_open_websocket_account_uses_current_model_and_tier(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    settings.proxy_request_budget_seconds = 600.0
+    settings.http_responses_stream_request_budget_seconds = 7200.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     account = _make_account("acc_ws_revalidate")
     refreshed_account = _make_account("acc_ws_revalidate")
     request_state = proxy_service._WebSocketRequestState(
@@ -332,7 +336,7 @@ async def test_revalidate_open_websocket_account_uses_current_model_and_tier(mon
         requested_service_tier="priority",
         reasoning_effort="high",
         api_key_reservation=None,
-        started_at=time.monotonic(),
+        started_at=100.0,
     )
     select_account = AsyncMock(
         return_value=AccountSelection(
@@ -356,6 +360,7 @@ async def test_revalidate_open_websocket_account_uses_current_model_and_tier(mon
     assert error_code is None
     assert error_message is None
     assert select_account.await_args is not None
+    assert select_account.await_args.args[0] == 7300.0
     assert select_account.await_args.kwargs["preferred_account_id"] == account.id
     assert select_account.await_args.kwargs["model"] == "gpt-5.6-sol"
     assert select_account.await_args.kwargs["service_tier"] == "priority"
@@ -26887,7 +26892,7 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_websocket_relay_uses_stream_specific_request_budget(monkeypatch):
+async def test_proxy_responses_websocket_uses_stream_specific_budget_for_all_gates(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     settings = _make_proxy_settings()
     settings.proxy_request_budget_seconds = 600.0
@@ -26915,10 +26920,12 @@ async def test_proxy_responses_websocket_relay_uses_stream_specific_request_budg
         request_text=request_text,
         awaiting_response_created=True,
     )
+    affinity_policy = proxy_service._AffinityPolicy(require_unambiguous_account=True)
+    request_state.affinity_policy = affinity_policy
     prepared_request = proxy_service._PreparedWebSocketRequest(
         text_data=request_text,
         request_state=request_state,
-        affinity_policy=proxy_service._AffinityPolicy(),
+        affinity_policy=affinity_policy,
     )
 
     class _FakeDownstreamWebSocket:
@@ -26945,20 +26952,31 @@ async def test_proxy_responses_websocket_relay_uses_stream_specific_request_budg
 
     downstream = _FakeDownstreamWebSocket()
     upstream = SimpleNamespace(send_text=AsyncMock(), send_bytes=AsyncMock(), close=AsyncMock())
+    account = _make_account("acc_ws_stream_budget")
 
     async def fake_connect_proxy_websocket(*args, **kwargs):
         del args, kwargs
-        return _make_account("acc_ws_stream_budget"), upstream
+        return account, upstream
 
     async def fake_relay(*args, **kwargs):
         del args, kwargs
         downstream._done.set()
 
     relay = AsyncMock(side_effect=fake_relay)
-    monkeypatch.setattr(service, "_prepare_websocket_response_create_request", AsyncMock(return_value=prepared_request))
+    prepare_request = AsyncMock(side_effect=[prepared_request, prepared_request])
+    wait_for_continuity = AsyncMock(return_value=True)
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_prepare_websocket_response_create_request", prepare_request)
     monkeypatch.setattr(service, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(service, "_relay_upstream_websocket_messages", relay)
     monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_websocket_full_replay_should_wait_for_continuity",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(websocket_mixin_module, "_wait_for_websocket_continuity_gap", wait_for_continuity)
 
     await service.proxy_responses_websocket(
         cast(WebSocket, downstream),
@@ -26973,6 +26991,9 @@ async def test_proxy_responses_websocket_relay_uses_stream_specific_request_budg
     assert relay_args is not None
     assert relay_args.kwargs["proxy_request_budget_seconds"] == 7200.0
     assert relay_args.kwargs["stream_idle_timeout_seconds"] == 7200.0
+    wait_for_continuity.assert_awaited_once()
+    assert wait_for_continuity.await_args is not None
+    assert wait_for_continuity.await_args.kwargs["timeout_seconds"] == 7200.0
     upstream.send_text.assert_awaited_once()
 
 

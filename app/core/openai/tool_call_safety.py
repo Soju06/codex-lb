@@ -42,7 +42,7 @@ DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
 )
 PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES = frozenset(
     {
-        *(f"functions.{name}" for name in HISTORY_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
+        *(f"functions.{name}" for name in DOWNSTREAM_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
         PARALLEL_TOOL_CALL_NAME,
     }
 )

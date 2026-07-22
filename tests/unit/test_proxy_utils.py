@@ -9532,9 +9532,7 @@ def test_sticky_key_from_session_header_accepts_aliases_in_priority_order():
         == "sid_1"
     )
     assert (
-        proxy_service._sticky_key_from_session_header(
-            {"x-parent-session-id": "parent", "session_id": "route"}
-        )
+        proxy_service._sticky_key_from_session_header({"x-parent-session-id": "parent", "session_id": "route"})
         == "route"
     )
 

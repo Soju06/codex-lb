@@ -733,13 +733,17 @@ def test_rewrite_parallel_tool_call_payload_keeps_duplicate_read_only_connector_
     assert rewritten_payload is payload
 
 
-def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_replay():
+@pytest.mark.parametrize(
+    "recipient_name",
+    ["functions.exec_command", "functions.exec", "functions.collaboration"],
+)
+def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_replay(recipient_name: str):
     upstream_control = proxy_service._WebSocketUpstreamControl()
     arguments = json.dumps(
         {
             "tool_uses": [
                 {
-                    "recipient_name": "functions.exec_command",
+                    "recipient_name": recipient_name,
                     "parameters": {"cmd": "gh pr create --repo Komzpa/evince"},
                 }
             ]
@@ -1628,6 +1632,44 @@ def test_dedupe_replayed_side_effect_input_items_keeps_distinct_code_mode_calls(
             "call_id": "call_code_mode_second",
             "output": "second result",
         },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_parallel_code_mode_calls(
+    recipient_name: str,
+):
+    arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": recipient_name,
+                    "parameters": {"cmd": "touch marker"},
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_parallel_first",
+        },
+        {"type": "function_call_output", "call_id": "call_parallel_first", "output": "first"},
+        {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_parallel_second",
+        },
+        {"type": "function_call_output", "call_id": "call_parallel_second", "output": "second"},
     ]
 
     deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)

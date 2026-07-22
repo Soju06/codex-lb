@@ -5,3 +5,4 @@
 - [x] 3. Add regression coverage for all compact-tail boundaries.
 - [x] 4. Update and validate the live Responses API compatibility contract.
 - [x] 5. Keep only unpaired continuity outputs, pending calls, and canonical side-effect tails fail-closed.
+- [x] 6. Match compact call/output pairs by both reused `call_id` and compatible wire variant.

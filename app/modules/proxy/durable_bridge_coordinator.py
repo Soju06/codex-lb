@@ -64,7 +64,7 @@ class DurableBridgeSessionCoordinator:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
-            resolved_snapshots: list[DurableBridgeSessionSnapshot] = []
+            resolved_aliases: list[tuple[str, DurableBridgeSessionSnapshot]] = []
             for alias_kind, alias_value in (
                 (_DURABLE_TURN_STATE_ALIAS, turn_state),
                 (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
@@ -78,7 +78,8 @@ class DurableBridgeSessionCoordinator:
                     api_key_scope=api_key_scope,
                 )
                 if snapshot is not None:
-                    resolved_snapshots.append(snapshot)
+                    resolved_aliases.append((alias_kind, snapshot))
+            resolved_snapshots = [snapshot for _, snapshot in resolved_aliases]
             resolved_account_ids = {
                 snapshot.account_id for snapshot in resolved_snapshots if snapshot.account_id is not None
             }
@@ -103,13 +104,25 @@ class DurableBridgeSessionCoordinator:
                     same_account_snapshots = [
                         snapshot for snapshot in resolved_snapshots if snapshot.account_id == account_id
                     ]
-                    account_snapshot = next(
-                        (snapshot for snapshot in same_account_snapshots if snapshot.latest_response_id is not None),
-                        same_account_snapshots[0],
+                    requested_response_snapshot = next(
+                        (
+                            snapshot
+                            for alias_kind, snapshot in resolved_aliases
+                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and snapshot.account_id == account_id
+                        ),
+                        None,
                     )
-                    # Alias priority decides otherwise equivalent snapshots, but
-                    # an existing response anchor is continuity state and must
-                    # survive a same-account blue-green handoff.
+                    account_snapshot = requested_response_snapshot or max(
+                        same_account_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.last_seen_at,
+                        ),
+                    )
+                    # Same-account aliases may point at different durable rows
+                    # during a handoff. Preserve an explicitly requested
+                    # response anchor; otherwise prefer the newest persisted
+                    # response anchor rather than alias-resolution order.
                     return _to_lookup(account_snapshot)
                 return _to_lookup(resolved_snapshots[0])
             snapshot = await repository.get_session(

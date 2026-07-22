@@ -177,6 +177,19 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
@@ -865,6 +878,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ):
                     matched_request_state.suppressed_duplicate_tool_call = True
                     return
+                if event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    matched_request_state.upstream_model_output_seen = True
                 if event_type in _TEXT_DELTA_EVENT_TYPES:
                     matched_request_state.downstream_visible = True
                 if event_type == "response.created" and matched_request_state.suppress_next_created_downstream:

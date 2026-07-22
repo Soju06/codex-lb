@@ -12,13 +12,12 @@ When upstream returns a temporary model-capacity failure whose message says that
 - **THEN** `classify_upstream_failure` returns `failure_class = "retryable_transient"`
 - **AND** pre-visible streaming/websocket paths are eligible to retry or fail over instead of surfacing a terminal client error.
 
-#### Scenario: Serialized selected-model capacity event can retry before visibility
+#### Scenario: Serialized selected-model capacity event surfaces without replay
 
 - **WHEN** a streaming Responses request receives a first upstream `response.failed` or `error` event whose message says the selected model is at capacity
-- **AND** the event does not include an upstream response id
 - **AND** no downstream-visible output has been emitted
-- **THEN** the stream retry layer MUST treat the event as a retryable transient failure inside the existing bounded same-account retry budget
-- **AND** the retry layer MUST preserve the existing no-replay behavior once downstream-visible output exists.
+- **THEN** the proxy MUST surface that terminal event without transparently re-POSTing the request
+- **AND** the absence of an upstream response id MUST NOT by itself prove the POST was safe to replay.
 
 #### Scenario: Post-connect body-read disconnect is not replayed as capacity retry
 

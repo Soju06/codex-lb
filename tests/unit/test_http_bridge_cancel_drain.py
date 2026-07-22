@@ -179,6 +179,7 @@ def test_retiring_http_bridge_session_is_not_reusable() -> None:
         key=session.key,
         incoming_turn_state=None,
         previous_response_id=None,
+        require_security_work_authorized=False,
     )
 
 

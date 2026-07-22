@@ -64,13 +64,25 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self,
+        key: str,
+        account_id: str | None,
+        *,
+        kind: StickySessionKind,
+        requires_security_work_authorized: bool = False,
+    ) -> StickySession:
         # RETURNING collapses the previous upsert + re-select + refresh
         # (4 round trips) into one statement; this runs inline before the
         # first upstream byte on sticky requests, so round trips are TTFT.
         # populate_existing forces the returned row to overwrite any stale
         # identity-map instance the session may already hold for this key.
-        statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        statement = self._build_upsert_statement(
+            key,
+            account_id,
+            kind,
+            requires_security_work_authorized=requires_security_work_authorized,
+        ).returning(StickySession)
         async with sqlite_writer_section():
             result = await self._session.execute(statement, execution_options={"populate_existing": True})
             row = result.scalar_one_or_none()
@@ -242,13 +254,27 @@ class StickySessionsRepository:
         stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
+        if kind in {None, StickySessionKind.CODEX_SESSION}:
+            stmt = stmt.where(
+                or_(
+                    StickySession.account_id.is_not(None),
+                    StickySession.requires_security_work_authorized.is_(False),
+                )
+            )
         async with sqlite_writer_section():
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())
             await self._session.commit()
         return deleted
 
-    def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+    def _build_upsert_statement(
+        self,
+        key: str,
+        account_id: str | None,
+        kind: StickySessionKind,
+        *,
+        requires_security_work_authorized: bool,
+    ) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_fn = pg_insert
@@ -256,11 +282,22 @@ class StickySessionsRepository:
             insert_fn = sqlite_insert
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
-        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        statement = insert_fn(StickySession).values(
+            key=key,
+            account_id=account_id,
+            kind=kind,
+            requires_security_work_authorized=requires_security_work_authorized,
+        )
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
+                # Security classification is monotonic for the lifetime of
+                # a lineage. Normal affinity refreshes must not clear it.
+                "requires_security_work_authorized": or_(
+                    StickySession.requires_security_work_authorized,
+                    statement.excluded.requires_security_work_authorized,
+                ),
                 "updated_at": func.now(),
             },
         )

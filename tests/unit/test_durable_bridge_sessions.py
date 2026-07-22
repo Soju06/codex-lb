@@ -132,6 +132,248 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_lookup_prefers_explicit_response_anchor_over_fresher_same_account_turn_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-turn-owner",
+        api_key_id="key-same-account",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    response_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-response-owner",
+        api_key_id="key-same-account",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=turn_owner.session_id,
+        api_key_id="key-same-account",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        turn_state="http_turn_same_account_owner",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=response_owner.session_id,
+        api_key_id="key-same-account",
+        instance_id="instance-b",
+        owner_epoch=response_owner.owner_epoch,
+        response_id="resp_same_account_owner",
+        lease_ttl_seconds=120.0,
+    )
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == turn_owner.session_id)
+            .values(last_seen_at=utcnow() + timedelta(seconds=10))
+        )
+        await session.commit()
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-same-account-owner",
+        api_key_id="key-same-account",
+        turn_state="http_turn_same_account_owner",
+        session_header=None,
+        previous_response_id="resp_same_account_owner",
+    )
+
+    assert lookup is not None
+    assert lookup.session_id == response_owner.session_id
+    assert lookup.account_id == "acc-shared"
+    assert lookup.latest_response_id == "resp_same_account_owner"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_prefers_newest_same_account_response_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-turn-old-anchor",
+        api_key_id="key-newest-anchor",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    session_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-session-new-anchor",
+        api_key_id="key-newest-anchor",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=turn_owner.session_id,
+        api_key_id="key-newest-anchor",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        turn_state="turn-old-anchor",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=turn_owner.session_id,
+        api_key_id="key-newest-anchor",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        response_id="resp-old-anchor",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_session_header(
+        session_id=session_owner.session_id,
+        api_key_id="key-newest-anchor",
+        session_header="sid-session-new-anchor",
+    )
+    await coordinator.register_previous_response_id(
+        session_id=session_owner.session_id,
+        api_key_id="key-newest-anchor",
+        instance_id="instance-b",
+        owner_epoch=session_owner.owner_epoch,
+        response_id="resp-new-anchor",
+        lease_ttl_seconds=120.0,
+    )
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == turn_owner.session_id)
+            .values(last_seen_at=utcnow() - timedelta(seconds=10))
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == session_owner.session_id)
+            .values(last_seen_at=utcnow())
+        )
+        await session.commit()
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-newest-anchor",
+        api_key_id="key-newest-anchor",
+        turn_state="turn-old-anchor",
+        session_header="sid-session-new-anchor",
+        previous_response_id=None,
+    )
+
+    assert lookup is not None
+    assert lookup.session_id == session_owner.session_id
+    assert lookup.latest_response_id == "resp-new-anchor"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_preserves_requested_response_alias_after_anchor_advances(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    requested_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-requested-anchor",
+        api_key_id="key-requested-anchor",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    fresher_turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-fresher-turn",
+        api_key_id="key-requested-anchor",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=requested_owner.session_id,
+        api_key_id="key-requested-anchor",
+        instance_id="instance-a",
+        owner_epoch=requested_owner.owner_epoch,
+        response_id="resp-requested-old",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=requested_owner.session_id,
+        api_key_id="key-requested-anchor",
+        instance_id="instance-a",
+        owner_epoch=requested_owner.owner_epoch,
+        response_id="resp-requested-latest",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_turn_state(
+        session_id=fresher_turn_owner.session_id,
+        api_key_id="key-requested-anchor",
+        instance_id="instance-b",
+        owner_epoch=fresher_turn_owner.owner_epoch,
+        turn_state="turn-fresher-than-requested",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=fresher_turn_owner.session_id,
+        api_key_id="key-requested-anchor",
+        instance_id="instance-b",
+        owner_epoch=fresher_turn_owner.owner_epoch,
+        response_id="resp-fresher-turn",
+        lease_ttl_seconds=120.0,
+    )
+    async with async_session_factory() as session:
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == fresher_turn_owner.session_id)
+            .values(last_seen_at=utcnow() + timedelta(seconds=10))
+        )
+        await session.commit()
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-requested-anchor",
+        api_key_id="key-requested-anchor",
+        turn_state="turn-fresher-than-requested",
+        session_header=None,
+        previous_response_id="resp-requested-old",
+    )
+
+    assert lookup is not None
+    assert lookup.session_id == requested_owner.session_id
+    assert lookup.latest_response_id == "resp-requested-latest"
+
+
+@pytest.mark.asyncio
 async def test_reversible_recovery_turn_state_registration_restores_previous_owner(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
@@ -145,7 +387,7 @@ async def test_reversible_recovery_turn_state_registration_restores_previous_own
         model="gpt-5.6-sol",
         service_tier=None,
         latest_turn_state=None,
-        latest_response_id=None,
+        latest_response_id="resp_stale_turn_anchor",
         allow_takeover=True,
     )
     assert (
@@ -285,6 +527,186 @@ async def test_reversible_recovery_rollback_does_not_restore_reclaimed_predecess
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_accepts_same_account_alias_session_divergence(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-turn-owner",
+        api_key_id="key-same-account",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp_stale_turn_anchor",
+        allow_takeover=True,
+    )
+    response_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-response-owner",
+        api_key_id="key-same-account",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=turn_owner.session_id,
+        api_key_id="key-same-account",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        turn_state="http_turn_same_account_owner",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=response_owner.session_id,
+        api_key_id="key-same-account",
+        instance_id="instance-b",
+        owner_epoch=response_owner.owner_epoch,
+        response_id="resp_same_account_owner",
+        lease_ttl_seconds=120.0,
+    )
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-same-account-owner",
+        api_key_id="key-same-account",
+        turn_state="http_turn_same_account_owner",
+        session_header=None,
+        previous_response_id="resp_same_account_owner",
+    )
+
+    assert lookup is not None
+    assert lookup.session_id == response_owner.session_id
+    assert lookup.account_id == "acc-shared"
+    assert lookup.latest_response_id == "resp_same_account_owner"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_turn_state_precedes_broader_same_account_session_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    turn_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-turn-specific",
+        api_key_id="key-turn-precedence",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp_turn_specific",
+        allow_takeover=True,
+    )
+    session_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-broader",
+        api_key_id="key-turn-precedence",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-shared",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp_other_conversation",
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=turn_owner.session_id,
+        api_key_id="key-turn-precedence",
+        instance_id="instance-a",
+        owner_epoch=turn_owner.owner_epoch,
+        turn_state="http_turn_specific",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_session_header(
+        session_id=session_owner.session_id,
+        api_key_id="key-turn-precedence",
+        session_header="sid-broader",
+    )
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-turn-precedence",
+        api_key_id="key-turn-precedence",
+        turn_state="http_turn_specific",
+        session_header="sid-broader",
+        previous_response_id=None,
+    )
+
+    assert lookup is not None
+    assert lookup.session_id == turn_owner.session_id
+    assert lookup.latest_response_id == "resp_turn_specific"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_lookup_rejects_ownerless_and_live_alias_divergence(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    ownerless = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-ownerless",
+        api_key_id="key-ownerless-conflict",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id=None,
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    live_owner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-live-owner",
+        api_key_id="key-ownerless-conflict",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-live",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=ownerless.session_id,
+        api_key_id="key-ownerless-conflict",
+        instance_id="instance-a",
+        owner_epoch=ownerless.owner_epoch,
+        turn_state="http_turn_ownerless",
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=live_owner.session_id,
+        api_key_id="key-ownerless-conflict",
+        instance_id="instance-b",
+        owner_epoch=live_owner.owner_epoch,
+        response_id="resp_live_owner",
+        lease_ttl_seconds=120.0,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-ownerless-conflict",
+            api_key_id="key-ownerless-conflict",
+            turn_state="http_turn_ownerless",
+            session_header=None,
+            previous_response_id="resp_live_owner",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
 
 
 @pytest.mark.asyncio

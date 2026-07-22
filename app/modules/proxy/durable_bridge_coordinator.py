@@ -41,6 +41,7 @@ class DurableBridgeLookup:
     latest_input_item_count: int | None = None
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
+    requires_security_work_authorized: bool = False
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -82,30 +83,28 @@ class DurableBridgeSessionCoordinator:
                 )
                 if snapshot is not None:
                     resolved_aliases.append((alias_kind, snapshot))
-            resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
-            if len(resolved_identities) > 1:
-                specific_aliases = [
-                    (alias_kind, snapshot)
+            resolved_snapshots = [snapshot for _, snapshot in resolved_aliases]
+            verified_replay_turn_snapshot = next(
+                (
+                    snapshot
                     for alias_kind, snapshot in resolved_aliases
-                    if alias_kind != _DURABLE_SESSION_HEADER_ALIAS
-                ]
-                specific_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in specific_aliases}
-                if len(specific_identities) == 1:
-                    specific_snapshot = specific_aliases[0][1]
-                    specific_identity = (specific_snapshot.id, specific_snapshot.account_id)
-                    conflicting_alias_kinds = {
-                        alias_kind
-                        for alias_kind, snapshot in resolved_aliases
-                        if (snapshot.id, snapshot.account_id) != specific_identity
-                    }
-                    if is_http_bridge_account_neutral_replay(
-                        kind=specific_snapshot.session_key_kind,
-                        key=specific_snapshot.session_key_value,
-                    ) and conflicting_alias_kinds == {_DURABLE_SESSION_HEADER_ALIAS}:
-                        return _to_lookup(specific_snapshot)
-                # Turn-state/response/session aliases are independent hard
-                # evidence. Returning the first match would silently discard a
-                # conflicting durable owner based on source ordering.
+                    if alias_kind == _DURABLE_TURN_STATE_ALIAS
+                    and is_http_bridge_account_neutral_replay(
+                        kind=snapshot.session_key_kind,
+                        key=snapshot.session_key_value,
+                    )
+                ),
+                None,
+            )
+            if previous_response_id is None and verified_replay_turn_snapshot is not None:
+                return _to_lookup(verified_replay_turn_snapshot)
+            resolved_account_ids = {
+                snapshot.account_id for snapshot in resolved_snapshots if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for snapshot in resolved_snapshots)
+            if len(resolved_account_ids) > 1 or (has_ownerless_snapshot and resolved_account_ids):
+                # Alias rows may diverge during a same-account blue-green
+                # handoff, but they must never disagree on the upstream owner.
                 raise ProxyResponseError(
                     502,
                     openai_error(
@@ -114,8 +113,27 @@ class DurableBridgeSessionCoordinator:
                         error_type="server_error",
                     ),
                 )
-            if resolved_aliases:
-                return _to_lookup(resolved_aliases[0][1])
+            if resolved_snapshots:
+                explicit_response_snapshot = next(
+                    (
+                        snapshot
+                        for alias_kind, snapshot in resolved_aliases
+                        if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS
+                    ),
+                    None,
+                )
+                if explicit_response_snapshot is not None:
+                    return _to_lookup(explicit_response_snapshot)
+                return _to_lookup(
+                    max(
+                        resolved_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.last_seen_at,
+                            snapshot.owner_epoch,
+                        ),
+                    )
+                )
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
@@ -178,6 +196,7 @@ class DurableBridgeSessionCoordinator:
         latest_response_id: str | None,
         allow_takeover: bool,
         force_owner_epoch_advance: bool = False,
+        requires_security_work_authorized: bool = False,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -194,8 +213,19 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=latest_response_id,
                 allow_takeover=allow_takeover,
                 force_owner_epoch_advance=force_owner_epoch_advance,
+                requires_security_work_authorized=requires_security_work_authorized,
             )
         return _to_lookup(snapshot)
+
+    async def require_security_work_authorized(self, *, session_id: str) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).require_security_work_authorized(session_id=session_id)
+        return _to_lookup(snapshot) if snapshot is not None else None
+
+    async def clear_security_work_authorized(self, *, session_id: str) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).clear_security_work_authorized(session_id=session_id)
+        return _to_lookup(snapshot) if snapshot is not None else None
 
     async def renew_live_session(
         self,
@@ -210,6 +240,7 @@ class DurableBridgeSessionCoordinator:
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
+        requires_security_work_authorized: bool = False,
     ) -> DurableBridgeLookup | None:
         del api_key_id
         async with self._session() as session:
@@ -223,6 +254,7 @@ class DurableBridgeSessionCoordinator:
                 latest_input_item_count=latest_input_item_count,
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
                 state=state,
+                requires_security_work_authorized=requires_security_work_authorized,
             )
         if snapshot is None:
             return None
@@ -385,4 +417,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
+        requires_security_work_authorized=snapshot.requires_security_work_authorized,
     )

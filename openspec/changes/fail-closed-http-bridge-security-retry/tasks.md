@@ -1,0 +1,7 @@
+- [x] 1. Block security retry after a created anchor or deferred upstream reasoning output.
+- [x] 2. Validate raw legacy ownership before one durable replacement claim and the session/alias swap for a permitted pre-created retry.
+- [x] 3. Cover deferred-output replay blocking and preserve pinned-request denial coverage.
+- [x] 4. Cover turn-state and session-header replacement success plus legacy-owner conflict rollback ordering.
+- [x] 5. Keep hard session-header pre-created reconnects on their established owner and strip stale turn-state headers when no replacement turn state exists.
+- [x] 6. Retire a replacement bridge when the post-swap security resend fails, and keep an entire reasoning prelude buffered until the terminal security decision.
+- [x] 7. Reacquire direct-WebSocket create admission before queuing a security replay on the authorized replacement.

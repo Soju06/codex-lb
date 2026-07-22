@@ -16,18 +16,65 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRY_STATUS_CODES = {500, 502, 503, 504}
+RATE_LIMIT_STATUS_CODES = {403, 429}
 DEFAULT_ATTEMPTS = 5
 DEFAULT_BASE_DELAY_SECONDS = 2.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
+RATE_LIMIT_DETAIL_MARKERS = (
+    "api rate limit exceeded",
+    "rate limit exceeded",
+    "secondary rate limit",
+    "abuse detection mechanism",
+)
 
 
 class GitHubApiError(RuntimeError):
-    """Raised when a GitHub API request fails after retries."""
+    """Raised when a GitHub API request fails."""
+
+    def __init__(self, message: str, *, transient: bool = True) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
+def _is_rate_limit_http_error(exc: urllib.error.HTTPError, detail: str) -> bool:
+    if exc.code not in RATE_LIMIT_STATUS_CODES:
+        return False
+    if exc.code == 429:
+        return True
+    headers = exc.headers
+    retry_after = headers.get("Retry-After")
+    rate_remaining = headers.get("X-RateLimit-Remaining")
+    rate_reset = headers.get("X-RateLimit-Reset")
+    if retry_after or (rate_remaining == "0" and rate_reset):
+        return True
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        payload = {}
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if not isinstance(message, str):
+        return False
+    message = message.lower()
+    return "rate limit" in message or "abuse detection" in message
 
 
 def _retry_delay(attempt_index: int, base_delay_seconds: float) -> float:
     return min(base_delay_seconds * (2**attempt_index), 30.0)
+
+
+def _is_transient_http_error(exc: urllib.error.HTTPError, detail: str) -> bool:
+    if exc.code in RETRY_STATUS_CODES:
+        return True
+    if _is_rate_limit_http_error(exc, detail):
+        return True
+    if exc.code != 403:
+        return False
+    remaining = exc.headers.get("x-ratelimit-remaining") if exc.headers is not None else None
+    if remaining == "0":
+        return True
+    normalized_detail = detail.lower()
+    return any(marker in normalized_detail for marker in RATE_LIMIT_DETAIL_MARKERS)
 
 
 def request_json(
@@ -57,12 +104,13 @@ def request_json(
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             last_error = f"HTTP {exc.code}: {detail[:500]}"
-            if exc.code not in RETRY_STATUS_CODES or attempt_index + 1 >= attempts:
-                raise GitHubApiError(last_error) from exc
+            transient = _is_transient_http_error(exc, detail)
+            if not transient or attempt_index + 1 >= attempts:
+                raise GitHubApiError(last_error, transient=transient) from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = str(exc)
             if attempt_index + 1 >= attempts:
-                raise GitHubApiError(last_error) from exc
+                raise GitHubApiError(last_error, transient=True) from exc
 
         delay = _retry_delay(attempt_index, base_delay_seconds)
         print(

@@ -446,10 +446,12 @@ def _should_retry_transient_stream_error(
         # stable code keeps settlement account-neutral, but cannot prove that
         # replaying the POST is safe.
         return False
+    if response_id is not None:
+        return False
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if is_upstream_model_capacity_error(message):
-        if code in _MODEL_CAPACITY_LIMIT_CODES or response_id is not None:
+        if code in _MODEL_CAPACITY_LIMIT_CODES:
             return False
         return True
     if code != "upstream_unavailable" or not message:
@@ -465,7 +467,7 @@ def _classify_upstream_close(
     *,
     response_events_seen: int,
 ) -> Literal["transient", "rejected"]:
-    if close_code == 1000 and response_events_seen == 0:
+    if close_code in {1000, 1003, 1007, 1008} and response_events_seen == 0:
         return "rejected"
     return "transient"
 
@@ -715,10 +717,10 @@ def _call_stream_with_supported_optional_kwargs(
 
 
 def _stream_request_budget_seconds(settings: object, *, request_transport: str) -> float:
-    if request_transport == _REQUEST_TRANSPORT_HTTP:
-        budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
-        if budget is not None:
-            return float(budget)
+    del request_transport
+    budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
+    if budget is not None:
+        return float(budget)
     return float(getattr(settings, "proxy_request_budget_seconds"))
 
 
@@ -756,6 +758,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
     selector = proxy._select_account_with_budget_compatible
     optional_kwargs = (
         "require_security_work_authorized",
+        "security_lineage_id",
         "lease_kind",
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",

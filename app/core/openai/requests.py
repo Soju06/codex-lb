@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -8,6 +9,7 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
@@ -40,10 +42,17 @@ _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content",
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
 _COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal", "update_plan"})
-_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
-_COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
-    {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
-)
+# A call_id can be reused by different item protocols. Compact pairing must
+# therefore keep each protocol's occurrence stream separate.
+_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE: dict[str, str] = {
+    "function_call_output": "function_call",
+    "custom_tool_call_output": "custom_tool_call",
+    "apply_patch_call_output": "apply_patch_call",
+}
+_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset(_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values())
+_COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE)
+_COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES = frozenset({"apply_patch_call", "apply_patch_call_output"})
+_COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"""data:image/[^,\s]+,[^\s"'<>]+""")
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -150,7 +159,7 @@ def _input_image_file_reference(item: Mapping[str, JsonValue]) -> str | None:
 def extract_input_file_ids(input_value: JsonValue) -> set[str]:
     """Return all ``file_id`` strings referenced by ``input_file`` / ``input_image`` items.
 
-    Walks both top-level items and nested role-message ``content`` parts,
+    Walks top-level items and nested request values,
     matching the shapes accepted by ``ResponsesRequest.input`` /
     ``ResponsesCompactRequest.input``. Returns an empty set when the
     input is a plain string or has no ``input_file`` parts. Used by the
@@ -162,34 +171,23 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
     if not is_json_list(input_value):
         return set()
     file_ids: set[str] = set()
-    for item in input_value:
-        if not is_json_mapping(item):
-            continue
-        item_mapping = item
-        if _is_input_file_with_id(item_mapping):
-            file_id = item_mapping.get("file_id")
-            if isinstance(file_id, str) and file_id:
-                file_ids.add(file_id)
-        image_file_id = _input_image_file_reference(item_mapping)
-        if image_file_id is not None:
-            file_ids.add(image_file_id)
-        content = item_mapping.get("content")
-        if is_json_list(content):
-            parts: list[JsonValue] = content
-        elif is_json_mapping(content):
-            parts = [content]
-        else:
-            parts = []
-        for part in parts:
-            if not is_json_mapping(part):
-                continue
-            if _is_input_file_with_id(part):
-                file_id = part.get("file_id")
+
+    def collect(value: JsonValue) -> None:
+        if is_json_mapping(value):
+            if _is_input_file_with_id(value):
+                file_id = value.get("file_id")
                 if isinstance(file_id, str) and file_id:
                     file_ids.add(file_id)
-            image_file_id = _input_image_file_reference(part)
+            image_file_id = _input_image_file_reference(value)
             if image_file_id is not None:
                 file_ids.add(image_file_id)
+            for child in value.values():
+                collect(child)
+        elif is_json_list(value):
+            for child in value:
+                collect(child)
+
+    collect(input_value)
     return file_ids
 
 
@@ -794,6 +792,9 @@ _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the la
 _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
 _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
+_COMPACT_OMITTED_INLINE_IMAGE_TEXT = (
+    "[compact trim] Omitted inline image bytes that were already observed before compaction"
+)
 
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
@@ -919,10 +920,36 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         return
 
     head_count = _compact_trim_prefix_count(token_counts)
-    preserved_indices = _compact_state_anchor_indices(input_value)
-    required_indices = set(preserved_indices)
-    if input_value:
-        required_indices.add(len(input_value) - 1)
+    state_anchor_indices = _compact_state_anchor_indices(input_value)
+    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
+    wire_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens)
+
+    side_effect_indices = _compact_side_effect_anchor_indices(input_value)
+    unusable_side_effect_indices = {
+        index
+        for index, item in enumerate(input_value)
+        if is_json_mapping(item)
+        and _compact_item_is_side_effect_anchor(item)
+        and (not isinstance(item.get("call_id"), str) or not item["call_id"])
+    }
+    # Keep priority side effects as complete call/output units before spending
+    # the remaining budget on ordinary head/tail context.  Otherwise a large
+    # recent message can leave room for a call but not its output, causing
+    # reconciliation to drop the historical side effect that would fit after
+    # trimming that ordinary message.
+    side_effect_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        side_effect_indices,
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+    )
+    required_indices = set(state_anchor_indices)
+    if required_indices & unusable_side_effect_indices:
+        raise ClientPayloadError(
+            "Compact input cannot retain a required side-effect call without a usable call_id.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
         required_indices,
@@ -930,8 +957,74 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_budget=sum(token_counts),
         required_indices=required_indices,
     )
+    terminal_indices, terminal_is_required, reconcile_terminal_pairs = _compact_terminal_required_indices(
+        input_value,
+        token_counts=token_counts,
+        has_continuity_anchor=_compact_has_continuity_anchor(payload),
+    )
+    if terminal_is_required and terminal_indices & unusable_side_effect_indices:
+        raise ClientPayloadError(
+            "Compact input cannot retain a required side-effect call without a usable call_id.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
+    if terminal_indices:
+        prospective_required_indices = required_indices | terminal_indices
+        if reconcile_terminal_pairs:
+            prospective_required_indices = _compact_reconciled_tool_call_indices(
+                input_value,
+                prospective_required_indices,
+                token_counts=token_counts,
+                token_budget=sum(token_counts),
+                required_indices=prospective_required_indices,
+            )
+        prospective_required_input = _compact_trimmed_input_with_markers(
+            input_value,
+            token_counts,
+            prospective_required_indices,
+        )
+        prospective_required_tokens = _estimated_json_tokens(prospective_required_input)
+        rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+            input_value,
+            required_indices=prospective_required_indices,
+        )
+        if images_elided:
+            if _estimated_json_tokens(rewritten_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                payload["input"] = rewritten_input
+                return
+            if prospective_required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                rewritten_token_counts = [_estimated_json_array_item_tokens(item) for item in rewritten_input]
+                rewritten_required_input = _compact_trimmed_input_with_markers(
+                    rewritten_input,
+                    rewritten_token_counts,
+                    prospective_required_indices,
+                )
+                rewritten_required_tokens = _estimated_json_tokens(rewritten_required_input)
+                if rewritten_required_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                    input_value = rewritten_input
+                    payload["input"] = input_value
+                    token_counts = rewritten_token_counts
+                    head_count = _compact_trim_prefix_count(token_counts)
+                    prospective_required_input = rewritten_required_input
+                    prospective_required_tokens = rewritten_required_tokens
+        if terminal_is_required or (prospective_required_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS):
+            required_indices = prospective_required_indices
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
+    if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+            input_value,
+            required_indices=required_indices,
+        )
+        if images_elided:
+            input_value = rewritten_input
+            payload["input"] = input_value
+            if _estimated_json_tokens(input_value) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                return
+            token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+            head_count = _compact_trim_prefix_count(token_counts)
+            required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+            required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         raise ClientPayloadError(
             "Compact input exceeds the upstream size limit and cannot be trimmed "
@@ -939,9 +1032,16 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             param="input",
             code="responses_compact_input_too_large",
         )
-    selected_indices = set(preserved_indices)
+    side_effect_indices &= _compact_reconciled_tool_call_indices(
+        input_value,
+        required_indices | side_effect_indices,
+        token_counts=token_counts,
+        token_budget=wire_budget,
+        required_indices=required_indices,
+    )
+    selected_indices = set(state_anchor_indices)
+    selected_indices.update(side_effect_indices)
     selected_indices.update(range(head_count))
-    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
     selected_indices.update(
@@ -953,18 +1053,48 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         )
     )
     selected_indices.update(required_indices)
+    selected_indices.difference_update(unusable_side_effect_indices)
+    latest_index = len(input_value) - 1
+    latest_mapping = _json_mapping_or_none(input_value[latest_index]) if input_value else None
+    latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if (
+        latest_mapping is not None
+        and _compact_has_continuity_anchor(payload)
+        and isinstance(latest_type, str)
+        and latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        and _compact_matching_tool_call_index(input_value, latest_index) is None
+    ):
+        latest_call_id = latest_mapping.get("call_id")
+        matching_call_type = _COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(latest_type)
+        selected_indices.difference_update(
+            index
+            for index, item in enumerate(input_value[:latest_index])
+            if is_json_mapping(item)
+            and item.get("call_id") == latest_call_id
+            and item.get("type") in {latest_type, matching_call_type}
+            and index not in required_indices
+        )
     selected_indices = _compact_reconciled_tool_call_indices(
         input_value,
         selected_indices,
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
-        required_indices=required_indices,
+        required_indices=required_indices | side_effect_indices,
     )
+    selected_tool_indices: set[int] = set()
+    for index in selected_indices:
+        selected_item = _json_mapping_or_none(input_value[index])
+        if (
+            selected_item is not None
+            and selected_item.get("type") in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        ):
+            selected_tool_indices.add(index)
     selected_indices = _compact_fit_selected_indices_to_wire_budget(
         input_value,
         token_counts,
         selected_indices=selected_indices,
         required_indices=required_indices,
+        priority_indices=side_effect_indices | selected_tool_indices,
     )
     trimmed_input = (
         input_value
@@ -983,19 +1113,214 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     payload["input"] = trimmed_input
 
 
+def _compact_has_continuity_anchor(payload: Mapping[str, JsonValue]) -> bool:
+    return any(
+        isinstance(payload.get(field), str) and bool(cast(str, payload[field]).strip())
+        for field in ("previous_response_id", "conversation")
+    )
+
+
+def _compact_terminal_required_indices(
+    input_value: list[JsonValue],
+    *,
+    token_counts: list[int],
+    has_continuity_anchor: bool,
+) -> tuple[set[int], bool, bool]:
+    """Return terminal context and whether it must remain even when oversized."""
+
+    if not input_value:
+        return set(), False, False
+
+    latest_index = len(input_value) - 1
+    latest_mapping = _json_mapping_or_none(input_value[latest_index])
+    latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+        return {latest_index}, True, False
+    if latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+    matching_call_index = _compact_matching_tool_call_index(input_value, latest_index)
+    if latest_mapping is not None and _compact_terminal_item_is_side_effect(
+        input_value,
+        latest_index,
+        matching_call_index=matching_call_index,
+    ):
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+    if latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES and has_continuity_anchor and matching_call_index is None:
+        return {latest_index}, True, False
+    if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+
+    paired_tail = _compact_reconciled_tool_call_indices(
+        input_value,
+        {latest_index},
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+    )
+    if latest_index in paired_tail:
+        return paired_tail, False, False
+    return set(), False, False
+
+
+def _compact_required_terminal_indices(
+    input_value: list[JsonValue], latest_index: int, token_counts: list[int]
+) -> set[int]:
+    return _compact_reconciled_tool_call_indices(
+        input_value,
+        {latest_index},
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+        required_indices={latest_index},
+    )
+
+
+def _compact_matching_tool_call_index(input_value: list[JsonValue], output_index: int) -> int | None:
+    output = _json_mapping_or_none(input_value[output_index])
+    if output is None:
+        return None
+    call_id = output.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    output_type = output.get("type")
+    expected_call_type = (
+        _COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(output_type) if isinstance(output_type, str) else None
+    )
+    if expected_call_type is None:
+        return None
+    unmatched_call_indices: list[int] = []
+    for index in range(output_index):
+        item = _json_mapping_or_none(input_value[index])
+        if item is None or item.get("call_id") != call_id:
+            continue
+        if item.get("type") == expected_call_type:
+            unmatched_call_indices.append(index)
+        elif item.get("type") == output_type and unmatched_call_indices:
+            unmatched_call_indices.pop()
+    return unmatched_call_indices[-1] if unmatched_call_indices else None
+
+
+def _compact_terminal_item_is_side_effect(
+    input_value: list[JsonValue],
+    latest_index: int,
+    *,
+    matching_call_index: int | None,
+) -> bool:
+    latest = _json_mapping_or_none(input_value[latest_index])
+    if latest is None:
+        return False
+    if latest.get("type") in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    tool_call = latest
+    if latest.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+        if matching_call_index is None:
+            return False
+        matched_call = _json_mapping_or_none(input_value[matching_call_index])
+        if matched_call is None:
+            return False
+        tool_call = matched_call
+    if tool_call.get("type") in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    return _compact_tool_call_is_side_effect(tool_call)
+
+
+def _compact_tool_call_is_side_effect(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    argument_field = "arguments" if item_type == "function_call" else "input"
+    argument_value = item.get(argument_field)
+    name = item.get("name")
+    return (
+        isinstance(name, str)
+        and isinstance(argument_value, str)
+        and is_downstream_side_effect_tool_call(name, argument_value)
+    )
+
+
+def _compact_elide_required_tool_output_images(
+    input_value: list[JsonValue],
+    *,
+    required_indices: set[int],
+) -> tuple[list[JsonValue], bool]:
+    rewritten: list[JsonValue] = []
+    changed = False
+    for index, item in enumerate(input_value):
+        if (
+            index in required_indices
+            and is_json_mapping(item)
+            and item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        ):
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        else:
+            rewritten.append(item)
+    return rewritten, changed
+
+
+def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
+    """Replace inline image bytes with an explicit compact-only text marker.
+
+    The model has already observed these images during the live turn. Re-sending
+    their data URLs to the compact endpoint can make an otherwise recoverable
+    thread permanently uncompactable, especially when the latest required tool
+    output contains a screenshot. File-backed image references remain intact.
+    """
+
+    if is_json_mapping(value):
+        if value.get("type") == "input_image":
+            image_url = value.get("image_url")
+            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                return (
+                    {
+                        "type": "input_text",
+                        "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(image_url)} encoded characters).",
+                    },
+                    True,
+                )
+        rewritten_mapping: JsonObject = {}
+        changed = False
+        for key, item in value.items():
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten_mapping[key] = rewritten_item
+            changed = changed or item_changed
+        return rewritten_mapping, changed
+    if is_json_list(value):
+        rewritten: list[JsonValue] = []
+        changed = False
+        for item in value:
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        return rewritten, changed
+    if isinstance(value, str) and "data:image/" in value:
+        rewritten_value, replacements = _COMPACT_INLINE_IMAGE_DATA_URL_RE.subn(
+            lambda match: f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(match.group(0))} encoded characters).",
+            value,
+        )
+        if replacements:
+            return rewritten_value, True
+    return value, False
+
+
 def _compact_fit_selected_indices_to_wire_budget(
     input_value: list[JsonValue],
     token_counts: list[int],
     *,
     selected_indices: set[int],
     required_indices: set[int],
+    priority_indices: set[int] | None = None,
 ) -> set[int]:
     """Drop best-effort middle context until the exact serialized input fits."""
 
     selected = set(selected_indices)
+    prioritized = priority_indices or set()
+
+    def optional_drop_key(index: int) -> tuple[int, int, int]:
+        if index in prioritized:
+            return (0, 0, -index)
+        return (1, min(index, len(input_value) - 1 - index), index)
+
     optional_indices = sorted(
         selected - required_indices,
-        key=lambda index: (min(index, len(input_value) - 1 - index), index),
+        key=optional_drop_key,
         reverse=True,
     )
     marker_budget = max(
@@ -1062,6 +1387,19 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
     return preserved_indices
 
 
+def _compact_side_effect_anchor_indices(input_value: list[JsonValue]) -> set[int]:
+    preserved_indices: set[int] = set()
+    for index, item in enumerate(input_value):
+        if (
+            is_json_mapping(item)
+            and _compact_item_is_side_effect_anchor(item)
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"]
+        ):
+            preserved_indices.add(index)
+    return preserved_indices
+
+
 def _compact_reconciled_tool_call_indices(
     input_value: list[JsonValue],
     selected_indices: set[int],
@@ -1071,8 +1409,8 @@ def _compact_reconciled_tool_call_indices(
     required_indices: set[int] | None = None,
     allow_pair_additions: bool = True,
 ) -> set[int]:
-    call_indices_by_id: dict[str, list[int]] = {}
-    output_indices_by_id: dict[str, list[int]] = {}
+    call_indices_by_key: dict[tuple[str, str], list[int]] = {}
+    output_indices_by_key: dict[tuple[str, str], list[int]] = {}
     for index, item in enumerate(input_value):
         if not is_json_mapping(item):
             continue
@@ -1080,10 +1418,12 @@ def _compact_reconciled_tool_call_indices(
         if not isinstance(call_id, str) or not call_id:
             continue
         item_type = item.get("type")
-        if item_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
-            call_indices_by_id.setdefault(call_id, []).append(index)
-        elif item_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
-            output_indices_by_id.setdefault(call_id, []).append(index)
+        if isinstance(item_type, str) and item_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+            call_indices_by_key.setdefault((call_id, item_type), []).append(index)
+        elif isinstance(item_type, str):
+            matching_call_type = _COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type)
+            if matching_call_type is not None:
+                output_indices_by_key.setdefault((call_id, matching_call_type), []).append(index)
 
     reconciled = set(selected_indices)
     protected_indices = required_indices or set()
@@ -1106,13 +1446,16 @@ def _compact_reconciled_tool_call_indices(
                 reconciled.remove(index)
                 selected_tokens -= token_counts[index]
 
-    def matching_call_index(call_indices: list[int], output_index: int) -> int | None:
-        if not call_indices:
-            return None
-        preceding_call_indices = [call_index for call_index in call_indices if call_index < output_index]
-        if preceding_call_indices:
-            return preceding_call_indices[-1]
-        return call_indices[0]
+    def matching_call_index(call_indices: list[int], output_indices: list[int], output_index: int) -> int | None:
+        unmatched_calls: list[int] = []
+        call_index_set = set(call_indices)
+        output_index_set = set(output_indices)
+        for index in range(output_index):
+            if index in call_index_set:
+                unmatched_calls.append(index)
+            elif index in output_index_set and unmatched_calls:
+                unmatched_calls.pop()
+        return unmatched_calls[-1] if unmatched_calls else None
 
     def matching_output_indices(call_indices: list[int], call_index: int, output_indices: list[int]) -> list[int]:
         next_call_indices = [next_call_index for next_call_index in call_indices if next_call_index > call_index]
@@ -1121,23 +1464,23 @@ def _compact_reconciled_tool_call_indices(
             output_index
             for output_index in output_indices
             if output_index > call_index and (next_call_index is None or output_index < next_call_index)
-        ]
+        ][:1]
 
-    for call_id, output_indices in output_indices_by_id.items():
+    for pair_key, output_indices in output_indices_by_key.items():
         selected_outputs = [index for index in output_indices if index in reconciled]
         if not selected_outputs:
             continue
-        call_indices = call_indices_by_id.get(call_id, [])
+        call_indices = call_indices_by_key.get(pair_key, [])
         for output_index in selected_outputs:
-            call_index = matching_call_index(call_indices, output_index)
+            call_index = matching_call_index(call_indices, output_indices, output_index)
             if call_index is None:
                 remove_indices([output_index])
             elif not allow_pair_additions and call_index not in reconciled:
                 remove_indices([output_index])
             elif not add_indices([call_index]):
                 remove_indices([output_index])
-    for call_id, call_indices in call_indices_by_id.items():
-        output_indices = output_indices_by_id.get(call_id, [])
+    for pair_key, call_indices in call_indices_by_key.items():
+        output_indices = output_indices_by_key.get(pair_key, [])
         for call_index in call_indices:
             if call_index not in reconciled:
                 continue
@@ -1175,6 +1518,15 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
             return True
     return False
+
+
+def _compact_item_is_side_effect_anchor(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    if item_type in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return True
+    if item_type not in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        return False
+    return _compact_tool_call_is_side_effect(item)
 
 
 def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:
@@ -1262,8 +1614,9 @@ def _compact_trim_marker(*, omitted_items: int, omitted_tokens: int) -> JsonObje
                 "text": (
                     "[compact trim] Omitted "
                     f"{omitted_items} input items (~{omitted_tokens} estimated tokens) "
-                    "before forwarding this oversized compact request upstream. The initial "
-                    "context, most recent context, and compact state anchors were preserved."
+                    "before forwarding this oversized compact request upstream. Required compact "
+                    "state anchors and retained input items remain in their original order; "
+                    "omitted items may include terminal context."
                 ),
             }
         ],

@@ -184,6 +184,7 @@ class AccountSelection:
     error_message: str | None
     error_code: str | None = None
     lease: AccountLease | None = None
+    requires_security_work_authorized: bool = False
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
 
 

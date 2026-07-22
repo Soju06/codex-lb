@@ -477,6 +477,14 @@ from app.modules.proxy._service.response_create import (
 from app.modules.proxy._service.response_create import (
     _write_response_create_dump as _write_response_create_dump,
 )
+from app.modules.proxy._service.security_lineage import (
+    _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,  # noqa: F401
+    _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,  # noqa: F401
+    _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,  # noqa: F401
+    _SECURITY_WORK_RETRY_MESSAGE,  # noqa: F401
+    _is_security_work_authorization_required_error,  # noqa: F401
+    _SecurityLineageMixin,
+)
 from app.modules.proxy._service.streaming import (
     _StreamingMixin,
 )
@@ -865,22 +873,6 @@ _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
 )
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
-_SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
-_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
-_SECURITY_WORK_AUTHORIZATION_REQUIRED_HINTS = (
-    "flagged for possible cybersecurity risk",
-    "authorized for security work",
-    "chatgpt.com/cyber",
-)
-_SECURITY_WORK_RETRY_MESSAGE = (
-    "Upstream flagged this request as possible cybersecurity work. "
-    "codex-lb is retrying on an account marked as authorized for security work."
-)
-_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
-    "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
-)
 
 
 def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
@@ -904,6 +896,7 @@ def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
 
 
 class ProxyService(
+    _SecurityLineageMixin,
     _ApiKeyUsageMixin,
     _RequestLogMixin,
     _RateLimitMixin,
@@ -1692,6 +1685,8 @@ class ProxyService(
         preferred_account_id: str | None = None,
         preferred_account_is_continuity_owner: bool = False,
         require_security_work_authorized: bool = False,
+        security_lineage_id: str | None = None,
+        allow_security_lineage_account_migration: bool = True,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
@@ -1740,6 +1735,13 @@ class ProxyService(
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
+                require_security_work_authorized = require_security_work_authorized or (
+                    allow_security_lineage_account_migration
+                    and await self._security_lineage_requires_security_work_authorized(
+                        security_lineage_id,
+                        api_key_id=api_key.id if api_key is not None else None,
+                    )
+                )
                 stream_reserve_slots = (
                     (
                         get_settings().proxy_account_stream_recovery_reserve
@@ -1765,18 +1767,21 @@ class ProxyService(
                             account=None,
                             error_message="Single account routing is enabled but no account is selected",
                             error_code="single_account_not_configured",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                     if selected_account_id in excluded_account_ids_set:
                         return AccountSelection(
                             account=None,
                             error_message="Selected single account is unavailable",
                             error_code="single_account_unavailable",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                     if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
                         return AccountSelection(
                             account=None,
                             error_message="Selected single account is outside the API key account scope",
                             error_code="single_account_scope_mismatch",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                     single_account_routing_id = selected_account_id
                     routing_strategy = "single_account"
@@ -1810,6 +1815,7 @@ class ProxyService(
                             account=None,
                             error_message="Preferred account is not available",
                             error_code="preferred_account_unavailable",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                 if preferred_eligible:
                     preferred_sticky_inputs = _AffinityPolicy.preferred_owner_sticky_inputs(
@@ -1861,7 +1867,12 @@ class ProxyService(
                             request_stage,
                             preferred_account_id,
                         )
-                        return preferred_selection
+                        return await self._bind_security_lineage_selection(
+                            security_lineage_id,
+                            preferred_selection,
+                            require_security_work_authorized=require_security_work_authorized,
+                            api_key_id=api_key.id if api_key is not None else None,
+                        )
                     if not fallback_on_preferred_account_unavailable:
                         logger.warning(
                             "Proxy preferred account unavailable request_id=%s kind=%s request_stage=%s "
@@ -1873,6 +1884,7 @@ class ProxyService(
                             preferred_selection.error_code,
                             preferred_selection.error_message,
                         )
+                        preferred_selection.requires_security_work_authorized = require_security_work_authorized
                         return preferred_selection
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
@@ -1921,6 +1933,7 @@ class ProxyService(
                         account=None,
                         error_message="No active accounts available",
                         error_code="no_accounts",
+                        requires_security_work_authorized=require_security_work_authorized,
                     )
                 logger.info(
                     "Proxy account selection result request_id=%s kind=%s request_stage=%s model=%s "
@@ -1935,7 +1948,12 @@ class ProxyService(
                     None if scoped_account_ids is None else len(scoped_account_ids),
                     len(excluded_account_ids_set),
                 )
-                return selection
+                return await self._bind_security_lineage_selection(
+                    security_lineage_id,
+                    selection,
+                    require_security_work_authorized=require_security_work_authorized,
+                    api_key_id=api_key.id if api_key is not None else None,
+                )
         except TimeoutError:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
             _raise_proxy_budget_exhausted()
@@ -2314,16 +2332,6 @@ def _security_work_advisory_event(
         "type": "codex_lb.warning",
         "warning": warning,
     }
-
-
-def _is_security_work_authorization_required_error(code: str | None, message: str | None) -> bool:
-    normalized_code = (code or "").strip().lower()
-    if normalized_code == _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE:
-        return True
-    normalized_message = (message or "").strip().lower()
-    if not normalized_message:
-        return False
-    return all(hint in normalized_message for hint in _SECURITY_WORK_AUTHORIZATION_REQUIRED_HINTS)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:

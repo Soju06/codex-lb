@@ -9,8 +9,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Literal, Mapping, TypeGuard, TypeVar, cast
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -57,6 +58,7 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
@@ -649,6 +651,18 @@ def _http_bridge_eventless_precreated_deadline(
     )
 
 
+def _http_bridge_request_contains_input_file_ids(text: str | None) -> bool:
+    if text is None:
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    return bool(extract_input_file_ids(payload.get("input")))
+
+
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
     """Keep a closed bridge registered while an unsent request owns its handoff."""
     return session is not None and bool(getattr(session, "admission_waiter_count", 0))
@@ -1080,13 +1094,61 @@ def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
     return session.account.status == AccountStatus.ACTIVE and not is_account_routing_unavailable(session.account.id)
 
 
+def _http_bridge_session_meets_security_requirement(
+    session: "_HTTPBridgeSession", require_security_work_authorized: bool
+) -> bool:
+    effective_requirement = require_security_work_authorized or bool(
+        getattr(session, "requires_security_work_authorized", False)
+    )
+    return not effective_requirement or bool(getattr(session.account, "security_work_authorized", False))
+
+
+def _http_bridge_connect_request_state(
+    *,
+    headers: Mapping[str, str],
+    request_model: str | None,
+    request_service_tier: str | None,
+    started_at: float,
+) -> _WebSocketRequestState:
+    return _WebSocketRequestState(
+        request_id=f"http_bridge_connect_{uuid4().hex}",
+        model=request_model,
+        service_tier=request_service_tier,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=started_at,
+        transport="http",
+        security_lineage_id=_sticky_key_from_session_header(headers),
+    )
+
+
+def _bridge_selection_account(
+    request_state: _WebSocketRequestState,
+    selection: Any,
+    require_security_work_authorized: bool,
+    session: _HTTPBridgeSession | None = None,
+) -> Any:
+    effective_requirement = (
+        require_security_work_authorized
+        or request_state.require_security_work_authorized
+        or bool(selection.requires_security_work_authorized)
+    )
+    request_state.require_security_work_authorized = effective_requirement
+    if session is not None:
+        session.requires_security_work_authorized = session.requires_security_work_authorized or effective_requirement
+    return selection.account
+
+
 def _http_bridge_session_reusable_for_request(
     *,
     session: "_HTTPBridgeSession",
     key: "_HTTPBridgeSessionKey",
     incoming_turn_state: str | None,
     previous_response_id: str | None,
+    require_security_work_authorized: bool,
 ) -> bool:
+    if not _http_bridge_session_meets_security_requirement(session, require_security_work_authorized):
+        return False
     if session.upstream_control.retire_after_drain:
         return False
     if key.affinity_kind != "prompt_cache":
@@ -1096,6 +1158,50 @@ def _http_bridge_session_reusable_for_request(
     if previous_response_id is not None:
         return True
     return not session.codex_session
+
+
+def _http_bridge_session_reusable_for_previous_response(
+    session: "_HTTPBridgeSession | None",
+    request_model: str | None,
+    request_service_tier: str | None,
+    require_security_work_authorized: bool = False,
+) -> TypeGuard["_HTTPBridgeSession"]:
+    return (
+        session is not None
+        and not session.closed
+        and _http_bridge_session_account_active(session)
+        and _http_bridge_compatible(session, request_model, request_service_tier, True)
+        and _http_bridge_session_meets_security_requirement(session, require_security_work_authorized)
+    )
+
+
+def _http_bridge_alias_fails_security_requirement(
+    session: "_HTTPBridgeSession | None",
+    request_model: str | None,
+    request_service_tier: str | None,
+    require_security_work_authorized: bool,
+) -> bool:
+    return (
+        session is not None
+        and _http_bridge_compatible(session, request_model, request_service_tier, True)
+        and not _http_bridge_session_meets_security_requirement(session, require_security_work_authorized)
+    )
+
+
+def _apply_http_bridge_reuse_metadata(
+    session: "_HTTPBridgeSession",
+    api_key: ApiKeyData | None,
+    request_model: str | None,
+    request_service_tier: str | None,
+    require_security_work_authorized: bool,
+) -> None:
+    session.api_key = api_key
+    session.request_model = request_model
+    session.request_service_tier = request_service_tier
+    session.requires_security_work_authorized = (
+        bool(getattr(session, "requires_security_work_authorized", False)) or require_security_work_authorized
+    )
+    session.last_used_at = _service_time().monotonic()
 
 
 def _http_bridge_session_matches_preferred_account(
@@ -1123,6 +1229,7 @@ def _http_bridge_session_reusable_for_lookup(
     require_preferred_account: bool,
     service_tier_supported: bool,
     allow_closed_admission_handoff: bool,
+    require_security_work_authorized: bool,
 ) -> bool:
     live_or_retained = _http_bridge_session_account_active(session) and (
         not session.closed or (allow_closed_admission_handoff and _http_bridge_session_has_admission_waiter(session))
@@ -1135,6 +1242,7 @@ def _http_bridge_session_reusable_for_lookup(
             key=key,
             incoming_turn_state=incoming_turn_state,
             previous_response_id=previous_response_id,
+            require_security_work_authorized=require_security_work_authorized,
         )
         and _http_bridge_session_matches_preferred_account(
             session=session,
@@ -1706,6 +1814,7 @@ async def _renew_durable_http_bridge_lease(
             lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
             latest_turn_state=session.downstream_turn_state,
             latest_response_id=None,
+            requires_security_work_authorized=bool(getattr(session, "requires_security_work_authorized", False)),
         )
     except Exception as exc:
         if account_neutral_recovery:

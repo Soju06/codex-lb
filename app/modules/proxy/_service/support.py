@@ -634,10 +634,19 @@ async def failover_after_previsible_refresh_error(
 class _TransientStreamError(Exception):
     """Transient upstream error (e.g. 500 server_error) - retry on same account first."""
 
-    def __init__(self, code: str, error: UpstreamError) -> None:
+    def __init__(
+        self,
+        code: str,
+        error: UpstreamError,
+        *,
+        preserve_on_selection_exhausted: bool = False,
+        account_health_error: bool = False,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.error = error
+        self.preserve_on_selection_exhausted = preserve_on_selection_exhausted
+        self.account_health_error = account_health_error
 
 
 class _TerminalStreamError(Exception):
@@ -728,6 +737,7 @@ class _WebSocketRequestState:
     )
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
+    upstream_sent_at: float | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None
@@ -772,6 +782,10 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    # Root Codex session from session-id / parent-thread headers.  This is
+    # deliberately distinct from affinity_policy, whose CODEX_SESSION key may
+    # be a per-turn x-codex-turn-state value.
+    security_lineage_id: str | None = None
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
@@ -794,6 +808,7 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
+    original_request_contains_input_file_ids: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
     error_message_override: str | None = None
@@ -804,6 +819,7 @@ class _WebSocketRequestState:
     upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    upstream_model_output_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
@@ -837,6 +853,7 @@ class _WebSocketRequestState:
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
+    deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
@@ -908,6 +925,7 @@ class _HTTPBridgeSession:
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
+    requires_security_work_authorized: bool = False
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
     closed: bool = False
@@ -1058,15 +1076,91 @@ def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequest
     _clear_websocket_request_error_overrides(request_state)
 
 
+def _websocket_is_reasoning_output_item_event(
+    event_type: str | None,
+    payload: Mapping[str, JsonValue] | None,
+) -> bool:
+    if event_type not in {"response.output_item.added", "response.output_item.done"}:
+        return False
+    if payload is None:
+        return False
+    item = payload.get("item")
+    if not isinstance(item, Mapping):
+        return False
+    return item.get("type") == "reasoning"
+
+
+def _websocket_should_defer_reasoning_prelude(
+    request_state: _WebSocketRequestState | None,
+    event_type: str | None,
+    payload: Mapping[str, JsonValue] | None,
+) -> bool:
+    if request_state is None:
+        return False
+    if request_state.downstream_visible:
+        return False
+    reasoning_output_item_event = _websocket_is_reasoning_output_item_event(event_type, payload)
+    # Once a reasoning prelude starts, keep the whole prelude buffered.  The
+    # first reasoning item marks upstream model output as seen so replay stays
+    # disabled; that marker must not make subsequent reasoning deltas visible.
+    if request_state.deferred_reasoning_downstream_texts and (
+        reasoning_output_item_event
+        or event_type
+        in {
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+        }
+    ):
+        return True
+    if not reasoning_output_item_event:
+        return False
+    if request_state.upstream_model_output_seen:
+        return False
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return False
+    return request_state.response_event_count <= 1
+
+
+def _pop_websocket_deferred_reasoning_downstream_texts(
+    request_state: _WebSocketRequestState | None,
+) -> list[str]:
+    if request_state is None or not request_state.deferred_reasoning_downstream_texts:
+        return []
+    deferred_texts = request_state.deferred_reasoning_downstream_texts
+    request_state.deferred_reasoning_downstream_texts = []
+    return deferred_texts
+
+
+def _clear_websocket_deferred_reasoning_downstream_texts(
+    request_state: _WebSocketRequestState | None,
+) -> None:
+    if request_state is not None:
+        request_state.deferred_reasoning_downstream_texts = []
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
+    if event_type not in {
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+    }:
+        request_state.upstream_model_output_seen = True
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1
 
 
-def _websocket_request_can_replay_before_visible_output(request_state: _WebSocketRequestState) -> bool:
+def _websocket_request_can_replay_before_visible_output(
+    request_state: _WebSocketRequestState,
+    *,
+    allow_created_downstream_anchor: bool = False,
+) -> bool:
     if not request_state.request_text:
         return False
     if request_state.replay_count >= 1:
@@ -1079,22 +1173,40 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         and request_state.response_event_count == 1
         and not request_state.downstream_visible
     )
-    if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
-        return False
-    if request_state.downstream_visible:
-        return False
     has_retry_safe_fresh_payload = (
         request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
     )
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
-    if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
-        return False
     created_only_pending = (
         request_state.response_id is not None
         and not request_state.awaiting_response_created
         and request_state.response_event_count <= 1
         and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
     )
+    created_anchor_only = (
+        allow_created_downstream_anchor
+        and created_only_pending
+        and not request_state.downstream_visible
+        and not request_state.upstream_model_output_seen
+    )
+    if (
+        request_state.last_downstream_sequence_number is not None
+        and not sequenced_created_only_prewarm
+        and not created_anchor_only
+    ):
+        return False
+    if request_state.downstream_visible:
+        return False
+    if request_state.transport == _REQUEST_TRANSPORT_HTTP and request_state.response_id is not None:
+        # An HTTP bridge response.created is already an SSE-visible continuity
+        # anchor. Rewriting a replacement upstream stream to that id would
+        # leave a later client previous_response_id pointing at an id the new
+        # upstream account never issued. Durable aliases identify the owning
+        # session, not an old-id-to-replacement-id translation target.
+        if not created_anchor_only:
+            return False
+    if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
+        return False
     if precreated_pending and request_state.response_event_count > 0:
         return False
     return precreated_pending or created_only_pending
@@ -1170,6 +1282,7 @@ class _WebSocketReceiveTimeout:
     error_code: str
     error_message: str
     fail_all_pending: bool = False
+    response_created_request_ids: frozenset[str] = frozenset()
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

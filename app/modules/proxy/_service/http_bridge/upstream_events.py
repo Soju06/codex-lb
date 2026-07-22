@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -48,7 +49,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_contains_input_file_ids,
     _http_bridge_request_counts_against_queue,
+    _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
@@ -111,11 +114,15 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _event_type_from_payload,
     _HTTPBridgeSession,
+    _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
+    _websocket_request_can_replay_before_visible_output,
+    _websocket_should_defer_reasoning_prelude,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
 )
@@ -170,11 +177,136 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
     "codex-lb is retrying on an account marked as authorized for security work."
 )
+_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
+    "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
+    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
+    "an account with Trusted Access for Cyber is marked as security-work-authorized."
+)
+_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
+_HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES = frozenset({"overloaded_error", "server_is_overloaded"})
+_HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_MESSAGES = (
+    "selected model is at capacity",
+    "servers are currently overloaded",
+)
+
+
+def _http_bridge_terminal_payload_contains_output(payload: dict[str, JsonValue] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    candidates: list[JsonValue | None] = [payload.get("output")]
+    response = payload.get("response")
+    if isinstance(response, dict):
+        candidates.append(response.get("output"))
+    for output in candidates:
+        if output is None:
+            continue
+        if isinstance(output, list):
+            if output:
+                return True
+            continue
+        return True
+    return False
+
+
+def _http_bridge_terminal_capacity_retry_message(message: str | None) -> bool:
+    if not isinstance(message, str):
+        return False
+    normalized = " ".join(message.casefold().split())
+    return any(marker in normalized for marker in _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_MESSAGES)
+
+
+def _http_bridge_terminal_capacity_retry_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    has_other_pending_requests: bool,
+) -> str | None:
+    """Classify one output-free accepted overload that native Codex can replay."""
+    if request_state is None or request_state.enforce_openai_sdk_contract:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.last_downstream_sequence_number is not None:
+        return None
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return None
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return None
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return None
+    if request_state.response_event_count < 1:
+        return None
+    if request_state.event_queue is None:
+        return None
+    if not request_state.request_text or request_state.replay_count >= 1:
+        return None
+    if event_type not in {"error", "response.failed"}:
+        return None
+    if _http_bridge_terminal_payload_contains_output(payload):
+        return None
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
+    if error_code in _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES:
+        return error_code
+    if not _http_bridge_terminal_capacity_retry_message(_websocket_event_error_message(event_type, payload)):
+        return None
+    return error_code or "model_at_capacity"
+
+
+def _http_bridge_transport_close_capacity_retry_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    has_other_pending_requests: bool,
+    error_code: str | None,
+    error_message: str | None,
+) -> str | None:
+    """Classify output-free accepted disconnects that native Codex can replay."""
+    if request_state is None or request_state.enforce_openai_sdk_contract:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return None
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return None
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return None
+    if request_state.response_event_count < 1:
+        return None
+    if request_state.event_queue is None:
+        return None
+    if not request_state.request_text or request_state.replay_count >= 1:
+        return None
+    normalized_error_code = _normalize_error_code(error_code, None)
+    if normalized_error_code == "proxy_network_unavailable":
+        return None
+    if _http_bridge_terminal_capacity_retry_message(error_message):
+        return normalized_error_code or "model_at_capacity"
+    if normalized_error_code in {"stream_incomplete", "upstream_error", "upstream_unavailable"}:
+        return "stream_incomplete"
+    return None
 
 
 def _archive_http_bridge_upstream_text(
@@ -329,6 +461,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     pending_lock=session.pending_lock,
                     proxy_request_budget_seconds=_http_bridge_request_budget_seconds(runtime_settings),
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                    response_created_timeout_seconds=(
+                        runtime_settings.http_responses_session_bridge_response_created_timeout_seconds
+                    ),
                 )
                 stuck_gate_retire_after_seconds = float(
                     getattr(
@@ -355,9 +490,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     timed_out = True
                 else:
                     wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
+                    wait_timeout_seconds = (
+                        receive_timeout.timeout_seconds
+                        if receive_timeout is not None
+                        else runtime_settings.http_responses_session_bridge_response_created_timeout_seconds
+                    )
                     done, _pending = await asyncio.wait(
                         (receive_task, wakeup_task),
-                        timeout=receive_timeout.timeout_seconds if receive_timeout is not None else None,
+                        timeout=wait_timeout_seconds,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if receive_task in done:
@@ -378,7 +518,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 if timed_out:
                     if receive_timeout is None:
-                        raise RuntimeError("HTTP bridge reader timed out without a timeout contract")
+                        continue
                     if receive_timeout.error_code == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL:
                         if receive_task is not None and receive_task.done():
                             continue
@@ -457,14 +597,49 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
                         receive_task = None
-                    retried = await self._retry_http_bridge_precreated_request(session)
-                    if retried:
-                        continue
+                    retried_startup_request = False
+                    terminal_error_code = receive_timeout.error_code
+                    terminal_error_message = receive_timeout.error_message
+                    if receive_timeout.response_created_request_ids:
+                        async with session.pending_lock:
+                            has_pending_sibling = any(
+                                request_state.request_id not in receive_timeout.response_created_request_ids
+                                for request_state in session.pending_requests
+                            )
+                        if not has_pending_sibling:
+                            retried_startup_request = True
+                            retried = await self._retry_http_bridge_precreated_request(session)
+                            if retried:
+                                continue
+                        await self._fail_response_created_timeout_requests(
+                            session,
+                            request_ids=receive_timeout.response_created_request_ids,
+                            timeout_seconds=(
+                                runtime_settings.http_responses_session_bridge_response_created_timeout_seconds
+                            ),
+                            error_code=receive_timeout.error_code,
+                            error_message=receive_timeout.error_message,
+                        )
+                        if has_pending_sibling:
+                            # A late response.created for the request removed
+                            # above has no correlation key on this multiplexed
+                            # transport. Keeping the socket alive could assign
+                            # it to a healthy sibling, so retire the bridge and
+                            # fail the remaining work explicitly instead.
+                            terminal_error_code = "stream_incomplete"
+                            terminal_error_message = (
+                                "Upstream bridge retired after another request timed out before response.created"
+                            )
+                            retried_startup_request = True
+                    if not retried_startup_request:
+                        retried = await self._retry_http_bridge_precreated_request(session)
+                        if retried:
+                            continue
                     async with session.lifecycle_lock:
                         await self._fail_http_bridge_reader_and_maybe_retire(
                             session,
-                            error_code=receive_timeout.error_code,
-                            error_message=receive_timeout.error_message,
+                            error_code=terminal_error_code,
+                            error_message=terminal_error_message,
                         )
                     break
 
@@ -484,13 +659,29 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 async with session.pending_lock:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                    has_other_pending_requests = len(session.pending_requests) != 1
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 retried = False
                 # A process-network receive failure follows a successful send;
                 # replay is not safe merely because output is not visible.
                 if message.error_code != "proxy_network_unavailable":
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                    capacity_retry_code = _http_bridge_transport_close_capacity_retry_error_code(
+                        archive_request_state,
+                        has_other_pending_requests=has_other_pending_requests,
+                        error_code=message.error_code,
+                        error_message=message.error,
+                    )
+                    capacity_retry_attempted = capacity_retry_code is not None and archive_request_state is not None
+                    if capacity_retry_attempted and archive_request_state is not None:
+                        retried = await self._retry_http_bridge_terminal_capacity_request(
+                            session,
+                            archive_request_state,
+                            error_code=capacity_retry_code,
+                            preserve_for_reader_failure=True,
+                        )
+                    if not retried and not capacity_retry_attempted:
+                        retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 async with session.lifecycle_lock:
@@ -498,7 +689,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         error_code=message.error_code or "stream_incomplete",
                         error_message=_upstream_websocket_disconnect_message(message),
-                        penalize_account=message.error_code != "proxy_network_unavailable",
+                        penalize_account=message.error_code is not None
+                        and message.error_code != "proxy_network_unavailable",
                     )
                 break
         except asyncio.CancelledError:
@@ -534,6 +726,57 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             if session.upstream is relay_upstream:
                 session.closed = True
+
+    async def _fail_response_created_timeout_requests(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_ids: frozenset[str],
+        timeout_seconds: float,
+        error_code: str,
+        error_message: str,
+    ) -> tuple["_WebSocketRequestState", ...]:
+        now = _service_time().monotonic()
+        async with session.pending_lock:
+            expired_requests = tuple(
+                request_state
+                for request_state in session.pending_requests
+                if request_state.request_id in request_ids
+                and request_state.upstream_sent_at is not None
+                and request_state.response_id is None
+                and request_state.awaiting_response_created
+                and _http_bridge_request_counts_against_queue(request_state)
+                and now >= request_state.upstream_sent_at + timeout_seconds
+            )
+            for request_state in expired_requests:
+                session.pending_requests.remove(request_state)
+            session.queued_request_count = max(
+                0,
+                session.queued_request_count
+                - sum(
+                    1 for request_state in expired_requests if _http_bridge_request_counts_against_queue(request_state)
+                ),
+            )
+        if not expired_requests:
+            return ()
+        for request_state in expired_requests:
+            preserve_existing_terminal = timeout_seconds <= 0 and request_state.error_code_override is not None
+            if request_state.error_message_override != "No available accounts" and not preserve_existing_terminal:
+                request_state.error_code_override = error_code
+                request_state.error_message_override = error_message
+                request_state.error_type_override = "server_error"
+                request_state.error_http_status_override = 502
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=deque([request_state]),
+                pending_lock=asyncio.Lock(),
+                error_code=error_code,
+                error_message=error_message,
+                api_key=request_state.api_key,
+                response_create_gate=session.response_create_gate,
+            )
+        return expired_requests
 
     async def _process_http_bridge_upstream_text(
         self: Any,
@@ -580,6 +823,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             matched_request_state = None
             created_request_state = None
             suppress_downstream_event = False
+            deferred_reasoning_prelude_event = False
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             anonymous_event_prefers_draining = event_type not in {"response.failed", "response.incomplete", "error"}
@@ -645,6 +889,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if payload is not None:
                     payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
                     event_block = format_sse_event(payload)
+                if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
+                    matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
+                    matched_request_state.upstream_model_output_seen = True
+                    suppress_downstream_event = True
+                    deferred_reasoning_prelude_event = True
+                elif event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    matched_request_state.upstream_model_output_seen = True
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -773,11 +1024,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:
             terminal_request_state = grouped_previous_response_request_states[0]
 
-        if matched_request_state is terminal_request_state:
-            _record_response_event(matched_request_state, event_type)
-        else:
-            _record_response_event(matched_request_state, event_type)
-            _record_response_event(terminal_request_state, event_type)
+        if not deferred_reasoning_prelude_event:
+            if matched_request_state is terminal_request_state:
+                _record_response_event(matched_request_state, event_type)
+            else:
+                _record_response_event(matched_request_state, event_type)
+                _record_response_event(terminal_request_state, event_type)
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
@@ -854,6 +1106,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
         )
+        terminal_capacity_retry_error_code = _http_bridge_terminal_capacity_retry_error_code(
+            status_request_state,
+            event_type=event_type,
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
         auth_error_code = _websocket_precreated_auth_error_code(
             status_request_state,
             event_type=event_type,
@@ -865,6 +1123,14 @@ class _HTTPBridgeUpstreamEventsMixin:
             event_type=event_type,
             payload=payload,
         )
+        if terminal_capacity_retry_error_code is not None and status_request_state is not None:
+            retried = await self._retry_http_bridge_terminal_capacity_request(
+                session,
+                status_request_state,
+                error_code=terminal_capacity_retry_error_code,
+            )
+            if retried:
+                return
         if (
             auth_error_code is not None
             and not is_previous_response_not_found_event
@@ -1173,19 +1439,66 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                security_retry_text = (
+                    terminal_request_state.fresh_upstream_request_text
+                    if terminal_request_state.previous_response_id is not None
+                    else terminal_request_state.request_text
+                )
+                original_request_has_file_ids = (
+                    terminal_request_state.original_request_contains_input_file_ids
+                    or _http_bridge_request_contains_input_file_ids(terminal_request_state.request_text)
+                )
+                security_retry_has_file_ids = original_request_has_file_ids or (
+                    security_retry_text is not None
+                    and _http_bridge_request_contains_input_file_ids(security_retry_text)
+                )
+                file_replay_unsafe = (
+                    terminal_request_state.file_required_preferred_account
+                    or security_retry_text is None
+                    or security_retry_has_file_ids
+                )
+                durable_security_requirement_persisted = False
+                if not terminal_request_state.file_required_preferred_account and not security_retry_has_file_ids:
+                    await self._mark_security_lineage_requirement(
+                        terminal_request_state.security_lineage_id,
+                        account_id=session.account.id,
+                        api_key_id=session.key.api_key_id,
+                    )
+                    terminal_request_state.require_security_work_authorized = True
+                    session.requires_security_work_authorized = True
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    if session.durable_session_id is not None:
+                        try:
+                            durable_lookup = await self._durable_bridge.require_security_work_authorized(
+                                session_id=session.durable_session_id
+                            )
+                            durable_security_requirement_persisted = durable_lookup is not None
+                        except Exception as exc:
+                            if not _is_missing_durable_bridge_table_error(exc):
+                                raise
+                            logger.warning(
+                                "Durable bridge tables missing while persisting security requirement; "
+                                "continuing with sticky lineage only"
+                            )
+                owner_is_security_work_authorized = bool(getattr(session.account, "security_work_authorized", False))
                 can_retry_security_work = (
                     not is_http_bridge_account_neutral_replay(
                         kind=session.key.affinity_kind,
                         key=session.key.affinity_key,
                     )
-                    and not session.account.security_work_authorized
+                    and not owner_is_security_work_authorized
                     and not has_other_pending_requests
-                    and terminal_request_state.response_id is None
+                    and not file_replay_unsafe
                     and terminal_request_state.replay_count < 1
                     and bool(terminal_request_state.request_text)
-                    and terminal_request_state.preferred_account_id != session.account.id
                     and _websocket_auth_request_can_switch_account(terminal_request_state)
+                    and _websocket_request_can_replay_before_visible_output(
+                        terminal_request_state,
+                        allow_created_downstream_anchor=False,
+                    )
                 )
+                _clear_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
                 if terminal_request_state.event_queue is not None:
                     await terminal_request_state.event_queue.put(
                         format_sse_event(
@@ -1209,7 +1522,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                     )
                 if can_retry_security_work:
-                    retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
+                    retried = await self._retry_http_bridge_security_work_request(
+                        session,
+                        terminal_request_state,
+                        durable_security_requirement_persisted=durable_security_requirement_persisted,
+                    )
                     if retried:
                         return
 
@@ -1218,12 +1535,16 @@ class _HTTPBridgeUpstreamEventsMixin:
             and matched_request_state.event_queue is not None
             and not suppress_downstream_event
         ):
+            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state):
+                await matched_request_state.event_queue.put(deferred_text)
             await matched_request_state.event_queue.put(event_block)
 
         if terminal_request_state is None:
             return
 
         if terminal_request_state is not matched_request_state and terminal_request_state.event_queue is not None:
+            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state):
+                await terminal_request_state.event_queue.put(deferred_text)
             await terminal_request_state.event_queue.put(event_block)
         if terminal_request_state.event_queue is not None:
             await terminal_request_state.event_queue.put(None)

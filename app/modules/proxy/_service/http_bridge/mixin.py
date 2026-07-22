@@ -6,7 +6,6 @@ import logging
 from collections import deque
 from collections.abc import Collection
 from typing import Any, Literal, TypeVar, overload
-from uuid import uuid4
 
 import aiohttp
 import anyio
@@ -66,13 +65,14 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeAccountSessionsMixin
 from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityMixin
 from app.modules.proxy._service.http_bridge.helpers import (
-    _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
+    _bridge_selection_account,
     _close_http_bridge_session_bounded,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
+    _http_bridge_alias_fails_security_requirement,
     _http_bridge_alias_target_is_stale,
     _http_bridge_allow_durable_takeover,
     _http_bridge_can_local_recover_without_ring,
@@ -80,6 +80,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
     _http_bridge_compatible,
+    _http_bridge_connect_request_state,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
@@ -100,8 +101,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_allows_api_key,
     _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
+    _http_bridge_session_meets_security_requirement,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_lookup,
+    _http_bridge_session_reusable_for_previous_response,
     _http_bridge_session_reusable_for_request,
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
@@ -264,31 +267,6 @@ class _HTTPBridgeMixin(
                 request_id=_hash_identifier(session.key.affinity_key),
             )
 
-    async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
-        tasks = [
-            task
-            for task in self._background_cleanup_tasks
-            if not task.done()
-            and (
-                task.get_name().startswith("proxy-http_bridge_session_close-")
-                or task.get_name().startswith("http-bridge-close-")
-            )
-        ]
-        if not tasks:
-            return
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True),
-                timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "http_bridge_background_cleanup_drain_timeout reason=%s count=%d timeout_seconds=%.1f",
-                reason,
-                len(tasks),
-                _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
-            )
-
     async def _fail_http_bridge_inflight_session_creation(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -360,6 +338,8 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -392,6 +372,8 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -423,6 +405,8 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
@@ -602,17 +586,16 @@ class _HTTPBridgeMixin(
                             previous_session = None
                             if previous_key is not None:
                                 previous_session = self._http_bridge_sessions.get(previous_key)
-                            if (
-                                previous_session is not None
-                                and not previous_session.closed
-                                and _http_bridge_session_account_active(previous_session)
-                                and _http_bridge_compatible(previous_session, request_model, request_service_tier, True)
-                                and _http_bridge_session_matches_preferred_account(
-                                    session=previous_session,
-                                    previous_response_id=previous_response_id,
-                                    preferred_account_id=preferred_account_id,
-                                    require_preferred_account=require_preferred_account,
-                                )
+                            if _http_bridge_session_reusable_for_previous_response(
+                                previous_session,
+                                request_model,
+                                request_service_tier,
+                                require_security_work_authorized,
+                            ) and _http_bridge_session_matches_preferred_account(
+                                session=previous_session,
+                                previous_response_id=previous_response_id,
+                                preferred_account_id=preferred_account_id,
+                                require_preferred_account=require_preferred_account,
                             ):
                                 key = previous_session.key
                                 self._promote_http_bridge_session_to_codex_affinity(
@@ -675,16 +658,21 @@ class _HTTPBridgeMixin(
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
-                reusable = existing is not None and _http_bridge_session_reusable_for_lookup(
-                    session=existing,
-                    key=key,
-                    api_key=api_key,
-                    incoming_turn_state=incoming_turn_state,
-                    previous_response_id=previous_response_id,
-                    preferred_account_id=preferred_account_id,
-                    require_preferred_account=require_preferred_account,
-                    service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
-                    allow_closed_admission_handoff=retained_handoff,
+                reusable = (
+                    existing is not None
+                    and _http_bridge_session_meets_security_requirement(existing, require_security_work_authorized)
+                    and _http_bridge_session_reusable_for_lookup(
+                        session=existing,
+                        key=key,
+                        api_key=api_key,
+                        incoming_turn_state=incoming_turn_state,
+                        previous_response_id=previous_response_id,
+                        preferred_account_id=preferred_account_id,
+                        require_preferred_account=require_preferred_account,
+                        service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
+                        allow_closed_admission_handoff=retained_handoff,
+                        require_security_work_authorized=require_security_work_authorized,
+                    )
                 )
                 fork_key = _http_bridge_parallel_fork_key(
                     key=key,
@@ -1117,11 +1105,16 @@ class _HTTPBridgeMixin(
                         previous_key = self._http_bridge_previous_response_index.get(previous_alias_key)
                         if previous_key is not None:
                             previous_session = self._http_bridge_sessions.get(previous_key)
-                            if (
-                                previous_session is not None
-                                and not previous_session.closed
-                                and _http_bridge_session_account_active(previous_session)
-                                and _http_bridge_compatible(previous_session, request_model, request_service_tier, True)
+                            if _http_bridge_session_reusable_for_previous_response(
+                                previous_session,
+                                request_model,
+                                request_service_tier,
+                                require_security_work_authorized,
+                            ) and _http_bridge_session_matches_preferred_account(
+                                session=previous_session,
+                                previous_response_id=previous_response_id,
+                                preferred_account_id=preferred_account_id,
+                                require_preferred_account=require_preferred_account,
                             ):
                                 key = previous_session.key
                                 existing = previous_session
@@ -1180,6 +1173,13 @@ class _HTTPBridgeMixin(
                                     if key != recovery_fork_key:
                                         key = recovery_fork_key
                                         continue
+                            elif previous_key is not None and _http_bridge_alias_fails_security_requirement(
+                                previous_session,
+                                request_model,
+                                request_service_tier,
+                                require_security_work_authorized,
+                            ):
+                                self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                             elif previous_key is not None and _http_bridge_alias_target_is_stale(previous_session):
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                     if (
@@ -1363,7 +1363,6 @@ class _HTTPBridgeMixin(
                 except Exception:
                     pass
                 continue
-
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1424,6 +1423,7 @@ class _HTTPBridgeMixin(
                         key=key,
                         incoming_turn_state=incoming_turn_state,
                         previous_response_id=previous_response_id,
+                        require_security_work_authorized=require_security_work_authorized,
                     )
                     and _http_bridge_session_matches_preferred_account(
                         session=session,
@@ -1453,7 +1453,6 @@ class _HTTPBridgeMixin(
                     if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
-
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
@@ -1483,6 +1482,8 @@ class _HTTPBridgeMixin(
                     "request_usage_budget": request_usage_budget,
                     "request_deadline": request_deadline,
                     "exclude_account_ids": exclude_account_ids,
+                    "require_security_work_authorized": require_security_work_authorized,
+                    "allow_security_lineage_account_migration": allow_security_lineage_account_migration,
                 }
                 try:
                     create_signature = inspect.signature(create_session)
@@ -1499,6 +1500,8 @@ class _HTTPBridgeMixin(
                         "request_deadline",
                         "exclude_account_ids",
                         "preferred_account_is_continuity_owner",
+                        "require_security_work_authorized",
+                        "allow_security_lineage_account_migration",
                     ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
@@ -1720,15 +1723,14 @@ class _HTTPBridgeMixin(
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        allow_security_lineage_account_migration: bool = True,
     ) -> "_HTTPBridgeSession":
-        request_state = _WebSocketRequestState(
-            request_id=f"http_bridge_connect_{uuid4().hex}",
-            model=request_model,
-            service_tier=request_service_tier,
-            reasoning_effort=None,
-            api_key_reservation=None,
+        request_state = _http_bridge_connect_request_state(
+            headers=headers,
+            request_model=request_model,
+            request_service_tier=request_service_tier,
             started_at=_service_time().monotonic(),
-            transport=_REQUEST_TRANSPORT_HTTP,
         )
         deadline = (
             request_deadline
@@ -1739,6 +1741,7 @@ class _HTTPBridgeMixin(
             )
         )
         settings = await _service_get_settings_cache().get()
+        prefer_earlier_reset_accounts = bool(getattr(settings, "prefer_earlier_reset_accounts", False))
         excluded_account_ids = set(exclude_account_ids or ())
         if require_preferred_account:
             fallback_on_preferred_account_unavailable = False
@@ -1752,7 +1755,7 @@ class _HTTPBridgeMixin(
                 "request_stage": request_stage,
                 "api_key": api_key,
                 "affinity_policy": affinity,
-                "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
+                "prefer_earlier_reset_accounts": prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
                 "model": request_model,
@@ -1763,10 +1766,13 @@ class _HTTPBridgeMixin(
                 "lease_kind": "stream",
                 "estimated_lease_tokens": _estimated_lease_tokens_from_request_usage_budget(request_usage_budget),
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
+                "require_security_work_authorized": require_security_work_authorized,
+                "security_lineage_id": request_state.security_lineage_id,
+                "allow_security_lineage_account_migration": allow_security_lineage_account_migration,
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
             selected_account_lease = selection.lease
-            account = selection.account
+            account = _bridge_selection_account(request_state, selection, require_security_work_authorized)
             if account is None:
                 await self._load_balancer.release_account_lease(selected_account_lease)
                 selected_account_lease = None
@@ -1977,6 +1983,7 @@ class _HTTPBridgeMixin(
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
             account_lease=selected_account_lease,
+            requires_security_work_authorized=request_state.require_security_work_authorized,
             catalog_omission_quota_admission=selection.catalog_omission_quota_admission,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
@@ -1992,11 +1999,21 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        owner_rebind_affinity: _AffinityPolicy | None = None,
+        selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
         # A replacement reader can start before its caller resends the request.
         # Clear the prior attempt first so an expired send timestamp cannot
         # retire the fresh socket before the next real send re-arms it.
         request_state.response_create_sent_at = None
+        request_state.upstream_sent_at = None
+        require_security_work_authorized = (
+            require_security_work_authorized
+            or request_state.require_security_work_authorized
+            or session.requires_security_work_authorized
+        )
+        request_state.require_security_work_authorized = require_security_work_authorized
+        session.requires_security_work_authorized = require_security_work_authorized
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -2022,9 +2039,11 @@ class _HTTPBridgeMixin(
             _http_bridge_request_budget_seconds(_service_get_settings()),
         )
         settings = await _service_get_settings_cache().get()
+        prefer_earlier_reset_accounts = bool(getattr(settings, "prefer_earlier_reset_accounts", False))
         session.api_key = request_state.api_key
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+        abandoned_account_ids: set[str] = set()
         requested_preferred_account_id = (
             request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
         )
@@ -2084,11 +2103,14 @@ class _HTTPBridgeMixin(
             await self._load_balancer.release_account_lease(lease)
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
-            nonlocal preferred_candidate_id
+            nonlocal preferred_candidate_id, retry_same_account_once
             if hard_close_account_bound or selected_account_model_replacement:
                 await release_selected_account_lease()
                 raise
+            if selected_account.id == session.account.id:
+                retry_same_account_once = False
             excluded_account_ids.add(selected_account.id)
+            abandoned_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
 
@@ -2100,8 +2122,8 @@ class _HTTPBridgeMixin(
                 kind="http_bridge",
                 request_stage="reattach",
                 api_key=session.api_key,
-                affinity_policy=session.affinity,
-                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                affinity_policy=selection_affinity or session.affinity,
+                prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=_routing_strategy(settings),
                 model=session.request_model,
@@ -2110,6 +2132,7 @@ class _HTTPBridgeMixin(
                 preferred_account_id=preferred_candidate_id,
                 preferred_account_is_continuity_owner=account_neutral_recovery,
                 require_security_work_authorized=require_security_work_authorized,
+                allow_security_lineage_account_migration=not request_state.file_required_preferred_account,
                 lease_kind=None if reuse_current_account_lease else "stream",
                 estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
                     request_state.request_usage_budget
@@ -2125,6 +2148,39 @@ class _HTTPBridgeMixin(
                 await release_selected_account_lease()
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
                     raise _http_bridge_previous_response_owner_unavailable_error()
+                if (
+                    (
+                        selection.error_code == "hard_affinity_saturated"
+                        or (selection.error_message or "").startswith("No available accounts")
+                    )
+                    and (
+                        request_state.previous_response_id is None
+                        or (
+                            request_state.proxy_injected_previous_response_id
+                            and request_state.fresh_upstream_request_is_retry_safe
+                            and request_state.fresh_upstream_request_text
+                        )
+                    )
+                    and request_state.precreated_replay_reason is None
+                    and session.account.id in excluded_account_ids
+                    and retry_same_account_once
+                    and not hard_close_account_bound
+                    and required_preferred_account_id is None
+                    and forced_refresh_account_id is None
+                    and _remaining_budget_seconds(deadline) > 0
+                ):
+                    excluded_account_ids.discard(session.account.id)
+                    request_state.excluded_account_ids.discard(session.account.id)
+                    preferred_candidate_id = session.account.id
+                    retry_same_account_once = False
+                    logger.info(
+                        "HTTP bridge pre-created reattach exhausted alternate accounts; "
+                        "retrying current account once request_id=%s account_id=%s model=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        session.account.id,
+                        session.request_model,
+                    )
+                    continue
                 if (
                     reuse_current_account_lease
                     and not hard_close_account_bound
@@ -2150,7 +2206,11 @@ class _HTTPBridgeMixin(
                     _require_http_bridge_bound_account_not_excluded(
                         hard_close_account_bound, session.account.id, excluded_account_ids
                     )
-                    retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
+                    retry_same_account_once = (
+                        retry_same_account_once
+                        and not skip_same_account
+                        and session.account.id not in excluded_account_ids
+                    )
                     if skip_same_account:
                         preferred_candidate_id = None
                     elif hard_close_account_bound and session.account.id not in excluded_account_ids:
@@ -2161,7 +2221,7 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = forced_refresh_account_id
                     elif request_state.preferred_account_id is not None:
                         preferred_candidate_id = request_state.preferred_account_id
-                    elif session.account.id not in excluded_account_ids:
+                    elif retry_same_account_once and session.account.id not in excluded_account_ids:
                         preferred_candidate_id = session.account.id
                     else:
                         preferred_candidate_id = None
@@ -2207,7 +2267,8 @@ class _HTTPBridgeMixin(
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
                 connect_headers = _websocket_safe_headers_with_turn_state(
-                    session.headers, _preferred_http_bridge_reconnect_turn_state(session)
+                    session.headers,
+                    None if owner_rebind_affinity is not None else _preferred_http_bridge_reconnect_turn_state(session),
                 )
                 upstream = await self._open_upstream_websocket_with_budget(
                     account,
@@ -2229,7 +2290,12 @@ class _HTTPBridgeMixin(
                         timeout_seconds=_remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
-                        session.headers, _preferred_http_bridge_reconnect_turn_state(session)
+                        session.headers,
+                        (
+                            None
+                            if owner_rebind_affinity is not None
+                            else _preferred_http_bridge_reconnect_turn_state(session)
+                        ),
                     )
                     upstream = await self._open_upstream_websocket_with_budget(
                         account,
@@ -2274,6 +2340,27 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
+        await self._claim_http_bridge_replacement_before_swap(
+            session,
+            account_id=account.id,
+            upstream=upstream,
+            release_selected_account_lease=release_selected_account_lease,
+            owner_rebind_affinity=owner_rebind_affinity,
+        )
+        if owner_rebind_affinity is not None:
+            await self._unregister_http_bridge_turn_states(session)
+            await self._unregister_http_bridge_previous_response_ids(session)
+            session.last_completed_response_id = None
+            session.last_completed_input_count = 0
+            session.last_completed_input_prefix_fingerprint = None
+            session.last_pending_tool_calls.clear()
+            session.affinity = selection_affinity or session.affinity
+            session.codex_session = False
+            session.upstream_turn_state = None
+            session.downstream_turn_state = None
+            session.headers = {
+                key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+            }
         try:
             await old_upstream.close()
         except Exception:

@@ -201,12 +201,46 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **THEN** the returned `failure_class` is `retryable_transient`
 - **AND** the streaming retry layer is eligible to retry the request before surfacing the terminal overload event
 
+#### Scenario: Non-streaming Responses retries status-level overload JSON
+
+- **GIVEN** a non-streaming `/v1/responses` request has not emitted any downstream output
+- **WHEN** upstream returns an HTTP status error envelope with `code="server_is_overloaded"`
+- **THEN** the retry layer MUST treat the envelope as a transient overload even when the HTTP status is not 500
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning the overload error to the client
+
+#### Scenario: Streaming Responses retries initial output-free EOF
+
+- **GIVEN** a streaming `/v1/responses` request is not anchored to a previous response
+- **WHEN** upstream closes before emitting the first SSE event
+- **THEN** the retry layer MUST treat the close as a transient output-free failure
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning `stream_incomplete`
+- **AND** it MUST NOT perform this retry for anchored continuations, after any downstream-visible output, or after the retry budget is exhausted
+
 #### Scenario: HTTP bridge retries a pre-created overload event
 
 - **GIVEN** the HTTP responses session bridge is enabled
 - **WHEN** the first upstream `response.failed` or `error` event has `code="overloaded_error"` or `code="server_is_overloaded"`
 - **THEN** the bridge MUST retry the pre-created request before forwarding that terminal event
 - **AND** the bridge MUST preserve its existing no-replay behavior after downstream-visible output or for other fail-fast error codes
+
+#### Scenario: Native Codex bridge retries an accepted output-free overload
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted `response.created` and optionally `response.in_progress`, but no reasoning, text, item, or tool output
+- **WHEN** upstream terminates that response with `code="overloaded_error"` or `code="server_is_overloaded"`
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id`
+- **AND** the bridge MUST expose the successful replay's actual `response.completed` ID so the next continuation anchors on the successful response
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any model output, while another request is pending, or after the replay budget is exhausted
+
+#### Scenario: Native Codex bridge retries accepted output-free abrupt closes
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted only lifecycle events such as `response.created` or `response.in_progress`
+- **WHEN** the upstream websocket closes before `response.completed` without a terminal error event
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id`
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any reasoning, text, item, or tool output, while another request is pending, or after the replay budget is exhausted
 
 ### Requirement: Strict function tool parameter schemas are pre-validated
 
@@ -1138,6 +1172,7 @@ When a direct Responses WebSocket request depends on `previous_response_id`, the
 ### Requirement: Failed precreated HTTP bridge replay retires stale sessions
 
 When an HTTP bridge request is still pending before upstream `response.completed` and the upstream websocket closes or times out before the pending request can be completed, the service MUST fail the pending request terminally and retire the affected bridge session if precreated replay does not reconnect and resend successfully.
+The upstream reader MUST additionally enforce `http_responses_session_bridge_response_created_timeout_seconds` as the per-attempt startup cutoff for pending HTTP bridge requests that have been sent upstream but have not received `response.created`. The default cutoff MUST be 120 seconds. When a single safely replayable unanchored request reaches that cutoff, the bridge MAY reconnect and resend it before emitting a terminal error. Requests that contain account-scoped `input_file.file_id` references MUST NOT be replayed on another account by this startup cutoff. When the cutoff expires and replay is unavailable or unsafe, the affected request MUST fail with `error.code = "response_created_timeout"`; if another pending request shares the same upstream bridge, the bridge MUST retire the shared connection and fail remaining pending work with a retryable bridge/session error rather than allowing late anonymous upstream events to attach to the wrong request.
 
 #### Scenario: Precreated replay fails after upstream disconnect
 
@@ -1148,6 +1183,23 @@ When an HTTP bridge request is still pending before upstream `response.completed
 - **AND** the per-session response-create gate is released
 - **AND** the bridge session is closed and removed from local reuse
 - **AND** the terminal error preserves the original failure code such as `stream_incomplete` or `upstream_request_timeout`
+
+#### Scenario: HTTP bridge startup cutoff fails requests that never receive response.created
+
+- **WHEN** an HTTP bridge request has been sent upstream
+- **AND** upstream does not emit `response.created` within `http_responses_session_bridge_response_created_timeout_seconds`
+- **AND** the request cannot be safely replayed before visible output
+- **THEN** the request is removed from the bridge queue and failed with `error.code = "response_created_timeout"`
+- **AND** the response-create gate and any response-create lease held by that request are released
+- **AND** a file-backed request is not resent on another account solely because the startup cutoff elapsed
+
+#### Scenario: HTTP bridge startup cutoff retires multiplexed bridge after one request times out
+
+- **WHEN** an HTTP bridge session has more than one pending request
+- **AND** one pending request reaches the configured response-created startup cutoff
+- **THEN** only the timed-out request is failed with `error.code = "response_created_timeout"`
+- **AND** the shared bridge is retired so any late anonymous upstream `response.created` cannot be assigned to another pending request
+- **AND** the remaining pending bridge work is failed with a retryable bridge/session error
 
 #### Scenario: Terminal logging failure does not preserve stale bridge ownership
 
@@ -1396,6 +1448,8 @@ error semantics. The bridge MUST NOT hold image requests waiting for
 
 When an upstream Responses request fails because the work requires cybersecurity authorization, codex-lb MUST retry the request on an account marked as security-work-authorized when the request can be safely replayed on a different account. The retry MUST exclude the account that produced the authorization error.
 
+The classifier MUST recognize both the legacy cybersecurity-risk message and the current `This content can't be shown` / `We take extra caution with cybersecurity requests` Trusted Access denial. For an eligible HTTP-bridge or websocket request, the retry MUST reconnect the existing downstream session to the authorized account and continue without forwarding the denial as the terminal response.
+
 #### Scenario: Unpinned stream request retries on an authorized account
 
 - **WHEN** an unpinned streamed Responses request fails with a security-work authorization error on an account that is not security-work-authorized
@@ -1403,24 +1457,90 @@ When an upstream Responses request fails because the work requires cybersecurity
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="security_work_authorization_required"` and `action="retry_security_work_authorized"`
 - **AND** codex-lb retries the request with account selection restricted to security-work-authorized accounts
 
-#### Scenario: No authorized account is available
+#### Scenario: Classified Codex lineage has no authorized account
 
-- **WHEN** codex-lb attempts a security-work-authorized retry
+- **WHEN** a root Codex session or any of its child turns has been classified as requiring security-work authorization
+- **AND** codex-lb attempts a security-work-authorized retry
 - **AND** no security-work-authorized accounts are available
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"`
-- **AND** codex-lb either continues normal account failover when safe or returns the original security-work authorization error when normal failover is exhausted or unsafe
+- **AND** codex-lb returns the original security-work authorization error without selecting an ordinary account
 
-#### Scenario: Pinned requests are not moved to another account
+#### Scenario: Classified Codex lineage remains classified after routing cleanup
+
+- **WHEN** a root Codex session has been classified as requiring security-work authorization
+- **AND** its ordinary account-affinity row is removed because no authorized account can currently be selected
+- **THEN** codex-lb MUST retain a separate durable security-work marker for that lineage
+- **AND** later turns and child turns MUST remain restricted to security-work-authorized accounts
+
+#### Scenario: Failed authorized reconnect preserves classification
+
+- **WHEN** codex-lb has durably classified a session as requiring security-work authorization
+- **AND** reconnecting that session to an authorized account fails
+- **THEN** codex-lb MUST preserve the durable security-work requirement
+- **AND** a later retry MUST NOT return the session to the ordinary account pool
+
+#### Scenario: Unrooted request has no authorized account
+
+- **WHEN** an unrooted request attempts a security-work-authorized retry
+- **AND** no security-work-authorized accounts are available
+- **THEN** codex-lb MAY continue normal account failover when safe
+
+#### Scenario: Pinned requests move only with a self-contained fresh replay
 
 - **WHEN** a security-work authorization error occurs for a request pinned by file ownership or previous-response ownership
+- **AND** the request does not carry a validated self-contained full resend without account-scoped files
 - **THEN** codex-lb MUST NOT replay the request on a different account
-- **AND** the client receives the original security-work authorization failure.
+- **AND** the client receives the original security-work authorization failure
+- **BUT WHEN** a previous-response owner is unavailable and the WebSocket request carries a validated self-contained fresh replay
+- **THEN** codex-lb drops the unusable anchor and retries that fresh body on a security-work-authorized account
+
+#### Scenario: Input-file requests remain account-bound despite stronger affinity
+
+- **WHEN** a request contains an `input_file` reference
+- **AND** a session, turn, or previous-response affinity signal prevents file-owner lookup from selecting an explicit preferred account
+- **AND** the upstream returns a security-work authorization error
+- **THEN** codex-lb MUST NOT persist a security-work lineage marker or retry the request on another account
+- **AND** the client receives the original security-work authorization failure
 
 #### Scenario: WebSocket replay releases the response-create gate
 
 - **WHEN** a downstream websocket request is eligible for security-work replay
 - **THEN** codex-lb releases the request's response-create gate before scheduling the replay
-- **AND** the replay can acquire the gate instead of blocking behind the failed first attempt
+- **AND** the replay MUST reacquire the per-session gate and shared/account create admission before it is queued or sent on the authorized replacement socket
+- **AND** the replay remains subject to the normal startup timeout and serialization gate
+
+#### Scenario: Hard bridge reconnect preserves one owner
+
+- **GIVEN** a pre-created HTTP bridge request uses a hard session-header key
+- **WHEN** its upstream socket closes before visible output
+- **THEN** the reconnect MUST require the established account
+- **AND** the session turn-state and owner affinity MUST NOT be cleared for migration
+
+#### Scenario: Replacement connection drops stale turn state
+
+- **WHEN** an account replacement has no replacement turn state
+- **THEN** its upstream handshake MUST NOT inherit a stale `x-codex-turn-state` header from the retired owner
+
+#### Scenario: Entire reasoning prelude stays buffered
+
+- **WHEN** an HTTP bridge has buffered the first reasoning-prelude event pending a terminal security decision
+- **THEN** later reasoning-prelude events MUST remain buffered even though model output has been observed
+- **AND** the buffered output MUST continue to disable account-switch replay
+
+#### Scenario: Non-replayable WebSocket denial retires the ordinary connection
+
+- **WHEN** a direct WebSocket request receives a security-work authorization denial after replay is no longer safe
+- **THEN** codex-lb forwards the terminal denial for that request
+- **AND** codex-lb MUST retire the ordinary upstream connection before accepting another turn for the classified lineage
+- **AND** the next turn MUST pass through security-work-authorized account selection
+
+#### Scenario: Classified local bridge cannot satisfy ordinary reuse
+
+- **GIVEN** a local HTTP bridge session is marked as requiring security-work authorization
+- **AND** its current account is not security-work-authorized
+- **WHEN** durable reattach checks whether the bridge can preserve local continuity
+- **THEN** codex-lb MUST treat the local bridge as non-reusable
+- **AND** it MUST preserve or inject the durable response anchor before selecting an authorized bridge
 
 ### Requirement: Responses request compatibility controls
 
@@ -2257,7 +2377,7 @@ top-level `instructions` unchanged.
 
 ### Requirement: Responses Lite follow-up transformations fail closed
 
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
+After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
 
 #### Scenario: Oversized compact input keeps the Lite prelude
 
@@ -2265,12 +2385,48 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **THEN** every required `additional_tools` item remains in the upstream input
 - **AND** typed and role-only system/developer state remains in the upstream input
 
-#### Scenario: Oversized compact input keeps the latest tool item
+#### Scenario: Compact input keeps a latest tool pair that fits
 
-- **WHEN** compact trimming is required and the latest input item is a tool call or tool output
+- **WHEN** compact trimming is required, the latest input item is a non-state, non-side-effecting tool call or tool output, and its complete pair fits with required anchors and trim markers
 - **THEN** the latest item remains in the upstream input
 - **AND** any matching call or output present in the supplied input is retained with it
-- **AND** the service returns `responses_compact_input_too_large` instead of silently dropping the latest item when the required pair cannot fit
+
+#### Scenario: Oversized non-state tool tail leaves room for trim markers
+
+- **WHEN** the latest input item is a non-state, non-side-effecting tool call or output whose complete pair cannot fit with required anchors and trim markers
+- **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
+- **AND** it does not return `responses_compact_input_too_large` solely because the pair fit before marker framing
+- **AND** the marker does not claim omitted terminal context was preserved
+
+#### Scenario: Continuity-anchored latest unpaired tool output remains required
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest input item is a tool output without a matching call in the supplied input
+- **THEN** the output remains in the upstream input because its call belongs to the prior response
+- **AND** the service returns `responses_compact_input_too_large` when that required output cannot fit
+
+#### Scenario: Self-contained anchored ordinary pair remains optional
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest ordinary tool output has a matching call in supplied input
+- **THEN** compact trimming MAY omit the complete pair when it cannot fit
+
+#### Scenario: Reused call ID from another tool variant does not satisfy continuity
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest tool
+  output reuses the `call_id` of an incompatible function/custom/apply-patch
+  call variant in supplied input
+- **THEN** the latest output remains required as continuity from the previous response
+- **AND** the incompatible supplied call is not retained as its pair
+
+#### Scenario: Oversized latest unmatched tool call fails closed
+
+- **WHEN** the latest compact input item is an unmatched tool call that cannot fit the compact wire budget
+- **THEN** the service returns `responses_compact_input_too_large` rather than representing the call with a compact-trim marker
+
+#### Scenario: Side-effecting tail remains required
+
+- **WHEN** the latest compact input item is an `apply_patch_call`, `apply_patch_call_output`, or a tool call or matching pair classified as side-effecting by the canonical tool-safety classifier
+- **THEN** the item and any matching counterpart remain required compact context
+- **AND** the service returns `responses_compact_input_too_large` rather than omitting the side-effecting record when it cannot fit
 
 #### Scenario: Reused call IDs keep only the required occurrence
 
@@ -2283,6 +2439,36 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **WHEN** optional tool context fits the approximate item budget but trim-marker framing exceeds the exact wire cap
 - **THEN** backtracking removes the optional call and its matching output as one group
 - **AND** it does not re-add either counterpart while preserving every required item
+
+### Requirement: Compact trimming preserves prioritised historical side effects
+
+The service MUST retain recognised historical side-effect tool calls as bounded
+priority context when an oversized compact input is trimmed. It MUST use the
+same side-effect classifier as downstream replay
+deduplication. This includes code-mode `exec` and `collaboration` wrapper calls
+as well as their lower-level tool spellings and recognised parallel batches.
+
+For each retained historical side effect, compact trimming MUST retain its
+matching call and output together. The service MUST reserve space for that
+complete pair before selecting optional ordinary head or tail context. Required
+state anchors and the current required item remain mandatory; if they leave no
+room for a historical pair, the service MAY drop that pair together and retain a
+trim marker instead.
+
+#### Scenario: Code-mode side effect survives an oversized compact input
+
+- **WHEN** an oversized compact input contains a historical custom `exec` or
+  `collaboration` call with its matching output outside required state context
+- **THEN** the trimmed upstream input retains both the call and its output when
+  the pair fits with required state
+- **AND** optional ordinary tail context is dropped before that pair
+
+#### Scenario: Historical side-effect pair cannot fit with required state
+
+- **WHEN** required state anchors and the current required item leave no room
+  for a historical side-effect call and its matching output
+- **THEN** compact trimming drops the entire historical pair
+- **AND** it does not retain only one member of that pair
 
 #### Scenario: Final compact wire expansion is rejected locally
 

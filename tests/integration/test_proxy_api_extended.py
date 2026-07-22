@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.responses import StreamingResponse
@@ -716,11 +717,17 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     response = await async_client.post(
         "/backend-api/codex/alpha/search?result_count=10",
         content=payload,
-        headers={"content-type": "application/json", "session_id": "search-session"},
+        headers={
+            "content-type": "application/json",
+            "origin": "https://chatgpt.com",
+            "session_id": "search-session",
+        },
     )
 
     assert response.status_code == 200
     assert response.content == upstream_body
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
     assert response.headers["x-request-id"] == "search-request"
     assert "set-cookie" not in response.headers
     assert calls == [
@@ -737,6 +744,131 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     ]
     assert isinstance(calls[0]["timeout_seconds"], float)
     assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_get_forwards_query_without_body(async_client, monkeypatch):
+    await _import_account(async_client, "acc_codex_search_get", "codex-search-get@example.com")
+    calls = []
+    upstream_body = b'{"results":[{"title":"OpenAI","url":"https://openai.com/"}]}'
+
+    async def fake_codex_control_request(
+        path,
+        *,
+        method,
+        payload: bytes | None,
+        query_params,
+        headers,
+        access_token,
+        account_id,
+        timeout_seconds=None,
+        **_kwargs,
+    ):
+        calls.append(
+            {
+                "path": path,
+                "method": method,
+                "payload": payload,
+                "query_params": list(query_params),
+                "session_id": headers.get("session_id"),
+                "access_token": access_token,
+                "account_id": account_id,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return core_proxy.CodexControlResponse(
+            status_code=200,
+            body=upstream_body,
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "search-get-request",
+            },
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    response = await async_client.get(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={"session_id": "search-get-session"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == upstream_body
+    assert response.headers["x-request-id"] == "search-get-request"
+    assert calls == [
+        {
+            "path": "alpha/search",
+            "method": "GET",
+            "payload": None,
+            "query_params": [("query", "OpenAI"), ("result_count", "10")],
+            "session_id": "search-get-session",
+            "access_token": "access-token",
+            "account_id": "acc_codex_search_get",
+            "timeout_seconds": calls[0]["timeout_seconds"],
+        }
+    ]
+    assert isinstance(calls[0]["timeout_seconds"], float)
+    assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_options_returns_local_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization, session_id",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["allow"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-methods"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-headers"] == "authorization, session_id"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_options_allows_private_network_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization, content-type, session_id",
+            "access-control-request-private-network": "true",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["access-control-allow-private-network"] == "true"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_unsupported_method_returns_full_allow_set(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.put(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={"origin": "https://chatgpt.com"},
+    )
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    codex_control_request.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1078,6 +1210,123 @@ async def test_proxy_stream_surfaces_and_logs_upstream_eof_without_terminal(asyn
 
 
 @pytest.mark.asyncio
+async def test_proxy_stream_initial_upstream_eof_surfaces_without_replay(async_client, monkeypatch):
+    expected_account_id = await _import_account(
+        async_client,
+        "acc_stream_initial_eof_retry",
+        "stream-initial-eof-retry@example.com",
+    )
+    calls = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal calls
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        calls += 1
+        if calls == 1:
+            if False:
+                yield ""
+            return
+        yield _sse_event({"type": "response.completed", "response": {"id": "resp_initial_eof_retry_ok"}})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr("app.modules.proxy._service.streaming.retry.backoff_seconds", lambda _attempt: 0.0)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": "req_stream_initial_eof_retry"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [
+        json.loads(line[6:]) for line in lines if line.startswith("data: ") and not line.startswith("data: [DONE]")
+    ]
+    assert events[-1]["type"] == "response.failed"
+    assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
+    assert calls == 1
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog)
+            .where(RequestLog.account_id == expected_account_id)
+            .order_by(RequestLog.requested_at.desc())
+        )
+        logs = list(result.scalars().all())
+        assert logs[0].status == "error"
+        assert logs[0].error_code == "stream_incomplete"
+        assert logs[0].error_message == "Upstream websocket closed before response.completed"
+        assert logs[0].latency_first_token_ms is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_does_not_retry_anchored_initial_upstream_eof(async_client, monkeypatch):
+    expected_account_id = await _import_account(
+        async_client,
+        "acc_stream_anchored_initial_eof",
+        "stream-anchored-initial-eof@example.com",
+    )
+    calls = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal calls
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        calls += 1
+        if False:
+            yield ""
+        return
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr("app.modules.proxy._service.streaming.retry.backoff_seconds", lambda _attempt: 0.0)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp_parent",
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": "req_stream_anchored_initial_eof"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [
+        event
+        for line in lines
+        if line.startswith("data: ") and not line.startswith("data: [DONE]")
+        if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+    ]
+    assert len(events) == 1
+    assert events[0]["type"] == "response.failed"
+    assert events[0]["response"]["id"] == "req_stream_anchored_initial_eof"
+    assert events[0]["response"]["error"] == {
+        "code": "stream_incomplete",
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+    }
+    assert calls == 1
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog)
+            .where(RequestLog.account_id == expected_account_id)
+            .order_by(RequestLog.requested_at.desc())
+        )
+        log = result.scalars().first()
+        assert log is not None
+        assert log.status == "error"
+        assert log.error_code == "stream_incomplete"
+        assert log.error_message == "Upstream websocket closed before response.completed"
+
+
+@pytest.mark.asyncio
 async def test_proxy_stream_classifies_core_generated_eof_failure(async_client, monkeypatch):
     expected_account_id = await _import_account(async_client, "acc_stream_core_eof", "stream-core-eof@example.com")
 
@@ -1129,7 +1378,7 @@ async def test_proxy_stream_classifies_core_generated_eof_failure(async_client, 
         assert log.failure_detail == "upstream_eof_before_terminal_event"
 
 
-async def test_proxy_stream_retries_first_core_generated_eof_before_no_accounts(async_client, monkeypatch):
+async def test_proxy_stream_surfaces_first_core_generated_eof_before_no_accounts(async_client, monkeypatch):
     expected_account_id = await _import_account(
         async_client,
         "acc_stream_first_core_eof",
@@ -1166,7 +1415,8 @@ async def test_proxy_stream_retries_first_core_generated_eof_before_no_accounts(
         json.loads(line[6:]) for line in lines if line.startswith("data: ") and not line.startswith("data: [DONE]")
     ][-1]
     assert event["type"] == "response.failed"
-    assert event["response"]["error"]["code"] == "no_accounts"
+    assert event["response"]["error"]["code"] == "stream_incomplete"
+    assert event["response"]["error"]["message"] == "Upstream closed stream without completion"
 
     async with SessionLocal() as session:
         result = await session.execute(

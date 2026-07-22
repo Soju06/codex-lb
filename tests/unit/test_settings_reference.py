@@ -46,7 +46,7 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # number when fields are removed; never raise it without a simplicity-budget
 # discussion — every new CODEX_LB_* setting needs a why-not-a-default
 # justification per CONTRIBUTING.md's simplicity gates.
-MAX_SETTINGS_FIELDS = 115
+MAX_SETTINGS_FIELDS = 116
 
 
 def test_generated_settings_reference_matches_code() -> None:

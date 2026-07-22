@@ -1073,6 +1073,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+                # This response was completed on the session's current account, so
+                # that account owns the anchor. Record it so the anchor is only
+                # replayed on the same account (never after a cross-account failover).
+                session.last_completed_response_account_id = session.account.id
                 # Remember which tool-call items the completed response left
                 # pending so an anchored follow-up that omits their outputs
                 # (interrupted turn) can receive synthetic interrupted

@@ -54,22 +54,18 @@ def test_needs_rebase_label_target_adds_for_confirmed_conflicts(merge_state: str
     assert module.needs_rebase_label_target(merge_state, has_label=False) is True
 
 
-@pytest.mark.parametrize("merge_state", ["BLOCKED", "CLEAN"])
+@pytest.mark.parametrize("merge_state", ["BEHIND", "BLOCKED", "CLEAN", "DRAFT", "HAS_HOOKS", "UNSTABLE"])
 def test_needs_rebase_label_target_removes_for_known_non_conflict_states(merge_state: str) -> None:
     module = load_sync_module()
 
     assert module.needs_rebase_label_target(merge_state, has_label=True) is False
 
 
-@pytest.mark.parametrize("merge_state", ["BEHIND", "DRAFT", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"])
 @pytest.mark.parametrize("has_label", [False, True])
-def test_needs_rebase_label_target_preserves_ambiguous_states(
-    merge_state: str,
-    has_label: bool,
-) -> None:
+def test_needs_rebase_label_target_preserves_unknown_state(has_label: bool) -> None:
     module = load_sync_module()
 
-    assert module.needs_rebase_label_target(merge_state, has_label=has_label) is has_label
+    assert module.needs_rebase_label_target("UNKNOWN", has_label=has_label) is has_label
 
 
 def test_apply_decision_adds_needs_rebase_label(monkeypatch: pytest.MonkeyPatch) -> None:

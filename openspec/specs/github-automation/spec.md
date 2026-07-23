@@ -22,11 +22,11 @@ behind the base branch.
 - **WHEN** GitHub reports it as `BLOCKED` by review or status requirements
 - **THEN** the synchronizer removes `needs rebase`
 
-#### Scenario: Base lag alone does not create the label
+#### Scenario: Base lag alone removes a stale label
 
 - **WHEN** GitHub reports a pull request as `BEHIND` without a confirmed conflict
-- **THEN** the synchronizer preserves the current label state
-- **AND** it does not add `needs rebase` to an unlabelled pull request
+- **THEN** the synchronizer removes `needs rebase` when present
+- **AND** it does not add the label to an unlabelled pull request
 
 ### Requirement: Codex review label sync write-token fallback
 

@@ -45,6 +45,9 @@ gatewayApi:
         - path:
             type: PathPrefix
             value: /backend-api/transcribe
+        - path:
+            type: PathPrefix
+            value: /backend-api/files
     - matches:
         - path:
             type: PathPrefix

@@ -11,8 +11,8 @@ and preserve the existing backend-only catch-all rule when no rules are set.
 
 - **GIVEN** `gatewayApi.enabled=true`
 - **AND** `gatewayApi.rules` contains an unfiltered API rule matching `/v1`,
-  `/backend-api/codex`, and `/backend-api/transcribe`, followed by a filtered
-  `/` catch-all rule
+  `/backend-api/codex`, `/backend-api/transcribe`, and `/backend-api/files`,
+  followed by a filtered `/` catch-all rule
 - **WHEN** the chart renders its HTTPRoute
 - **THEN** both rules retain their configured matches in order
 - **AND** only the catch-all rule contains the configured filter

@@ -475,6 +475,93 @@ def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path
         assert "transport" in columns
 
 
+def test_request_log_useragent_family_migration_backfills_only_slash_values(tmp_path: Path) -> None:
+    db_path = tmp_path / "request-log-useragent-families.db"
+    url = _db_url(db_path)
+    parent_revision = "20260720_000000_add_request_log_conversation_id"
+    target_revision = "20260722_000000_backfill_request_log_useragent_families"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO request_logs (request_id, model, status, useragent, useragent_group) "
+                    "VALUES (:request_id, :model, :status, :useragent, :useragent_group)"
+                ),
+                [
+                    {
+                        "request_id": "slash",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": "Codex Desktop/0.142.4",
+                        "useragent_group": "Codex",
+                    },
+                    {
+                        "request_id": "whitespace",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": " Codex Desktop/0.142.4",
+                        "useragent_group": "Codex",
+                    },
+                    {
+                        "request_id": "slash-free",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": "CodexCLI",
+                        "useragent_group": "sentinel-slash-free",
+                    },
+                    {
+                        "request_id": "null",
+                        "model": "gpt-5",
+                        "status": "success",
+                        "useragent": None,
+                        "useragent_group": "sentinel-null",
+                    },
+                ],
+            )
+    finally:
+        engine.dispose()
+
+    run_upgrade(url, target_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            groups = {
+                row.request_id: row.useragent_group
+                for row in connection.execute(text("SELECT request_id, useragent_group FROM request_logs")).all()
+            }
+    finally:
+        engine.dispose()
+
+    assert groups == {
+        "slash": "Codex Desktop",
+        "whitespace": " Codex Desktop",
+        "slash-free": "sentinel-slash-free",
+        "null": "sentinel-null",
+    }
+
+
+def test_request_log_useragent_family_migration_selects_postgresql_expression(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "app.db.alembic.versions.20260722_000000_backfill_request_log_useragent_families"
+    )
+    fake_bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    selected_statements: list[object] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: fake_bind)
+    monkeypatch.setattr(migration.op, "execute", selected_statements.append)
+
+    migration.upgrade()
+
+    assert len(selected_statements) == 1
+    sql = str(selected_statements[0])
+    assert "substring(useragent from 1 for position('/' in useragent) - 1)" in sql
+    assert "WHERE useragent IS NOT NULL AND position('/' in useragent) > 0" in sql
+    assert "trim" not in sql.lower()
+
+
 def test_request_logs_response_lookup_migration_handles_preexisting_session_id_column(tmp_path: Path) -> None:
     db_path = tmp_path / "request-logs-session-id-drift.db"
     url = _db_url(db_path)

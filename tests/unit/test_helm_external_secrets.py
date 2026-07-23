@@ -491,6 +491,10 @@ def test_gateway_api_renders_ordered_path_matches_and_filters() -> None:
         "--set-string",
         "gatewayApi.rules[0].matches[3].path.value=/backend-api/files",
         "--set-string",
+        "gatewayApi.rules[0].matches[4].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[4].path.value=/api/codex",
+        "--set-string",
         "gatewayApi.rules[1].matches[0].path.type=PathPrefix",
         "--set-string",
         "gatewayApi.rules[1].matches[0].path.value=/",
@@ -512,6 +516,7 @@ def test_gateway_api_renders_ordered_path_matches_and_filters() -> None:
             {"path": {"type": "PathPrefix", "value": "/backend-api/codex"}},
             {"path": {"type": "PathPrefix", "value": "/backend-api/transcribe"}},
             {"path": {"type": "PathPrefix", "value": "/backend-api/files"}},
+            {"path": {"type": "PathPrefix", "value": "/api/codex"}},
         ],
         "backendRefs": [{"name": "codex-lb", "port": 2455}],
     }

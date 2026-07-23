@@ -535,6 +535,9 @@ gatewayApi:
         - path:
             type: PathPrefix
             value: /backend-api/files
+        - path:
+            type: PathPrefix
+            value: /api/codex
     - matches:
         - path:
             type: PathPrefix

@@ -48,6 +48,9 @@ gatewayApi:
         - path:
             type: PathPrefix
             value: /backend-api/files
+        - path:
+            type: PathPrefix
+            value: /api/codex
     - matches:
         - path:
             type: PathPrefix
@@ -61,6 +64,9 @@ gatewayApi:
 ```
 
 The default empty `rules` list preserves the chart's catch-all HTTPRoute.
+Keep `/backend-api/files` and `/api/codex` in the unfiltered API rule: file
+uploads and Codex usage/reset-credit calls authenticate independently of the
+dashboard's forward-auth middleware.
 Extension resources must be valid for the release namespace according to the
 Gateway implementation.
 

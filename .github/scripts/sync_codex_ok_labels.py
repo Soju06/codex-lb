@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 CODEX_OK_LABEL = "🤖 codex: ok"
 CODEX_NEEDS_WORK_LABEL = "🤖 codex: needs work"
+NEEDS_REBASE_LABEL = "needs rebase"
 LEGACY_CODEX_LABELS = {"🤖 codex-ok"}
 CODEX_REVIEW_AUTHORS = {
     "chatgpt-codex-connector",
@@ -32,6 +33,8 @@ SUCCESS_CHECK_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 FAIL_CHECK_STATES = {"ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE", "TIMED_OUT"}
 PENDING_CHECK_STATES = {"EXPECTED", "IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"}
 UNMERGEABLE_STATES = {"DIRTY", "BLOCKED"}
+NEEDS_REBASE_STATES = {"CONFLICTING", "DIRTY"}
+NO_REBASE_STATES = {"BLOCKED", "CLEAN"}
 CODEX_LB_REQUIRED_CHECKS = frozenset(
     {
         "Frontend lint (eslint)",
@@ -229,6 +232,9 @@ class SyncDecision:
     has_needs_work_label: bool
     wants_needs_work_label: bool
     needs_work_action: str
+    has_needs_rebase_label: bool
+    wants_needs_rebase_label: bool
+    needs_rebase_action: str
     legacy_labels: frozenset[str]
     reason: str
     review_url: str | None
@@ -933,6 +939,16 @@ def pr_merge_state(repo: str, number: int) -> str:
     return merge_state or "UNKNOWN"
 
 
+def needs_rebase_label_target(merge_state: str, *, has_label: bool) -> bool:
+    """Sync confirmed conflicts and preserve the label when GitHub is ambiguous."""
+
+    if merge_state in NEEDS_REBASE_STATES:
+        return True
+    if merge_state in NO_REBASE_STATES:
+        return False
+    return has_label
+
+
 def workflow_runs_requiring_approval(repo: str, head_sha: str) -> tuple[int, ...]:
     runs = paged_api(f"/repos/{repo}/actions/runs?event=pull_request&head_sha={head_sha}")
     run_ids: list[int] = []
@@ -1140,6 +1156,11 @@ def decide_pr(
     )
     has_ok_label = CODEX_OK_LABEL in labels
     has_needs_work_label = CODEX_NEEDS_WORK_LABEL in labels
+    has_needs_rebase_label = NEEDS_REBASE_LABEL in labels
+    wants_needs_rebase_label = needs_rebase_label_target(
+        merge_state,
+        has_label=has_needs_rebase_label,
+    )
     legacy_labels = frozenset(label for label in labels if label in LEGACY_CODEX_LABELS)
 
     reason_parts: list[str] = []
@@ -1204,6 +1225,12 @@ def decide_pr(
         needs_work_action = "remove"
     else:
         needs_work_action = "keep"
+    if wants_needs_rebase_label and not has_needs_rebase_label:
+        needs_rebase_action = "add"
+    elif not wants_needs_rebase_label and has_needs_rebase_label:
+        needs_rebase_action = "remove"
+    else:
+        needs_rebase_action = "keep"
 
     review_url = unresolved_finding_urls[0] if unresolved_finding_urls else None
     if review_url is None and isinstance(review_node, dict):
@@ -1219,6 +1246,9 @@ def decide_pr(
         has_needs_work_label=has_needs_work_label,
         wants_needs_work_label=wants_needs_work_label,
         needs_work_action=needs_work_action,
+        has_needs_rebase_label=has_needs_rebase_label,
+        wants_needs_rebase_label=wants_needs_rebase_label,
+        needs_rebase_action=needs_rebase_action,
         legacy_labels=legacy_labels,
         reason="; ".join(reason_parts),
         review_url=review_url,
@@ -1275,6 +1305,26 @@ def apply_decision(decision: SyncDecision, *, tolerate_permission_errors: bool =
                 tolerate_permission_errors=tolerate_permission_errors,
                 tolerate_missing=True,
                 action=f"remove {CODEX_NEEDS_WORK_LABEL} from {decision.repo}#{decision.number}",
+            )
+        )
+    if decision.needs_rebase_action == "add":
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels",
+                method="POST",
+                input_json={"labels": [NEEDS_REBASE_LABEL]},
+                tolerate_permission_errors=tolerate_permission_errors,
+                action=f"add {NEEDS_REBASE_LABEL} to {decision.repo}#{decision.number}",
+            )
+        )
+    elif decision.needs_rebase_action == "remove":
+        record(
+            gh_api_write(
+                f"/repos/{decision.repo}/issues/{decision.number}/labels/{quote(NEEDS_REBASE_LABEL, safe='')}",
+                method="DELETE",
+                tolerate_permission_errors=tolerate_permission_errors,
+                tolerate_missing=True,
+                action=f"remove {NEEDS_REBASE_LABEL} from {decision.repo}#{decision.number}",
             )
         )
     for label in decision.legacy_labels:
@@ -1414,6 +1464,16 @@ def main(argv: list[str] | None = None) -> int:
                 tolerate_permission_errors=args.tolerate_write_permission_errors,
             )
         )
+        setup_warnings.extend(
+            ensure_label(
+                repo,
+                NEEDS_REBASE_LABEL,
+                color="fbca04",
+                description="Needs rebase or conflict repair against current main",
+                apply=args.apply,
+                tolerate_permission_errors=args.tolerate_write_permission_errors,
+            )
+        )
         for warning in setup_warnings:
             print(f"warning: {warning}", file=sys.stderr, flush=True)
         numbers = list_open_pr_numbers(repo) if args.all_open else list(args.pr or [])
@@ -1476,6 +1536,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"ok={decision.has_ok_label}->{decision.wants_ok_label}/{decision.ok_action} "
                     f"needs_work={decision.has_needs_work_label}->{decision.wants_needs_work_label}/"
                     f"{decision.needs_work_action} "
+                    f"needs_rebase={decision.has_needs_rebase_label}->{decision.wants_needs_rebase_label}/"
+                    f"{decision.needs_rebase_action} "
                     f"legacy={','.join(sorted(decision.legacy_labels)) or '-'} "
                     f"approve_runs={','.join(str(run_id) for run_id in decision.approve_workflow_run_ids) or '-'} "
                     f"trigger_codex={decision.trigger_codex_review and not args.no_trigger_missing_codex} "

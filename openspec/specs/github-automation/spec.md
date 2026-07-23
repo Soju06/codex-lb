@@ -1,8 +1,33 @@
 # github-automation Specification
 
 ## Purpose
-Repository automation around the Codex review merge gate: the `Codex review labels` workflow and its synchronization script keep `🤖 codex: ok` / `🤖 codex: needs work` labels faithful to current-head CI state and Codex review evidence, with token sourcing that stays within GitHub API quotas and degrades safely when privileged credentials are unavailable.
+Repository automation around the Codex review merge gate: the `Codex review labels` workflow and its synchronization script keep `🤖 codex: ok` / `🤖 codex: needs work` labels faithful to current-head CI state and Codex review evidence, keep `needs rebase` faithful to confirmed merge-conflict state, and use token sourcing that stays within GitHub API quotas and degrades safely when privileged credentials are unavailable.
 ## Requirements
+### Requirement: Needs-rebase label sync
+
+The Codex label synchronization script MUST add `needs rebase` when GitHub
+reports a confirmed merge conflict, MUST remove it when GitHub reports a known
+non-conflict state, and MUST preserve its current value when merge state is
+ambiguous. It MUST NOT infer a conflict from the pull request merely being
+behind the base branch.
+
+#### Scenario: Confirmed conflict gains the label
+
+- **WHEN** GitHub reports the pull request as `CONFLICTING` or `DIRTY`
+- **THEN** the synchronizer adds `needs rebase`
+
+#### Scenario: Review-blocked pull request loses a stale label
+
+- **GIVEN** a pull request has `needs rebase`
+- **WHEN** GitHub reports it as `BLOCKED` by review or status requirements
+- **THEN** the synchronizer removes `needs rebase`
+
+#### Scenario: Base lag alone does not create the label
+
+- **WHEN** GitHub reports a pull request as `BEHIND` without a confirmed conflict
+- **THEN** the synchronizer preserves the current label state
+- **AND** it does not add `needs rebase` to an unlabelled pull request
+
 ### Requirement: Codex review label sync write-token fallback
 
 The `Codex review labels` workflow MUST execute the label synchronization script from the trusted default branch and MUST prefer a dedicated GitHub App installation token, then a repository-provided write token, before falling back to the default `github.token`.
@@ -297,4 +322,3 @@ labels, so the override MUST NOT apply there: a change that would leave
 - **WHEN** a budget is exceeded
 - **THEN** no pull-request label set is resolved and the check fails
   regardless of any label on the originating pull request
-

@@ -874,6 +874,88 @@ async def test_normalize_public_responses_stream_synthesizes_response_created_on
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sequences_unsequenced_leading_failure() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 0
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sequences_failure_after_reasoning() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":7,'
+                    '"response":{"id":"resp_err","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.reasoning_summary_text.delta","sequence_number":8,'
+                    '"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Checking."}\n\n'
+                ),
+                (
+                    'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                    '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 9
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_preserves_failure_sequence() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.failed","sequence_number":12,'
+                    '"response":{"id":"resp_err","object":"response","status":"failed",'
+                    '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                )
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 12
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_preserves_unsequenced_failure() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    failed = proxy_api_module._parse_sse_payload(blocks[0])
+    assert failed is not None
+    assert "sequence_number" not in failed
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_drops_precreated_output_when_envelope_arrives() -> None:
     """A: public /v1 must never attach anonymous pre-created output to a later response.
 

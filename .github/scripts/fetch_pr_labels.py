@@ -26,7 +26,13 @@ def main() -> int:
         try:
             payload, link = request_json(url, token=os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"))
         except GitHubApiError as exc:
-            raise SystemExit(f"GitHub PR labels request failed after retries: {exc}") from exc
+            print(
+                f"warning: GitHub PR labels request failed after retries; continuing without override labels: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            labels.clear()
+            break
         if not isinstance(payload, list):
             raise SystemExit(f"GitHub PR labels request returned {type(payload).__name__}, expected list")
         labels.extend(item["name"] for item in payload if isinstance(item, dict) and isinstance(item.get("name"), str))

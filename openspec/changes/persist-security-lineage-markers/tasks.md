@@ -13,4 +13,5 @@
 - [x] 2.2 Cover durable and sticky security-marker persistence.
 - [x] 2.3 Run focused unit/integration tests, type checking, migration policy,
   schema drift, and strict OpenSpec validation.
-
+- [x] 2.4 Cover cross-transport `previous_response_id` enforcement, fail-closed
+  persisted requirements, and the bounded newly-classified fallback.

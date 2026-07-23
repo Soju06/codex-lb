@@ -44,6 +44,9 @@ gatewayApi:
             value: /backend-api/codex
         - path:
             type: PathPrefix
+            value: /backend-api/wham
+        - path:
+            type: PathPrefix
             value: /backend-api/transcribe
         - path:
             type: PathPrefix
@@ -64,9 +67,10 @@ gatewayApi:
 ```
 
 The default empty `rules` list preserves the chart's catch-all HTTPRoute.
-Keep `/backend-api/files` and `/api/codex` in the unfiltered API rule: file
-uploads and Codex usage/reset-credit calls authenticate independently of the
-dashboard's forward-auth middleware.
+Keep `/backend-api/wham`, `/backend-api/files`, and `/api/codex` in the
+unfiltered API rule: WHAM identity discovery, file uploads, and Codex
+usage/reset-credit calls authenticate independently of the dashboard's
+forward-auth middleware.
 Extension resources must be valid for the release namespace according to the
 Gateway implementation.
 

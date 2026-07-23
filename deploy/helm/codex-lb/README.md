@@ -531,6 +531,9 @@ gatewayApi:
             value: /backend-api/codex
         - path:
             type: PathPrefix
+            value: /backend-api/wham
+        - path:
+            type: PathPrefix
             value: /backend-api/transcribe
         - path:
             type: PathPrefix

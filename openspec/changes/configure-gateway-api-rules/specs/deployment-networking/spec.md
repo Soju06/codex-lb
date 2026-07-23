@@ -11,14 +11,16 @@ and preserve the existing backend-only catch-all rule when no rules are set.
 
 - **GIVEN** `gatewayApi.enabled=true`
 - **AND** `gatewayApi.rules` contains an unfiltered API rule matching `/v1`,
-  `/backend-api/codex`, `/backend-api/transcribe`, `/backend-api/files`, and
-  `/api/codex`, followed by a filtered `/` catch-all rule
+  `/backend-api/codex`, `/backend-api/wham`, `/backend-api/transcribe`,
+  `/backend-api/files`, and `/api/codex`, followed by a filtered `/` catch-all
+  rule
 - **WHEN** the chart renders its HTTPRoute
 - **THEN** both rules retain their configured matches in order
 - **AND** only the catch-all rule contains the configured filter
 - **AND** both rules target the chart-managed codex-lb Service and port
-- **AND** file-upload and Codex usage/reset-credit paths retain their own
-  caller-authentication contracts instead of traversing the dashboard filter
+- **AND** WHAM identity discovery, file-upload, and Codex usage/reset-credit
+  paths retain their own caller-authentication contracts instead of traversing
+  the dashboard filter
 
 #### Scenario: Empty rule configuration preserves the default route
 

@@ -764,7 +764,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state,
                     event_type=event_type,
                     payload=payload,
-                    has_other_pending_requests=False,
+                    has_other_pending_requests=any(
+                        pending_request is not matched_request_state for pending_request in session.pending_requests
+                    ),
                 )
                 reserve_terminal_for_model_capacity_retry = bool(
                     matched_request_state is not None
@@ -1045,6 +1047,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session.queued_request_count += 1
                     status_request_state.awaiting_response_created = True
                     status_request_state.response_id = None
+            if status_request_state.propagate_http_errors:
+                _signal_http_bridge_capacity_startup_wait(status_request_state)
             await self._handle_stream_error(
                 session.account,
                 {"message": retry_error_message or "Upstream error"},

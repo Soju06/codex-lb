@@ -2474,6 +2474,78 @@ async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_an
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_model_capacity_with_younger_request_releases_failed_queue_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    failed_request = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-failed",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"first"}',
+    )
+    younger_request = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-younger",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=False,
+        response_id="resp-model-capacity-younger",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"second"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-with-younger-request",
+        pending_requests=deque([younger_request, failed_request]),
+        queued_request_count=2,
+    )
+    wait_before_retry = AsyncMock(return_value=True)
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_before_http_bridge_model_capacity_retry",
+        wait_before_retry,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    wait_before_retry.assert_not_awaited()
+    retry_precreated.assert_not_awaited()
+    assert list(session.pending_requests) == [younger_request]
+    assert session.queued_request_count == 1
+    assert failed_request.event_queue is not None
+    assert await failed_request.event_queue.get() is not None
+    assert await failed_request.event_queue.get() is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_model_capacity_does_not_requeue_after_detach_during_health_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2490,6 +2562,8 @@ async def test_http_bridge_model_capacity_does_not_requeue_after_detach_during_h
         event_queue=asyncio.Queue(),
         transport="http",
         propagate_http_errors=True,
+        capacity_startup_wait_event=asyncio.Event(),
+        capacity_startup_ready_event=asyncio.Event(),
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
     )
     session = _make_bridge_session(
@@ -2500,6 +2574,10 @@ async def test_http_bridge_model_capacity_does_not_requeue_after_detach_during_h
 
     async def detach_during_health_update(*args: object, **kwargs: object) -> None:
         del args, kwargs
+        assert request_state.capacity_startup_wait_event is not None
+        assert request_state.capacity_startup_wait_event.is_set() is True
+        assert request_state.capacity_startup_ready_event is not None
+        assert request_state.capacity_startup_ready_event.is_set() is False
         assert request_state in session.pending_requests
         assert await service._detach_http_bridge_request(session, request_state=request_state) is True
 

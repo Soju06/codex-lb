@@ -1548,6 +1548,17 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.response_create_admission = None
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
+                async with session.pending_lock:
+                    retry_consumer_attached = (
+                        request_state in session.pending_requests
+                        and request_state.event_queue is not None
+                        and not request_state.draining_until_terminal
+                    )
+                if not retry_consumer_attached:
+                    request_state.response_create_admission.release()
+                    request_state.response_create_admission = None
+                    await self._release_request_state_account_response_create_lease(request_state)
+                    return False
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()

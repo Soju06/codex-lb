@@ -26,6 +26,7 @@ from app.db.models import (
     HttpBridgeSessionState,
     RequestLog,
     StickySession,
+    StickySessionKind,
     UsageHistory,
 )
 from app.db.session import sqlite_writer_section
@@ -41,6 +42,9 @@ from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 _UNSET = object()
+_HARD_STICKY_UNAVAILABLE_STATUSES = frozenset(
+    (AccountStatus.PAUSED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,6 +529,9 @@ class AccountsRepository:
         blocked_at: int | None | object = _UNSET,
     ) -> bool:
         async with sqlite_writer_section():
+            previous_status = await self._session.scalar(
+                select(Account.status).where(Account.id == account_id).with_for_update()
+            )
             values: dict[str, object | None] = {
                 "status": status,
                 "deactivation_reason": deactivation_reason,
@@ -535,11 +542,14 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
             )
-            if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            updated_id = result.scalar_one_or_none()
+            if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
+                await self._refresh_hard_sticky_outage_grace(account_id)
+            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return updated_id is not None
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
@@ -601,11 +611,36 @@ class AccountsRepository:
                 stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
+            if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
+                await self._refresh_hard_sticky_outage_grace(account_id)
             if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return updated_id is not None
+
+    @staticmethod
+    def _hard_sticky_outage_started(
+        previous_status: AccountStatus | None,
+        status: AccountStatus,
+    ) -> bool:
+        return (
+            previous_status is not None
+            and previous_status not in _HARD_STICKY_UNAVAILABLE_STATUSES
+            and status in _HARD_STICKY_UNAVAILABLE_STATUSES
+        )
+
+    async def _refresh_hard_sticky_outage_grace(self, account_id: str) -> None:
+        """Start a fresh purge grace period when a hard owner goes unavailable."""
+
+        await self._session.execute(
+            update(StickySession)
+            .where(
+                StickySession.account_id == account_id,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+            .values(updated_at=utcnow())
+        )
 
     async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:
         session_ids = select(HttpBridgeSessionRecord.id).where(HttpBridgeSessionRecord.account_id == account_id)

@@ -1,9 +1,10 @@
 # Tasks
 
 - [x] Add `StickySessionsRepository.purge_stale_hard_codex_session_mappings`,
-      gated strictly on account status (`PAUSED`, or
-      `RATE_LIMITED`/`QUOTA_EXCEEDED`) and elapsed time past
-      `blocked_at`/`reset_at`.
+      gated on an unavailable account status and the conservative hard-mapping
+      clock (later of last use and transition into unavailability).
+- [x] Refresh that clock when an owner first becomes unavailable without
+      extending it on repeated unavailable-status writes.
 - [x] Wire it into `StickySessionCleanupScheduler`'s existing periodic
       leader-elected cycle with a fixed, deliberately conservative threshold.
 - [x] Add regression coverage: a fresh (recently rate-limited/paused) owner's

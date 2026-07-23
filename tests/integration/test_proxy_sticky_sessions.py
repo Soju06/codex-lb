@@ -1567,6 +1567,8 @@ async def test_purge_stale_hard_codex_session_mappings_only_drops_durably_unavai
     cutoff = now - timedelta(hours=6)
     accounts = [
         ("acc_purge_active", AccountStatus.ACTIVE),
+        ("acc_purge_recent_transition_rate_limited", AccountStatus.ACTIVE),
+        ("acc_purge_recent_transition_paused", AccountStatus.ACTIVE),
         ("acc_purge_fresh_rate_limited", AccountStatus.RATE_LIMITED),
         ("acc_purge_stale_rate_limited", AccountStatus.RATE_LIMITED),
         ("acc_purge_fresh_paused", AccountStatus.PAUSED),
@@ -1605,7 +1607,36 @@ async def test_purge_stale_hard_codex_session_mappings_only_drops_durably_unavai
                 .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
                 .values(updated_at=cutoff - timedelta(hours=1))
             )
+        for account_id in ("acc_purge_recent_transition_rate_limited", "acc_purge_recent_transition_paused"):
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=cutoff - timedelta(hours=1))
+            )
         await session.commit()
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        assert await repo_accounts.update_status(
+            "acc_purge_recent_transition_rate_limited",
+            AccountStatus.RATE_LIMITED,
+        )
+        assert await repo_accounts.update_status_if_current(
+            "acc_purge_recent_transition_paused",
+            AccountStatus.PAUSED,
+            expected_status=AccountStatus.ACTIVE,
+        )
+        # Rewriting an already-unavailable state must not extend the grace
+        # period, and a failed compare-and-set must not touch it either.
+        assert await repo_accounts.update_status(
+            "acc_purge_stale_rate_limited",
+            AccountStatus.RATE_LIMITED,
+        )
+        assert not await repo_accounts.update_status_if_current(
+            "acc_purge_stale_paused",
+            AccountStatus.PAUSED,
+            expected_status=AccountStatus.ACTIVE,
+        )
 
     async with SessionLocal() as session:
         repo = StickySessionsRepository(session)
@@ -1619,4 +1650,10 @@ async def test_purge_stale_hard_codex_session_mappings_only_drops_durably_unavai
             for account_id, _status in accounts
             if await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION) is not None
         }
-    assert remaining == {"acc_purge_active", "acc_purge_fresh_rate_limited", "acc_purge_fresh_paused"}
+    assert remaining == {
+        "acc_purge_active",
+        "acc_purge_recent_transition_rate_limited",
+        "acc_purge_recent_transition_paused",
+        "acc_purge_fresh_rate_limited",
+        "acc_purge_fresh_paused",
+    }

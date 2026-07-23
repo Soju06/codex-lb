@@ -258,19 +258,17 @@ class StickySessionsRepository:
         That correctly protects a transient blip, but leaves the mapping
         stuck forever if the owner never recovers.
 
-        Gating on ``Account.reset_at``/``blocked_at`` was tried and rejected:
-        in practice ``reset_at`` is frequently absent (upstream simply hasn't
-        reported fresh quota data), and ``blocked_at`` is explicitly cleared
-        to ``None`` whenever an account is paused — neither field reliably
-        answers "how long has this been broken" across all three unavailable
-        statuses. ``StickySession.updated_at`` does: it only advances when
-        the mapping is actually (re)used, so it already reflects "how long
-        since this session last worked" without needing per-status account
-        bookkeeping. Only once BOTH the owner is non-active AND the mapping
-        itself hasn't been touched since well before ``cutoff`` (deliberately
-        much later than any ordinary quota-reset window) do we give up on it
-        — by deleting the mapping, never by rebinding it, so the next request
-        simply re-resolves fresh.
+        ``Account.reset_at`` is frequently absent, while ``blocked_at`` is
+        cleared when an account is paused, so neither field provides one
+        durable outage clock for every unavailable status. Instead,
+        ``AccountsRepository`` refreshes the mapping timestamp exactly when
+        its owner transitions from an available status into one of the
+        unavailable statuses below. ``StickySession.updated_at`` therefore
+        records the later of the mapping's last use and the outage start.
+        Only once BOTH the owner is still non-active AND that conservative
+        timestamp is before ``cutoff`` do we give up on the mapping — by
+        deleting it, never by rebinding it, so the next request re-resolves
+        fresh.
         """
         unavailable_account_ids = select(Account.id).where(
             Account.status.in_((AccountStatus.PAUSED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED))

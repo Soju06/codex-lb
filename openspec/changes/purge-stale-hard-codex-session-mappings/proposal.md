@@ -23,11 +23,14 @@ delete ~250 stale mappings directly in the database to unblock it.
 Add a bounded exception, enforced only by a periodic background purge —
 never by the hot-path selection logic, and never by rebinding:
 
+- Account status transitions refresh a hard `codex_session` mapping's
+  `updated_at` exactly when its owner first enters `PAUSED`, `RATE_LIMITED`,
+  or `QUOTA_EXCEEDED`. Repeated writes while already unavailable do not extend
+  the grace period.
 - A new repository method,
   `StickySessionsRepository.purge_stale_hard_codex_session_mappings`, deletes
-  `codex_session` mappings whose owning account has been `PAUSED` since
-  before a cutoff, or `RATE_LIMITED`/`QUOTA_EXCEEDED` with `reset_at` before
-  that same cutoff.
+  mappings whose owner is still unavailable and whose timestamp — the later
+  of last use and outage start — is before a conservative cutoff.
 - The existing leader-elected `StickySessionCleanupScheduler` (already
   running every 300s) calls this once per cycle, using a fixed threshold
   (`_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS`, 6 hours) deliberately far

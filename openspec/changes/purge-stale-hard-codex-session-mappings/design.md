@@ -38,15 +38,15 @@ reset to `None` whenever an account is paused (`accounts/service.py`'s
 `blocked_at=None`). Neither field reliably answers "how long has this
 specific account been broken" across all three unavailable statuses.
 
-`StickySession.updated_at` does, indirectly but reliably: it only advances
-when the mapping is actually reused on a successful request, so it already
-means "how long since this session last worked" without needing any
-per-status account bookkeeping. Gating on `Account.status` (non-active) AND
-`StickySession.updated_at < cutoff` together also gets a property the
-account-field approach didn't: a session that's still being actively used
-right up until the moment its owner goes down keeps its full grace window
-from that last real use, not from whatever moment its account record
-happened to change.
+`StickySession.updated_at` becomes the shared durable clock by recording the
+later of two events: the mapping's last use and the owner's transition from an
+available status into `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED`.
+`AccountsRepository` refreshes hard mapping timestamps only for that boundary;
+repeated writes while the owner remains unavailable do not extend the grace
+period. Gating on `Account.status` (still unavailable) AND
+`StickySession.updated_at < cutoff` therefore preserves the full threshold
+after a fresh outage even for a long-lived session, without adding another
+account status timestamp or relying on incomplete quota metadata.
 
 ## Choosing the threshold
 

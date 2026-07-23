@@ -46,7 +46,9 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 #### Scenario: A durably unavailable hard Codex owner's mapping is eventually purged
 
 - **GIVEN** a raw `codex_session` mapping points to account A
-- **AND** account A has been `PAUSED` since before a conservative cutoff, or `RATE_LIMITED`/`QUOTA_EXCEEDED` with its reset time before that same cutoff
+- **AND** account A is still `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED`
+- **AND** the later of the mapping's last use and account A's transition into
+  an unavailable status is before a conservative cutoff
 - **WHEN** the periodic sticky-session cleanup job runs
 - **THEN** the mapping is deleted
 - **AND** it is not rebound to any other account
@@ -55,6 +57,7 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 #### Scenario: A merely transient hard Codex owner outage is never purged
 
 - **GIVEN** a raw `codex_session` mapping points to account A
-- **AND** account A became rate-limited or paused more recently than the conservative cutoff
+- **AND** account A became rate-limited or paused more recently than the
+  conservative cutoff, even if the mapping itself is older
 - **WHEN** the periodic sticky-session cleanup job runs
 - **THEN** the mapping is left untouched

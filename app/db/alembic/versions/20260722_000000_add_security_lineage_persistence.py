@@ -1,7 +1,7 @@
 """Reconcile durable security-lineage persistence without a second head.
 
 Revision ID: 20260722_000000_add_security_lineage_persistence
-Revises: 20260720_000000_add_request_log_conversation_id
+Revises: 20260722_000000_backfill_request_log_useragent_families
 Create Date: 2026-07-22 00:00:00.000000
 """
 
@@ -15,14 +15,14 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260722_000000_add_security_lineage_persistence"
-down_revision = "20260720_000000_add_request_log_conversation_id"
+down_revision = "20260722_000000_backfill_request_log_useragent_families"
 branch_labels = None
 depends_on = None
 
 _MARKER_PREFIX = "@security-work/v2/"
 _LEGACY_MARKER_PREFIX = "security-work:"
 _CODEX_SESSION_KIND = "codex_session"
-_LINEAGE_ALIAS_KINDS = ("session_header", "turn_state")
+_LINEAGE_ALIAS_KINDS = ("session_header", "turn_state", "previous_response_id")
 _ANONYMOUS_SCOPE = "__anonymous__"
 _BATCH_NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",

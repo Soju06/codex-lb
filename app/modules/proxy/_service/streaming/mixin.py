@@ -298,6 +298,7 @@ from app.modules.proxy._service.support import (
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
+    _TransientStreamError,
     _ttft_event_latency_ms,
     _WebSocketUpstreamControl,
 )

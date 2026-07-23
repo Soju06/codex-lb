@@ -1344,6 +1344,48 @@ class _StreamingRetryMixin:
                     # instead of returning a generic no_accounts event.
                     if propagate_http_errors and last_transient_exc is not None:
                         raise last_transient_exc
+                    if last_retryable_stream_error is not None:
+                        error_message = str(last_retryable_stream_error.error.get("message") or "Upstream error")
+                        event = response_failed_event(
+                            last_retryable_stream_error.code,
+                            error_message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        await proxy._write_request_log(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code=last_retryable_stream_error.code,
+                            error_message=error_message,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            conversation_id=conversation_id,
+                            client_ip=client_ip,
+                        )
+                        return
+                    if last_exhausted_transient_exc is not None:
+                        error = _parse_openai_error(last_exhausted_transient_exc.payload)
+                        error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                        error_message = error.message if error else None
+                        event = response_failed_event(
+                            error_code or "upstream_error",
+                            error_message or "Upstream error",
+                            error_type=(error.type if error else None) or "server_error",
+                            response_id=request_id,
+                            error_param=error.param if error else None,
+                        )
+                        _apply_error_metadata(event["response"]["error"], error)
+                        yield format_sse_event(event)
+                        return
                     if last_security_work_retry_error is not None:
                         message = (
                             last_security_work_retry_error.error.get("message")

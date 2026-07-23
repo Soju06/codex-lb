@@ -18,6 +18,21 @@ STARTUP_TIMEOUT_SECONDS = 90.0
 SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
 
+def _run_backend(listener_fd: int) -> None:
+    # This subprocess deliberately changes only its Settings class before the
+    # application is imported. The smoke harness must not inherit a developer's
+    # repository-local .env or .env.local database/auth configuration.
+    from app.core.config import settings as settings_module
+
+    empty_env_file = Path(os.environ["CODEX_LB_DATA_DIR"]) / ".dashboard-browser-smoke.env"
+    settings_module.ENV_FILES = (empty_env_file, empty_env_file)
+    settings_module.Settings.model_config["env_file"] = None
+
+    import uvicorn
+
+    uvicorn.run("app.main:app", fd=listener_fd, log_level="warning")
+
+
 def _smoke_environment(data_dir: Path) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("CODEX_LB_")}
     environment.update(
@@ -96,13 +111,9 @@ def run() -> int:
             server = subprocess.Popen(
                 [
                     sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "app.main:app",
-                    "--fd",
+                    str(Path(__file__).resolve()),
+                    "--backend-fd",
                     str(listener.fileno()),
-                    "--log-level",
-                    "warning",
                 ],
                 cwd=REPOSITORY_ROOT,
                 env=environment,
@@ -130,4 +141,7 @@ def run() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--backend-fd":
+        _run_backend(int(sys.argv[2]))
+        raise SystemExit(0)
     raise SystemExit(run())

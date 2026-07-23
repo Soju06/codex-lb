@@ -37,7 +37,7 @@ help:
 	  '  make ci                      full local CI gate'
 
 .PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build \
-	test-dashboard-browser-smoke
+	frontend-playwright-chromium test-dashboard-browser-smoke
 frontend-install:
 	cd frontend && bun install --frozen-lockfile
 
@@ -56,7 +56,10 @@ frontend-test-fast: frontend-install
 frontend-build: frontend-install
 	cd frontend && bun run build
 
-test-dashboard-browser-smoke: frontend-build
+frontend-playwright-chromium: frontend-install
+	cd frontend && bun run playwright install chromium
+
+test-dashboard-browser-smoke: frontend-build frontend-playwright-chromium
 	uv sync --dev --frozen
 	uv run python scripts/run_dashboard_browser_smoke.py
 

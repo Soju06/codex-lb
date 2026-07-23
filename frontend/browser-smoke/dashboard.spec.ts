@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 import { AuthSessionSchema } from "../src/features/auth/schemas";
+import { DashboardProjectionsSchema } from "../src/features/dashboard/schemas";
 
 const REQUIRED_API_PATHS = [
   "/api/dashboard-auth/session",
   "/api/dashboard/overview",
+  "/api/dashboard/projections",
   "/api/request-logs/options",
   "/api/request-logs",
 ] as const;
@@ -53,6 +55,13 @@ test("the built dashboard accepts real backend responses", async ({ page }) => {
   }
   const sessionResponse = requiredResponses[0];
   AuthSessionSchema.parse(await sessionResponse.json());
+  const projectionsResponse = requiredResponses.find(
+    (response) => new URL(response.url()).pathname === "/api/dashboard/projections",
+  );
+  if (!projectionsResponse) {
+    throw new Error("Dashboard projections response was not captured");
+  }
+  DashboardProjectionsSchema.parse(await projectionsResponse.json());
 
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
   await expect(page.getByText("No accounts connected yet", { exact: true })).toBeVisible();

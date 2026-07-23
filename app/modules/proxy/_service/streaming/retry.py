@@ -367,6 +367,11 @@ class _StreamingRetryMixin:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
+        security_requirement_preexisting = await proxy._security_lineage_requires_security_work_authorized(
+            security_lineage_ids,
+            api_key_id=api_key.id if api_key is not None else None,
+        )
+        bypass_new_security_lineage_requirement = False
         security_lineage_persisted: bool | None = None
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
@@ -789,6 +794,7 @@ class _StreamingRetryMixin:
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
                             security_lineage_ids=security_lineage_ids,
+                            enforce_persisted_security_lineage=not bypass_new_security_lineage_requirement,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
                             # Keep stored-object and file ownership strict. The
@@ -840,21 +846,34 @@ class _StreamingRetryMixin:
                         and require_security_work_authorized
                         and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
                     ):
+                        if not security_requirement_preexisting and last_security_work_retry_error is not None:
+                            _facade().logger.info(
+                                "No security-work-authorized account available for new stream classification; "
+                                "continuing ordinary failover request_id=%s",
+                                request_id,
+                            )
+                            yield format_sse_event(
+                                _facade()._security_work_advisory_event(
+                                    code=_facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                                    message=_facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                                    request_id=request_id,
+                                    action="continue_normal_selection",
+                                )
+                            )
+                            require_security_work_authorized = False
+                            bypass_new_security_lineage_requirement = True
+                            continue
                         _facade().logger.info(
-                            "No security-work-authorized account available for stream retry; "
-                            "continuing normal account failover request_id=%s",
+                            "No security-work-authorized account available for classified stream request_id=%s",
                             request_id,
                         )
-                        yield format_sse_event(
-                            _facade()._security_work_advisory_event(
-                                code=_facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
-                                message=_facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
-                                request_id=request_id,
-                                action="continue_normal_selection",
-                            )
+                        event = response_failed_event(
+                            selection.error_code,
+                            selection.error_message or _facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                            response_id=request_id,
                         )
-                        require_security_work_authorized = False
-                        continue
+                        yield format_sse_event(event)
+                        return
                     if not account and deferred_capacity_account is not None:
                         deferred_error = _parse_openai_error(last_transient_exc.payload) if last_transient_exc else None
                         recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(

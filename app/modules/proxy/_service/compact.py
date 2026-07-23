@@ -843,6 +843,15 @@ class _CompactMixin:
             network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
             require_security_work_authorized = False
+            # A warning observed during this request may be retried without an
+            # authorized pool for backwards-compatible first-turn failover.
+            # A marker that existed before this request is a durable policy
+            # decision and must never be softened that way.
+            security_requirement_preexisting = await proxy._security_lineage_requires_security_work_authorized(
+                security_lineage_ids,
+                api_key_id=api_key.id if api_key is not None else None,
+            )
+            bypass_new_security_lineage_requirement = False
             security_lineage_persisted: bool | None = None
 
             async def _persist_security_work_lineage_once() -> bool:
@@ -874,6 +883,7 @@ class _CompactMixin:
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
                     security_lineage_ids=security_lineage_ids,
+                    enforce_persisted_security_lineage=not bypass_new_security_lineage_requirement,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -883,14 +893,16 @@ class _CompactMixin:
                     if (
                         require_security_work_authorized
                         and selection.error_code == _no_security_work_authorized_accounts_code()
+                        and not security_requirement_preexisting
                         and last_exc is not None
                     ):
                         logger.info(
-                            "No security-work-authorized account available for compact retry; "
-                            "continuing normal account failover request_id=%s",
+                            "No security-work-authorized account available for new compact classification; "
+                            "continuing ordinary failover request_id=%s",
                             request_id,
                         )
                         require_security_work_authorized = False
+                        bypass_new_security_lineage_requirement = True
                         selection = await proxy._select_account_with_budget_compatible(
                             deadline,
                             request_id=request_id,
@@ -905,16 +917,16 @@ class _CompactMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=False,
+                            security_lineage_ids=security_lineage_ids,
+                            enforce_persisted_security_lineage=False,
                             lease_kind="response_create",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
                         )
                         account = selection.account
-                    if account is not None:
-                        pass
-                    elif last_exc is not None:
+                    if account is None and last_exc is not None:
                         break
-                    else:
+                    if account is None:
                         log_error_code = selection.error_code or "no_accounts"
                         log_error_message = selection.error_message or "No active accounts available"
                         status_code = 429 if log_error_code == "account_response_create_cap" else 503

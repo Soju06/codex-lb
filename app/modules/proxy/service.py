@@ -1473,6 +1473,30 @@ class ProxyService(
             return False
         return bool(marker_keys)
 
+    async def _security_lineage_requires_security_work_authorized(
+        self,
+        lineage_ids: Collection[str],
+        *,
+        api_key_id: str | None,
+    ) -> bool:
+        normalized_lineage_ids = _security_lineage_ids(*lineage_ids)
+        if not normalized_lineage_ids:
+            return False
+        try:
+            async with self._repo_factory() as repos:
+                return (
+                    await repos.sticky_sessions.security_work_required(
+                        normalized_lineage_ids,
+                        api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                    )
+                    is True
+                )
+        except Exception:
+            # Unknown lineage metadata must not downgrade a previously
+            # classified security request into an ordinary account selection.
+            logger.warning("Security-work lineage lookup failed; requiring an authorized account", exc_info=True)
+            return True
+
     @asynccontextmanager
     async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
         # Fresh, self-contained accounts repo (own DB session) for AuthManager's
@@ -1728,6 +1752,7 @@ class ProxyService(
         preferred_account_is_continuity_owner: bool = False,
         require_security_work_authorized: bool = False,
         security_lineage_ids: Collection[str] = (),
+        enforce_persisted_security_lineage: bool = True,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
@@ -1779,7 +1804,7 @@ class ProxyService(
                     *security_lineage_ids,
                     *((sticky_key, legacy_sticky_key) if sticky_kind == StickySessionKind.CODEX_SESSION else ()),
                 )
-                if lineage_ids:
+                if lineage_ids and enforce_persisted_security_lineage:
                     async with self._repo_factory() as repos:
                         persisted_security_requirement = await repos.sticky_sessions.security_work_required(
                             lineage_ids,

@@ -44,6 +44,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
@@ -148,6 +149,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _security_lineage_ids,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _ttft_event_visible_at,
@@ -888,6 +890,16 @@ class _HTTPBridgeStreamingMixin:
                 and durable_model_transition_lookup.requires_security_work_authorized
             )
         )
+        if not extract_input_file_ids(payload.input) and not durable_security_requirement:
+            durable_security_requirement = await self._security_lineage_requires_security_work_authorized(
+                _security_lineage_ids(
+                    bridge_session_key.affinity_key,
+                    incoming_turn_state_header,
+                    incoming_session_header,
+                    payload.previous_response_id,
+                ),
+                api_key_id=api_key.id if api_key is not None else None,
+            )
         durable_model_transition_requires_owner = durable_model_transition_lookup is not None and (
             payload.previous_response_id is not None
             or bridge_session_key.strength == "hard"

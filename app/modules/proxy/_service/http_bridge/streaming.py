@@ -46,10 +46,7 @@ from app.core.metrics.prometheus import (
     stream_idle_timeout_total,
     stream_keepalive_sent_total,
 )
-from app.core.openai.requests import (
-    ResponsesRequest,
-    extract_input_file_ids,
-)
+from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -1360,7 +1357,7 @@ class _HTTPBridgeStreamingMixin:
                 and durable_model_transition_lookup.requires_security_work_authorized
             )
         )
-        if not extract_input_file_ids(payload.input) and not durable_security_requirement:
+        if not durable_security_requirement:
             durable_security_requirement = await self._security_lineage_requires_security_work_authorized(
                 _security_lineage_ids(
                     bridge_session_key.affinity_key,

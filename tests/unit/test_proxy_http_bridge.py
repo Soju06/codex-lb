@@ -599,6 +599,62 @@ async def test_terminal_capacity_retry_stops_after_downstream_detach_without_dou
 
 
 @pytest.mark.asyncio
+async def test_terminal_capacity_retry_leaves_pending_cleanup_to_waiting_detach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_capacity_retry_state()
+    session = _make_bridge_session(
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    close_upstream = cast(AsyncMock, session.upstream.close)
+    detach_task: asyncio.Task[bool] | None = None
+
+    async def fake_acquire(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **kwargs: object,
+    ) -> None:
+        del kwargs
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    async def fail_reconnect(*args: object, **kwargs: object) -> None:
+        nonlocal detach_task
+        del args, kwargs
+        detach_task = asyncio.create_task(service._detach_http_bridge_request(session, request_state=request_state))
+        await asyncio.sleep(0)
+        assert request_state.event_queue is None
+        assert detach_task.done() is False
+        raise RuntimeError("retry reconnect failed")
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", fake_acquire)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fail_reconnect)
+    monkeypatch.setattr(http_bridge_request_submit_module, "backoff_seconds", lambda attempt: 0.0)
+
+    retried = await service._retry_http_bridge_terminal_capacity_request(
+        session,
+        request_state,
+        error_code="server_is_overloaded",
+        preserve_for_reader_failure=True,
+    )
+
+    assert retried is False
+    assert detach_task is not None
+    assert await detach_task is True
+    assert request_state.draining_until_terminal is True
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    assert request_state.response_create_gate_acquired is False
+    assert session.closed is True
+    close_upstream.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_terminal_capacity_retry_stops_when_backoff_exhausts_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

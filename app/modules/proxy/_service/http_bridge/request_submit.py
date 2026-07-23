@@ -1540,7 +1540,6 @@ class _HTTPBridgeRequestSubmitMixin:
                         len(session.pending_requests) == 1
                         and session.pending_requests[0] is request_state
                         and not request_state.draining_until_terminal
-                        and request_state.event_queue is not None
                     )
                     if not preserve_pending_for_reader_failure and request_state in session.pending_requests:
                         counted_request = _http_bridge_request_counts_against_queue(request_state)

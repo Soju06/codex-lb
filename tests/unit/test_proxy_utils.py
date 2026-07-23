@@ -35035,6 +35035,7 @@ async def test_retry_http_bridge_precreated_request_reacquires_replacement_respo
         response_create_gate=response_create_gate,
         response_create_gate_acquired=True,
         response_create_admission_reacquire_required=True,
+        event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
     )
     session = proxy_service._HTTPBridgeSession(

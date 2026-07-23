@@ -35851,7 +35851,14 @@ async def test_http_bridge_owner_forward_defers_image_inlining(monkeypatch):
         {
             "model": "gpt-5.5",
             "instructions": "describe the image",
-            "input": [{"content": [{"type": "input_image", "image_url": original_url}]}],
+            "input": [
+                {
+                    "content": [
+                        {"type": "input_image", "image_url": original_url},
+                        {"type": "input_file", "file_id": "file-owner-pinned"},
+                    ]
+                }
+            ],
             "stream": True,
         }
     )

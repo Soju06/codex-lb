@@ -477,6 +477,7 @@ from app.modules.proxy._service.response_create import (
 from app.modules.proxy._service.response_create import (
     _write_response_create_dump as _write_response_create_dump,
 )
+from app.modules.proxy._service.security_lineage import _SecurityLineageMixin
 from app.modules.proxy._service.streaming import (
     _StreamingMixin,
 )
@@ -906,6 +907,7 @@ def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
 
 
 class ProxyService(
+    _SecurityLineageMixin,
     _ApiKeyUsageMixin,
     _RequestLogMixin,
     _RateLimitMixin,
@@ -1472,30 +1474,6 @@ class ProxyService(
             logger.warning("Failed to persist security-work lineage markers", exc_info=True)
             return False
         return bool(marker_keys)
-
-    async def _security_lineage_requires_security_work_authorized(
-        self,
-        lineage_ids: Collection[str],
-        *,
-        api_key_id: str | None,
-    ) -> bool:
-        normalized_lineage_ids = _security_lineage_ids(*lineage_ids)
-        if not normalized_lineage_ids:
-            return False
-        try:
-            async with self._repo_factory() as repos:
-                return (
-                    await repos.sticky_sessions.security_work_required(
-                        normalized_lineage_ids,
-                        api_key_scope=durable_bridge_api_key_scope(api_key_id),
-                    )
-                    is True
-                )
-        except Exception:
-            # Unknown lineage metadata must not downgrade a previously
-            # classified security request into an ordinary account selection.
-            logger.warning("Security-work lineage lookup failed; requiring an authorized account", exc_info=True)
-            return True
 
     @asynccontextmanager
     async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:

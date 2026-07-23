@@ -309,8 +309,13 @@ async def _iter_account_capacity_wait_sse(
     reason: str | None,
     sleep_seconds: float,
     emit_keepalives: bool,
+    request_state: _WebSocketRequestState | None = None,
 ) -> AsyncIterator[str]:
     if not emit_keepalives:
+        if request_state is not None and request_state.capacity_startup_ready_event is not None:
+            request_state.capacity_startup_ready_event.clear()
+        if request_state is not None and request_state.capacity_startup_wait_event is not None:
+            request_state.capacity_startup_wait_event.set()
         _signal_propagated_capacity_startup_wait()
     wait_started_at = _service_time().monotonic()
     remaining_sleep_seconds = sleep_seconds
@@ -518,6 +523,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -541,6 +548,8 @@ class _HTTPBridgeStreamingMixin:
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_startup_wait_event,
+            capacity_startup_ready_event=capacity_startup_ready_event,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -564,6 +573,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -651,6 +662,8 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_startup_wait_event,
+                capacity_startup_ready_event=capacity_startup_ready_event,
             ):
                 yield line
         finally:
@@ -686,6 +699,8 @@ class _HTTPBridgeStreamingMixin:
         rewritten_file_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
@@ -709,7 +724,7 @@ class _HTTPBridgeStreamingMixin:
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
             if bridge_uses_responses_lite:
-                return self._prepare_http_bridge_request(
+                request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -718,14 +733,18 @@ class _HTTPBridgeStreamingMixin:
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
                 )
-            return self._prepare_http_bridge_request(
-                request_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                request_id=request_id,
-                client_ip=client_ip,
-            )
+            else:
+                request_state, text_data = self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                )
+            request_state.capacity_startup_wait_event = capacity_startup_wait_event
+            request_state.capacity_startup_ready_event = capacity_startup_ready_event
+            return request_state, text_data
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -1284,6 +1303,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1494,6 +1514,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1875,6 +1896,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1978,6 +2000,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -2167,6 +2190,7 @@ class _HTTPBridgeStreamingMixin:
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
                     ):
                         yield line
                     if _service_time().monotonic() >= request_deadline:
@@ -2287,6 +2311,7 @@ class _HTTPBridgeStreamingMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
+        request_state.propagate_http_errors = propagate_http_errors
         while True:
             try:
                 if account_neutral_recovery:
@@ -2350,6 +2375,7 @@ class _HTTPBridgeStreamingMixin:
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
                     ):
                         yield line
                 finally:
@@ -2366,6 +2392,10 @@ class _HTTPBridgeStreamingMixin:
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)
             _signal_propagated_capacity_startup_ready()
+            if request_state.capacity_startup_wait_event is not None:
+                request_state.capacity_startup_wait_event.clear()
+            if request_state.capacity_startup_ready_event is not None:
+                request_state.capacity_startup_ready_event.set()
             event_queue = request_state.event_queue
             assert event_queue is not None
             yielded_any = False
@@ -2393,6 +2423,8 @@ class _HTTPBridgeStreamingMixin:
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
+                            if request_state.account_capacity_wait_suppress_keepalive:
+                                continue
                             keepalive_sent = True
                             yielded_any = True
                             downstream_response_id = _websocket_downstream_response_id(request_state)

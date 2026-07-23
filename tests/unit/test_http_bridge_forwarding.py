@@ -1116,7 +1116,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
     get_settings.cache_clear()
 
     client = HTTPBridgeOwnerClient()
-    ready_calls: list[bool] = []
+    response_state_calls: list[str] = []
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -1133,14 +1133,15 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
             headers={"Authorization": "Bearer proxy-key"},
             context=context,
             request_started_at=10.0,
-            on_response_ready=lambda: ready_calls.append(True),
+            on_response_wait=lambda: response_state_calls.append("wait"),
+            on_response_ready=lambda: response_state_calls.append("ready"),
         )
     ]
 
     assert len(events) == 1
     assert '"type":"response.failed"' in events[0]
     assert '"code":"stream_incomplete"' in events[0]
-    assert ready_calls == [True]
+    assert response_state_calls == ["wait", "ready"]
     assert captured["trust_env"] is False
     skip_auto_headers = captured["skip_auto_headers"]
     assert isinstance(skip_auto_headers, frozenset)

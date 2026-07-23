@@ -39,6 +39,7 @@ from app.modules.proxy._service.http_bridge import helpers as http_bridge_helper
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
+from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
@@ -2299,6 +2300,610 @@ def test_http_error_status_from_payload_accepts_official_status_code_alias() -> 
     }
 
     assert proxy_service._http_error_status_from_payload(payload) == 400
+
+
+@pytest.mark.parametrize(
+    ("upstream_code", "expected_retry_error_code"),
+    [
+        ("invalid_request_error", "server_is_overloaded"),
+        ("rate_limit_exceeded", "rate_limit_exceeded"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_waits_before_precreated_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_code: str,
+    expected_retry_error_code: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error = AsyncMock()
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS",
+        0.001,
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-wait",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-wait",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": upstream_code,
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    keepalive_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert keepalive_block is not None
+    keepalive = proxy_service.parse_sse_data_json(keepalive_block)
+    assert isinstance(keepalive, dict)
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert keepalive["request_id"] == "req-model-capacity-wait"
+    assert keepalive["retry_after_seconds"] == 0
+    reason = keepalive["reason"]
+    assert isinstance(reason, str)
+    assert "Selected model is at capacity" in reason
+    handle_stream_error.assert_awaited_once()
+    handle_call = handle_stream_error.await_args
+    assert handle_call is not None
+    assert handle_call.args[2] == expected_retry_error_code
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    assert request_state in session.pending_requests
+    assert session.queued_request_count == 1
+    assert request_state.account_capacity_waiting is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    capacity_message = "Selected model is at capacity. Please try a different model."
+    fresh_request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"full resend"}'
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-injected-anchor",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-proxy-injected",
+        preferred_account_id="acc-owner",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=fresh_request_text,
+        fresh_upstream_request_is_retry_safe=True,
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.6-sol",'
+            '"previous_response_id":"resp-proxy-injected","input":"trimmed"}'
+        ),
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-injected-anchor",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    call_order: list[str] = []
+
+    async def wait_before_retry(*args: object, **kwargs: object) -> bool:
+        assert args == (request_state,)
+        assert kwargs == {
+            "emit_keepalives": True,
+            "error_message": capacity_message,
+            "cancel_when_detached": True,
+        }
+        assert request_state.previous_response_id == "resp-proxy-injected"
+        call_order.append("wait")
+        return True
+
+    async def retry_precreated(
+        retry_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState | None = None,
+    ) -> bool:
+        assert retry_session is session
+        assert request_state is not None
+        assert call_order == ["wait"]
+        call_order.append("retry")
+        return True
+
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_before_http_bridge_model_capacity_retry",
+        wait_before_retry,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 429,
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "message": capacity_message,
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert call_order == ["wait", "retry"]
+    assert list(session.pending_requests) == [request_state]
+    assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_with_younger_request_releases_failed_queue_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    failed_request = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-failed",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"first"}',
+    )
+    younger_request = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-younger",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=False,
+        response_id="resp-model-capacity-younger",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"second"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-with-younger-request",
+        pending_requests=deque([younger_request, failed_request]),
+        queued_request_count=2,
+    )
+    wait_before_retry = AsyncMock(return_value=True)
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_before_http_bridge_model_capacity_retry",
+        wait_before_retry,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    wait_before_retry.assert_not_awaited()
+    retry_precreated.assert_not_awaited()
+    assert list(session.pending_requests) == [younger_request]
+    assert session.queued_request_count == 1
+    assert failed_request.event_queue is not None
+    assert await failed_request.event_queue.get() is not None
+    assert await failed_request.event_queue.get() is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_does_not_requeue_after_detach_during_health_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-detached-during-health",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        propagate_http_errors=True,
+        capacity_startup_wait_event=asyncio.Event(),
+        capacity_startup_ready_event=asyncio.Event(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-detached-during-health",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    async def detach_during_health_update(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        assert request_state.capacity_startup_wait_event is not None
+        assert request_state.capacity_startup_wait_event.is_set() is True
+        assert request_state.capacity_startup_ready_event is not None
+        assert request_state.capacity_startup_ready_event.is_set() is False
+        assert request_state in session.pending_requests
+        assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+
+    wait_before_retry = AsyncMock(return_value=True)
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", detach_during_health_update)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_before_http_bridge_model_capacity_retry",
+        wait_before_retry,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    wait_before_retry.assert_not_awaited()
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_wait_suppresses_keepalive_when_errors_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS",
+        0.001,
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-propagate",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        propagate_http_errors=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-propagate",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_wait_hides_keepalive_for_non_sdk_propagated_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS",
+        0.001,
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-propagate-non-sdk",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        propagate_http_errors=True,
+        enforce_openai_sdk_contract=False,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-propagate-non-sdk",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_wait_does_not_retry_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-deadline",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() - 0.001,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-deadline",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    retry_precreated.assert_not_awaited()
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "response.failed"
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_wait_skips_sleep_for_non_replayable_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    wait_before_retry = AsyncMock(return_value=True)
+    retry_precreated = AsyncMock(return_value=False)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_before_http_bridge_model_capacity_retry",
+        wait_before_retry,
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-not-replayable",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        replay_count=1,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-not-replayable",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    wait_before_retry.assert_not_awaited()
+    retry_precreated.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_wait_does_not_delay_anchored_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS",
+        60.0,
+    )
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-model-capacity-anchored",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp_anchor",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp_anchor"}',
+    )
+    session = _make_bridge_session(
+        key_value="bridge-model-capacity-anchored",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    started = time.monotonic()
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert time.monotonic() - started < 1.0
+    retry_precreated.assert_not_awaited()
+    assert request_state.event_queue is not None
+    terminal_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert terminal_block is not None
+    terminal = proxy_service.parse_sse_data_json(terminal_block)
+    assert isinstance(terminal, dict)
+    assert terminal["type"] == "response.failed"
 
 
 @pytest.mark.asyncio
@@ -8506,6 +9111,8 @@ async def test_forward_http_bridge_request_to_owner_preserves_session_header_key
     assert context.original_affinity_kind == "session_header"
     assert context.original_affinity_key == "sid-123"
     assert cast(dict[str, str], captured["headers"])["x-codex-session-id"] == "sid-123"
+    assert captured["on_response_wait"] is proxy_support_module._signal_propagated_capacity_startup_wait
+    assert captured["on_response_ready"] is proxy_support_module._signal_propagated_capacity_startup_ready
 
 
 @pytest.mark.asyncio

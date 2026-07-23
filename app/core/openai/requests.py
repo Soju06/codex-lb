@@ -152,10 +152,12 @@ def _input_image_file_reference(item: Mapping[str, JsonValue]) -> str | None:
 def extract_input_file_ids(input_value: JsonValue) -> set[str]:
     """Return all ``file_id`` strings referenced by ``input_file`` / ``input_image`` items.
 
-    Walks both top-level items and nested role-message ``content`` parts,
-    matching the shapes accepted by ``ResponsesRequest.input`` /
-    ``ResponsesCompactRequest.input``. Returns an empty set when the
-    input is a plain string or has no ``input_file`` parts. Used by the
+    Walks top-level input items, role-message ``content`` parts, and retained
+    tool-output content, matching the actual reference shapes accepted by
+    ``ResponsesRequest.input`` / ``ResponsesCompactRequest.input``. Tool
+    metadata and arbitrary nested objects are deliberately not references.
+    Returns an empty set when the input is a plain string or has no
+    ``input_file`` parts. Used by the
     ``/responses`` flow to look up account pins recorded by
     ``POST /backend-api/files`` so the response request lands on the
     upstream account that registered the file (the upstream contract is
@@ -165,22 +167,26 @@ def extract_input_file_ids(input_value: JsonValue) -> set[str]:
         return set()
     file_ids: set[str] = set()
 
-    def collect(value: JsonValue) -> None:
-        if is_json_mapping(value):
-            if _is_input_file_with_id(value):
-                file_id = value.get("file_id")
-                if isinstance(file_id, str) and file_id:
-                    file_ids.add(file_id)
-            image_file_id = _input_image_file_reference(value)
-            if image_file_id is not None:
-                file_ids.add(image_file_id)
-            for child in value.values():
-                collect(child)
-        elif is_json_list(value):
-            for child in value:
-                collect(child)
+    def collect_part(part: JsonValue) -> None:
+        if not is_json_mapping(part):
+            return
+        if _is_input_file_with_id(part):
+            file_id = part.get("file_id")
+            if isinstance(file_id, str) and file_id:
+                file_ids.add(file_id)
+        image_file_id = _input_image_file_reference(part)
+        if image_file_id is not None:
+            file_ids.add(image_file_id)
 
-    collect(input_value)
+    for item in input_value:
+        if not is_json_mapping(item):
+            continue
+        collect_part(item)
+        for part in _json_parts(item.get("content")):
+            collect_part(part)
+        if item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+            for part in _json_parts(item.get("output")):
+                collect_part(part)
     return file_ids
 
 
@@ -907,25 +913,17 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     input_value = payload.get("input")
     if not is_json_list(input_value):
         return
-    token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
     total_tokens = _estimated_json_tokens(input_value)
     if total_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         return
 
-    head_count = _compact_trim_prefix_count(token_counts)
-    preserved_indices = _compact_state_anchor_indices(input_value)
-    required_indices = set(preserved_indices)
-    if input_value:
-        required_indices.add(len(input_value) - 1)
-    required_indices = _compact_reconciled_tool_call_indices(
-        input_value,
-        required_indices,
-        token_counts=token_counts,
-        token_budget=sum(token_counts),
-        required_indices=required_indices,
-    )
-    required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
-    required_tokens = _estimated_json_tokens(required_input)
+    losslessly_trimmed_input = _compact_losslessly_trim_input(input_value)
+    if losslessly_trimmed_input is not None:
+        payload["input"] = losslessly_trimmed_input
+        return
+
+    token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+    required_indices = _compact_required_indices(input_value, token_counts)
     rewritten_input, images_elided = _compact_elide_required_tool_output_images(
         input_value,
         required_indices=required_indices,
@@ -935,28 +933,27 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         payload["input"] = input_value
         if _estimated_json_tokens(input_value) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
             return
-        token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
-        head_count = _compact_trim_prefix_count(token_counts)
-        preserved_indices = _compact_state_anchor_indices(input_value)
-        required_indices = set(preserved_indices)
-        if input_value:
-            required_indices.add(len(input_value) - 1)
-        required_indices = _compact_reconciled_tool_call_indices(
-            input_value,
-            required_indices,
-            token_counts=token_counts,
-            token_budget=sum(token_counts),
-            required_indices=required_indices,
-        )
-        required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
-        required_tokens = _estimated_json_tokens(required_input)
-    if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
-        raise ClientPayloadError(
-            "Compact input exceeds the upstream size limit and cannot be trimmed "
-            "without removing required state anchors.",
-            param="input",
-            code="responses_compact_input_too_large",
-        )
+        losslessly_trimmed_input = _compact_losslessly_trim_input(input_value)
+        if losslessly_trimmed_input is not None:
+            payload["input"] = losslessly_trimmed_input
+            return
+    raise ClientPayloadError(
+        "Compact input exceeds the upstream size limit and cannot be trimmed without removing required state anchors.",
+        param="input",
+        code="responses_compact_input_too_large",
+    )
+
+
+def _compact_losslessly_trim_input(input_value: list[JsonValue]) -> list[JsonValue] | None:
+    """Return a budget-fitting context selection without changing any retained bytes."""
+
+    token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+    head_count = _compact_trim_prefix_count(token_counts)
+    preserved_indices = _compact_state_anchor_indices(input_value)
+    required_indices = _compact_required_indices(input_value, token_counts, preserved_indices=preserved_indices)
+    required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+    if _estimated_json_tokens(required_input) > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        return None
     selected_indices = set(preserved_indices)
     selected_indices.update(range(head_count))
     marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
@@ -991,14 +988,28 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     )
     trimmed_tokens = _estimated_json_tokens(trimmed_input)
     if trimmed_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
-        raise ClientPayloadError(
-            "Compact input still exceeds the upstream size limit after retaining required compact context.",
-            param="input",
-            code="responses_compact_input_too_large",
-        )
-    if trimmed_input is input_value:
-        return
-    payload["input"] = trimmed_input
+        return None
+    return trimmed_input
+
+
+def _compact_required_indices(
+    input_value: list[JsonValue],
+    token_counts: list[int],
+    *,
+    preserved_indices: set[int] | None = None,
+) -> set[int]:
+    if preserved_indices is None:
+        preserved_indices = _compact_state_anchor_indices(input_value)
+    required_indices = set(preserved_indices)
+    if input_value:
+        required_indices.add(len(input_value) - 1)
+    return _compact_reconciled_tool_call_indices(
+        input_value,
+        required_indices,
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+        required_indices=required_indices,
+    )
 
 
 def _compact_elide_required_tool_output_images(
@@ -1039,6 +1050,17 @@ def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
                     {
                         "type": "input_text",
                         "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(image_url)} encoded characters).",
+                    },
+                    True,
+                )
+        if value.get("type") == "image_url":
+            image_url = value.get("image_url")
+            url = image_url.get("url") if is_json_mapping(image_url) else image_url
+            if isinstance(url, str) and url.startswith("data:image/"):
+                return (
+                    {
+                        "type": "text",
+                        "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(url)} encoded characters).",
                     },
                     True,
                 )

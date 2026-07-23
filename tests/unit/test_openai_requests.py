@@ -1481,7 +1481,7 @@ def test_compact_trimming_elides_percent_encoded_image_url_in_string_output():
     assert "Omitted inline image bytes" in json.dumps(dumped_input)
 
 
-def test_compact_image_elision_keeps_other_input_when_rewritten_request_fits():
+def test_compact_trimming_prefers_lossless_context_trim_before_inline_image_elision():
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
@@ -1499,8 +1499,78 @@ def test_compact_image_elision_keeps_other_input_when_rewritten_request_fits():
     dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
 
     assert isinstance(dumped_input, list)
-    assert dumped_input[0] == payload["input"][0]
-    assert not any(isinstance(item, dict) and item.get("type") == "message" for item in dumped_input)
+    assert dumped_input[0] != payload["input"][0]
+    assert "data:image/png;base64" in json.dumps(dumped_input)
+    assert "Omitted inline image bytes" not in json.dumps(dumped_input)
+    assert any(isinstance(item, dict) and item.get("type") == "message" for item in dumped_input)
+
+
+def test_compact_trimming_elides_structured_chat_image_url_as_text_part():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"type": "function_call", "name": "capture", "call_id": "call-chat-image", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-chat-image",
+                "output": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64," + "A" * 500_000, "detail": "high"},
+                    }
+                ],
+            },
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    dumped_output = cast(Mapping[str, object], dumped_input[-1])
+    assert dumped_output["output"] == [
+        {
+            "type": "text",
+            "text": (
+                "[compact trim] Omitted inline image bytes that were already observed before compaction "
+                "(500022 encoded characters)."
+            ),
+        }
+    ]
+
+
+def test_compact_trimming_elides_bare_chat_image_url_as_text_part():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"type": "function_call", "name": "capture", "call_id": "call-bare-chat-image", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-bare-chat-image",
+                "output": [
+                    {
+                        "type": "image_url",
+                        "image_url": "data:image/png;base64," + "A" * 500_000,
+                    }
+                ],
+            },
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    dumped_output = cast(Mapping[str, object], dumped_input[-1])
+    assert dumped_output["output"] == [
+        {
+            "type": "text",
+            "text": (
+                "[compact trim] Omitted inline image bytes that were already observed before compaction "
+                "(500022 encoded characters)."
+            ),
+        }
+    ]
 
 
 def test_compact_trimming_keeps_accepted_file_reference_while_eliding_inline_image():
@@ -2446,7 +2516,7 @@ def test_extract_input_file_ids_string_input_returns_empty_set():
     assert extract_input_file_ids("Hello world") == set()
 
 
-def test_extract_input_file_ids_finds_top_level_and_nested_ids():
+def test_extract_input_file_ids_finds_actual_input_references_but_not_tool_metadata():
     input_value: list[JsonValue] = [
         {
             "role": "user",
@@ -2465,6 +2535,24 @@ def test_extract_input_file_ids_finds_top_level_and_nested_ids():
             "type": "custom_tool_call_output",
             "call_id": "call-file",
             "output": [{"type": "input_file", "file_id": "file_tool_output"}],
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call-metadata",
+            "input": {"type": "input_file", "file_id": "file_call_metadata"},
+        },
+        {
+            "type": "additional_tools",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "parameters": {
+                            "properties": {"fake_file": {"type": "input_file", "file_id": "file_tool_schema"}}
+                        }
+                    },
+                }
+            ],
         },
     ]
     assert extract_input_file_ids(input_value) == {"file_a", "file_b", "file_c", "file_tool_output"}

@@ -32,6 +32,7 @@ class _WebSocketServiceProtocol(Protocol):
     _open_upstream_websocket_with_budget: Any
     _prepare_response_bridge_request_state: Any
     _prepare_websocket_response_create_request: Any
+    _persist_security_work_lineage_markers: Any
     _process_upstream_websocket_text: Any
     _raise_for_unsupported_input_image_references: Any
     _refresh_websocket_api_key_policy: Any

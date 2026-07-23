@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -536,7 +536,7 @@ class AccountsRepository:
                 update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
             )
             if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
-                await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+                await self._clear_account_sticky_sessions(account_id)
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return result.scalar_one_or_none() is not None
@@ -602,7 +602,7 @@ class AccountsRepository:
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
-                await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+                await self._clear_account_sticky_sessions(account_id)
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return updated_id is not None
@@ -625,6 +625,22 @@ class AccountsRepository:
                 latest_response_id=None,
                 latest_input_item_count=None,
                 latest_input_full_fingerprint=None,
+            )
+        )
+
+    async def _clear_account_sticky_sessions(self, account_id: str) -> None:
+        await self._session.execute(
+            update(StickySession)
+            .where(
+                StickySession.account_id == account_id,
+                StickySession.requires_security_work_authorized.is_(True),
+            )
+            .values(account_id=None, updated_at=func.now())
+        )
+        await self._session.execute(
+            delete(StickySession).where(
+                StickySession.account_id == account_id,
+                StickySession.requires_security_work_authorized.is_(False),
             )
         )
 
@@ -669,7 +685,7 @@ class AccountsRepository:
                     .where(RequestLog.account_id == account_id)
                     .values(account_id=None, deleted_at=utcnow()),
                 )
-            await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+            await self._clear_account_sticky_sessions(account_id)
             await self._session.execute(delete(AccountUsageRollup).where(AccountUsageRollup.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
             deleted_id = result.scalar_one_or_none()

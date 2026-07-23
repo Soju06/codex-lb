@@ -817,6 +817,49 @@ async def test_accounts_delete_clears_usage_cache_after_commit(db_setup, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_accounts_delete_detaches_required_sticky_lineage_and_deletes_neutral_mapping(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = _make_account("acc-delete-security-lineage", "delete-security-lineage@example.com")
+        await repo.upsert(account, merge_by_email=False)
+        session.add_all(
+            [
+                StickySession(
+                    key="required-security-lineage",
+                    kind=StickySessionKind.CODEX_SESSION,
+                    account_id=account.id,
+                    requires_security_work_authorized=True,
+                ),
+                StickySession(
+                    key="neutral-lineage",
+                    kind=StickySessionKind.CODEX_SESSION,
+                    account_id=account.id,
+                    requires_security_work_authorized=False,
+                ),
+            ]
+        )
+        await session.commit()
+
+        deleted = await repo.delete(account.id)
+        required = await session.get(
+            StickySession,
+            ("required-security-lineage", StickySessionKind.CODEX_SESSION),
+            populate_existing=True,
+        )
+        neutral = await session.get(
+            StickySession,
+            ("neutral-lineage", StickySessionKind.CODEX_SESSION),
+            populate_existing=True,
+        )
+
+    assert deleted is True
+    assert required is not None
+    assert required.account_id is None
+    assert required.requires_security_work_authorized is True
+    assert neutral is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_does_not_clear_workspace_on_workspace_less_reauth(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

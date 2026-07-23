@@ -20,8 +20,11 @@ def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) ->
     All fields map by name. Callers that need a ``UsageWindowRow`` from a
     usage row should route through this helper.
     """
+    account_id = entry.account_id
+    if account_id is None:
+        raise ValueError("Detached security-lineage usage rows are not usage windows")
     return UsageWindowRow(
-        account_id=entry.account_id,
+        account_id=account_id,
         used_percent=entry.used_percent,
         reset_at=entry.reset_at,
         window_minutes=entry.window_minutes,

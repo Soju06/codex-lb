@@ -41,6 +41,7 @@ from app.modules.proxy._service.support import (
     _account_selection_recovery_sleep_seconds,
     _request_log_client_fields,
     _RetryableStreamError,
+    _security_lineage_ids,
     _signal_propagated_capacity_startup_wait,
     _stream_settlement_error_payload,
     _StreamSettlement,
@@ -313,6 +314,12 @@ class _StreamingRetryMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        security_lineage_ids = _security_lineage_ids(
+            affinity.selection_key,
+            affinity.legacy_selection_key,
+            payload.previous_response_id,
+        )
+        request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)
         if turn_state is not None:
@@ -360,6 +367,12 @@ class _StreamingRetryMixin:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
+        security_requirement_preexisting = await proxy._security_lineage_requires_security_work_authorized(
+            security_lineage_ids,
+            api_key_id=api_key.id if api_key is not None else None,
+        )
+        bypass_new_security_lineage_requirement = False
+        security_lineage_persisted: bool | None = None
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
@@ -379,6 +392,16 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        async def _persist_security_work_lineage_once() -> bool:
+            nonlocal security_lineage_persisted
+            if security_lineage_persisted is not None:
+                return security_lineage_persisted
+            security_lineage_persisted = await proxy._persist_security_work_lineage_markers(
+                security_lineage_ids,
+                api_key_id=api_key.id if api_key is not None else None,
+            )
+            return security_lineage_persisted
 
         async def _wait_for_process_network_recovery(
             account: Account,
@@ -770,6 +793,8 @@ class _StreamingRetryMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
+                            security_lineage_ids=security_lineage_ids,
+                            enforce_persisted_security_lineage=not bypass_new_security_lineage_requirement,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
                             # Keep stored-object and file ownership strict. The
@@ -821,21 +846,34 @@ class _StreamingRetryMixin:
                         and require_security_work_authorized
                         and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
                     ):
+                        if not security_requirement_preexisting and last_security_work_retry_error is not None:
+                            _facade().logger.info(
+                                "No security-work-authorized account available for new stream classification; "
+                                "continuing ordinary failover request_id=%s",
+                                request_id,
+                            )
+                            yield format_sse_event(
+                                _facade()._security_work_advisory_event(
+                                    code=_facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                                    message=_facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                                    request_id=request_id,
+                                    action="continue_normal_selection",
+                                )
+                            )
+                            require_security_work_authorized = False
+                            bypass_new_security_lineage_requirement = True
+                            continue
                         _facade().logger.info(
-                            "No security-work-authorized account available for stream retry; "
-                            "continuing normal account failover request_id=%s",
+                            "No security-work-authorized account available for classified stream request_id=%s",
                             request_id,
                         )
-                        yield format_sse_event(
-                            _facade()._security_work_advisory_event(
-                                code=_facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
-                                message=_facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
-                                request_id=request_id,
-                                action="continue_normal_selection",
-                            )
+                        event = response_failed_event(
+                            selection.error_code,
+                            selection.error_message or _facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                            response_id=request_id,
                         )
-                        require_security_work_authorized = False
-                        continue
+                        yield format_sse_event(event)
+                        return
                     if not account and deferred_capacity_account is not None:
                         deferred_error = _parse_openai_error(last_transient_exc.payload) if last_transient_exc else None
                         recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(
@@ -1624,8 +1662,11 @@ class _StreamingRetryMixin:
                                     # already excluded by the helper.
                                     break
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
+                                    security_requirement_persisted = await _persist_security_work_lineage_once()
                                     if (
-                                        account.security_work_authorized
+                                        not security_requirement_persisted
+                                        or account.security_work_authorized
+                                        or request_contains_input_file_ids
                                         or account.id == file_preferred_account_id
                                         or require_preferred_account
                                         or attempt >= max_attempts - 1
@@ -1827,8 +1868,11 @@ class _StreamingRetryMixin:
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     if _facade()._is_security_work_authorization_required_error(exc.code, exc.error.get("message")):
+                        security_requirement_persisted = await _persist_security_work_lineage_once()
                         if (
-                            account.security_work_authorized
+                            not security_requirement_persisted
+                            or account.security_work_authorized
+                            or request_contains_input_file_ids
                             or account.id == file_preferred_account_id
                             or require_preferred_account
                             or attempt >= max_attempts - 1
@@ -2289,8 +2333,11 @@ class _StreamingRetryMixin:
                     error_type = error.type if error else None
                     error_param = error.param if error else None
                     if _facade()._is_security_work_authorization_required_error(error_code, error_message):
+                        security_requirement_persisted = await _persist_security_work_lineage_once()
                         if (
-                            not account.security_work_authorized
+                            security_requirement_persisted
+                            and not account.security_work_authorized
+                            and not request_contains_input_file_ids
                             and account.id != file_preferred_account_id
                             and not require_preferred_account
                             and attempt < max_attempts - 1

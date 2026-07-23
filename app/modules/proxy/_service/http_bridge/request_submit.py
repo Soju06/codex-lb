@@ -1615,6 +1615,53 @@ class _HTTPBridgeRequestSubmitMixin:
                 logger.warning("HTTP bridge pre-created auth retry failed", exc_info=True)
             return "failed"
 
+    async def _persist_http_bridge_security_work_requirement(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+    ) -> bool:
+        request_state.require_security_work_authorized = True
+        durable_session_id = session.durable_session_id
+        durable_persisted = False
+        if durable_session_id is not None:
+            try:
+                durable_snapshot = await self._durable_bridge.require_security_work_authorized(
+                    session_id=durable_session_id
+                )
+                durable_persisted = durable_snapshot is not None
+            except Exception:
+                logger.warning(
+                    "Failed to persist durable HTTP bridge security-work requirement session_id=%s",
+                    durable_session_id,
+                    exc_info=True,
+                )
+
+        affinity_key = request_state.affinity_policy.selection_key
+        lineage_ids = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    session.key.affinity_key,
+                    affinity_key,
+                    session.upstream_turn_state,
+                    session.downstream_turn_state,
+                    request_state.session_id,
+                    request_state.previous_response_id,
+                )
+                if value
+            )
+        )
+        marker_persisted = await self._persist_security_work_lineage_markers(
+            lineage_ids,
+            api_key_id=session.key.api_key_id,
+        )
+        if not durable_persisted and not marker_persisted:
+            logger.error(
+                "Refusing HTTP bridge security-work retry because no durable requirement was persisted session_id=%s",
+                durable_session_id,
+            )
+        return durable_persisted or marker_persisted
+
     async def _retry_http_bridge_security_work_request(
         self: Any,
         session: "_HTTPBridgeSession",

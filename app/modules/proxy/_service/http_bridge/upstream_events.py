@@ -1173,8 +1173,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                security_requirement_persisted = await self._persist_http_bridge_security_work_requirement(
+                    session, terminal_request_state
+                )
                 can_retry_security_work = (
-                    not is_http_bridge_account_neutral_replay(
+                    security_requirement_persisted
+                    and not is_http_bridge_account_neutral_replay(
                         kind=session.key.affinity_kind,
                         key=session.key.affinity_key,
                     )
@@ -1194,9 +1198,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 message=(
                                     _SECURITY_WORK_RETRY_MESSAGE
                                     if can_retry_security_work
-                                    else "Upstream flagged this request as possible cybersecurity work. "
-                                    "codex-lb cannot safely switch accounts after this response has already started, "
-                                    "so the original upstream error is being forwarded."
+                                    else "Upstream flagged this request as possible cybersecurity work, but "
+                                    "codex-lb could not durably preserve that requirement or cannot safely "
+                                    "switch accounts after this response has already started. The original "
+                                    "upstream error is being forwarded."
                                 ),
                                 request_id=terminal_request_state.request_log_id or terminal_request_state.request_id,
                                 action=(

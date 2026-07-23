@@ -24,7 +24,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
-from app.core.openai.requests import ResponsesCompactRequest
+from app.core.openai.requests import ResponsesCompactRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
@@ -36,7 +36,11 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import (
+    _request_log_client_fields,
+    _RequestLogFailureMetadata,
+    _security_lineage_ids,
+)
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
     _AffinityPolicy,
@@ -86,6 +90,8 @@ class _CompactServiceProtocol(Protocol):
     _http_bridge_sessions: Any
     _http_bridge_turn_state_index: Any
     _durable_bridge: Any
+    _persist_security_work_lineage_markers: Any
+    _security_lineage_requires_security_work_authorized: Any
 
     def _get_work_admission(self) -> WorkAdmissionController: ...
 
@@ -610,6 +616,12 @@ class _CompactMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        security_lineage_ids = _security_lineage_ids(
+            affinity.selection_key,
+            affinity.legacy_selection_key,
+            getattr(payload, "previous_response_id", None),
+        )
+        request_contains_input_file_ids = bool(extract_input_file_ids(payload.input))
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = (
@@ -832,6 +844,27 @@ class _CompactMixin:
             network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
             require_security_work_authorized = False
+            # A warning observed during this request may be retried without an
+            # authorized pool for backwards-compatible first-turn failover.
+            # A marker that existed before this request is a durable policy
+            # decision and must never be softened that way.
+            security_requirement_preexisting = await proxy._security_lineage_requires_security_work_authorized(
+                security_lineage_ids,
+                api_key_id=api_key.id if api_key is not None else None,
+            )
+            bypass_new_security_lineage_requirement = False
+            security_lineage_persisted: bool | None = None
+
+            async def _persist_security_work_lineage_once() -> bool:
+                nonlocal security_lineage_persisted
+                if security_lineage_persisted is not None:
+                    return security_lineage_persisted
+                security_lineage_persisted = await proxy._persist_security_work_lineage_markers(
+                    security_lineage_ids,
+                    api_key_id=api_key.id if api_key is not None else None,
+                )
+                return security_lineage_persisted
+
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
@@ -850,6 +883,8 @@ class _CompactMixin:
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    security_lineage_ids=security_lineage_ids,
+                    enforce_persisted_security_lineage=not bypass_new_security_lineage_requirement,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -859,14 +894,16 @@ class _CompactMixin:
                     if (
                         require_security_work_authorized
                         and selection.error_code == _no_security_work_authorized_accounts_code()
+                        and not security_requirement_preexisting
                         and last_exc is not None
                     ):
                         logger.info(
-                            "No security-work-authorized account available for compact retry; "
-                            "continuing normal account failover request_id=%s",
+                            "No security-work-authorized account available for new compact classification; "
+                            "continuing ordinary failover request_id=%s",
                             request_id,
                         )
                         require_security_work_authorized = False
+                        bypass_new_security_lineage_requirement = True
                         selection = await proxy._select_account_with_budget_compatible(
                             deadline,
                             request_id=request_id,
@@ -881,16 +918,16 @@ class _CompactMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=False,
+                            security_lineage_ids=security_lineage_ids,
+                            enforce_persisted_security_lineage=False,
                             lease_kind="response_create",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
                         )
                         account = selection.account
-                    if account is not None:
-                        pass
-                    elif last_exc is not None:
+                    if account is None and last_exc is not None:
                         break
-                    else:
+                    if account is None:
                         log_error_code = selection.error_code or "no_accounts"
                         log_error_message = selection.error_message or "No active accounts available"
                         status_code = 429 if log_error_code == "account_response_create_cap" else 503
@@ -1375,8 +1412,19 @@ class _CompactMixin:
                             safe_retry_budget -= 1
                             continue
                         if _is_security_work_authorization_required_error(code, error_message):
+                            security_requirement_persisted = await _persist_security_work_lineage_once()
+                            if not security_requirement_persisted:
+                                await proxy._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                raise
                             if (
-                                not account.security_work_authorized
+                                not request_contains_input_file_ids
+                                and rewritten_file_account_id is None
+                                and not account.security_work_authorized
                                 and account.id != preferred_account_id
                                 and _account_attempt < _compact_max_account_attempts() - 1
                             ):

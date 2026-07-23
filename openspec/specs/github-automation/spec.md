@@ -7,9 +7,9 @@ Repository automation around the Codex review merge gate: the `Codex review labe
 
 The Codex label synchronization script MUST add `needs rebase` when GitHub
 reports a confirmed merge conflict, MUST remove it when GitHub reports a known
-non-conflict state, and MUST preserve its current value when merge state is
-ambiguous. It MUST NOT infer a conflict from the pull request merely being
-behind the base branch.
+mergeable or non-conflict state, and MUST preserve its current value only when
+GitHub reports `UNKNOWN`. It MUST NOT infer a conflict from the pull request
+merely being behind the base branch.
 
 #### Scenario: Confirmed conflict gains the label
 
@@ -27,6 +27,17 @@ behind the base branch.
 - **WHEN** GitHub reports a pull request as `BEHIND` without a confirmed conflict
 - **THEN** the synchronizer removes `needs rebase` when present
 - **AND** it does not add the label to an unlabelled pull request
+
+#### Scenario: Other mergeable statuses remove a stale label
+
+- **GIVEN** a pull request has `needs rebase`
+- **WHEN** GitHub reports `CLEAN`, `DRAFT`, `HAS_HOOKS`, or `UNSTABLE`
+- **THEN** the synchronizer removes `needs rebase`
+
+#### Scenario: Unknown state preserves current evidence
+
+- **WHEN** GitHub reports `UNKNOWN`
+- **THEN** the synchronizer preserves the current `needs rebase` value
 
 ### Requirement: Codex review label sync write-token fallback
 

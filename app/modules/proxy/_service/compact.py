@@ -91,6 +91,7 @@ class _CompactServiceProtocol(Protocol):
     _http_bridge_turn_state_index: Any
     _durable_bridge: Any
     _persist_security_work_lineage_markers: Any
+    _security_lineage_requires_security_work_authorized: Any
 
     def _get_work_admission(self) -> WorkAdmissionController: ...
 

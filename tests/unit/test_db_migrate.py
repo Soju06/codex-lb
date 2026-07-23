@@ -2132,6 +2132,9 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
     preexisting_marker_key = (
         "@security-work/v2/" + hashlib.sha256("api-key-scope\0security-alias-root".encode()).hexdigest()
     )
+    previous_response_marker_key = (
+        "@security-work/v2/" + hashlib.sha256("api-key-scope\0resp-security-alias-root".encode()).hexdigest()
+    )
     with create_engine(sync_url, future=True).begin() as connection:
         connection.execute(
             text(
@@ -2195,10 +2198,15 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
                 """
                 INSERT INTO http_bridge_session_aliases (
                     id, session_id, alias_kind, alias_value, alias_hash, api_key_scope
-                ) VALUES (
-                    'security-alias', 'security-bridge', 'turn_state', 'security-alias-root',
-                    'alias-hash', 'api-key-scope'
-                )
+                ) VALUES
+                    (
+                        'security-alias', 'security-bridge', 'turn_state', 'security-alias-root',
+                        'alias-hash', 'api-key-scope'
+                    ),
+                    (
+                        'security-previous-response-alias', 'security-bridge', 'previous_response_id',
+                        'resp-security-alias-root', 'previous-response-alias-hash', 'api-key-scope'
+                    )
                 """
             )
         )
@@ -2227,6 +2235,13 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
             ),
             {"key": preexisting_marker_key},
         ).one()
+        previous_response_marker = connection.execute(
+            text(
+                "SELECT account_id, requires_security_work_authorized FROM sticky_sessions "
+                "WHERE key = :key AND kind = 'codex_session'"
+            ),
+            {"key": previous_response_marker_key},
+        ).one()
         sticky_foreign_keys = connection.execute(text("PRAGMA foreign_key_list('sticky_sessions')")).mappings().all()
         usage_index_sql = {
             name: sql
@@ -2250,6 +2265,7 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
     assert {"auto_redeem_expiring_reset_credits", "reset_credit_redeem_lead_minutes"} <= quota_columns
     assert detached
     assert alias_marker == (None, True)
+    assert previous_response_marker == (None, True)
     assert all(account_id is None and bool(required) for account_id, required in detached)
     assert any(
         foreign_key["from"] == "account_id"

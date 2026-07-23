@@ -13860,15 +13860,19 @@ async def test_stream_responses_preexisting_security_lineage_never_falls_back(mo
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         del payload, headers, access_token, account_id, base_url, raise_for_status
-        yield "data: " + json.dumps(
-            {
-                "type": "response.failed",
-                "response": {
-                    "id": "resp_preexisting_security",
-                    "error": {"code": "invalid_request_error", "message": cyber_message},
-                },
-            }
-        ) + "\n\n"
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_preexisting_security",
+                        "error": {"code": "invalid_request_error", "message": cyber_message},
+                    },
+                }
+            )
+            + "\n\n"
+        )
 
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
@@ -14290,6 +14294,7 @@ async def test_http_bridge_security_work_requirement_persists_durable_and_detach
         api_key_reservation=None,
         started_at=1.0,
         session_id="downstream-turn",
+        previous_response_id="resp-bridge-security-root",
         affinity_policy=proxy_service._AffinityPolicy(
             key="affinity-root",
             kind=proxy_service.StickySessionKind.CODEX_SESSION,
@@ -14312,7 +14317,13 @@ async def test_http_bridge_security_work_requirement_persists_durable_and_detach
         session_id="durable-security-root"
     )
     sticky_repository.require_security_work_authorized.assert_awaited_once_with(
-        ("canonical-root", "affinity-root", "upstream-turn", "downstream-turn"),
+        (
+            "canonical-root",
+            "affinity-root",
+            "upstream-turn",
+            "downstream-turn",
+            "resp-bridge-security-root",
+        ),
         api_key_scope="api-key-a",
     )
     assert persisted is True
@@ -15348,6 +15359,66 @@ async def test_compact_responses_treats_missing_security_work_pool_as_optional(m
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["account_id"] for call in request_logs.calls] == [fallback_account.id]
     assert request_logs.calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_preexisting_security_lineage_never_falls_back(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_compact_preexisting_security_regular")
+    fallback_account = _make_account("acc_compact_preexisting_security_fallback")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=regular_account, error_message=None),
+            AccountSelection(
+                account=None,
+                error_message="No accounts marked as authorized for security work",
+                error_code="no_security_work_authorized_accounts",
+            ),
+            AccountSelection(account=fallback_account, error_message=None),
+        ]
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(service, "_security_lineage_requires_security_work_authorized", AsyncMock(return_value=True))
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            400,
+            openai_error(
+                "invalid_request_error",
+                cyber_message,
+                error_type="invalid_request_error",
+            ),
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact-preexisting-security"})
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert _proxy_error_code(exc) == "invalid_request_error"
+    assert select_account.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -35801,7 +35872,10 @@ async def test_http_bridge_owner_forward_defers_image_inlining(monkeypatch):
     monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
     monkeypatch.setattr(service, "_http_bridge_owner_client", OwnerClient())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
-    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=owner_forward))
+    persisted_security_lookup = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_security_lineage_requires_security_work_authorized", persisted_security_lookup)
+    get_or_create_session = AsyncMock(return_value=owner_forward)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create_session)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(
         proxy_service,
@@ -35840,6 +35914,12 @@ async def test_http_bridge_owner_forward_defers_image_inlining(monkeypatch):
     assert forwarded_payloads
     forwarded = forwarded_payloads[0].model_dump(mode="json", exclude_none=True)
     assert forwarded["input"][0]["content"][0]["image_url"] == original_url
+    persisted_security_lookup.assert_awaited_once()
+    security_lookup_call = persisted_security_lookup.await_args
+    assert security_lookup_call is not None
+    assert "sid-forward-inline" in security_lookup_call.args[0]
+    assert get_or_create_session.await_args is not None
+    assert get_or_create_session.await_args.kwargs["require_security_work_authorized"] is True
 
 
 def test_count_external_image_urls_handles_object_content() -> None:

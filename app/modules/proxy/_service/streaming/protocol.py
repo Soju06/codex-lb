@@ -21,6 +21,7 @@ class _StreamingServiceProtocol(Protocol):
     _resolve_websocket_previous_response_owner: Any
     _run_api_key_reservation_heartbeat: Any
     _schedule_cancel_safe_cleanup: Any
+    _security_lineage_requires_security_work_authorized: Any
     _select_account_with_budget_compatible: Any
     _settle_stream_api_key_usage: Any
     _stream_once: Any

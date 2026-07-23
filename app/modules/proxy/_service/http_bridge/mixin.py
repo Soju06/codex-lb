@@ -1739,6 +1739,7 @@ class _HTTPBridgeMixin(
             )
         )
         settings = await _service_get_settings_cache().get()
+        prefer_earlier_reset_accounts = bool(getattr(settings, "prefer_earlier_reset_accounts", False))
         excluded_account_ids = set(exclude_account_ids or ())
         if require_preferred_account:
             fallback_on_preferred_account_unavailable = False
@@ -1752,7 +1753,7 @@ class _HTTPBridgeMixin(
                 "request_stage": request_stage,
                 "api_key": api_key,
                 "affinity_policy": affinity,
-                "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
+                "prefer_earlier_reset_accounts": prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
                 "model": request_model,
@@ -2022,6 +2023,7 @@ class _HTTPBridgeMixin(
             _http_bridge_request_budget_seconds(_service_get_settings()),
         )
         settings = await _service_get_settings_cache().get()
+        prefer_earlier_reset_accounts = bool(getattr(settings, "prefer_earlier_reset_accounts", False))
         session.api_key = request_state.api_key
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
@@ -2101,7 +2103,7 @@ class _HTTPBridgeMixin(
                 request_stage="reattach",
                 api_key=session.api_key,
                 affinity_policy=session.affinity,
-                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=_routing_strategy(settings),
                 model=session.request_model,

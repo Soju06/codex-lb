@@ -692,6 +692,40 @@ async def test_v1_responses_non_streaming_500_preserves_http_status(async_client
     assert call_count == 3
 
 
+@pytest.mark.asyncio
+async def test_v1_responses_non_streaming_server_overload_status_retries_same_account(async_client, monkeypatch):
+    """OpenAI SDK non-streaming responses can receive overloaded status JSON.
+
+    The status may be non-500, but the normalized upstream code is still a
+    transient overload before any downstream response is visible.
+    """
+    await _import_account(async_client, "acc_prop_overload", "prop-overload@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            raise ProxyResponseError(
+                429,
+                openai_error("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_nonstream_overload_retry_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": "hi"}
+    response = await async_client.post("/v1/responses", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_nonstream_overload_retry_ok"
+    assert seen_account_ids == ["acc_prop_overload", "acc_prop_overload"]
+
+
 # ===========================================================================
 # Compact — HTTP 500 retry
 # ===========================================================================

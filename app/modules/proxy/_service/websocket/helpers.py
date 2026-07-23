@@ -347,9 +347,9 @@ def _facade() -> Any:
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
-    downstream_response_id = None
+    downstream_response_id = request_state.replay_downstream_response_id
     if request_state.response_id is not None and not request_state.awaiting_response_created:
-        downstream_response_id = request_state.response_id
+        downstream_response_id = downstream_response_id or request_state.response_id
     if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
         request_state.request_text = request_state.fresh_upstream_request_text
         request_state.previous_response_id = None

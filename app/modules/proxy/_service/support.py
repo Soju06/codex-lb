@@ -67,6 +67,7 @@ _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_
 _TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
+_WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS = 3
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
     {
         "turn_state_header",
@@ -1071,7 +1072,7 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
 def _websocket_request_can_replay_before_visible_output(request_state: _WebSocketRequestState) -> bool:
     if not request_state.request_text:
         return False
-    if request_state.replay_count >= 1:
+    if request_state.replay_count >= _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS:
         return False
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm

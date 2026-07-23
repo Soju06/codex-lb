@@ -12971,6 +12971,52 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_http_500_exhaustion_preserves_error_when_no_failover_candidate(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_http_500_only")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_count = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        if not excluded_account_ids:
+            return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts")
+
+    async def fake_stream(*args: object, **kwargs: object):
+        nonlocal call_count
+        del args, kwargs
+        call_count += 1
+        raise proxy_module.ProxyResponseError(
+            500,
+            openai_error("server_error", "Upstream failed after retries"),
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - keep this async generator-shaped
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert call_count == 3
+    assert seen_excluded_account_ids == [set(), {account.id}]
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "server_error"
+    assert event["response"]["error"]["message"] == "Upstream failed after retries"
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_empty_upstream_emits_terminal_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

@@ -877,6 +877,16 @@ class _HTTPBridgeStreamingMixin:
         if durable_lookup is not None and payload_looks_like_full_resend and durable_anchor_trimmable:
             durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
             durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
+            if isinstance(payload.input, list) and durable_full_resend_anchor_count is not None:
+                replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=durable_full_resend_anchor_count,
+                )
+                if replay_projection is not None:
+                    durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
+                        replay_projection.input_items,
+                        stored_count=replay_projection.stored_prefix_count,
+                    )
         durable_model_transition_lookup = (
             durable_lookup
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
@@ -941,7 +951,7 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             ):
-                if payload_looks_like_full_resend:
+                if payload_looks_like_full_resend and durable_full_resend_retains_prior_output:
                     durable_full_resend_starts_fresh_bridge = True
                     _log_http_bridge_event(
                         "fresh_reattach_full_resend_without_anchor",

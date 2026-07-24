@@ -6355,17 +6355,23 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retains_prior_output", [False, True])
 async def test_stream_via_http_bridge_uses_trimmable_full_resend_without_durable_anchor(
     monkeypatch: pytest.MonkeyPatch,
+    retains_prior_output: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    input_items = [
+    stored_input_items = [
         {
             "type": "additional_tools",
             "role": "developer",
             "tools": [{"type": "custom", "name": "shell"}],
         },
         {"role": "user", "content": "hello"},
+    ]
+    input_items = [
+        *stored_input_items,
+        *([{"role": "assistant", "content": "hello back"}] if retains_prior_output else []),
         {"role": "user", "content": "follow up"},
     ]
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -6477,10 +6483,8 @@ async def test_stream_via_http_bridge_uses_trimmable_full_resend_without_durable
                 state=HttpBridgeSessionState.ACTIVE,
                 latest_turn_state="http_turn_1",
                 latest_response_id="resp_latest",
-                latest_input_item_count=2,
-                latest_input_full_fingerprint=proxy_service._fingerprint_input_items(
-                    cast(list[Any], payload.input)[:2]
-                ),
+                latest_input_item_count=len(stored_input_items),
+                latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
             )
         ),
     )
@@ -6514,13 +6518,23 @@ async def test_stream_via_http_bridge_uses_trimmable_full_resend_without_durable
     ]
 
     assert chunks == []
-    assert prepared_previous_response_ids == [None]
-    assert prepared_input_lengths == [3]
+    assert prepared_previous_response_ids == ([None] if retains_prior_output else [None, "resp_latest", "resp_latest"])
+    assert prepared_input_lengths == (
+        [len(input_items)] if retains_prior_output else [len(input_items), len(input_items), 1]
+    )
     assert all("tools" not in frame for frame in prepared_frames)
-    assert prepared_frames[-1]["input"] == input_items
+    if retains_prior_output:
+        assert [item["role"] for item in prepared_frames[-1]["input"]] == [
+            "developer",
+            "user",
+            "assistant",
+            "user",
+        ]
+    else:
+        assert prepared_frames[-1]["input"] == [input_items[-1]]
     assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
         "true",
-    ]
+    ] * len(prepared_frames)
     assert all(
         frame["reasoning"]
         == {

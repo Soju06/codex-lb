@@ -18,6 +18,14 @@ _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS = frozenset(
         "x-codex-conversation-id",
         "x-codex-session-id",
         "x-codex-turn-state",
+        # Client-declared session identity recognized by affinity parsing;
+        # must be stripped alongside the Codex names so an account-neutral
+        # replay cannot re-register the alias on a fresh upstream account.
+        "x-session-affinity",
+        "x-session-id",
+        "x-opencode-session",
+        "x-claude-code-agent-id",
+        "x-claude-remote-session-id",
     }
 )
 

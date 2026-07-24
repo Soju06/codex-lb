@@ -102,3 +102,10 @@
   retaining the displayed ID.
 - [x] 6.5 Update focused frontend tests and run the relevant frontend and strict
   OpenSpec validation commands.
+
+## 7. Review Follow-ups
+
+- [x] 7.1 Preserve nullable cached-token totals in both conversation endpoints
+  when every eligible row has an unknown cached-token value.
+- [x] 7.2 Accept percent-encoded slash-containing conversation IDs in the detail
+  route and cover the externally listed-then-opened path.

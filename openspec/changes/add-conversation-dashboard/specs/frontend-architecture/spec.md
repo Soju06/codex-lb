@@ -36,7 +36,9 @@ internal names MUST NOT be emitted as alternate response fields.
 `reasoning_tokens` used for a row when `output_tokens` is null.
 `cachedInputTokens` MUST use the existing per-row clamp: null remains null;
 otherwise the cached value is clamped to `[0, input_tokens]` when input tokens
-are present.
+are present. At aggregate level, null per-row values MUST NOT be converted to
+zero; when every eligible row has a null cached value, `cachedInputTokens` MUST
+be null, and otherwise it MUST equal the sum of the known clamped values.
 
 Representative account values MUST use `request_count DESC,
 latest_requested_at DESC, lexical account ASC`. List model values MUST be
@@ -147,7 +149,9 @@ MUST operate only on returned rows.
 
 An encoded blank path such as `GET /api/conversations/%20` MUST return the
 project-standard 404 response. An unknown non-empty conversation ID MUST also
-return the project-standard 404 response.
+return the project-standard 404 response. The detail route MUST accept any
+normalized non-empty stored conversation ID, including IDs containing `/`, when
+the client percent-encodes the opaque ID as one path value.
 
 #### Scenario: Details preserve cumulative elapsed time
 
@@ -172,6 +176,13 @@ return the project-standard 404 response.
 - **WHEN** the client calls `GET /api/conversations/%20` or requests an unknown
   non-empty ID
 - **THEN** the API returns the standard 404 error envelope
+
+#### Scenario: Slash-containing detail IDs remain addressable
+
+- **GIVEN** an eligible conversation has the normalized ID `workspace/thread-1`
+- **WHEN** the client calls `GET /api/conversations/workspace%2Fthread-1`
+- **THEN** the API returns that conversation's details with
+  `conversationId` equal to `workspace/thread-1`
 
 ### Requirement: Dashboard conversation view
 

@@ -694,6 +694,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         error_type="rate_limit_error",
                     ),
                 )
+            await self._ensure_http_bridge_session_stream_lease_locked(session)
             session.queued_request_count += 1
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
@@ -1239,6 +1240,70 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 detail="last_admission_waiter_cancelled",
             )
+
+    async def _ensure_http_bridge_session_stream_lease_locked(
+        self: Any,
+        session: "_HTTPBridgeSession",
+    ) -> None:
+        """Reacquire the account stream lease for a session idled between turns.
+
+        Callers hold ``session.pending_lock``. The lease is released when the
+        session's last in-flight turn detaches, so an idle session does not
+        occupy a per-account stream slot; the next turn must pass normal cap
+        admission again. Denial raises the standard local-cap envelope so the
+        existing recoverable capacity wait applies.
+        """
+        if session.account_lease is not None or session.closed:
+            return
+        load_balancer = getattr(self, "_load_balancer", None)
+        if load_balancer is None:
+            return
+        lease = await load_balancer.acquire_account_lease(
+            session.account.id,
+            kind="stream",
+        )
+        if lease is None:
+            raise ProxyResponseError(
+                429,
+                openai_error(
+                    "account_stream_cap",
+                    "Account stream capacity is exhausted; wait for active streams to finish.",
+                    error_type="rate_limit_error",
+                ),
+            )
+        session.account_lease = lease
+
+    async def _maybe_release_idle_http_bridge_session_lease(
+        self: Any,
+        session: "_HTTPBridgeSession",
+    ) -> None:
+        """Release the account stream lease once a session has no in-flight work.
+
+        The per-account stream cap exists to bound concurrent upstream
+        generation; an idle bridge session keeping its upstream WebSocket warm
+        must not occupy a slot for its whole idle TTL. Session close releases
+        via its own path, so a session that closed keeps that settlement.
+        """
+        load_balancer = getattr(self, "_load_balancer", None)
+        if load_balancer is None:
+            return
+        lease = None
+        async with session.pending_lock:
+            if (
+                not session.closed
+                and session.account_lease is not None
+                and session.queued_request_count == 0
+                and session.admission_waiter_count == 0
+                and not session.pending_requests
+            ):
+                lease = session.account_lease
+                session.account_lease = None
+        if lease is None:
+            return
+        try:
+            await load_balancer.release_account_lease(lease)
+        except Exception:
+            logger.warning("Failed to release idle HTTP bridge account lease", exc_info=True)
 
     async def _detach_http_bridge_request(
         self: Any,

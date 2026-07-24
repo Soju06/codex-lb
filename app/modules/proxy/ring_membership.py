@@ -86,12 +86,18 @@ class RingMembershipService:
             await session.execute(stmt)
             await session.commit()
 
-    async def heartbeat(self, instance_id: str, *, endpoint_base_url: str | None = None) -> None:
+    async def heartbeat(
+        self,
+        instance_id: str,
+        *,
+        endpoint_base_url: str | None = None,
+        account_stream_inflight: dict[str, int] | None = None,
+    ) -> None:
         """Upsert heartbeat — recovers from mark_stale or unregister by sibling workers."""
         async with self._session() as session:
             dialect = session.get_bind().dialect.name
             now = utcnow()
-            metadata_json = _bridge_ring_metadata_json(endpoint_base_url)
+            metadata_json = _bridge_ring_metadata_json(endpoint_base_url, account_stream_inflight)
             if dialect == "postgresql":
                 stmt = (
                     pg_insert(BridgeRingMember)
@@ -214,6 +220,33 @@ class RingMembershipService:
             metadata_json = result.scalar_one_or_none()
         return _bridge_ring_endpoint_from_metadata(metadata_json)
 
+    async def list_active_stream_inflight(
+        self,
+        self_instance_id: str,
+        *,
+        stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS,
+    ) -> dict[str, dict[str, int] | None]:
+        """Fresh peers' published per-account stream-lease counts.
+
+        Maps every other active member's instance id to its published counts,
+        or ``None`` when that member's metadata carries no counts, so
+        consumers can distinguish incomplete data from idle peers.
+        """
+        from datetime import timedelta
+
+        cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
+        statement = select(BridgeRingMember.instance_id, BridgeRingMember.metadata_json).where(
+            BridgeRingMember.last_heartbeat_at >= cutoff,
+            BridgeRingMember.instance_id != self_instance_id,
+        )
+        async with self._session() as session:
+            result = await session.execute(statement)
+            rows = result.all()
+        return {
+            instance_id: _bridge_ring_stream_inflight_from_metadata(metadata_json)
+            for instance_id, metadata_json in rows
+        }
+
     async def ring_fingerprint(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> str:
         """sha256 of sorted active member list. Same for all pods with same membership."""
         members = await self.list_active(stale_threshold_seconds)
@@ -229,10 +262,41 @@ class RingMembershipService:
             await close_session(session)
 
 
-def _bridge_ring_metadata_json(endpoint_base_url: str | None) -> str | None:
+def _bridge_ring_metadata_json(
+    endpoint_base_url: str | None,
+    account_stream_inflight: dict[str, int] | None = None,
+) -> str | None:
+    # ``list_active(require_endpoint=True)`` treats a non-null metadata row as
+    # endpoint-bearing, so metadata is only written alongside an advertised
+    # endpoint; stream-inflight counts ride along on the same upsert.
     if endpoint_base_url is None:
         return None
-    return json.dumps({"endpoint_base_url": endpoint_base_url}, ensure_ascii=True, separators=(",", ":"))
+    payload: dict[str, object] = {"endpoint_base_url": endpoint_base_url}
+    if account_stream_inflight is not None:
+        payload["account_stream_inflight"] = {
+            account_id: int(count) for account_id, count in account_stream_inflight.items() if count > 0
+        }
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _bridge_ring_stream_inflight_from_metadata(metadata_json: str | None) -> dict[str, int] | None:
+    """Published per-account stream counts; None when absent (mixed-version ring)."""
+    if metadata_json is None:
+        return None
+    try:
+        payload = json.loads(metadata_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    counts = payload.get("account_stream_inflight")
+    if not isinstance(counts, dict):
+        return None
+    parsed: dict[str, int] = {}
+    for account_id, count in counts.items():
+        if isinstance(account_id, str) and isinstance(count, int) and count > 0:
+            parsed[account_id] = count
+    return parsed
 
 
 def _bridge_ring_endpoint_from_metadata(metadata_json: str | None) -> str | None:

@@ -565,3 +565,164 @@ async def test_refresh_cap_partition_uses_effective_dashboard_caps_for_hysteresi
     clock.advance(60.0)
     await refresh_cap_partition(_four_rank2, "replica-m")
     assert get_cap_partition() == CapPartition(replica_count=4, rank=2)
+
+
+class TestStreamShareBorrowing:
+    """Peer-headroom borrowing for stream leases under partitioned caps."""
+
+    def test_borrows_fair_fraction_of_idle_peer_headroom(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 2
+        )
+
+    def test_peer_usage_shrinks_headroom(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {"acct": 3}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 0
+        )
+
+    def test_other_accounts_do_not_count_against_headroom(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {"other": 7}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 2
+        )
+
+    def test_missing_peer_counts_disable_borrowing(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": None})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 0
+        )
+
+    def test_incomplete_peer_coverage_disables_borrowing(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=2,
+                configured_stream_limit=8,
+                replica_count=3,
+            )
+            == 0
+        )
+
+    def test_no_snapshot_disables_borrowing(self) -> None:
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 0
+        )
+
+    def test_stale_snapshot_disables_borrowing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        monkeypatch.setattr(cap_partitioning_module, "PEER_INFLIGHT_MAX_AGE_SECONDS", -1.0)
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 0
+        )
+
+    def test_unlimited_cap_and_single_replica_disable_borrowing(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=0,
+                replica_count=2,
+            )
+            == 0
+        )
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=1,
+            )
+            == 0
+        )
+
+
+class TestEffectiveStreamAdmissionCap:
+    def _partitioned_caps(self):
+        from app.modules.proxy._load_balancer.types import AccountConcurrencyCaps
+
+        return AccountConcurrencyCaps(
+            response_create_limit=2,
+            stream_limit=4,
+            configured_response_create_limit=4,
+            configured_stream_limit=8,
+            replica_count=2,
+        )
+
+    def test_static_share_used_while_it_admits(self) -> None:
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=2,
+                caps=caps,
+                stream_reserve_slots=1,
+            )
+            == 3
+        )
+
+    def test_borrow_extends_exhausted_share(self) -> None:
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        # share 4 exhausted; headroom (8 - 4) / 2 = 2 -> ceiling 4 + 2 - 1 = 5
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=4,
+                caps=caps,
+                stream_reserve_slots=1,
+            )
+            == 5
+        )
+
+    def test_exhausted_share_without_peer_data_keeps_static_ceiling(self) -> None:
+        caps = self._partitioned_caps()
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=4,
+                caps=caps,
+                stream_reserve_slots=1,
+            )
+            == 3
+        )

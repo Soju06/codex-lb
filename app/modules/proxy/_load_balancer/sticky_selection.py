@@ -33,6 +33,7 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
+from app.modules.proxy.cap_partitioning import effective_stream_admission_cap
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
@@ -1165,9 +1166,15 @@ def _filter_states_for_account_caps(
                 continue
         else:
             cap = caps.stream_limit
-            effective_cap = max(1, cap - max(0, stream_reserve_slots))
-            if cap > 0 and state.inflight_streams >= effective_cap:
-                continue
+            if cap > 0:
+                effective_cap = effective_stream_admission_cap(
+                    state.account_id,
+                    local_inflight=state.inflight_streams,
+                    caps=caps,
+                    stream_reserve_slots=stream_reserve_slots,
+                )
+                if state.inflight_streams >= effective_cap:
+                    continue
         filtered.append(state)
     return filtered
 

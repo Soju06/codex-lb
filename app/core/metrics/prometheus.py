@@ -232,6 +232,11 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    account_stream_share_borrows_total = Counter(
+        "codex_lb_account_stream_share_borrows_total",
+        "Total stream leases admitted beyond the static replica share via peer-headroom borrowing",
+        registry=REGISTRY,
+    )
     _replica_gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
         # Sibling workers share one instance identity and compute the same
@@ -325,6 +330,7 @@ else:
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_inflight_leases: GaugeLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    account_stream_share_borrows_total: CounterLike | None = None
     cap_partition_replicas: GaugeLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
@@ -349,6 +355,7 @@ __all__ = [
     "account_lease_acquired_total",
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",
+    "account_stream_share_borrows_total",
     "accounts_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",

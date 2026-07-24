@@ -4,7 +4,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import ColumnElement, Integer, and_, cast, func, literal, or_, select, text, update
+from sqlalchemy import ColumnElement, Integer, and_, cast, false, func, literal, or_, select, text, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,9 +14,12 @@ from app.db.models import (
     QuotaPlannerDecision,
     QuotaPlannerSettings,
     QuotaWindowObservation,
+    RequestDemandQuarterRollup,
     RequestLog,
 )
 from app.db.session import sqlite_writer_section
+from app.modules.accounts.usage_time_rollup import QUARTER_SLOT_SECONDS, from_dimension
+from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_demand_window
 from app.modules.quota_planner.logic import PlannerSettings, encode_working_days, parse_working_days
 
 _SETTINGS_ID = 1
@@ -39,13 +42,19 @@ def _to_db_naive_utc(value: datetime | None) -> datetime | None:
 
 @dataclass(frozen=True, slots=True)
 class DemandBin:
+    """One demand slot's aggregate. Folded history is served from the quarter
+    rollup at its (slot, account, kind) grain, so api_key_id / model /
+    reasoning_effort / status are ``None`` for folded bins; the un-folded raw
+    tail keeps the legacy fine grain. ``DemandBinLike`` (the only consumer
+    contract) never reads those fields."""
+
     slot_epoch: int
     account_id: str | None
     api_key_id: str | None
-    model: str
+    model: str | None
     reasoning_effort: str | None
     request_kind: str
-    status: str
+    status: str | None
     input_tokens: int
     cached_input_tokens: int
     output_tokens: int
@@ -397,6 +406,41 @@ class QuotaPlannerRepository:
         bucket_seconds: int = 900,
     ) -> list[DemandBin]:
         since = to_utc_naive(since) if since is not None else (utcnow() - timedelta(days=28))
+        bins: list[DemandBin] = []
+        raw_windows: list[RawWindow] = [(since, None)]
+        if bucket_seconds == QUARTER_SLOT_SECONDS:
+            # Folded history from the quarter rollup (its native slot size);
+            # the rollup keeps soft-deleted traffic as a dimension, so the
+            # legacy `deleted_at IS NULL` filter becomes `is_deleted = false`.
+            # Any other slot size degrades to the full raw scan.
+            rollup_rows, raw_windows = await read_demand_window(
+                self._session,
+                since,
+                filters=(RequestDemandQuarterRollup.is_deleted.is_(false()),),
+            )
+            bins.extend(
+                DemandBin(
+                    slot_epoch=row.slot_epoch,
+                    account_id=from_dimension(row.account_id),
+                    api_key_id=None,
+                    model=None,
+                    reasoning_effort=None,
+                    request_kind=row.request_kind,
+                    status=None,
+                    input_tokens=row.input_tokens,
+                    cached_input_tokens=row.cached_input_tokens,
+                    output_tokens=row.output_or_reasoning_tokens,
+                    cost_usd=row.cost_usd,
+                    request_count=row.request_count,
+                )
+                for row in rollup_rows
+            )
+        if raw_windows:
+            bins.extend(await self._aggregate_demand_bins_raw(raw_windows, bucket_seconds))
+        bins.sort(key=lambda demand: demand.slot_epoch)
+        return bins
+
+    async def _aggregate_demand_bins_raw(self, windows: list[RawWindow], bucket_seconds: int) -> list[DemandBin]:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
@@ -424,7 +468,7 @@ class QuotaPlannerRepository:
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
                 func.count(RequestLog.id).label("request_count"),
             )
-            .where(and_(RequestLog.requested_at >= since, RequestLog.deleted_at.is_(None)))
+            .where(and_(raw_windows_clause(windows), RequestLog.deleted_at.is_(None)))
             .group_by(
                 bucket_col,
                 RequestLog.account_id,

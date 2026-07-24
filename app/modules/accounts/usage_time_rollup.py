@@ -71,7 +71,12 @@ TS_FOLD_SLICE = timedelta(hours=48)
 TS_MAX_SLICES_PER_PASS = 20
 
 _EPOCH = datetime(1970, 1, 1)
-_EXCLUDED_REQUEST_KINDS = ("warmup", "limit_warmup")
+
+# Synthetic request kinds every statistics read path filters out. Folded
+# verbatim as a dimension; readers exclude them bucket-side exactly as the
+# legacy raw queries do row-side.
+WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
+_EXCLUDED_REQUEST_KINDS = WARMUP_REQUEST_KINDS
 
 # Stored stand-in for NULL account_id / api_key_id / service_tier (PK columns
 # cannot be NULL, and NULLs would be distinct under a unique constraint).
@@ -256,7 +261,11 @@ class RequestUsageTimeRollupRepository:
         )
 
     async def read_hourly(
-        self, *, since_epoch: int | None = None, until_epoch: int | None = None
+        self,
+        *,
+        since_epoch: int | None = None,
+        until_epoch: int | None = None,
+        filters: Sequence[ColumnElement[bool]] = (),
     ) -> tuple[list[HourlyUsageRollupRow], datetime | None]:
         return await self._read(
             RequestUsageHourlyRollup,
@@ -265,10 +274,15 @@ class RequestUsageTimeRollupRepository:
             HourlyUsageRollupRow,
             since_epoch,
             until_epoch,
+            filters,
         )
 
     async def read_errors(
-        self, *, since_epoch: int | None = None, until_epoch: int | None = None
+        self,
+        *,
+        since_epoch: int | None = None,
+        until_epoch: int | None = None,
+        filters: Sequence[ColumnElement[bool]] = (),
     ) -> tuple[list[HourlyErrorRollupRow], datetime | None]:
         return await self._read(
             RequestUsageHourlyErrorRollup,
@@ -277,10 +291,15 @@ class RequestUsageTimeRollupRepository:
             HourlyErrorRollupRow,
             since_epoch,
             until_epoch,
+            filters,
         )
 
     async def read_demand(
-        self, *, since_epoch: int | None = None, until_epoch: int | None = None
+        self,
+        *,
+        since_epoch: int | None = None,
+        until_epoch: int | None = None,
+        filters: Sequence[ColumnElement[bool]] = (),
     ) -> tuple[list[QuarterDemandRollupRow], datetime | None]:
         return await self._read(
             RequestDemandQuarterRollup,
@@ -289,10 +308,13 @@ class RequestUsageTimeRollupRepository:
             QuarterDemandRollupRow,
             since_epoch,
             until_epoch,
+            filters,
         )
 
-    async def _read(self, model, epoch_column, columns: tuple[str, ...], row_type, since_epoch, until_epoch):
-        join_conditions = []
+    async def _read(
+        self, model, epoch_column, columns: tuple[str, ...], row_type, since_epoch, until_epoch, filters=()
+    ):
+        join_conditions = list(filters)
         if since_epoch is not None:
             join_conditions.append(epoch_column >= since_epoch)
         if until_epoch is not None:
@@ -378,7 +400,7 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
 def _error_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
     bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
     account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
-    # Exact reproduction of the top-error read filter (`_top_error_stmt`):
+    # Exact reproduction of the top-error read filter:
     # warmup kinds excluded, soft-deleted rows INCLUDED.
     stmt = (
         select(bucket, account_id, RequestLog.error_code, func.count(RequestLog.id))

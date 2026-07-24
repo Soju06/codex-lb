@@ -114,6 +114,42 @@ async def test_reacquire_denial_raises_local_cap_envelope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reacquire_racing_close_releases_fresh_lease() -> None:
+    """A close during the acquire await must not strand a lease on the closed session.
+
+    _close_http_bridge_session does not take pending_lock before settling the
+    session's lease, so it can set session.closed while acquire_account_lease
+    is suspended. The freshly acquired lease must be returned and the turn
+    must fail with the closed-bridge envelope instead of installing a lease
+    that no cleanup path would ever release.
+    """
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    lease = _make_lease("l-race")
+
+    async def acquire_and_close(*_args: object, **_kwargs: object) -> proxy_service.AccountLease:
+        session.closed = True
+        return lease
+
+    release_account_lease = AsyncMock()
+    fake_self = SimpleNamespace(
+        _load_balancer=SimpleNamespace(
+            acquire_account_lease=AsyncMock(side_effect=acquire_and_close),
+            release_account_lease=release_account_lease,
+        )
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async with session.pending_lock:
+            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert session.account_lease is None
+    release_account_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
 async def test_reacquire_noop_when_lease_already_held() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     session = _make_bridge_session()

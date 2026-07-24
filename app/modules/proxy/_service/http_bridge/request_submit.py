@@ -1256,6 +1256,12 @@ class _HTTPBridgeRequestSubmitMixin:
         occupy a per-account stream slot; the next turn must pass normal cap
         admission again. Denial raises the standard local-cap envelope so the
         existing recoverable capacity wait applies.
+
+        The lease stays per-session (one upstream stream): a session that
+        already holds a lease admits further queued turns without acquiring
+        another, because those turns multiplex over the session's single
+        upstream WebSocket — unchanged from the pre-existing per-session
+        lease lifecycle.
         """
         if session.account_lease is not None or session.closed:
             return
@@ -1275,6 +1281,24 @@ class _HTTPBridgeRequestSubmitMixin:
                     error_type="rate_limit_error",
                 ),
             )
+        if session.closed:
+            # A close or eviction ran while the acquire await was suspended
+            # (the close path does not take pending_lock before settling the
+            # session's lease). Installing this lease on the closed session
+            # would leak the slot: close already settled, and the idle
+            # release helper skips closed sessions. Return the slot and fail
+            # the turn like any other submit on a closed bridge.
+            try:
+                await load_balancer.release_account_lease(lease)
+            except Exception:
+                logger.warning(
+                    "Failed to release stream lease acquired for closed HTTP bridge session",
+                    exc_info=True,
+                )
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+            )
         session.account_lease = lease
 
     async def _maybe_release_idle_http_bridge_session_lease(
@@ -1284,7 +1308,8 @@ class _HTTPBridgeRequestSubmitMixin:
         """Release the account stream lease once a session has no in-flight work.
 
         The per-account stream cap exists to bound concurrent upstream
-        generation; an idle bridge session keeping its upstream WebSocket warm
+        streams (one bridge session holds one slot for its single upstream
+        WebSocket); an idle bridge session keeping its upstream WebSocket warm
         must not occupy a slot for its whole idle TTL. Session close releases
         via its own path, so a session that closed keeps that settlement.
         """

@@ -13,11 +13,13 @@ Before the stable release PR for `X.Y.Z` is merged, a `vX.Y.Z-beta.N`
 prerelease SHALL have been published and deployed to at least one
 production-scale environment for a soak of at least 48 hours without new
 regressions attributable to the release train. A maintainer MAY promote
-directly to stable without a completed soak only when the delta since the last
-soaked prerelease of the train consists solely of documentation, CI, or
-release-tooling changes, or when the promotion is an urgent security or outage
-hotfix; the exception and its reason SHALL be recorded on the stable release
-PR before merge.
+directly to stable without a completed soak only when the entire unsoaked
+delta (every change since the last soaked prerelease of the train, or since
+the previous stable release when no prerelease exists) consists solely of
+documentation, CI, or release-tooling changes, an urgent security or outage
+hotfix, or a combination of these; a train that also carries unrelated
+unsoaked changes SHALL NOT use this exception. The exception and its reason
+SHALL be recorded on the stable release PR before merge.
 
 When the release train contains Alembic revisions, the maintainer SHALL review
 the revisions between the previous stable tag and the release candidate
@@ -46,10 +48,21 @@ the train contains no data backfills.
 #### Scenario: stable promotion without a soaked beta records an exception
 
 - **GIVEN** no `v1.21.1-beta.N` prerelease has completed a 48-hour soak
-- **AND** the release train is an urgent security hotfix
+- **AND** the entire delta since `v1.21.0` consists of an urgent security
+  hotfix and CI changes only
 - **WHEN** a maintainer merges the stable release PR for `1.21.1` with the
   exception and its reason recorded on the PR
 - **THEN** the promotion is compliant with this requirement
+
+#### Scenario: unrelated unsoaked changes cannot ride a hotfix exception
+
+- **GIVEN** no `v1.22.0-beta.N` prerelease has completed a 48-hour soak
+- **AND** the delta since the previous stable release contains an urgent
+  hotfix alongside unrelated feature or migration changes
+- **WHEN** a maintainer considers promoting `1.22.0` directly to stable
+- **THEN** the hotfix exception does not apply to the train
+- **AND** the train either soaks as a beta or the hotfix is released
+  separately
 
 #### Scenario: data backfills are identified from Alembic revisions
 

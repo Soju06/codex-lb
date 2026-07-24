@@ -360,10 +360,14 @@ memory pressure, and upstream-protocol regressions surface without burning a
 stable version number.
 
 Exceptions — a maintainer may promote directly to stable, noting the reason in
-the release PR, when the delta since the last soaked beta contains only:
+the release PR, when the **entire** unsoaked delta consists of (any
+combination of):
 
 - documentation, CI, or release-tooling changes, or
 - a security or outage hotfix where waiting out the soak is the greater risk.
+
+A train that also carries unrelated unsoaked changes must either soak as a
+beta or ship the hotfix separately.
 
 Before merging a release PR whose train includes migrations, inspect the
 Alembic revisions directly (`git diff vPREV..HEAD -- app/db/alembic/versions`)

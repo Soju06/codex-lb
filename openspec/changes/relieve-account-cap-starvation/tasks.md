@@ -9,11 +9,12 @@
 
 ## 2. Stream-share borrowing
 
-- [x] 2.1 Compute a per-account borrow allowance (`floor((cap − observed cluster in-flight) / R)`, floored at 0) gated on fresh counts from every other active member.
+- [x] 2.1 Compute a per-account borrow allowance (`floor((cap − conservative cluster in-flight) / R)`, floored at 0) gated on fresh counts from every other active member and reserving each peer's possible static-share growth since its heartbeat.
 - [x] 2.2 Apply the allowance in the sticky-selection cap filter and the lease admission check for stream leases only.
 - [x] 2.3 Record borrowed-lease admissions in a metric.
 - [x] 2.4 Clamp static-share admission by fresh cluster headroom so peer borrows are not re-admitted locally.
 - [x] 2.5 Validate peer-count snapshots against the active peer identities from the latest membership refresh, not member count alone.
+- [x] 2.6 Prevent simultaneous replicas from borrowing the same stale headroom by flooring each peer's effective usage at its largest reserve-adjusted static share.
 
 ## 3. Bounded account-capacity wait
 

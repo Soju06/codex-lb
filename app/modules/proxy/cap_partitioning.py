@@ -195,6 +195,15 @@ class PeerStreamInflightSnapshot:
             total += max(0, int(counts.get(account_id, 0)))
         return total
 
+    def conservative_peer_inflight(self, account_id: str, *, static_floor: int) -> int | None:
+        """Peer usage including growth each peer may have admitted since publishing."""
+        total = 0
+        for counts in self.counts_by_instance.values():
+            if counts is None:
+                return None
+            total += max(static_floor, int(counts.get(account_id, 0)), 0)
+        return total
+
 
 class _PeerStreamInflightHolder:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -293,6 +302,7 @@ def effective_stream_admission_cap(
         local_inflight=local_inflight,
         configured_stream_limit=caps.configured_stream_limit,
         replica_count=caps.replica_count,
+        stream_reserve_slots=reserve,
     )
     if borrow <= 0:
         return effective
@@ -313,6 +323,14 @@ def _fresh_complete_peer_inflight(account_id: str, *, replica_count: int) -> int
     """
     if replica_count <= 1:
         return None
+    snapshot = _fresh_complete_peer_snapshot(replica_count=replica_count)
+    if snapshot is None:
+        return None
+    return snapshot.peer_inflight(account_id)
+
+
+def _fresh_complete_peer_snapshot(*, replica_count: int) -> PeerStreamInflightSnapshot | None:
+    """Return a fresh snapshot only when it covers the current peer set."""
     snapshot = _peer_inflight_holder.fresh_snapshot(max_age_seconds=PEER_INFLIGHT_MAX_AGE_SECONDS)
     if snapshot is None:
         return None
@@ -321,7 +339,7 @@ def _fresh_complete_peer_inflight(account_id: str, *, replica_count: int) -> int
         return None
     if len(snapshot.counts_by_instance) < replica_count - 1:
         return None
-    return snapshot.peer_inflight(account_id)
+    return snapshot
 
 
 def stream_share_borrow_allowance(
@@ -330,21 +348,23 @@ def stream_share_borrow_allowance(
     local_inflight: int,
     configured_stream_limit: int | None,
     replica_count: int,
+    stream_reserve_slots: int = 0,
 ) -> int:
     """Extra stream-lease slots this replica may use beyond its static share.
 
-    Fair fraction of the observed cluster headroom:
-    ``floor((cap - observed cluster inflight) / R)``, floored at zero. Returns
-    0 — preserving the static share — unless the partition has multiple
-    members, the configured cap is positive, and every other active member has
-    fresh published counts. Published counts lag by up to one heartbeat, so
-    simultaneous borrows may transiently exceed the cluster cap; the fair
-    fraction bounds the sustained aggregate at the configured cap once counts
-    reflect actual usage.
+    Fair fraction of conservative cluster headroom, floored at zero. Each peer
+    is assumed able to grow to the largest reserve-adjusted static share since
+    its last heartbeat, so simultaneous replicas cannot borrow the same stale
+    headroom. Returns zero unless every other active member has fresh counts.
     """
     if configured_stream_limit is None or configured_stream_limit <= 0 or replica_count <= 1:
         return 0
-    peer_inflight = _fresh_complete_peer_inflight(account_id, replica_count=replica_count)
+    snapshot = _fresh_complete_peer_snapshot(replica_count=replica_count)
+    if snapshot is None:
+        return 0
+    largest_static_share = (configured_stream_limit + replica_count - 1) // replica_count
+    peer_static_floor = max(1, largest_static_share - max(0, stream_reserve_slots))
+    peer_inflight = snapshot.conservative_peer_inflight(account_id, static_floor=peer_static_floor)
     if peer_inflight is None:
         return 0
     headroom = configured_stream_limit - (max(0, local_inflight) + peer_inflight)

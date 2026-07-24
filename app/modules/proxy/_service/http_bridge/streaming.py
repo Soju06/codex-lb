@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
+    _http_bridge_startup_wait_timeout_error,
     _http_bridge_turn_state_anchor_for_owner_failure,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
@@ -282,8 +283,11 @@ def _http_bridge_can_replace_retired_gate_session(
 ) -> bool:
     # A gate timeout happens before this waiter is appended or sent.  Once the
     # stale owner has retired the session, only that fully cleaned pre-submit
-    # state is safe to carry to a replacement; any response/replay/downstream
-    # marker makes the upstream acceptance boundary ambiguous.
+    # state is safe to carry to a replacement; any response/downstream marker
+    # makes the upstream acceptance boundary ambiguous. A non-zero replay
+    # count reflects client-side reconnect attempts, not upstream progress on
+    # *this* bridge attempt, so it does not by itself make the boundary
+    # ambiguous and must not disqualify replacement on its own.
     code, _message = _proxy_error_code_message(exc)
     return (
         code == "response_create_gate_timeout"
@@ -294,12 +298,33 @@ def _http_bridge_can_replace_retired_gate_session(
         and request_state.event_queue is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
-        and request_state.replay_count == 0
         and request_state.last_downstream_sequence_number is None
         and not request_state.downstream_visible
         and not request_state.awaiting_response_created
         and request_state.response_create_gate is None
         and not request_state.response_create_gate_acquired
+    )
+
+
+def _http_bridge_owner_is_stuck(
+    request_state: _WebSocketRequestState,
+    *,
+    yielded_any: bool,
+    age_seconds: float,
+    threshold_seconds: float,
+) -> bool:
+    # Mirrors the waiter-side stuck-gate predicate, but evaluated by the
+    # owner request itself from inside its own keepalive loop. A previous-
+    # response account pin makes moving accounts unsafe (continuation must
+    # stay on the account that owns the prior response id), so those turns
+    # are excluded here and left to the existing idle-timeout behavior.
+    return (
+        not yielded_any
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and not request_state.downstream_visible
+        and request_state.previous_response_id is None
+        and age_seconds >= threshold_seconds
     )
 
 
@@ -1909,6 +1934,101 @@ class _HTTPBridgeStreamingMixin:
                     except Exception:
                         pass
                 return
+            owner_stuck_code, _owner_stuck_message = _proxy_error_code_message(exc)
+            if (
+                owner_stuck_code == "response_create_gate_owner_stuck"
+                and not yielded_any
+                and request_state.previous_response_id is None
+            ):
+                await self._handle_stream_error(
+                    session.account,
+                    {"message": "HTTP bridge owner produced no response events before the stuck-gate threshold"},
+                    "response_create_gate_owner_stuck",
+                )
+                _log_http_bridge_event(
+                    "owner_stuck_gate_failover",
+                    bridge_session_key,
+                    account_id=session.account.id,
+                    model=effective_payload.model,
+                    detail="reason=response_create_gate_owner_stuck",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                    owner_check_applied=True,
+                )
+                owner_stuck_reroute_key = _HTTPBridgeSessionKey(
+                    "internal_owner_stuck_reroute",
+                    f"{bridge_session_key.affinity_kind}:{uuid4().hex}",
+                    bridge_session_key.api_key_id,
+                    strength="soft",
+                )
+                while True:
+                    try:
+                        owner_stuck_replacement_session = await self._get_or_create_http_bridge_session(
+                            owner_stuck_reroute_key,
+                            headers=dict(headers),
+                            affinity=_AffinityPolicy(),
+                            api_key=api_key,
+                            request_model=effective_payload.model,
+                            idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                                affinity=_AffinityPolicy(),
+                                idle_ttl_seconds=idle_ttl_seconds,
+                                codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                                prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+                            ),
+                            max_sessions=max_sessions,
+                            previous_response_id=None,
+                            gateway_safe_mode=runtime_config.gateway_safe_mode,
+                            allow_forward_to_owner=False,
+                            forwarded_request=forwarded_request,
+                            durable_lookup=None,
+                            request_stage=request_state.request_stage,
+                            preferred_account_id=None,
+                            request_usage_budget=request_state.request_usage_budget,
+                            request_deadline=request_deadline,
+                        )
+                    except ProxyResponseError as capacity_exc:
+                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        if wait_plan is None:
+                            raise
+                        bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                        logger.info(
+                            "Waiting for an account to recover before retrying after a stuck HTTP bridge owner "
+                            "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
+                            request_id,
+                            effective_payload.model,
+                            bounded_wait_seconds,
+                            account_capacity_wait_seconds,
+                            message,
+                        )
+                        async for line in _iter_account_capacity_wait_sse(
+                            request_id=request_id,
+                            reason=message,
+                            sleep_seconds=bounded_wait_seconds,
+                            emit_keepalives=not propagate_http_errors,
+                        ):
+                            yield line
+                        if _service_time().monotonic() >= request_deadline:
+                            raise
+                        continue
+                    break
+                owner_stuck_replacement_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
+                    owner_stuck_replacement_session,
+                    request_state=request_state,
+                    text_data=text_data,
+                    queue_limit=queue_limit,
+                    propagate_http_errors=propagate_http_errors,
+                    downstream_turn_state=downstream_turn_state,
+                    request_deadline=request_deadline,
+                )
+                try:
+                    async for event_block in owner_stuck_replacement_events:
+                        yield event_block
+                finally:
+                    try:
+                        await owner_stuck_replacement_events.aclose()
+                    except Exception:
+                        pass
+                return
             if (
                 _http_bridge_should_attempt_soft_affinity_reroute(
                     exc,
@@ -2423,6 +2543,34 @@ class _HTTPBridgeStreamingMixin:
                             continue
                         keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
+                        stuck_gate_retire_after_seconds = float(
+                            getattr(
+                                _service_get_settings(),
+                                "http_responses_session_bridge_stuck_gate_retire_after_seconds",
+                                300.0,
+                            )
+                        )
+                        if _http_bridge_owner_is_stuck(
+                            request_state,
+                            yielded_any=yielded_any,
+                            age_seconds=_service_time().monotonic() - request_state.started_at,
+                            threshold_seconds=stuck_gate_retire_after_seconds,
+                        ):
+                            logger.info(
+                                "HTTP bridge owner stuck without any response event request_id=%s "
+                                "account_id=%s age_seconds=%.1f",
+                                request_state.request_id,
+                                session.account.id,
+                                _service_time().monotonic() - request_state.started_at,
+                            )
+                            await self._retire_stale_pending_http_bridge_session(
+                                session,
+                                detail="response_create_gate_owner_stuck",
+                            )
+                            raise _http_bridge_startup_wait_timeout_error(
+                                "http_bridge_owner_stuck_gate",
+                                code="response_create_gate_owner_stuck",
+                            )
                         if keepalive_count > max_keepalive_count:
                             logger.info(
                                 "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "

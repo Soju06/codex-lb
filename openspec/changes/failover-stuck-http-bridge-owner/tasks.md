@@ -1,0 +1,10 @@
+- [ ] Add a stuck-owner detection check to the HTTP bridge keepalive loop using the same zero-response-events / not-downstream-visible predicate already used for waiter-side retirement.
+- [ ] On stuck-owner detection, retire the session, exclude the stuck account, select a fresh eligible account, and resubmit the same request once on a new bridge before yielding anything to the client.
+- [ ] Skip owner-side failover entirely when the request has a previous-response account pin; let it continue waiting instead.
+- [ ] Record an error against the excluded account so it is not immediately reselected.
+- [ ] Broaden `_http_bridge_can_replace_retired_gate_session` to stop treating `replay_count > 0` as disqualifying on its own.
+- [ ] Add negative unit tests proving every other disqualifying field (response id, response event count, downstream sequence number, downstream visibility, gate ownership flags) still blocks replacement.
+- [ ] Add a unit test proving a stuck owner with no previous-response pin fails over to a different account before yielding to the client.
+- [ ] Add a unit test proving a stuck owner *with* a previous-response pin is not failed over.
+- [ ] Add an integration regression proving a hung upstream owner self-heals and the client never sees a disconnect.
+- [ ] Run focused unit/integration, lint, type, and strict OpenSpec validation.

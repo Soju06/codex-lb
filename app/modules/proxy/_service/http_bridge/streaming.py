@@ -866,6 +866,7 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_retains_prior_output = False
+        durable_full_resend_starts_fresh_bridge = False
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
         durable_anchor_trimmable = durable_lookup is not None and _input_prefix_matches_stored_context(
@@ -940,31 +941,30 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             ):
-                effective_payload = payload.model_copy(
-                    update={"previous_response_id": durable_lookup.latest_response_id}
-                )
-                proxy_injected_previous_response_id = True
-                _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
-                del _fresh_request_state
-                _log_http_bridge_event(
-                    "fresh_reattach_anchor_injected",
-                    bridge_session_key,
-                    account_id=None,
-                    model=payload.model,
-                    detail=f"response_id={durable_lookup.latest_response_id}",
-                    cache_key_family=bridge_session_key.affinity_kind,
-                    model_class=_extract_model_class(payload.model) if payload.model else None,
-                )
                 if payload_looks_like_full_resend:
+                    durable_full_resend_starts_fresh_bridge = True
                     _log_http_bridge_event(
-                        "durable_full_resend_anchor_injected",
+                        "fresh_reattach_full_resend_without_anchor",
                         bridge_session_key,
                         account_id=None,
                         model=payload.model,
-                        detail=(
-                            f"response_id={durable_lookup.latest_response_id} "
-                            f"stored_items={durable_full_resend_anchor_count}"
-                        ),
+                        detail=f"stored_items={durable_full_resend_anchor_count}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
+                else:
+                    effective_payload = payload.model_copy(
+                        update={"previous_response_id": durable_lookup.latest_response_id}
+                    )
+                    proxy_injected_previous_response_id = True
+                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                    del _fresh_request_state
+                    _log_http_bridge_event(
+                        "fresh_reattach_anchor_injected",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=f"response_id={durable_lookup.latest_response_id}",
                         cache_key_family=bridge_session_key.affinity_kind,
                         model_class=_extract_model_class(payload.model) if payload.model else None,
                     )
@@ -1593,7 +1593,8 @@ class _HTTPBridgeStreamingMixin:
                 return
         session = session_or_forward
         if (
-            durable_full_resend_anchor_count is not None
+            not durable_full_resend_starts_fresh_bridge
+            and durable_full_resend_anchor_count is not None
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None

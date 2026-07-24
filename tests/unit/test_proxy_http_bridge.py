@@ -6355,7 +6355,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_resend(
+async def test_stream_via_http_bridge_uses_trimmable_full_resend_without_durable_anchor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -6514,13 +6514,11 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
     ]
 
     assert chunks == []
-    assert prepared_previous_response_ids == [None, "resp_latest", "resp_latest"]
-    assert prepared_input_lengths == [3, 3, 1]
+    assert prepared_previous_response_ids == [None]
+    assert prepared_input_lengths == [3]
     assert all("tools" not in frame for frame in prepared_frames)
-    assert prepared_frames[-1]["input"] == [input_items[-1]]
+    assert prepared_frames[-1]["input"] == input_items
     assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
-        "true",
-        "true",
         "true",
     ]
     assert all(
@@ -7887,7 +7885,7 @@ async def test_stream_via_http_bridge_clears_injected_anchor_after_owner_unavail
         assert prepared_previous_response_ids == [None, None, None]
         assert forwarded_payloads == [payload]
     else:
-        assert prepared_previous_response_ids[-2:] == ["resp_latest", None]
+        assert prepared_previous_response_ids[-2:] == [None, None]
         assert forwarded_payloads == []
     assert get_or_create_kwargs[-1]["allow_forward_to_owner"] is False
     assert get_or_create_kwargs[-1]["exclude_account_ids"] == {"acc-1"}
@@ -16733,7 +16731,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     first_call = get_or_create.await_args_list[0]
     second_call = get_or_create.await_args_list[1]
     third_call = get_or_create.await_args_list[2]
-    assert first_call.kwargs["previous_response_id"] == ("resp_completed_anchor" if stored_model is None else None)
+    assert first_call.kwargs["previous_response_id"] is None
     assert first_call.kwargs["preferred_account_id"] == "acc-owner"
     assert first_call.kwargs["allow_forward_to_owner"] is True
     assert second_call.kwargs["previous_response_id"] is None

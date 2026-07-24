@@ -9,18 +9,20 @@ release-please stable release PR for the corresponding base version. Stable
 promotion SHALL rebuild PyPI, Docker, Helm, and GitHub Release artifacts with
 the stable version instead of retagging prerelease artifacts.
 
-Before the stable release PR for `X.Y.Z` is merged, the changes in the
-release candidate SHALL be covered by a `vX.Y.Z-beta.N` prerelease that has
-been published and deployed to at least one production-scale environment for
-a soak of at least 48 hours without new regressions attributable to the
-release train. The unsoaked delta — every change not covered by such a soaked
+Before the stable release PR for `X.Y.Z` is merged, every change in the
+release candidate SHALL either be covered by a `vX.Y.Z-beta.N` prerelease
+that has been published and deployed to at least one production-scale
+environment for a soak of at least 48 hours without new regressions
+attributable to the release train, or fall under the safe-delta exception
+below. The unsoaked delta — every change not covered by such a soaked
 prerelease, whether because no prerelease of the train completed a soak or
-because the change landed after the last soaked prerelease — SHALL consist
-solely of documentation, CI, or release-tooling changes, an urgent security
-or outage hotfix, or a combination of these; otherwise the train SHALL soak
-(again) as a new prerelease before stable promotion. When promotion relies on
-this exception, the exception and its reason SHALL be recorded on the stable
-release PR before merge.
+because the change landed after the last soaked prerelease — qualifies for
+the exception only when it consists solely of documentation, CI, or
+release-tooling changes, an urgent security or outage hotfix, or a
+combination of these; otherwise the train SHALL soak (again) as a new
+prerelease before stable promotion. When promotion relies on the exception,
+the exception and its reason SHALL be recorded on the stable release PR
+before merge.
 
 When the release train contains Alembic revisions, the maintainer SHALL review
 the revisions between the previous stable tag and the release candidate

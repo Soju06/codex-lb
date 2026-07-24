@@ -368,9 +368,11 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
     created_payload = proxy_api_module._parse_sse_payload(blocks[0])
     assert created_payload is not None
     assert created_payload["type"] == "response.created"
+    assert created_payload["sequence_number"] == 0
     payload = proxy_api_module._parse_sse_payload(blocks[1])
     assert payload is not None
     assert payload["type"] == "response.failed"
+    assert payload["sequence_number"] == 1
     response = payload["response"]
     assert isinstance(response, dict)
     error = response["error"]
@@ -395,6 +397,7 @@ async def test_normalize_public_responses_stream_preserves_initial_error_details
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
     payloads = [payload for payload in payloads if payload is not None]
     assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    assert [payload["sequence_number"] for payload in payloads] == [0, 1]
     response = payloads[1]["response"]
     assert isinstance(response, dict)
     error = response["error"]

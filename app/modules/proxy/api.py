@@ -6694,11 +6694,13 @@ def _public_response_failed_event_blocks(
         ),
     )
     if sequence_number is not None:
-        failed_payload["sequence_number"] = sequence_number
+        failed_payload["sequence_number"] = sequence_number + int(include_created)
     blocks: list[str] = []
     if include_created:
         synthetic_created = _synthetic_response_created_envelope(failed_payload)
         if synthetic_created is not None:
+            if sequence_number is not None:
+                synthetic_created["sequence_number"] = sequence_number
             blocks.append(format_sse_event(synthetic_created))
     blocks.append(format_sse_event(failed_payload))
     return blocks
@@ -6735,11 +6737,12 @@ def _public_response_failed_event_blocks_from_error(
             error_param=error.param,
         ),
     )
-    failed_payload["sequence_number"] = sequence_number
+    failed_payload["sequence_number"] = sequence_number + int(include_created)
     blocks: list[str] = []
     if include_created:
         synthetic_created = _synthetic_response_created_envelope(failed_payload)
         if synthetic_created is not None:
+            synthetic_created["sequence_number"] = sequence_number
             blocks.append(format_sse_event(synthetic_created))
     blocks.append(format_sse_event(failed_payload))
     return blocks

@@ -139,6 +139,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.retry import _resolved_configured_stream_transport
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -599,7 +600,12 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
-        runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        base_settings = _service_get_settings()
+        runtime_config = _http_bridge_runtime_config(dashboard_settings, base_settings)
+        configured_stream_transport, _explicit_stream_transport = _resolved_configured_stream_transport(
+            dashboard_settings,
+            base_settings,
+        )
         request_id = ensure_request_id()
         self._raise_for_unsupported_input_image_references(payload)
         payload_size_estimate_bytes = len(
@@ -617,7 +623,7 @@ class _HTTPBridgeStreamingMixin:
             ("signed forwarding context", forwarded_file_owner_account_id),
             ("local file pin", local_file_owner_account_id),
         )
-        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(base_settings)
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
@@ -641,7 +647,7 @@ class _HTTPBridgeStreamingMixin:
         if (
             runtime_config.enabled
             and force_upstream_stream_transport is None
-            and _service_get_settings().upstream_stream_transport != "websocket"
+            and configured_stream_transport != "websocket"
             and _http_bridge_request_is_unanchored_one_shot(
                 payload,
                 headers,

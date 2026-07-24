@@ -559,7 +559,16 @@ async def _fold_next_hourly_slice(session: AsyncSession, target: datetime) -> tu
         # Defensive DELETE: zero rows on the normal path (the watermark only
         # moves forward), but makes an operator watermark reset (escape
         # hatch) converge — a re-fold can never double-count or leave rows
-        # from a previous fold generation behind.
+        # from a previous fold generation behind. Convergence is guaranteed
+        # under the escape hatch's documented precondition (raw below the
+        # target still present, or the reset truncated the rollups in the
+        # same transaction): every previously-folded hour then either has
+        # raw rows (re-covered by a slice window and its DELETE) or no
+        # rollup rows. Hours the min()-jump skips are deliberately NOT
+        # cleared — after a rewind-only reset over retention-pruned history
+        # (the documented forbidden state) the skipped rollup rows are the
+        # ONLY surviving copy of those statistics, and deleting them would
+        # turn an operator mistake into permanent data loss.
         await session.execute(
             delete(RequestUsageHourlyRollup).where(
                 RequestUsageHourlyRollup.bucket_epoch >= start_epoch,

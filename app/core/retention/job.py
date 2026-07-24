@@ -106,12 +106,24 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
     while True:
         async with get_background_session() as session:
             async with sqlite_writer_section():
+                # FOR UPDATE: the batch's prune decision must serialize with
+                # anything mutating the fold state in another transaction —
+                # in particular the operator escape hatch (rollup truncate +
+                # watermark reset). An unlocked read could capture the old
+                # watermark, the reset could commit, and this batch would
+                # then prune raw rows whose folded statistics were just
+                # truncated — recoverable from neither side. With the row
+                # lock held through the batch, the reset either commits
+                # first (this read sees the epoch watermark and pruning
+                # pauses) or waits until the batch's delete has committed.
                 watermarks = (
                     await session.execute(
                         select(
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
-                        ).where(AccountUsageRollupState.id == 1)
+                        )
+                        .where(AccountUsageRollupState.id == 1)
+                        .with_for_update()
                     )
                 ).first()
                 watermark = min(watermarks) if watermarks is not None else None

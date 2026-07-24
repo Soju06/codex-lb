@@ -93,9 +93,7 @@ gatewayApi:
 
 `gatewayApi.gateway.gatewayClassName` is required when `create=true`. The
 Gateway defaults to a single HTTP listener on port 80; override
-`gatewayApi.gateway.listeners` for TLS or other ports. See the
-[Helm chart README](https://github.com/Soju06/codex-lb/blob/main/deploy/helm/codex-lb/README.md)
-for a TLS listener example.
+`gatewayApi.gateway.listeners` for TLS or other ports.
 
 ## Full chart reference
 

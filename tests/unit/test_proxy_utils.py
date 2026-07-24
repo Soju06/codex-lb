@@ -1336,6 +1336,23 @@ def test_filter_inbound_headers_strips_internal_capability_header():
     assert filtered["X-Custom"] == "preserved"
 
 
+def test_filter_inbound_headers_strips_client_session_identity_only_at_egress() -> None:
+    headers = {
+        "X-Session-Affinity": "affinity",
+        "X-Session-Id": "session",
+        "X-OpenCode-Session": "opencode",
+        "X-Claude-Code-Agent-Id": "agent",
+        "X-Claude-Remote-Session-Id": "remote",
+        "User-Agent": "opencode/1.18.3",
+    }
+
+    filtered = filter_inbound_headers(headers)
+    preserved = filter_inbound_headers(headers, preserve_client_session_identity=True)
+
+    assert {key.lower() for key in filtered} == {"user-agent"}
+    assert preserved == headers
+
+
 def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
     assert proxy_service._request_log_useragent_fields(
         {

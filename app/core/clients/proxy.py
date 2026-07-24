@@ -95,6 +95,13 @@ CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 CODEX_LB_REQUIRED_CAPABILITY_HEADER = "x-codex-lb-required-capability"
 CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
+CLIENT_SESSION_IDENTITY_HEADERS = (
+    "x-session-affinity",
+    "x-session-id",
+    "x-opencode-session",
+    "x-claude-code-agent-id",
+    "x-claude-remote-session-id",
+)
 
 IGNORE_INBOUND_HEADERS = {
     "authorization",
@@ -537,8 +544,10 @@ class CodexControlRequestPrivacyPolicy(Enum):
         return self is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
 
 
-def _should_drop_inbound_header(name: str) -> bool:
+def _should_drop_inbound_header(name: str, *, preserve_client_session_identity: bool) -> bool:
     normalized = name.lower()
+    if not preserve_client_session_identity and normalized in CLIENT_SESSION_IDENTITY_HEADERS:
+        return True
     if normalized in IGNORE_INBOUND_HEADERS:
         return True
     if normalized in INTERNAL_OPENAI_UPSTREAM_HEADERS:
@@ -550,8 +559,19 @@ def _should_drop_inbound_header(name: str) -> bool:
     return False
 
 
-def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
+def filter_inbound_headers(
+    headers: Mapping[str, str],
+    *,
+    preserve_client_session_identity: bool = False,
+) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in headers.items()
+        if not _should_drop_inbound_header(
+            key,
+            preserve_client_session_identity=preserve_client_session_identity,
+        )
+    }
 
 
 def _rewrite_turn_metadata_installation_id(value: JsonValue, codex_installation_id: str | None) -> JsonValue:

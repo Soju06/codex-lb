@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocketState
 
 from app.core import usage as usage_core
 from app.core.auth.dependencies import (
@@ -697,19 +698,59 @@ async def _codex_control_proxy(
     path: str,
     context: ProxyContext,
     api_key: ApiKeyData | None,
+    *,
+    bind_realtime_call: bool = False,
 ) -> Response:
+    successful_account_id: str | None = None
+
+    def capture_success_account(account_id: str) -> None:
+        nonlocal successful_account_id
+        successful_account_id = account_id
+
     try:
-        response = await context.service.codex_control_request(
-            path,
-            method=request.method,
-            payload=await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
-            query_params=list(request.query_params.multi_items()),
-            headers=request.headers,
-            codex_session_affinity=True,
-            api_key=api_key,
-        )
+        control_kwargs: dict[str, Any] = {
+            "method": request.method,
+            "payload": await request.body() if request.method.upper() not in {"GET", "HEAD"} else None,
+            "query_params": list(request.query_params.multi_items()),
+            "headers": request.headers,
+            "codex_session_affinity": True,
+            "api_key": api_key,
+        }
+        if bind_realtime_call:
+            control_kwargs["success_account_callback"] = capture_success_account
+        response = await context.service.codex_control_request(path, **control_kwargs)
     except ProxyResponseError as exc:
         return _logged_error_json_response(request, exc.status_code, exc.payload)
+
+    if bind_realtime_call and 200 <= response.status_code < 300:
+        if successful_account_id is None:
+            return _logged_error_json_response(
+                request,
+                503,
+                openai_error(
+                    "realtime_call_binding_failed",
+                    "Realtime call owner could not be determined",
+                    error_type="server_error",
+                ),
+            )
+        try:
+            await context.service.bind_realtime_call_owner(
+                response_headers=response.headers,
+                account_id=successful_account_id,
+                api_key=api_key,
+            )
+        except Exception:
+            logger.exception("Failed to persist realtime call owner binding")
+            return _logged_error_json_response(
+                request,
+                503,
+                openai_error(
+                    "realtime_call_binding_failed",
+                    "Realtime call owner binding could not be persisted",
+                    error_type="server_error",
+                ),
+            )
+
     return Response(
         content=response.body,
         status_code=response.status_code,
@@ -769,7 +810,13 @@ async def codex_realtime_calls(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _codex_control_proxy(request, "realtime/calls", context, api_key)
+    return await _codex_control_proxy(
+        request,
+        "realtime/calls",
+        context,
+        api_key,
+        bind_realtime_call=True,
+    )
 
 
 @router.post("/safety/arc")
@@ -1112,6 +1159,47 @@ async def internal_bridge_responses(
         enforce_openai_sdk_contract=False,
         prohibit_fast_mode=await _prohibit_fast_mode_enabled(),
     )
+
+
+@v1_ws_router.websocket("/live/{call_id}")
+async def v1_live_websocket(
+    websocket: WebSocket,
+    call_id: str,
+    context: ProxyContext = Depends(get_proxy_websocket_context),
+) -> None:
+    api_key, denial = await _validate_proxy_websocket_request(websocket)
+    if denial is not None:
+        await websocket.send_denial_response(denial)
+        return
+    try:
+        await context.service.proxy_realtime_live_websocket(
+            websocket,
+            call_id,
+            dict(websocket.headers),
+            list(websocket.query_params.multi_items()),
+            api_key=api_key,
+            client_ip=resolve_request_client_host(websocket),
+        )
+    except ProxyResponseError as exc:
+        if websocket.application_state == WebSocketState.CONNECTING:
+            await websocket.send_denial_response(JSONResponse(status_code=exc.status_code, content=exc.payload))
+        elif websocket.application_state == WebSocketState.CONNECTED:
+            await websocket.close(code=1011)
+    except Exception:
+        logger.exception("Realtime live websocket setup failed")
+        if websocket.application_state == WebSocketState.CONNECTING:
+            await websocket.send_denial_response(
+                JSONResponse(
+                    status_code=503,
+                    content=openai_error(
+                        "realtime_live_unavailable",
+                        "Realtime live websocket is unavailable",
+                        error_type="server_error",
+                    ),
+                )
+            )
+        elif websocket.application_state == WebSocketState.CONNECTED:
+            await websocket.close(code=1011)
 
 
 @v1_ws_router.websocket("/responses")

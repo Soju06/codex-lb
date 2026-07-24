@@ -248,6 +248,45 @@ class StickySessionsRepository:
             await self._session.commit()
         return deleted
 
+    async def purge_key_before(
+        self,
+        key: str,
+        cutoff: datetime,
+        *,
+        kind: StickySessionKind,
+    ) -> int:
+        """Delete one reserved row only when it is older than ``cutoff``."""
+
+        stmt = delete(StickySession).where(
+            StickySession.kind == kind,
+            StickySession.key == key,
+            StickySession.updated_at < to_utc_naive(cutoff),
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt)
+            await self._session.commit()
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    async def purge_before_for_key_prefix(
+        self,
+        cutoff: datetime,
+        *,
+        kind: StickySessionKind,
+        key_prefix: str,
+    ) -> int:
+        """Delete expired rows from one reserved key namespace."""
+
+        stmt = delete(StickySession).where(
+            StickySession.kind == kind,
+            StickySession.key.startswith(key_prefix, autoescape=True),
+            StickySession.updated_at < to_utc_naive(cutoff),
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt.returning(StickySession.key))
+            deleted = len(result.scalars().all())
+            await self._session.commit()
+        return deleted
+
     def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":

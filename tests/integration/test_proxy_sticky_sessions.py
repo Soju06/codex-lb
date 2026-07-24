@@ -1550,3 +1550,69 @@ async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup)
         # stale in-memory account_id.
         second = await repo.upsert("key_rebind", "acc_rebind_b", kind=StickySessionKind.PROMPT_CACHE)
         assert second.account_id == "acc_rebind_b"
+
+
+@pytest.mark.asyncio
+async def test_sticky_prefix_purge_deletes_only_expired_reserved_rows(db_setup):
+    from sqlalchemy import select, update
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id="acc_live_prefix",
+                email="live-prefix@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    prefix = "codex_live_call:"
+    old_key = f"{prefix}old"
+    new_key = f"{prefix}new"
+    wildcard_lookalike_key = "codexXliveXcall:old"
+    targeted_key = "other_namespace:expired"
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for key in (old_key, new_key, wildcard_lookalike_key, targeted_key):
+            await repo.upsert(key, "acc_live_prefix", kind=StickySessionKind.CODEX_SESSION)
+        old_time = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key.in_((old_key, wildcard_lookalike_key, targeted_key)))
+            .values(updated_at=old_time)
+        )
+        await session.commit()
+
+        deleted = await repo.purge_before_for_key_prefix(
+            utcnow() - timedelta(hours=2),
+            kind=StickySessionKind.CODEX_SESSION,
+            key_prefix=prefix,
+        )
+        targeted_deleted = await repo.purge_key_before(
+            targeted_key,
+            utcnow() - timedelta(hours=2),
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        remaining = set(
+            (
+                await session.execute(
+                    select(StickySession.key).where(StickySession.kind == StickySessionKind.CODEX_SESSION)
+                )
+            ).scalars()
+        )
+
+    assert deleted == 1
+    assert targeted_deleted == 1
+    assert old_key not in remaining
+    assert targeted_key not in remaining
+    assert new_key in remaining
+    assert wildcard_lookalike_key in remaining

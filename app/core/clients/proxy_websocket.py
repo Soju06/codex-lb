@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping, NoReturn, Protocol, cast
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import aiohttp
 from websockets.asyncio.client import ClientConnection
@@ -63,6 +63,8 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = _HOP_BY_HOP_HEADER_NAMES | frozenset(
 )
 _RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
 _RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS = frozenset({"responses=experimental"})
+_OPENAI_LIVE_BASE_URL = "https://api.openai.com/v1"
+_LIVE_CALL_ID_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-")
 
 logger = logging.getLogger(__name__)
 
@@ -307,42 +309,46 @@ class ArchivingResponsesWebSocket:
         route: ResolvedUpstreamRoute | None = None,
         fallback_used: bool | None = None,
         direct_egress: bool = False,
+        archive_payloads: bool = True,
     ) -> None:
         self._wrapped = wrapped
         self._url = url
         self._headers = headers
         self._account_id = account_id
+        self._archive_payloads = archive_payloads
         self.upstream_proxy_route_mode = route.mode if route is not None else ("direct" if direct_egress else None)
         self.upstream_proxy_pool_id = route.pool_id if route is not None else None
         self.upstream_proxy_endpoint_id = route.endpoint_id if route is not None else None
         self.upstream_proxy_fallback_used = fallback_used if route is not None else None
 
     async def send_text(self, text: str) -> None:
-        archive_text(
-            direction="codex_to_server",
-            kind="responses",
-            transport="websocket",
-            text=text,
-            account_id=self._account_id,
-            method="GET",
-            url=self._url,
-            headers=self._headers,
-            extra={"frame_type": "text"},
-        )
+        if self._archive_payloads:
+            archive_text(
+                direction="codex_to_server",
+                kind="responses",
+                transport="websocket",
+                text=text,
+                account_id=self._account_id,
+                method="GET",
+                url=self._url,
+                headers=self._headers,
+                extra={"frame_type": "text"},
+            )
         await self._wrapped.send_text(text)
 
     async def send_bytes(self, data: bytes) -> None:
-        archive_bytes(
-            direction="codex_to_server",
-            kind="responses",
-            transport="websocket",
-            data=data,
-            account_id=self._account_id,
-            method="GET",
-            url=self._url,
-            headers=self._headers,
-            extra={"frame_type": "binary"},
-        )
+        if self._archive_payloads:
+            archive_bytes(
+                direction="codex_to_server",
+                kind="responses",
+                transport="websocket",
+                data=data,
+                account_id=self._account_id,
+                method="GET",
+                url=self._url,
+                headers=self._headers,
+                extra={"frame_type": "binary"},
+            )
         await self._wrapped.send_bytes(data)
 
     async def receive(self) -> UpstreamWebSocketMessage:
@@ -350,6 +356,8 @@ class ArchivingResponsesWebSocket:
         return message
 
     def archive_received(self, message: UpstreamWebSocketMessage) -> None:
+        if not self._archive_payloads:
+            return
         if message.kind == "text" and message.text is not None:
             archive_text(
                 direction="server_to_codex",
@@ -413,6 +421,8 @@ def _build_upstream_websocket_headers(
     inbound: dict[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    include_responses_beta: bool = True,
 ) -> dict[str, str]:
     headers = filter_inbound_websocket_headers(inbound)
     # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
@@ -447,8 +457,68 @@ def _build_upstream_websocket_headers(
             headers["chatgpt-account-id"] = account_id
         else:
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
-    _ensure_responses_websocket_beta_header(headers)
+    if include_responses_beta:
+        _ensure_responses_websocket_beta_header(headers)
     return headers
+
+
+def _build_upstream_live_websocket_headers(
+    inbound: dict[str, str],
+    access_token: str,
+    account_id: str | None,
+) -> dict[str, str]:
+    headers = _build_upstream_websocket_headers(
+        inbound,
+        access_token,
+        account_id,
+        include_responses_beta=False,
+    )
+    beta_value = _pop_header_case_insensitive(headers, "openai-beta")
+    if beta_value:
+        responses_beta_tokens = {
+            _RESPONSES_WEBSOCKET_BETA_HEADER.lower(),
+            *_RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS,
+        }
+        retained_tokens = [
+            token.strip()
+            for token in beta_value.split(",")
+            if token.strip() and token.strip().lower() not in responses_beta_tokens
+        ]
+        if retained_tokens:
+            headers["openai-beta"] = ", ".join(retained_tokens)
+    return headers
+
+
+def _live_websocket_url(
+    call_id: str,
+    *,
+    base_url: str = _OPENAI_LIVE_BASE_URL,
+    query_params: list[tuple[str, str]] | None = None,
+) -> str:
+    normalized = call_id.strip()
+    if (
+        not normalized.startswith("rtc_")
+        or len(normalized) <= len("rtc_")
+        or len(normalized) > 256
+        or any(character not in _LIVE_CALL_ID_CHARACTERS for character in normalized)
+    ):
+        raise ValueError("Invalid realtime call id")
+    parsed = urlparse(f"{base_url.rstrip('/')}/live/{quote(normalized, safe='')}")
+    if parsed.scheme == "https":
+        scheme = "wss"
+    elif parsed.scheme == "http":
+        scheme = "ws"
+    else:
+        scheme = parsed.scheme
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    if query_params:
+        query_pairs.extend(query_params)
+    return urlunparse(
+        parsed._replace(
+            scheme=scheme,
+            query=urlencode(query_pairs, doseq=True),
+        )
+    )
 
 
 def _ensure_responses_websocket_beta_header(headers: dict[str, str]) -> None:
@@ -491,24 +561,28 @@ def _responses_websocket_url(base_url: str) -> str:
     return urlunparse(parsed._replace(scheme=scheme))
 
 
-async def connect_responses_websocket(
+async def _connect_upstream_websocket(
     headers: dict[str, str],
     access_token: str,
     account_id: str | None,
     *,
-    base_url: str | None = None,
+    url: str,
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    include_responses_beta: bool,
+    archive_payloads: bool,
+    operation: str,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
-    upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
-    url = _responses_websocket_url(upstream_base)
-    upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+    if include_responses_beta:
+        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+    else:
+        upstream_headers = _build_upstream_live_websocket_headers(headers, access_token, account_id)
     require_route_or_direct_egress_opt_in(
         route=route,
         allow_direct_egress=allow_direct_egress,
-        operation="responses websocket",
+        operation=operation,
     )
     if route is not None:
         owns_codex_client = codex_client is None
@@ -571,6 +645,7 @@ async def connect_responses_websocket(
             account_id=account_id,
             route=active_route,
             fallback_used=fallback_used,
+            archive_payloads=archive_payloads,
         )
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
@@ -637,6 +712,61 @@ async def connect_responses_websocket(
         headers=upstream_headers,
         account_id=account_id,
         direct_egress=allow_direct_egress,
+        archive_payloads=archive_payloads,
+    )
+
+
+async def connect_responses_websocket(
+    headers: dict[str, str],
+    access_token: str,
+    account_id: str | None,
+    *,
+    base_url: str | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
+) -> UpstreamResponsesWebSocket:
+    settings = get_settings()
+    upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
+    return await _connect_upstream_websocket(
+        headers,
+        access_token,
+        account_id,
+        url=_responses_websocket_url(upstream_base),
+        route=route,
+        codex_client=codex_client,
+        allow_direct_egress=allow_direct_egress,
+        include_responses_beta=True,
+        archive_payloads=True,
+        operation="responses websocket",
+    )
+
+
+async def connect_live_websocket(
+    call_id: str,
+    headers: dict[str, str],
+    access_token: str,
+    account_id: str | None,
+    *,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
+    base_url: str = _OPENAI_LIVE_BASE_URL,
+    query_params: list[tuple[str, str]] | None = None,
+) -> UpstreamResponsesWebSocket:
+    """Connect the account-bound Codex Frameless sideband without refreshing auth."""
+
+    return await _connect_upstream_websocket(
+        headers,
+        access_token,
+        account_id,
+        url=_live_websocket_url(call_id, base_url=base_url, query_params=query_params),
+        route=route,
+        codex_client=codex_client,
+        allow_direct_egress=allow_direct_egress,
+        include_responses_beta=False,
+        archive_payloads=False,
+        operation="live websocket",
     )
 
 

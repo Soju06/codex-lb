@@ -54,6 +54,9 @@ from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket as UpstreamResponsesWebSocket,
 )
 from app.core.clients.proxy_websocket import (
+    connect_live_websocket as connect_live_websocket,
+)
+from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
 from app.core.config.settings import get_settings
@@ -336,6 +339,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
 )
+from app.modules.proxy._service.realtime_live import _RealtimeLiveMixin
 from app.modules.proxy._service.refresh import (
     ensure_fresh_with_budget as _recover_fresh_account,
 )
@@ -911,6 +915,7 @@ class ProxyService(
     _FileOpsMixin,
     _TranscribeMixin,
     _CodexControlMixin,
+    _RealtimeLiveMixin,
     _CompactMixin,
     _StreamingMixin,
     _WebSocketMixin,

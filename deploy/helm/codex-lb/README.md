@@ -416,18 +416,6 @@ helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
   --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
 ```
 
-**Optional Grafana hierarchy:** sidecars that map annotation paths to nested
-folders can render concise dashboard names under an installation-specific path:
-
-```yaml
-metrics:
-  grafanaDashboard:
-    folder: Applications/Codex LB
-    titles:
-      codex-lb.json: Overview
-      ttft-breakdown.json: TTFT Breakdown
-```
-
 ### Graceful Shutdown Tuning
 
 Graceful shutdown coordinates three timeout parameters to drain in-flight requests and session bridge connections:

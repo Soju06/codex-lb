@@ -74,6 +74,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_is_unanchored_one_shot,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
@@ -604,6 +605,27 @@ class _HTTPBridgeStreamingMixin:
                 image_generation_request,
                 request_id,
             )
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
+        if (
+            runtime_config.enabled
+            and force_upstream_stream_transport is None
+            and _service_get_settings().upstream_stream_transport != "websocket"
+            and _http_bridge_request_is_unanchored_one_shot(
+                payload,
+                headers,
+                forwarded_request=forwarded_request,
+            )
+        ):
+            # Tool-less, self-contained side calls (title, summary, compaction)
+            # gain nothing from a persistent bridge WebSocket and would fork an
+            # independent bridge lane per overlap with the agent's main turn.
+            # An explicit websocket upstream transport override keeps the
+            # bridge: bypassing there would open a fresh WebSocket per request.
+            logger.info(
+                "stream_responses bypassing http bridge for unanchored one-shot request request_id=%s",
+                request_id,
+            )
+            force_upstream_stream_transport = "http"
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if not runtime_config.enabled:
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)

@@ -11,8 +11,8 @@ conversation view is needed.
 ## What Changes
 
 - Add an authenticated dashboard API `GET /api/conversations` returning paginated
-  conversation aggregates derived from `request_logs`, with only `limit`,
-  `offset`, and `search` parameters.
+  conversation aggregates derived from `request_logs`, with `limit`, `offset`,
+  `search`, and `since` parameters.
 - The list response rows contain exactly `conversationId`, `lastRequest`,
   `representativeAccount`, `remainingAccountCount`, `apiKeyId`,
   `apiKeyName`, `representativeModel`, `remainingModelCount`,
@@ -65,15 +65,17 @@ None.
   existing request-log persistence model and the existing request-log search and
   `warmup`/`limit_warmup` exclusion clauses.
 - **Frontend**: the dashboard gains a title-styled Radix Request Logs /
-  Conversations selector, a Conversations list without a filter input, and a
-  sortable detail experience.
+  Conversations selector, a Conversations list without a free-text filter input,
+  a day-range selector (`1d`/`7d`/`30d`, default `7d`, URL-backed
+  `conversationTimeframe`) shown at the top-right while the Conversations view is
+  active, and a sortable detail experience.
 - **Tests**: backend integration tests for the two APIs (stable pagination order,
   non-empty conversation IDs, `warmup`/`limit_warmup` and soft-delete exclusion, search-before-
   grouping with whole-conversation aggregation, representative selection,
   cumulative elapsed time, token clamping with the reasoning-token fallback, the
   exact wire columns, the default `reqs DESC` order, and encoded-blank/unknown
   conversation IDs) and frontend tests for the selector default, list columns,
-  and client-side detail sorting.
+  the day-range selector, and client-side detail sorting.
 - **Schema and dependencies**: no migration, dependency, setting, README, or
   changelog change.
 
@@ -84,4 +86,6 @@ None.
   `conversation_id` are aggregated.
 - No changes to proxy routing, request-log capture, or the conversation-ID
   detection rules.
-- No date/timeframe controls or `since`/`until` list parameters.
+- No unbounded "all" history option for the Conversations view; the day selector
+  is bounded to `1d`/`7d`/`30d` (default `7d`) so the dashboard poll stays off
+  the full-history scan path.

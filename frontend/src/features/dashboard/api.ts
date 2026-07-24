@@ -108,6 +108,7 @@ export type ConversationListFilters = {
   limit?: number;
   offset?: number;
   search?: string;
+  since?: string;
 };
 
 export function getConversations(params: ConversationListFilters = {}) {
@@ -120,6 +121,9 @@ export function getConversations(params: ConversationListFilters = {}) {
   }
   if (params.search) {
     query.set("search", params.search);
+  }
+  if (params.since) {
+    query.set("since", params.since);
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return get(`${CONVERSATIONS_PATH}${suffix}`, ConversationsResponseSchema);

@@ -3,8 +3,8 @@
 ### Requirement: Dashboard conversation listing
 
 The authenticated dashboard MUST expose `GET /api/conversations`. The list
-endpoint MUST accept only `limit`, `offset`, and `search` query parameters. It
-MUST aggregate eligible `request_logs` rows by normalized, non-empty
+endpoint MUST accept `limit`, `offset`, `search`, and `since` query parameters.
+It MUST aggregate eligible `request_logs` rows by normalized, non-empty
 `conversation_id`, excluding rows whose request kind is `warmup` or
 `limit_warmup`, and rows with `deleted_at IS NOT NULL`.
 
@@ -13,6 +13,17 @@ eligible row's user-agent family. Search MUST select whole conversations first:
 after a conversation matches, aggregation MUST include all eligible rows in that
 conversation, including rows whose user-agent family or ID did not match the
 search text. The endpoint MUST derive aggregates from `request_logs` only.
+
+When `since` is provided, a conversation MUST be selected only when its earliest
+eligible row's `requested_at` — the first message of the conversation — is at or
+after `since`. The filter MUST be applied as a post-grouping predicate
+(`HAVING MIN(requested_at) >= since`) so that a conversation spanning the
+`since` boundary (rows both before and after) is excluded because its first
+message predates the window. Aggregates MUST NOT be clipped by `since`: all
+eligible rows of a selected conversation MUST contribute to its totals. Because
+a conversation selected by this filter has `MIN(requested_at) >= since`, every
+row of a selected conversation necessarily falls within or after `since`, so the
+first-message criterion and the per-row totals are consistent.
 
 The response MUST contain `conversations`, `total`, and `hasMore` pagination
 fields. Each row in `conversations` MUST contain exactly these fields and no
@@ -98,6 +109,27 @@ The list order MUST be stable: `lastRequest DESC`, then normalized
 - **THEN** the conversation is selected when either the normalized ID or any
   eligible row's user-agent family matches case-insensitively
 
+#### Scenario: Since filter selects conversations whose first message is in window
+
+- **GIVEN** conversation `conv-old` has its earliest eligible row at `t-10d`
+  and a later row at `t-1d`, and conversation `conv-new` has its earliest
+  eligible row at `t-1d`
+- **WHEN** the client calls `GET /api/conversations?since=<t-7d ISO>`
+- **THEN** only `conv-new` is returned
+- **AND** `conv-old` is excluded because its first message predates the window
+  even though it has a row inside the window
+- **AND** the returned `conv-new` totals aggregate every eligible row of that
+  conversation, not only rows at or after `since`
+
+#### Scenario: Since filter composes with search and pagination
+
+- **GIVEN** two conversations started inside the `since` window and only one
+  matches the search text
+- **WHEN** the client calls `GET /api/conversations?since=<ISO>&search=opencode`
+- **THEN** only the matching conversation is returned
+- **AND** the response total and hasMore reflect the since-and-search filtered
+  set
+
 #### Scenario: List model representatives ignore reasoning effort
 
 - **GIVEN** a conversation has requests for the same model with multiple
@@ -119,6 +151,43 @@ The list order MUST be stable: `lastRequest DESC`, then normalized
   lexical API-key ID
 - **AND** the response contains only the corresponding dashboard-safe name and
   never secret, hash, or plaintext key material
+
+### Requirement: Conversation listing total is served from a short-TTL cache
+
+The grouped `total` returned by `GET /api/conversations` is display-only
+pagination metadata that tolerates short staleness, and the dashboard polls the
+endpoint every 30 seconds. Recomputing the grouped count over the full eligible
+`request_logs` history on every poll risks the same dashboard-induced
+database contention this repository has previously optimized away.
+
+The conversation listing total MUST be served from the same short-TTL
+per-filter-signature cache as the request-log listing total (fixed 30 s TTL
+application constant; bounded LRU-ish eviction; per-instance). The cache
+signature MUST include every dimension that changes the grouped count —
+`search`, `since`, `limit`, and `offset` MUST be excluded from the signature
+while `search` and `since` MUST be included — so two requests with different
+`since` or `search` values MUST NOT reuse one another's cached total.
+
+#### Scenario: Repeated polls reuse the cached conversation total
+
+- **GIVEN** the conversation listing has computed a total for a given
+  `search` and `since` signature
+- **WHEN** the dashboard polls the same endpoint within the TTL with the same
+  signature
+- **THEN** the grouped count MUST NOT be recomputed
+- **AND** the response total MUST equal the previously computed value
+
+#### Scenario: Different since signatures isolate cached conversation totals
+
+- **GIVEN** two listing requests differ only by the `since` window
+- **WHEN** their totals are served through the cache
+- **THEN** each request MUST use its own cache entry and grouped total
+
+#### Scenario: Search participates in the conversation total cache signature
+
+- **GIVEN** two listing requests differ only by the `search` text
+- **WHEN** their totals are served through the cache
+- **THEN** each request MUST use its own cache entry and grouped total
 
 ### Requirement: Conversation details
 
@@ -198,8 +267,16 @@ Conversations, including each view's applicable filters and pagination.
 Switching views MUST NOT reinterpret, overwrite, or clear the inactive view's
 query state, and returning to a view MUST restore its retained state.
 
-The Conversations view MUST NOT render a filter input above the list and MUST
-NOT provide date/timeframe controls. The view MUST use the list endpoint's
+The Conversations view MUST NOT render a free-text filter input above the list.
+The view MUST render a day-range selector with exactly three options — `1d`,
+`7d`, and `30d` — placed at the top-right of the dashboard page alongside the
+refresh action and shown only while the Conversations view is active. The
+selector MUST default to `7d`. The selected value MUST be persisted in the URL
+as `conversationTimeframe`, MUST drive the list endpoint's `since` query
+parameter (each option maps to a `now − Nd` ISO timestamp sent as `since`), and
+MUST reset pagination to offset 0 on change. The selector's values and default
+MUST mirror the dashboard overview timeframe selector, with no unbounded
+"all" option. The view MUST use the list endpoint's
 established loading, error, empty, and pagination behavior.
 
 The conversation list MUST render exactly these columns in order: Last request,
@@ -250,15 +327,34 @@ An empty conversation list MUST render the established dashboard empty state.
 - **AND** switching views does not reinterpret, overwrite, or clear the other
   view's query state
 
-#### Scenario: Conversations has no filter input and uses exact rendering
+#### Scenario: Conversations has no free-text filter and renders the day selector
 
 - **WHEN** the operator opens the Conversations view
-- **THEN** no filter input or date/timeframe controls are rendered above the list
+- **THEN** no free-text filter input is rendered above the list
+- **AND** a day-range selector with exactly `1d`, `7d`, and `30d` options is
+  rendered at the top-right of the dashboard page alongside the refresh action
+- **AND** the selector defaults to `7d` and no unbounded "all" option is offered
 - **AND** the list renders the specified reordered columns and two-line request
   time presentation
 - **AND** representative account IDs resolve to display name, then email, then ID
 - **AND** smaller muted `+ N more` account/model secondary lines and cached
   tokens as a subordinate line are rendered
+
+#### Scenario: Conversation day selector persists in the URL and drives since
+
+- **WHEN** the operator changes the Conversations day selector from `7d` to `30d`
+- **THEN** the URL gains `conversationTimeframe=30d` (or drops the param when the
+  default `7d` is selected)
+- **AND** the list endpoint is called with a `since` query parameter equal to
+  `now − 30d` as an ISO timestamp
+- **AND** pagination resets to offset 0
+
+#### Scenario: Conversation day selector state is independent per view
+
+- **GIVEN** the Conversations day selector is set to `30d`
+- **WHEN** the operator switches to Request Logs and back to Conversations
+- **THEN** the Conversations view restores its retained `30d` selector state
+- **AND** the Request Logs view state is unaffected
 
 #### Scenario: Conversation account privacy blur applies only to email fallback
 

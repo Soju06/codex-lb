@@ -189,6 +189,7 @@ class RequestLogsRepository:
         limit: int = 50,
         offset: int = 0,
         search: str | None = None,
+        since: datetime | None = None,
     ) -> ConversationListResult:
         conversation_id = self._conversation_id_expr()
         conditions = self._conversation_conditions()
@@ -222,8 +223,20 @@ class RequestLogsRepository:
             .where(*conditions)
             .group_by(conversation_id)
         )
+        if since is not None:
+            summary_stmt = summary_stmt.having(func.min(RequestLog.requested_at) >= since)
         summary_subquery = summary_stmt.subquery()
-        total = int((await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one())
+        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
+        if ttl_seconds <= 0:
+            total = int((await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one())
+        else:
+            cache_key = (search, since)
+            total = _cached_recent_count(cache_key)
+            if total is None:
+                total = int(
+                    (await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one()
+                )
+                _store_recent_count(cache_key, total, ttl_seconds)
         page_rows = (
             await self._session.execute(
                 select(summary_subquery)

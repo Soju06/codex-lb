@@ -132,9 +132,10 @@ async def list_conversations(
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     search: str | None = Query(default=None),
+    since: datetime | None = Query(default=None),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> ConversationsResponse:
-    page = await context.service.list_conversations(limit=limit, offset=offset, search=search)
+    page = await context.service.list_conversations(limit=limit, offset=offset, search=search, since=since)
     return ConversationsResponse(
         conversations=page.conversations,
         total=page.total,

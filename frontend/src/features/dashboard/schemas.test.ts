@@ -1013,19 +1013,21 @@ describe("ConversationDetailsSchema", () => {
 });
 
 describe("ConversationFilterStateSchema", () => {
-  it("parses search, limit, and offset only", () => {
+  it("parses search, limit, offset, and timeframe", () => {
     const parsed = ConversationFilterStateSchema.parse({
       search: "opencode",
       limit: 25,
       offset: 0,
+      timeframe: "7d",
     });
 
     expect(parsed.search).toBe("opencode");
     expect(parsed.limit).toBe(25);
     expect(parsed.offset).toBe(0);
+    expect(parsed.timeframe).toBe("7d");
   });
 
-  it("does not accept timeframe or other request-log keys", () => {
+  it("rejects invalid timeframe values and strips other request-log keys", () => {
     const result = ConversationFilterStateSchema.safeParse({
       search: "x",
       limit: 25,
@@ -1034,9 +1036,7 @@ describe("ConversationFilterStateSchema", () => {
       accountId: ["acc_1"],
     });
 
-    // passthrough is not enabled; extra keys are stripped, core stays valid
-    expect(result.success).toBe(true);
-    expect(result.success && "timeframe" in result.data).toBe(false);
+    expect(result.success).toBe(false);
   });
 });
 

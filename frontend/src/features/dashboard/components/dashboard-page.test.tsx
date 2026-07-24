@@ -93,6 +93,20 @@ vi.mock("@/features/dashboard/components/filters/overview-timeframe-select", () 
   OverviewTimeframeSelect: () => <div data-testid="overview-timeframe-select" />,
 }));
 
+vi.mock("@/features/dashboard/components/filters/conversation-timeframe-select", () => ({
+  ConversationTimeframeSelect: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange: (value: "30d") => void;
+  }) => (
+    <button type="button" data-testid="conversation-timeframe-select" onClick={() => onChange("30d")}>
+      {value}
+    </button>
+  ),
+}));
+
 vi.mock("@/features/dashboard/components/filters/request-filters", async () => {
   const actual = await vi.importActual<typeof import("@/features/dashboard/components/filters/request-filters")>("@/features/dashboard/components/filters/request-filters");
   return actual;
@@ -353,6 +367,39 @@ describe("DashboardPage", () => {
 
     expect(conversationHeadings).toHaveLength(1);
     expect(within(conversationHeadings[0] as HTMLElement).getByRole("button", { name: "Conversations" })).toBeInTheDocument();
+  });
+
+  it("renders the conversation timeframe selector only for Conversations and resets its offset", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations&conversationOffset=25");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("7d");
+    expect(screen.queryByTestId("overview-timeframe-select")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("conversation-timeframe-select"));
+
+    expect(useConversationsMock.mock.results[0]?.value.updateFilters).toHaveBeenCalledWith({
+      timeframe: "30d",
+      offset: 0,
+    });
+  });
+
+  it("restores the retained conversation timeframe after switching views", async () => {
+    const user = userEvent.setup();
+    window.history.pushState({}, "", "/dashboard?view=conversations&conversationTimeframe=30d");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("30d");
+    await user.click(screen.getByRole("button", { name: "Conversations" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: "Request Logs" }));
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: "Conversations" }));
+
+    expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("30d");
   });
 
   it("renders the account summary line in the Accounts header using overview accounts", () => {

@@ -638,6 +638,7 @@
   "dashboard.filters.noOptions": "옵션 없음",
   "dashboard.filters.overview": "Overview",
   "dashboard.filters.overviewTimeframe": "Overview 기간",
+  "dashboard.filters.conversationTimeframe": "대화 기간",
   "dashboard.filters.removeStale": "Stale {{label}} 제거",
   "dashboard.filters.searchPlaceholder": "request id, Account, API Key, Model, error 검색...",
   "dashboard.filters.stale": "Stale",

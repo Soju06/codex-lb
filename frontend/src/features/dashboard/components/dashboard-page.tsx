@@ -16,6 +16,7 @@ import { AccountSummaryLine } from "@/features/dashboard/components/account-summ
 import { AccountViewModeToggle } from "@/features/dashboard/components/account-view-mode-toggle";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
 import { ConversationsView } from "@/features/dashboard/components/conversations-view";
+import { ConversationTimeframeSelect } from "@/features/dashboard/components/filters/conversation-timeframe-select";
 import { DashboardViewSelector } from "@/features/dashboard/components/filters/dashboard-view-selector";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
@@ -31,8 +32,10 @@ import { buildDashboardView } from "@/features/dashboard/utils";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   parseDashboardView,
+  parseConversationTimeframe,
   parseOverviewTimeframe,
   type AccountSummary,
+  type ConversationTimeframe,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
@@ -58,6 +61,10 @@ export function DashboardPage() {
   const canWrite = useAuthStore((state) => state.canWrite);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
+    [searchParams],
+  );
+  const conversationTimeframe = useMemo(
+    () => parseConversationTimeframe(searchParams.get("conversationTimeframe")),
     [searchParams],
   );
   const dashboardView = useMemo(
@@ -95,6 +102,13 @@ export function DashboardPage() {
       setSearchParams(next);
     },
     [searchParams, setSearchParams],
+  );
+
+  const handleConversationTimeframeChange = useCallback(
+    (timeframe: ConversationTimeframe) => {
+      conversationsState.updateFilters({ timeframe, offset: 0 });
+    },
+    [conversationsState],
   );
 
   const handleDashboardViewChange = useCallback(
@@ -319,6 +333,12 @@ export function DashboardPage() {
             <OverviewTimeframeSelect
               value={overviewTimeframe}
               onChange={handleOverviewTimeframeChange}
+            />
+          ) : null}
+          {dashboardView === "conversations" ? (
+            <ConversationTimeframeSelect
+              value={conversationTimeframe}
+              onChange={handleConversationTimeframeChange}
             />
           ) : null}
           <button

@@ -197,8 +197,9 @@ class RequestLogsService:
         limit: int = 50,
         offset: int = 0,
         search: str | None = None,
+        since: datetime | None = None,
     ) -> ConversationsPage:
-        result = await self._repo.list_conversations(limit=limit, offset=offset, search=search)
+        result = await self._repo.list_conversations(limit=limit, offset=offset, search=search, since=since)
         api_key_ids = [facet.value for facet in result.api_key_facets]
         api_key_names = await self._repo.get_api_key_names_by_ids(api_key_ids)
         return ConversationsPage(

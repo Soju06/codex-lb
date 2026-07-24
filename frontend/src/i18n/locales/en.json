@@ -638,6 +638,7 @@
   "dashboard.filters.noOptions": "No options",
   "dashboard.filters.overview": "Overview",
   "dashboard.filters.overviewTimeframe": "Overview timeframe",
+  "dashboard.filters.conversationTimeframe": "Conversation timeframe",
   "dashboard.filters.removeStale": "Remove stale {{label}}",
   "dashboard.filters.searchPlaceholder": "Search request id, account, API key, model, error...",
   "dashboard.filters.stale": "Stale",

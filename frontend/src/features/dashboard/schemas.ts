@@ -16,6 +16,15 @@ export function parseOverviewTimeframe(value: string | null | undefined): Overvi
   return parsed.success ? parsed.data : DEFAULT_OVERVIEW_TIMEFRAME;
 }
 
+const ConversationTimeframeKeySchema = z.enum(["1d", "7d", "30d"]);
+export type ConversationTimeframe = z.infer<typeof ConversationTimeframeKeySchema>;
+export const DEFAULT_CONVERSATION_TIMEFRAME: ConversationTimeframe = "7d";
+
+export function parseConversationTimeframe(value: string | null | undefined): ConversationTimeframe {
+  const parsed = ConversationTimeframeKeySchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_CONVERSATION_TIMEFRAME;
+}
+
 const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
   remainingPercentAvg: z.number().nullable(),
@@ -316,6 +325,7 @@ export const ConversationFilterStateSchema = z.object({
   search: z.string(),
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),
+  timeframe: ConversationTimeframeKeySchema,
 });
 
 export type ConversationModelEffort = z.infer<typeof ConversationModelEffortSchema>;

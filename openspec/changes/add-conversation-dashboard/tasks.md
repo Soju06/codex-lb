@@ -109,3 +109,32 @@
   when every eligible row has an unknown cached-token value.
 - [x] 7.2 Accept percent-encoded slash-containing conversation IDs in the detail
   route and cover the externally listed-then-opened path.
+
+## 8. Conversation Day Selector And Count Cache
+
+- [ ] 8.1 Add a `since` parameter to `GET /api/conversations` that filters
+  conversations by their first eligible message: a conversation is selected only
+  when `MIN(requested_at) >= since` (a `HAVING` predicate on the existing
+  conversation summary grouping). Aggregates MUST NOT be clipped by `since`.
+- [ ] 8.2 Serve the conversation listing `total` from the same short-TTL
+  per-signature cache as the request-log listing total (`_recent_count_cache`),
+  keyed by `search` and `since` (excluding `limit`/`offset`); the 30 s TTL
+  constant and bounded eviction are reused unchanged.
+- [ ] 8.3 Add backend integration tests: a conversation spanning the `since`
+  boundary is excluded (first message predates window) while a conversation
+  started in window is included; `since` composes with search and pagination;
+  the grouped total is cached under a positive TTL across repeated identical
+  signatures and isolated across distinct `since`/`search` signatures.
+- [ ] 8.4 Add a day-range selector (`1d`, `7d`, `30d`; default `7d`; no
+  unbounded "all") rendered at the dashboard top-right, shown only while the
+  Conversations view is active, mirroring the overview timeframe selector. The
+  value persists as URL-backed `conversationTimeframe`, resets pagination to
+  offset 0 on change, and is converted client-side to a `now − Nd` ISO timestamp
+  sent to the list endpoint as `since`.
+- [ ] 8.5 Add frontend tests: the selector's options and default, URL-backed
+  `conversationTimeframe` persistence, `since` param derivation, pagination
+  reset on change, and per-view state independence (switching to Request Logs
+  and back restores the retained Conversations selector state).
+- [ ] 8.6 Run targeted backend and frontend suites, `openspec validate --specs`,
+  `openspec validate add-conversation-dashboard --type change --strict`, and
+  `git diff --check`.

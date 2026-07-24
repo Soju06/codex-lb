@@ -53,7 +53,7 @@ describe("useConversations", () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(
       queryClient,
-      "/dashboard?view=conversations&conversationSearch=opencode&conversationLimit=10&conversationOffset=20",
+      "/dashboard?view=conversations&conversationSearch=opencode&conversationLimit=10&conversationOffset=20&conversationTimeframe=30d",
     );
 
     const { result } = renderHook(() => useConversations({ enabled: true }), {
@@ -66,6 +66,7 @@ describe("useConversations", () => {
       search: "opencode",
       limit: 10,
       offset: 20,
+      timeframe: "30d",
     });
 
     const query = queryClient.getQueryCache().findAll({
@@ -77,6 +78,7 @@ describe("useConversations", () => {
     expect(key?.[2].search).toBe("opencode");
     expect(key?.[2].limit).toBe(10);
     expect(key?.[2].offset).toBe(20);
+    expect(key?.[2]).toHaveProperty("since");
   });
 
   it("does not read request-log-only keys (search/limit/offset)", async () => {
@@ -237,5 +239,55 @@ describe("useConversations", () => {
 
     await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
     expect(apiSearches.some((value) => value === "hello")).toBe(true);
+  });
+
+  it("maps the conversation timeframe to the API since parameter", async () => {
+    const apiSince: string[] = [];
+    server.use(
+      http.get("/api/conversations", ({ request }) => {
+        apiSince.push(new URL(request.url).searchParams.get("since") ?? "-missing-");
+        return HttpResponse.json({ conversations: [], total: 0, hasMore: false });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?view=conversations&conversationTimeframe=30d",
+    );
+    const { result } = renderHook(() => useConversations({ enabled: true }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
+    expect(apiSince.some((value) => value !== "-missing-")).toBe(true);
+    expect(apiSince.some((value) => {
+      const since = Date.parse(value);
+      return Number.isFinite(since) && since < Date.now() - 29 * 24 * 60 * 60 * 1000;
+    })).toBe(true);
+  });
+
+  it("writes the timeframe and resets conversation offset", async () => {
+    const queryClient = createTestQueryClient();
+    let locationSearch = "";
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?view=conversations&conversationOffset=30",
+      (search) => {
+        locationSearch = search;
+      },
+    );
+    const { result } = renderHook(() => useConversations({ enabled: true }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
+    act(() => {
+      result.current.updateFilters({ timeframe: "30d", offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.timeframe).toBe("30d"));
+    expect(locationSearch).toContain("conversationTimeframe=30d");
+    expect(locationSearch).toContain("conversationOffset=0");
   });
 });

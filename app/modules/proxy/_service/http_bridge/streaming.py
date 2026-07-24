@@ -333,6 +333,20 @@ def _http_bridge_capacity_wait_plan(
     return bounded_wait_seconds, account_capacity_wait_seconds, message
 
 
+def _http_bridge_capacity_wait_expired(
+    request_state: _WebSocketRequestState,
+    exc: ProxyResponseError,
+    *,
+    request_deadline: float,
+) -> bool:
+    """Whether either the bridge budget or local-cap wait ceiling has elapsed."""
+    capacity_wait_deadline = _http_bridge_account_capacity_wait_deadline(request_state, exc)
+    effective_deadline = (
+        request_deadline if capacity_wait_deadline is None else min(request_deadline, capacity_wait_deadline)
+    )
+    return _service_time().monotonic() >= effective_deadline
+
+
 def _http_bridge_can_replace_retired_gate_session(
     exc: ProxyResponseError,
     *,
@@ -1430,7 +1444,11 @@ class _HTTPBridgeStreamingMixin:
                             emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            exc,
+                            request_deadline=request_deadline,
+                        ):
                             await self._write_account_cap_overload_request_log(
                                 request_state=request_state,
                                 exc=exc,
@@ -1661,7 +1679,11 @@ class _HTTPBridgeStreamingMixin:
                             emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                        ):
                             await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         continue
@@ -2050,7 +2072,11 @@ class _HTTPBridgeStreamingMixin:
                             emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                        ):
                             await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         continue
@@ -2161,7 +2187,11 @@ class _HTTPBridgeStreamingMixin:
                             emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                        ):
                             await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         continue
@@ -2356,7 +2386,11 @@ class _HTTPBridgeStreamingMixin:
                         emit_keepalives=not propagate_http_errors,
                     ):
                         yield line
-                    if _service_time().monotonic() >= request_deadline:
+                    if _http_bridge_capacity_wait_expired(
+                        request_state,
+                        capacity_exc,
+                        request_deadline=request_deadline,
+                    ):
                         await write_terminal_account_cap_overload(capacity_exc)
                         raise
                     continue
@@ -2559,7 +2593,11 @@ class _HTTPBridgeStreamingMixin:
                     if gate_contention:
                         async with session.pending_lock:
                             session.queued_request_count = max(0, session.queued_request_count - 1)
-                if _service_time().monotonic() >= request_deadline:
+                if _http_bridge_capacity_wait_expired(
+                    request_state,
+                    exc,
+                    request_deadline=request_deadline,
+                ):
                     await write_terminal_account_cap_overload(exc)
                     raise
                 if gate_contention and session.closed:

@@ -4019,8 +4019,18 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_wait(
+@pytest.mark.parametrize(
+    ("error_code", "request_budget_seconds", "capacity_wait_max_seconds"),
+    [
+        pytest.param("no_accounts", 1.0, 120.0, id="bridge-budget"),
+        pytest.param("account_stream_cap", 120.0, 1.0, id="account-capacity-ceiling"),
+    ],
+)
+async def test_stream_via_http_bridge_stops_session_creation_retry_after_effective_deadline(
     monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    request_budget_seconds: float,
+    capacity_wait_max_seconds: float,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     settings = SimpleNamespace(
@@ -4031,8 +4041,8 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
     )
     get_or_create = AsyncMock(
         side_effect=ProxyResponseError(
-            503,
-            openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+            429 if error_code == "account_stream_cap" else 503,
+            openai_error(error_code, "Rate limit exceeded. Try again in 120s"),
         )
     )
     now = 100.0
@@ -4071,8 +4081,8 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
         proxy_service,
         "get_settings",
         lambda: _make_app_settings(
-            proxy_request_budget_seconds=1.0,
-            http_responses_session_bridge_request_budget_seconds=1.0,
+            proxy_request_budget_seconds=request_budget_seconds,
+            http_responses_session_bridge_request_budget_seconds=request_budget_seconds,
         ),
     )
     monkeypatch.setattr(
@@ -4083,10 +4093,17 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
     monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 120.0)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 120.0)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_ACCOUNT_CAPACITY_WAIT_MAX_SECONDS",
+        capacity_wait_max_seconds,
+    )
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    write_request_log = AsyncMock()
+    monkeypatch.setattr(service, "_write_request_log", write_request_log)
 
     payload = proxy_service.ResponsesRequest.model_validate(
         {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
@@ -4116,6 +4133,13 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
     assert keepalive["type"] == "codex.keepalive"
     assert keepalive["status"] == "waiting_for_account_capacity"
     assert get_or_create.await_count == 1
+    if error_code == "account_stream_cap":
+        assert request_state.account_capacity_wait_deadline == pytest.approx(now)
+        assert write_request_log.await_args is not None
+        assert write_request_log.await_args.kwargs["error_code"] == "account_stream_cap"
+    else:
+        assert request_state.account_capacity_wait_deadline is None
+        write_request_log.assert_not_awaited()
 
 
 def test_http_bridge_session_key_infers_strength_from_affinity_kind() -> None:

@@ -22,6 +22,7 @@
 - [x] 3.2 Clamp the bridge capacity-wait plan for account-capacity errors to the ceiling while leaving `response_create_gate_timeout` waits budget-bounded.
 - [x] 3.3 Surface the original HTTP 429 cap envelope when the ceiling expires.
 - [x] 3.4 Record the terminal capacity overload in the request log (settlement-time logging never sees pre-submission failures).
+- [x] 3.5 Re-check the effective capacity deadline immediately after every bounded sleep before retrying session creation, recovery, reroute, or submission.
 
 ## 4. Unanchored parallel fork spillover
 

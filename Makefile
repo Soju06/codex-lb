@@ -65,8 +65,8 @@ test-dashboard-browser-smoke: frontend-build frontend-playwright-chromium
 
 .PHONY: lint typecheck architecture-check
 lint: architecture-check
-	uvx ruff check .
-	uvx ruff format --check .
+	uv run ruff check .
+	uv run ruff format --check .
 
 architecture-check:
 	python scripts/check_proxy_architecture.py

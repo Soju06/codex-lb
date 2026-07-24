@@ -495,7 +495,11 @@ async def lifespan(app: FastAPI):
                     logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
             await refresh_cap_partition(svc.list_active, iid)
             try:
-                observe_peer_stream_inflight(await svc.list_active_stream_inflight(iid))
+                peer_stream_inflight = await svc.list_active_stream_inflight(iid)
+                observe_peer_stream_inflight(
+                    peer_stream_inflight.counts_by_instance,
+                    snapshot_age_seconds=peer_stream_inflight.oldest_heartbeat_age_seconds,
+                )
             except Exception:
                 logger.warning("Peer stream-inflight refresh failed", exc_info=True)
 

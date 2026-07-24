@@ -9414,8 +9414,10 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_capacity", [False, True])
 async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner_forward_failure(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_capacity: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     started_at = time.monotonic()
@@ -9533,8 +9535,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
     reserve_retry = AsyncMock(return_value=retried_reservation)
     capacity_unavailable = ProxyResponseError(
-        503,
-        proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
+        429 if terminal_capacity else 503,
+        proxy_service.openai_error(
+            "account_stream_cap" if terminal_capacity else "no_accounts",
+            "Account stream capacity is exhausted" if terminal_capacity else "Rate limit exceeded. Try again in 120s",
+        ),
     )
     get_or_create = AsyncMock(side_effect=[owner_forward, capacity_unavailable, session_retry])
 
@@ -9570,24 +9575,36 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_startup_keepalive_grace_seconds", lambda: 0.001)
-
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"x-codex-session-id": "sid-123"},
-            codex_session_affinity=True,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=api_key,
-            api_key_reservation=initial_reservation,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=900.0,
-            max_sessions=8,
-            queue_limit=4,
+    write_overload_log = AsyncMock()
+    monkeypatch.setattr(service, "_write_account_cap_overload_request_log", write_overload_log)
+    if terminal_capacity:
+        monkeypatch.setattr(
+            http_bridge_streaming_module, "_http_bridge_capacity_wait_plan", lambda *_args, **_kwargs: None
         )
-    ]
+
+    stream = service._stream_via_http_bridge(
+        payload,
+        headers={"x-codex-session-id": "sid-123"},
+        codex_session_affinity=True,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=api_key,
+        api_key_reservation=initial_reservation,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=900.0,
+        max_sessions=8,
+        queue_limit=4,
+    )
+    if terminal_capacity:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            async for _chunk in stream:
+                pass
+        assert exc_info.value is capacity_unavailable
+        write_overload_log.assert_awaited_once()
+        return
+
+    chunks = [chunk async for chunk in stream]
 
     keepalive = proxy_service.parse_sse_data_json(chunks[0])
     assert keepalive is not None
@@ -9598,6 +9615,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     assert prepare_reservations == [initial_reservation, retried_reservation]
     assert submitted_reservations == [retried_reservation]
     reserve_retry.assert_awaited_once()
+    write_overload_log.assert_not_awaited()
 
 
 async def _run_owner_forward_recovery_with_session(

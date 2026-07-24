@@ -654,6 +654,22 @@ class TestStreamShareBorrowing:
             == 0
         )
 
+    def test_heartbeat_age_is_preserved_when_snapshot_is_observed(self) -> None:
+        cap_partitioning_module.observe_peer_stream_inflight(
+            {"peer-1": {}},
+            snapshot_age_seconds=cap_partitioning_module.PEER_INFLIGHT_MAX_AGE_SECONDS + 1.0,
+        )
+
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 0
+        )
+
     def test_unlimited_cap_and_single_replica_disable_borrowing(self) -> None:
         cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
         assert (

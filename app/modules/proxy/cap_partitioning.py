@@ -201,10 +201,15 @@ class _PeerStreamInflightHolder:
         self._clock = clock
         self._snapshot: PeerStreamInflightSnapshot | None = None
 
-    def observe(self, counts_by_instance: dict[str, dict[str, int] | None]) -> None:
+    def observe(
+        self,
+        counts_by_instance: dict[str, dict[str, int] | None],
+        *,
+        snapshot_age_seconds: float = 0.0,
+    ) -> None:
         self._snapshot = PeerStreamInflightSnapshot(
             counts_by_instance=counts_by_instance,
-            observed_at=self._clock(),
+            observed_at=self._clock() - max(0.0, snapshot_age_seconds),
         )
 
     def fresh_snapshot(self, *, max_age_seconds: float) -> PeerStreamInflightSnapshot | None:
@@ -224,14 +229,21 @@ _peer_inflight_holder = _PeerStreamInflightHolder()
 PEER_INFLIGHT_MAX_AGE_SECONDS = 25.0
 
 
-def observe_peer_stream_inflight(counts_by_instance: dict[str, dict[str, int] | None]) -> None:
+def observe_peer_stream_inflight(
+    counts_by_instance: dict[str, dict[str, int] | None],
+    *,
+    snapshot_age_seconds: float = 0.0,
+) -> None:
     """Record peers' published per-account stream-lease counts.
 
     ``counts_by_instance`` must cover every other active ring member; a member
     without published counts must be present with ``None`` so consumers can
     tell incomplete data from idle peers.
     """
-    _peer_inflight_holder.observe(counts_by_instance)
+    _peer_inflight_holder.observe(
+        counts_by_instance,
+        snapshot_age_seconds=snapshot_age_seconds,
+    )
 
 
 def effective_stream_admission_cap(

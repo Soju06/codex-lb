@@ -4,7 +4,8 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, cast
 
@@ -25,6 +26,12 @@ RING_HEARTBEAT_INTERVAL_SECONDS = 10
 RING_STALE_THRESHOLD_SECONDS = 30
 RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
 RING_MEMBER_RETENTION_SECONDS = 24 * 60 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class PeerStreamInflightRead:
+    counts_by_instance: dict[str, dict[str, int] | None]
+    oldest_heartbeat_age_seconds: float
 
 
 class RingMembershipService:
@@ -225,7 +232,7 @@ class RingMembershipService:
         self_instance_id: str,
         *,
         stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS,
-    ) -> dict[str, dict[str, int] | None]:
+    ) -> PeerStreamInflightRead:
         """Fresh peers' published per-account stream-lease counts.
 
         Maps every other active member's instance id to its published counts,
@@ -234,18 +241,38 @@ class RingMembershipService:
         """
         from datetime import timedelta
 
-        cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
-        statement = select(BridgeRingMember.instance_id, BridgeRingMember.metadata_json).where(
+        read_at = utcnow()
+        read_at_utc = read_at if read_at.tzinfo is not None else read_at.replace(tzinfo=timezone.utc)
+        cutoff = read_at - timedelta(seconds=stale_threshold_seconds)
+        statement = select(
+            BridgeRingMember.instance_id,
+            BridgeRingMember.metadata_json,
+            BridgeRingMember.last_heartbeat_at,
+        ).where(
             BridgeRingMember.last_heartbeat_at >= cutoff,
             BridgeRingMember.instance_id != self_instance_id,
         )
         async with self._session() as session:
             result = await session.execute(statement)
             rows = result.all()
-        return {
+        counts_by_instance = {
             instance_id: _bridge_ring_stream_inflight_from_metadata(metadata_json)
-            for instance_id, metadata_json in rows
+            for instance_id, metadata_json, _heartbeat_at in rows
         }
+        heartbeat_ages = [
+            max(
+                0.0,
+                (
+                    read_at_utc
+                    - (heartbeat_at if heartbeat_at.tzinfo is not None else heartbeat_at.replace(tzinfo=timezone.utc))
+                ).total_seconds(),
+            )
+            for _instance_id, _metadata_json, heartbeat_at in rows
+        ]
+        return PeerStreamInflightRead(
+            counts_by_instance=counts_by_instance,
+            oldest_heartbeat_age_seconds=max(heartbeat_ages, default=0.0),
+        )
 
     async def ring_fingerprint(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> str:
         """sha256 of sorted active member list. Same for all pods with same membership."""

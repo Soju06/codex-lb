@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
@@ -210,7 +211,10 @@ async def test_mark_stale_preserves_endpoint_within_grace_window(ring_service: R
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_publishes_stream_inflight_counts(ring_service: RingMembershipService) -> None:
+async def test_heartbeat_publishes_stream_inflight_counts(
+    ring_service: RingMembershipService,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
     await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.11:8080")
     await ring_service.register("pod-b", endpoint_base_url="http://10.0.0.12:8080")
     await ring_service.heartbeat(
@@ -218,10 +222,21 @@ async def test_heartbeat_publishes_stream_inflight_counts(ring_service: RingMemb
         endpoint_base_url="http://10.0.0.12:8080",
         account_stream_inflight={"acct-1": 3, "acct-idle": 0},
     )
+    session = async_session_factory()
+    try:
+        await session.execute(
+            update(BridgeRingMember)
+            .where(BridgeRingMember.instance_id == "pod-b")
+            .values(last_heartbeat_at=utcnow() - timedelta(seconds=20))
+        )
+        await session.commit()
+    finally:
+        await session.close()
 
-    counts = await ring_service.list_active_stream_inflight("pod-a")
+    snapshot = await ring_service.list_active_stream_inflight("pod-a")
 
-    assert counts == {"pod-b": {"acct-1": 3}}
+    assert snapshot.counts_by_instance == {"pod-b": {"acct-1": 3}}
+    assert snapshot.oldest_heartbeat_age_seconds == pytest.approx(20.0, abs=1.0)
 
 
 @pytest.mark.asyncio
@@ -233,9 +248,9 @@ async def test_stream_inflight_reader_reports_missing_counts_not_zero(
     # (mixed-version ring): the reader must report missing, not idle.
     await ring_service.register("pod-b", endpoint_base_url="http://10.0.0.12:8080")
 
-    counts = await ring_service.list_active_stream_inflight("pod-a")
+    snapshot = await ring_service.list_active_stream_inflight("pod-a")
 
-    assert counts == {"pod-b": None}
+    assert snapshot.counts_by_instance == {"pod-b": None}
 
 
 @pytest.mark.asyncio
@@ -250,9 +265,9 @@ async def test_stream_inflight_reader_publishes_empty_counts_as_idle(
         account_stream_inflight={},
     )
 
-    counts = await ring_service.list_active_stream_inflight("pod-a")
+    snapshot = await ring_service.list_active_stream_inflight("pod-a")
 
-    assert counts == {"pod-b": {}}
+    assert snapshot.counts_by_instance == {"pod-b": {}}
 
 
 @pytest.mark.asyncio
@@ -268,8 +283,6 @@ async def test_stream_inflight_reader_excludes_self_and_stale_members(
         account_stream_inflight={"acct-1": 1},
     )
     # Age pod-b past the stale threshold.
-    from sqlalchemy import update
-
     session = async_session_factory()
     try:
         await session.execute(
@@ -281,6 +294,6 @@ async def test_stream_inflight_reader_excludes_self_and_stale_members(
     finally:
         await session.close()
 
-    counts = await ring_service.list_active_stream_inflight("pod-a")
+    snapshot = await ring_service.list_active_stream_inflight("pod-a")
 
-    assert counts == {}
+    assert snapshot.counts_by_instance == {}

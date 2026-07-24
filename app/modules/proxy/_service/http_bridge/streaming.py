@@ -1202,6 +1202,16 @@ class _HTTPBridgeStreamingMixin:
             request_state.fresh_upstream_request_is_retry_safe = False
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
+
+        async def write_terminal_account_cap_overload(exc: ProxyResponseError) -> None:
+            await self._write_account_cap_overload_request_log(
+                request_state=request_state,
+                exc=exc,
+                api_key=api_key,
+                headers=headers,
+                client_ip=client_ip,
+            )
+
         session_creation_headers = (
             without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
         )
@@ -1629,6 +1639,7 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
                         if wait_plan is None:
+                            await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
@@ -1651,6 +1662,7 @@ class _HTTPBridgeStreamingMixin:
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
+                            await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         continue
                     break
@@ -2019,6 +2031,7 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
                         if wait_plan is None:
+                            await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
@@ -2038,6 +2051,7 @@ class _HTTPBridgeStreamingMixin:
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
+                            await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         continue
                     break
@@ -2128,6 +2142,7 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
                         if wait_plan is None:
+                            await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
@@ -2147,6 +2162,7 @@ class _HTTPBridgeStreamingMixin:
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
+                            await write_terminal_account_cap_overload(capacity_exc)
                             raise
                         continue
                     break
@@ -2320,6 +2336,7 @@ class _HTTPBridgeStreamingMixin:
                         capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, capacity_exc),
                     )
                     if wait_plan is None:
+                        await write_terminal_account_cap_overload(capacity_exc)
                         raise
                     bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                     logger.info(
@@ -2340,6 +2357,7 @@ class _HTTPBridgeStreamingMixin:
                     ):
                         yield line
                     if _service_time().monotonic() >= request_deadline:
+                        await write_terminal_account_cap_overload(capacity_exc)
                         raise
                     continue
                 break
@@ -2453,6 +2471,16 @@ class _HTTPBridgeStreamingMixin:
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
         request_state.bridge_request_deadline = request_deadline
+
+        async def write_terminal_account_cap_overload(exc: ProxyResponseError) -> None:
+            await self._write_account_cap_overload_request_log(
+                request_state=request_state,
+                exc=exc,
+                api_key=request_state.api_key,
+                headers=session.headers,
+                client_ip=request_state.client_ip,
+            )
+
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -2483,6 +2511,7 @@ class _HTTPBridgeStreamingMixin:
                     capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, exc),
                 )
                 if wait_plan is None:
+                    await write_terminal_account_cap_overload(exc)
                     raise
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                 exc_code, _exc_message = _proxy_error_code_message(exc)
@@ -2531,6 +2560,7 @@ class _HTTPBridgeStreamingMixin:
                         async with session.pending_lock:
                             session.queued_request_count = max(0, session.queued_request_count - 1)
                 if _service_time().monotonic() >= request_deadline:
+                    await write_terminal_account_cap_overload(exc)
                     raise
                 if gate_contention and session.closed:
                     raise

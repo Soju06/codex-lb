@@ -6,7 +6,7 @@ from datetime import timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import text, update
 
 import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
@@ -1550,3 +1550,110 @@ async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup)
         # stale in-memory account_id.
         second = await repo.upsert("key_rebind", "acc_rebind_b", kind=StickySessionKind.PROMPT_CACHE)
         assert second.account_id == "acc_rebind_b"
+
+
+@pytest.mark.asyncio
+async def test_purge_stale_hard_codex_session_mappings_only_drops_durably_unavailable_owners(db_setup):
+    """A hard codex_session mapping must survive a merely-transient owner
+    blip (rate-limited/paused, but recently used) and only be dropped once
+    BOTH the owner is non-active AND the mapping itself hasn't been used
+    since well before the cutoff. Mappings on a healthy owner, and mappings
+    still recently used despite an unavailable owner, must never be touched."""
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    cutoff = now - timedelta(hours=6)
+    accounts = [
+        ("acc_purge_active", AccountStatus.ACTIVE),
+        ("acc_purge_recent_transition_rate_limited", AccountStatus.ACTIVE),
+        ("acc_purge_recent_transition_paused", AccountStatus.ACTIVE),
+        ("acc_purge_fresh_rate_limited", AccountStatus.RATE_LIMITED),
+        ("acc_purge_stale_rate_limited", AccountStatus.RATE_LIMITED),
+        ("acc_purge_fresh_paused", AccountStatus.PAUSED),
+        ("acc_purge_stale_paused", AccountStatus.PAUSED),
+    ]
+    # Only the "stale_*" mappings are backdated to before the cutoff; the
+    # rest keep their real upsert-time timestamp (well after the cutoff).
+    stale_account_ids = {"acc_purge_stale_rate_limited", "acc_purge_stale_paused"}
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        for account_id, status in accounts:
+            await repo_accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=status,
+                    deactivation_reason=None,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for account_id, _status in accounts:
+            await repo.upsert(f"turn_{account_id}", account_id, kind=StickySessionKind.CODEX_SESSION)
+
+    async with SessionLocal() as session:
+        for account_id in stale_account_ids:
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=cutoff - timedelta(hours=1))
+            )
+        for account_id in ("acc_purge_recent_transition_rate_limited", "acc_purge_recent_transition_paused"):
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=cutoff - timedelta(hours=1))
+            )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        assert await repo_accounts.update_status(
+            "acc_purge_recent_transition_rate_limited",
+            AccountStatus.RATE_LIMITED,
+        )
+        assert await repo_accounts.update_status_if_current(
+            "acc_purge_recent_transition_paused",
+            AccountStatus.PAUSED,
+            expected_status=AccountStatus.ACTIVE,
+        )
+        # Rewriting an already-unavailable state must not extend the grace
+        # period, and a failed compare-and-set must not touch it either.
+        assert await repo_accounts.update_status(
+            "acc_purge_stale_rate_limited",
+            AccountStatus.RATE_LIMITED,
+        )
+        assert not await repo_accounts.update_status_if_current(
+            "acc_purge_stale_paused",
+            AccountStatus.PAUSED,
+            expected_status=AccountStatus.ACTIVE,
+        )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        deleted_count = await repo.purge_stale_hard_codex_session_mappings(cutoff)
+
+    assert deleted_count == 2
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        remaining = {
+            account_id
+            for account_id, _status in accounts
+            if await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION) is not None
+        }
+    assert remaining == {
+        "acc_purge_active",
+        "acc_purge_recent_transition_rate_limited",
+        "acc_purge_recent_transition_paused",
+        "acc_purge_fresh_rate_limited",
+        "acc_purge_fresh_paused",
+    }

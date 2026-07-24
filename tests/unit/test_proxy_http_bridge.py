@@ -126,6 +126,44 @@ def _make_eventless_http_bridge_owner(
     )
 
 
+class _SilentTrackingUpstream:
+    def __init__(self, *, leading_telemetry: bool = False) -> None:
+        self.leading_telemetry = leading_telemetry
+        self.telemetry_emitted = False
+        self.blocking_receive_started = asyncio.Event()
+        self.receive_cancellations = 0
+        self.closed = False
+        self.sent_texts: list[str] = []
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        if self.leading_telemetry and not self.telemetry_emitted:
+            self.telemetry_emitted = True
+            return UpstreamWebSocketMessage(
+                kind="text",
+                text=json.dumps(
+                    {
+                        "type": "codex.rate_limits",
+                        "plan_type": "pro",
+                        "rate_limits": {"allowed": True, "limit_reached": False},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        self.blocking_receive_started.set()
+        try:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        except asyncio.CancelledError:
+            self.receive_cancellations += 1
+            raise
+
+    async def send_text(self, text: str) -> None:
+        self.sent_texts.append(text)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
     request_state = _make_eventless_http_bridge_owner()
 
@@ -134,7 +172,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 340.0
+        == 130.0
     )
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
@@ -150,7 +188,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 340.0
+        == 130.0
     )
 
 
@@ -17372,6 +17410,176 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
         session=session,
     )
     assert "http_bridge_event event=missing_response_created_timeout" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leading_telemetry", [False, True], ids=["silent", "leading-telemetry"])
+async def test_http_bridge_eventless_timeout_retries_once_on_fresh_same_account_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    leading_telemetry: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    old_upstream = _SilentTrackingUpstream(leading_telemetry=leading_telemetry)
+    replacement_upstream = _SilentTrackingUpstream()
+    session = _make_bridge_session(key_value=f"eventless-retry-{leading_telemetry}")
+    session.upstream = cast(UpstreamResponsesWebSocket, old_upstream)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.1,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    record_stuck_retire = Mock()
+    monkeypatch.setattr(proxy_service, "_record_http_bridge_stuck_retire", record_stuck_retire)
+    fail_reader = AsyncMock()
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner = _make_eventless_http_bridge_owner(
+        request_id=f"req-eventless-retry-{leading_telemetry}",
+        sent_at=time.monotonic() if leading_telemetry else time.monotonic() - 1.0,
+    )
+    owner.started_at = time.monotonic()
+    owner.response_create_gate = gate
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    owner.preferred_account_id = session.account.id
+    owner.account_response_create_lease = cast(Any, object())
+    async with session.pending_lock:
+        session.pending_requests.append(owner)
+        session.queued_request_count = 1
+
+    async def reconnect(
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> None:
+        assert target_session is session
+        assert kwargs["request_state"] is owner
+        assert kwargs["require_same_account"] is True
+        owner.response_create_sent_at = None
+        target_session.upstream = cast(UpstreamResponsesWebSocket, replacement_upstream)
+
+    reconnect_mock = AsyncMock(side_effect=reconnect)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect_mock)
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    try:
+        await asyncio.wait_for(replacement_upstream.blocking_receive_started.wait(), timeout=1.0)
+
+        reconnect_mock.assert_awaited_once_with(
+            session,
+            request_state=owner,
+            require_same_account=True,
+        )
+        assert replacement_upstream.sent_texts == [owner.request_text]
+        assert old_upstream.receive_cancellations == 1
+        assert owner.replay_count == 1
+        assert owner.response_create_sent_at is not None
+        assert owner.failure_detail_override is None
+        assert list(session.pending_requests) == [owner]
+        assert session.closed is False
+        assert owner.event_queue is not None
+        if leading_telemetry:
+            telemetry_block = owner.event_queue.get_nowait()
+            assert telemetry_block is not None
+            assert '"type":"codex.rate_limits"' in telemetry_block
+        assert owner.event_queue.empty() is True
+        fail_reader.assert_not_awaited()
+        record_stuck_retire.assert_not_called()
+    finally:
+        reader_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader_task
+
+    assert replacement_upstream.receive_cancellations == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_retry_second_timeout_settles_and_retires_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    old_upstream = _SilentTrackingUpstream()
+    replacement_upstream = _SilentTrackingUpstream()
+    session = _make_bridge_session(key_value="eventless-retry-exhausted")
+    session.upstream = cast(UpstreamResponsesWebSocket, old_upstream)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    write_request_log = AsyncMock()
+    monkeypatch.setattr(service, "_write_request_log", write_request_log)
+    record_stuck_retire = Mock()
+    monkeypatch.setattr(proxy_service, "_record_http_bridge_stuck_retire", record_stuck_retire)
+    original_fail_reader = service._fail_http_bridge_reader_and_maybe_retire
+    fail_reader = AsyncMock(wraps=original_fail_reader)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner = _make_eventless_http_bridge_owner(
+        request_id="req-eventless-retry-exhausted",
+        sent_at=time.monotonic() - 1.0,
+    )
+    owner.started_at = time.monotonic()
+    owner.response_create_gate = gate
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    owner.preferred_account_id = session.account.id
+    owner.account_response_create_lease = cast(Any, object())
+    event_queue = owner.event_queue
+    assert event_queue is not None
+    async with session.pending_lock:
+        session.pending_requests.append(owner)
+        session.queued_request_count = 1
+
+    async def reconnect(
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> None:
+        assert target_session is session
+        assert kwargs["request_state"] is owner
+        assert kwargs["require_same_account"] is True
+        owner.response_create_sent_at = None
+        target_session.upstream = cast(UpstreamResponsesWebSocket, replacement_upstream)
+
+    reconnect_mock = AsyncMock(side_effect=reconnect)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect_mock)
+
+    await asyncio.wait_for(service._relay_http_bridge_upstream_messages(session), timeout=1.0)
+
+    event_blocks: list[str] = []
+    while (event_block := await asyncio.wait_for(event_queue.get(), timeout=0.1)) is not None:
+        event_blocks.append(event_block)
+    assert len(event_blocks) == 1
+    assert '"code":"upstream_request_timeout"' in event_blocks[0]
+    assert event_queue.empty() is True
+    reconnect_mock.assert_awaited_once_with(
+        session,
+        request_state=owner,
+        require_same_account=True,
+    )
+    assert replacement_upstream.sent_texts == [owner.request_text]
+    assert old_upstream.receive_cancellations == 1
+    assert replacement_upstream.receive_cancellations == 1
+    assert owner.replay_count == 1
+    assert owner.failure_detail_override == "missing_response_created_timeout"
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    assert session.closed is True
+    assert session.key not in service._http_bridge_sessions
+    assert gate.locked() is False
+    assert write_request_log.await_count == 1
+    fail_reader.assert_awaited_once()
+    assert fail_reader.await_args.kwargs["penalize_account"] is False
+    record_stuck_retire.assert_called_once_with(
+        reason="missing_response_created_timeout",
+        session=session,
+    )
 
 
 @pytest.mark.asyncio

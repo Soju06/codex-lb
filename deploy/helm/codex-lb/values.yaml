@@ -358,7 +358,16 @@ ingress:
 gatewayApi:
   # @param gatewayApi.enabled Enable Gateway API HTTPRoute
   enabled: false
-  # @param gatewayApi.parentRefs Gateway parent references
+  gateway:
+    # @param gatewayApi.gateway.create Create an application-specific Gateway for this release instead of attaching to an existing shared Gateway
+    create: false
+    # @param gatewayApi.gateway.gatewayClassName GatewayClass name for the chart-managed Gateway (required when create=true)
+    gatewayClassName: ""
+    # @param gatewayApi.gateway.annotations Annotations for the chart-managed Gateway
+    annotations: {}
+    # @param gatewayApi.gateway.listeners Listeners for the chart-managed Gateway (empty = one HTTP listener on port 80)
+    listeners: []
+  # @param gatewayApi.parentRefs Gateway parent references (ignored when gatewayApi.gateway.create=true)
   parentRefs:
     - name: gateway
       namespace: gateway-system

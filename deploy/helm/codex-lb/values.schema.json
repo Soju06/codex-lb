@@ -84,6 +84,18 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "gateway": {
+          "type": "object",
+          "properties": {
+            "create": { "type": "boolean" },
+            "gatewayClassName": { "type": "string" },
+            "annotations": { "type": "object" },
+            "listeners": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        },
         "rules": {
           "type": "array",
           "items": {

@@ -74,6 +74,29 @@ forward-auth middleware.
 Extension resources must be valid for the release namespace according to the
 Gateway implementation.
 
+## Application-specific Gateway
+
+When no shared Gateway exists (or the release should not depend on one), set
+`gatewayApi.gateway.create=true` to render a Gateway dedicated to this release
+in the release namespace. The chart's HTTPRoute attaches to it automatically
+and `gatewayApi.parentRefs` is ignored:
+
+```yaml
+gatewayApi:
+  enabled: true
+  gateway:
+    create: true
+    gatewayClassName: envoy
+  hostnames:
+    - codex-lb.example.com
+```
+
+`gatewayApi.gateway.gatewayClassName` is required when `create=true`. The
+Gateway defaults to a single HTTP listener on port 80; override
+`gatewayApi.gateway.listeners` for TLS or other ports. See the
+[Helm chart README](https://github.com/Soju06/codex-lb/blob/main/deploy/helm/codex-lb/README.md)
+for a TLS listener example.
+
 ## Full chart reference
 
 For external database, production config, ingress, observability, and more see the

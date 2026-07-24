@@ -6361,7 +6361,7 @@ async def test_stream_via_http_bridge_uses_trimmable_full_resend_without_durable
     retains_prior_output: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    stored_input_items = [
+    stored_input_items: list[proxy_service.JsonValue] = [
         {
             "type": "additional_tools",
             "role": "developer",

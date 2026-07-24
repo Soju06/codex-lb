@@ -11,7 +11,8 @@ import aiohttp
 import pytest
 from websockets.asyncio.server import serve as websocket_serve
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidProxy, InvalidStatus
+from websockets.frames import Close
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
@@ -20,6 +21,8 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
     UpstreamWebSocketTransportError,
+    WebsocketsResponsesWebSocket,
+    connect_live_websocket,
     connect_responses_websocket,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -127,7 +130,8 @@ class _FakeCodexWebSocket:
     async def receive(self) -> object:
         return b'{"type":"response.completed"}'
 
-    async def close(self) -> None:
+    async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        del code, message
         self.closed = True
 
 
@@ -184,6 +188,26 @@ class _FailingCodexClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_live_direct_adapter_preserves_abnormal_close_code_and_reason() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(Close(1011, "server restart"), None)
+
+    websocket = WebsocketsResponsesWebSocket(
+        cast(Any, Connection()),
+        uses_proxy=False,
+        preserve_close_semantics=True,
+    )
+
+    message = await websocket.receive()
+
+    assert message.kind == "close"
+    assert message.close_code == 1011
+    assert message.close_reason == "server restart"
+    assert message.error is None
 
 
 @pytest.mark.asyncio
@@ -349,6 +373,89 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert call["max_msg_size"] == 4321
     assert "max_size" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_routed_call_disables_denial_replay_and_enables_heartbeat(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    codex_client = _FakeCodexClient()
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_live_websocket(
+        "rtc_live",
+        {},
+        "access-token",
+        "account-123",
+        route=route,
+        codex_client=cast(Any, codex_client),
+    )
+    await websocket.close()
+
+    call = codex_client.calls[0]
+    assert call["retry_handshake_status"] is False
+    assert call["heartbeat"] == 120.0
+    assert call["max_msg_size"] == 4321
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_preserves_handshake_status_without_endpoint_disclosure(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_secret", "http", "proxy.test", 8080),
+    )
+
+    class DeniedCodexClient:
+        async def open_ws_with_route_metadata(self, *_args, **_kwargs):
+            raise CodexTransportError(
+                "sensitive denial via endpoint ep_secret",
+                status_code=403,
+                error_code="upstream_websocket_handshake_failed",
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, DeniedCodexClient()),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert _proxy_error_code(exc_info.value) == "upstream_websocket_handshake_failed"
+    assert "ep_secret" not in (_proxy_error_message(exc_info.value) or "")
+    assert "sensitive" not in (_proxy_error_message(exc_info.value) or "")
 
 
 @pytest.mark.asyncio

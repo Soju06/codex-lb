@@ -79,6 +79,25 @@ class StickySessionsRepository:
             raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
         return row
 
+    async def insert_if_absent(self, key: str, account_id: str, kind: StickySessionKind) -> str:
+        """Insert immutable ownership and return the persisted owner."""
+
+        statement = self._build_insert_do_nothing_statement(key, account_id, kind).returning(StickySession.account_id)
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement)
+            owner_id = result.scalar_one_or_none()
+            if owner_id is None:
+                owner_id = await self._session.scalar(
+                    select(StickySession.account_id).where(
+                        StickySession.key == key,
+                        StickySession.kind == kind,
+                    )
+                )
+            await self._session.commit()
+        if owner_id is None:
+            raise RuntimeError("StickySession immutable insert did not resolve an owner")
+        return owner_id
+
     async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
         if not key:
             return False
@@ -242,6 +261,38 @@ class StickySessionsRepository:
         stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
+        async with sqlite_writer_section():
+            result = await self._session.execute(stmt.returning(StickySession.key))
+            deleted = len(result.scalars().all())
+            await self._session.commit()
+        return deleted
+
+    async def purge_before_for_key_prefix(
+        self,
+        cutoff: datetime,
+        *,
+        kind: StickySessionKind,
+        key_prefix: str,
+        limit: int = _DELETE_ENTRIES_CHUNK_SIZE,
+    ) -> int:
+        """Delete one bounded batch from a reserved key namespace."""
+
+        if limit <= 0:
+            return 0
+        target_keys = (
+            select(StickySession.key)
+            .where(
+                StickySession.kind == kind,
+                StickySession.key.startswith(key_prefix, autoescape=True),
+                StickySession.updated_at < to_utc_naive(cutoff),
+            )
+            .order_by(StickySession.updated_at.asc(), StickySession.key.asc())
+            .limit(limit)
+        )
+        stmt = delete(StickySession).where(
+            StickySession.kind == kind,
+            StickySession.key.in_(target_keys),
+        )
         async with sqlite_writer_section():
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())

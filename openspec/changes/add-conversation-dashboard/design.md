@@ -13,7 +13,7 @@ Covers:
 - two authenticated dashboard APIs (`GET /api/conversations` and
   `GET /api/conversations/{conversation_id}`);
 - a switchable dashboard view (Request Logs default, Conversations alternative)
-  with one combined conversation-ID/user-agent-family search input;
+  whose section title is the view selector;
 - model-plus-effort detail statistics with client-side column sorting; and
 - backend and frontend regression coverage.
 
@@ -74,22 +74,29 @@ The list row contains exactly these fields from the frontend-architecture delta:
 regardless of reasoning effort. The list envelope contains pagination metadata
 and rows only, not a response summary object.
 
-The dashboard list columns are Conversation, Last request, Accounts, API key,
-Models, Tokens, Cost, and Details. Account/model remainder values use a smaller
-muted `+ N more` secondary line, and cached tokens are subordinate to total
-tokens. The selector uses the existing
-Radix-style menu conventions and `ChevronDown`, with Request Logs as the default
-and `view=conversations` as the URL-backed alternative. Each view's filters and
-pagination are retained in separate URL-backed query state; switching views does
-not reinterpret, overwrite, or clear the inactive view's state, and conversation
-search changes reset the conversation page/offset to zero.
+The dashboard list columns are Last request, Conversation, Accounts, API key,
+Models, Tokens, Cost, and Details. Last request uses the request-log Time
+column's two-line time/date presentation. Account/model remainder values use a
+smaller muted `+ N more` secondary line, and cached tokens are subordinate to
+total tokens. Account IDs remain the API aggregation key, while the frontend
+resolves the representative account through the dashboard account summaries and
+displays `displayName`, then email, then the ID as the final fallback.
+
+The original uppercase section-title typography is retained and the title itself
+becomes the single accessible Radix-style selector trigger with `ChevronDown`.
+Request Logs remains the default and `view=conversations` remains the URL-backed
+alternative. The separate selector to the title's right is removed. Each view's
+pagination and remaining filters retain separate URL-backed query state;
+switching views does not reinterpret, overwrite, or clear inactive state. The
+Conversations view does not render a filter input above its list.
 
 The detail dialog puts conversation ID/start/latest on row one and account
 count/total elapsed/dominant user-agent on row two. Its displayed model/effort
 table has exactly these columns: Model (effort), Reqs, Total elapsed, Total input
 (with total cache as a subordinate/parenthetical value), Total output, and Total
 cost. It starts at Reqs descending; every displayed column is sortable
-client-side over the single returned page.
+client-side over the single returned page. Conversation ID remains visible but
+does not render a copy action.
 
 ## Verification Decisions
 
@@ -101,11 +108,13 @@ client-side over the single returned page.
   elapsed time at both levels, token/cost semantics, exact detail columns,
   default `reqs DESC`, no API sort parameter, encoded blank detail path, and
   unknown-ID 404 behavior.
-- Frontend coverage asserts the Request Logs default, selector URL state, one
-  search input with no date controls, independent retained URL query state and
-  conversation pagination reset, exact list columns and subordinate cached
-  tokens, detail loading/error/retry behavior, nullable aggregate fallbacks,
-  empty state, detail layout, and client-side-only sorting.
+- Frontend coverage asserts the Request Logs default, title-styled selector URL
+  state with no duplicate right-side selector, no conversation filter input,
+  independent retained URL query state, exact reordered list columns, shared
+  request-log time presentation, human-readable account labels, subordinate
+  cached tokens, absence of the conversation-ID copy action, detail
+  loading/error/retry behavior, nullable aggregate fallbacks, empty state,
+  detail layout, and client-side-only sorting.
 - OpenSpec validation and whitespace validation must pass before this change is
   considered ready. Main capability specs are not synchronized by this change.
 

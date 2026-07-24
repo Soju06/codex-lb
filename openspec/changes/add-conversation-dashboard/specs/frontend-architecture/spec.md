@@ -175,27 +175,33 @@ return the project-standard 404 response.
 
 ### Requirement: Dashboard conversation view
 
-The dashboard MUST render Request Logs by default and MUST provide a styled,
-accessible Radix-style selector with `ChevronDown` for Request Logs and
-Conversations. Selecting Conversations MUST persist `view=conversations` in the
-URL; selecting Request Logs MUST return to the existing request-log view.
+The dashboard MUST render Request Logs by default. The original uppercase
+section-title typography MUST be retained, and the title itself MUST be the
+single accessible Radix-style selector trigger with `ChevronDown` for Request
+Logs and Conversations. A separate selector MUST NOT render to the title's
+right. Selecting Conversations MUST persist `view=conversations` in the URL;
+selecting Request Logs MUST return to the existing request-log view.
 
 The dashboard MUST retain separate URL-backed query state for Request Logs and
-Conversations, including each view's filters and pagination. Switching views
-MUST NOT reinterpret, overwrite, or clear the inactive view's query state, and
-returning to a view MUST restore its retained filters and pagination. Changing
-conversation search MUST reset only the conversation page/offset to zero.
+Conversations, including each view's applicable filters and pagination.
+Switching views MUST NOT reinterpret, overwrite, or clear the inactive view's
+query state, and returning to a view MUST restore its retained state.
 
-The Conversations view MUST contain one search input that matches conversation
-ID and user-agent family. It MUST NOT provide date/timeframe controls. The view
-MUST use the list endpoint's established loading, error, empty, and pagination
-behavior.
+The Conversations view MUST NOT render a filter input above the list and MUST
+NOT provide date/timeframe controls. The view MUST use the list endpoint's
+established loading, error, empty, and pagination behavior.
 
-The conversation list MUST render exactly these columns: Conversation, Last
-request, Accounts, API key, Models, Tokens, Cost, and Details. Accounts and
-models MUST show the representative value and render remaining values as a
-smaller muted `+ N more` secondary line. Tokens MUST show total tokens with
-cached input tokens on a subordinate line.
+The conversation list MUST render exactly these columns in order: Last request,
+Conversation, Accounts, API key, Models, Tokens, Cost, and Details. Last request
+MUST use the request-log Time column's two-line time/date presentation. Accounts
+MUST resolve the representative account ID through the dashboard account
+summaries and display `displayName`, then email, then the ID as a final fallback.
+Accounts and models MUST render remaining values as a smaller muted `+ N more`
+secondary line. Tokens MUST show total tokens with cached input tokens on a
+subordinate line.
+When dashboard privacy blur is enabled, an account label resolved from an email
+fallback MUST render with the established `privacy-blur` class; display-name
+and account-ID fallback labels MUST remain unblurred.
 The API-key column MUST use `apiKeyName` only. Details MUST use the existing
 Details button treatment.
 
@@ -207,6 +213,7 @@ subordinate/parenthetical value), Total output, and Total cost. Total cache MUST
 not be a separate displayed column. The table MUST default to Reqs descending
 and MUST support client-side sorting for every displayed column without adding a
 sort query parameter.
+The displayed conversation ID MUST NOT provide a copy action.
 
 The detail dialog MUST use the established dashboard loading state while the
 detail API is pending. Unknown or malformed conversation IDs, including a
@@ -232,21 +239,30 @@ An empty conversation list MUST render the established dashboard empty state.
 - **AND** switching views does not reinterpret, overwrite, or clear the other
   view's query state
 
-#### Scenario: Conversation search resets only conversation pagination
-
-- **GIVEN** the Conversations view is on a non-zero page/offset and Request Logs
-  has retained filters and pagination
-- **WHEN** the operator changes the conversation search text
-- **THEN** the conversation page/offset resets to zero
-- **AND** the Request Logs query state remains unchanged
-
-#### Scenario: Conversations has one search input and exact rendering
+#### Scenario: Conversations has no filter input and uses exact rendering
 
 - **WHEN** the operator opens the Conversations view
-- **THEN** exactly one search input is available and no date/timeframe controls
-  are rendered
-- **AND** the list renders the specified columns, smaller muted `+ N more`
-  account/model secondary lines, and cached tokens as a subordinate line
+- **THEN** no filter input or date/timeframe controls are rendered above the list
+- **AND** the list renders the specified reordered columns and two-line request
+  time presentation
+- **AND** representative account IDs resolve to display name, then email, then ID
+- **AND** smaller muted `+ N more` account/model secondary lines and cached
+  tokens as a subordinate line are rendered
+
+#### Scenario: Conversation account privacy blur applies only to email fallback
+
+- **GIVEN** dashboard privacy blur is enabled and account labels resolve using
+  display name, email fallback, and account-ID fallback values
+- **WHEN** the Conversations list renders
+- **THEN** only the email-fallback label has the established `privacy-blur` class
+- **AND** the display-name and account-ID fallback labels remain unblurred
+
+#### Scenario: The original-styled title is the only view selector
+
+- **WHEN** the list section renders
+- **THEN** its uppercase title typography is retained
+- **AND** activating the title opens the Request Logs/Conversations selector
+- **AND** no separate selector is rendered to the title's right
 
 #### Scenario: Conversation details use established loading and retry states
 
@@ -273,6 +289,7 @@ An empty conversation list MUST render the established dashboard empty state.
 
 - **WHEN** the operator opens a conversation's Details dialog
 - **THEN** row one contains conversation ID/start/latest
+- **AND** conversation ID has no copy action
 - **AND** row two contains account count/total elapsed/dominant user-agent
 - **AND** the table displays exactly Model (effort), Reqs, Total elapsed, Total
   input (with total cache as a subordinate/parenthetical value), Total output,

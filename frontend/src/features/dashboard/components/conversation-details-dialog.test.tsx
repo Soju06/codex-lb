@@ -188,6 +188,21 @@ describe("ConversationDetailsDialog", () => {
     expect(screen.getAllByRole("row")[1]).toHaveTextContent("gpt-5.4-mini (high)");
   });
 
+  it("shows the conversation ID without a copy action", async () => {
+    server.use(
+      http.get("/api/conversations/conv_no_copy", () =>
+        HttpResponse.json(createConversationDetails({ conversationId: "conv_no_copy" })),
+      ),
+    );
+
+    renderWithProviders(
+      <ConversationDetailsDialog open conversationId="conv_no_copy" onOpenChange={() => {}} />,
+    );
+
+    expect(await screen.findByText("conv_no_copy")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /copy conversation id/i })).not.toBeInTheDocument();
+  });
+
   it("uses the standard retry surface for a detail error", async () => {
     server.use(
       http.get("/api/conversations/missing", () =>

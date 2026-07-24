@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { DashboardViewSelector } from "@/features/dashboard/components/filters/dashboard-view-selector";
@@ -17,6 +17,30 @@ describe("DashboardViewSelector", () => {
     render(<DashboardViewSelector value="conversations" onChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: /conversations/i })).toBeInTheDocument();
+  });
+
+  it("uses the original section-title style as the dropdown trigger", async () => {
+    const user = userEvent.setup();
+    render(<DashboardViewSelector value="request-logs" onChange={vi.fn()} />);
+
+    const heading = screen.getByRole("heading", { level: 2 });
+    const trigger = within(heading).getByRole("button", { name: /request logs/i });
+    expect(heading).toHaveClass(
+      "text-[13px]",
+      "font-medium",
+      "uppercase",
+      "tracking-wider",
+      "text-muted-foreground",
+    );
+    expect(trigger).toHaveClass(
+      "text-[13px]",
+      "font-medium",
+      "uppercase",
+      "tracking-wider",
+      "text-muted-foreground",
+    );
+    await user.click(trigger);
+    expect(await screen.findByRole("menu")).toBeInTheDocument();
   });
 
   it("opens the menu and exposes both options", async () => {

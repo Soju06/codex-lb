@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 
 import { ConversationsView } from "@/features/dashboard/components/conversations-view";
@@ -8,22 +7,13 @@ import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 describe("ConversationsView", () => {
-  it("has one search input, no timeframe controls, and preserves the list state", async () => {
+  it("renders the list without a conversation filter", async () => {
     window.history.pushState({}, "", "/dashboard?view=conversations");
-    renderWithProviders(<ConversationsView />);
+    renderWithProviders(<ConversationsView accounts={[]} />);
 
     expect(await screen.findByText("conv_abc")).toBeInTheDocument();
-    const search = screen.getByRole("searchbox");
-    expect(screen.getAllByRole("searchbox")).toHaveLength(1);
-    expect(search).toHaveAttribute("name", "conversationSearch");
-    expect(search).toHaveAttribute("autocomplete", "off");
-    expect(search).toHaveAccessibleName("Search conversations");
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
     expect(screen.queryByText(/timeframe/i)).not.toBeInTheDocument();
-
-    const user = userEvent.setup();
-    await user.type(screen.getByRole("searchbox"), "opencode");
-    expect(window.location.search).toContain("conversationSearch=opencode");
-    expect(window.location.search).toContain("conversationOffset=0");
   });
 
   it("renders the established empty state", async () => {

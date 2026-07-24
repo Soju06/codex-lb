@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
-import { CopyButton } from "@/components/copy-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -118,8 +117,6 @@ export function ConversationDetailsDialog({
                   value={detailsQuery.data.conversationId || "—"}
                   mono
                   translateNo
-                  copyValue={detailsQuery.data.conversationId}
-                  copyLabel={t("dashboard.requestDetails.copyConversationId")}
                 />
                 <DetailField label={t("dashboard.conversations.details.start")} value={formatDateTimeInline(detailsQuery.data.start)} />
                 <DetailField label={t("dashboard.conversations.details.latest")} value={formatDateTimeInline(detailsQuery.data.latest)} />
@@ -223,21 +220,16 @@ function DetailField({
   value,
   mono = false,
   translateNo = false,
-  copyValue,
-  copyLabel,
 }: {
   label: string;
   value: string;
   mono?: boolean;
   translateNo?: boolean;
-  copyValue?: string;
-  copyLabel?: string;
 }) {
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-        <span>{label}</span>
-        {copyValue ? <CopyButton value={copyValue} label={copyLabel} iconOnly /> : null}
+      <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
+        {label}
       </div>
       <p className={`break-all text-sm leading-relaxed ${mono ? "font-mono" : ""}`} translate={translateNo ? "no" : undefined}>{value}</p>
     </div>

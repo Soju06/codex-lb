@@ -393,13 +393,10 @@ export function DashboardPage() {
 
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
-              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">
-                {t(dashboardView === "request-logs" ? "dashboard.requests.title" : "dashboard.conversations.title")}
-              </h2>
               <DashboardViewSelector value={dashboardView} onChange={handleDashboardViewChange} />
               <div className="h-px flex-1 bg-border" />
             </div>
-            {dashboardView === "conversations" ? <ConversationsView state={conversationsState} /> : logsQuery.isPending && !logPage ? (
+            {dashboardView === "conversations" ? <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} /> : logsQuery.isPending && !logPage ? (
               <div className="rounded-xl border bg-card py-8">
                 <SpinnerBlock />
               </div>

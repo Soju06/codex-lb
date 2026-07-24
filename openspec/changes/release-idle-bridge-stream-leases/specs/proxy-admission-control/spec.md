@@ -4,7 +4,7 @@
 
 An HTTP bridge session's per-account stream lease MUST be held only while the session has in-flight work. When a session's last in-flight turn detaches — no queued requests, no admission waiters, and no pending requests — the session MUST release its account stream lease while remaining alive for reuse, so a warm idle upstream WebSocket does not occupy a per-account stream slot for its idle TTL. A turn admitted to a session holding no lease MUST reacquire one under normal cap admission before it is counted into the session queue, and a denied reacquisition MUST fail with the standard HTTP 429 `account_stream_cap` envelope so the recoverable capacity wait and client retry semantics apply unchanged. The stream recovery reserve MUST NOT be consulted at reacquisition, consistent with the reserve being a selection-time reserve. Session close MUST keep its existing lease settlement; a session that already released while idle has nothing further to settle.
 
-The lease remains per-session, matching the pre-existing lease lifecycle: a session MUST hold at most one stream lease at a time, and turns queued on a session that already holds a lease MUST NOT acquire additional leases — queued turns multiplex over the session's single upstream stream, which is what the per-account stream cap bounds. If the session closes while a reacquisition is in flight, the freshly acquired lease MUST be released back rather than installed on the closed session, and the turn MUST fail with the standard closed-bridge error envelope.
+The lease remains per-session, matching the pre-existing lease lifecycle: a session MUST hold at most one stream lease at a time, and turns queued on a session that already holds a lease MUST NOT acquire additional leases — queued turns multiplex over the session's single upstream stream, which is what the per-account stream cap bounds. If the session closes while a reacquisition is in flight, the freshly acquired lease MUST be released back rather than installed on the closed session, and the turn MUST fail with the standard closed-bridge error envelope. A submit MUST be registered as in-flight work (admission waiter) atomically with its lease reacquisition, so a completed turn's finalizer running concurrently cannot observe the session as idle and release the reacquired lease before the new turn is counted into the session queue.
 
 #### Scenario: Finished turn returns the account's stream slot
 
@@ -39,6 +39,13 @@ The lease remains per-session, matching the pre-existing lease lifecycle: a sess
 - **WHEN** the session is closed or evicted before the acquisition completes
 - **THEN** the freshly acquired lease is released back to the account
 - **AND** the turn fails with the standard closed-bridge error envelope
+
+#### Scenario: Stale finalizer cannot release a lease reacquired for a new turn
+
+- **GIVEN** a warm session whose new turn has reacquired a stream lease but is not yet counted into the session queue
+- **WHEN** a previous turn's finalizer runs its idle-release check concurrently
+- **THEN** the session is not considered idle
+- **AND** the reacquired lease is retained for the new turn
 
 #### Scenario: Queued turns share the session's single stream slot
 

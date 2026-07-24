@@ -660,8 +660,17 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         request_state.session_previous_gap_ms = int(max(0.0, request_state.started_at - session.last_used_at) * 1000)
+        gate_acquired = False
+        request_enqueued = False
+        admission_waiter_registered = False
         async with session.pending_lock:
             await self._ensure_http_bridge_session_stream_lease_locked(session)
+            # Register the submit as an admission waiter atomically with the
+            # reacquire so a previous turn's finalizer unwinding concurrently
+            # cannot see an apparently idle session and release this lease
+            # before the turn is counted into the session queue.
+            session.admission_waiter_count += 1
+            admission_waiter_registered = True
         try:
             await self._maybe_prewarm_http_bridge_session(
                 session,
@@ -671,13 +680,15 @@ class _HTTPBridgeRequestSubmitMixin:
         except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
+            async with session.pending_lock:
+                session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+                admission_waiter_registered = False
             await self._maybe_release_idle_http_bridge_session_lease(session)
             raise
-        gate_acquired = False
-        request_enqueued = False
-        admission_waiter_registered = False
         async with session.pending_lock:
             if session.queued_request_count >= queue_limit:
+                session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+                admission_waiter_registered = False
                 if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                     session.unanchored_reservation_id = None
                 _log_http_bridge_event(
@@ -701,8 +712,6 @@ class _HTTPBridgeRequestSubmitMixin:
             session.queued_request_count += 1
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
-            session.admission_waiter_count += 1
-            admission_waiter_registered = True
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
             text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)

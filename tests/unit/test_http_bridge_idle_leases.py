@@ -232,6 +232,126 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
 
 
 @pytest.mark.asyncio
+async def test_stale_finalizer_cannot_release_lease_reacquired_for_new_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A previous turn's finalizer must not steal the lease reacquired for a new turn.
+
+    The submit registers as an admission waiter atomically with the first
+    reacquire, so a stale finalizer running during prewarm sees a non-idle
+    session and leaves the fresh lease alone. Without that registration the
+    finalizer releases the lease and the second ensure has to acquire again
+    (observable as a second acquire_account_lease call).
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    lease = _make_lease("l8")
+    acquire_account_lease = AsyncMock(return_value=lease)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+
+    async def stale_finalizer_during_prewarm(*_args: object, **_kwargs: object) -> None:
+        # Simulates the previous turn's terminal path / stream finalizer
+        # unwinding between the first reacquire and queue admission.
+        await service._maybe_release_idle_http_bridge_session_lease(session)
+        assert session.account_lease is lease
+
+    monkeypatch.setattr(
+        service, "_maybe_prewarm_http_bridge_session", AsyncMock(side_effect=stale_finalizer_during_prewarm)
+    )
+    monkeypatch.setattr(
+        service,
+        "_inline_http_bridge_image_urls",
+        AsyncMock(return_value='{"type":"response.create","model":"gpt-5.2","input":"hi"}'),
+    )
+    monkeypatch.setattr(
+        service,
+        "_acquire_request_state_response_create_admission",
+        AsyncMock(
+            side_effect=ProxyResponseError(
+                429,
+                openai_error(
+                    "account_response_create_cap",
+                    "Account response-create capacity is exhausted.",
+                    error_type="rate_limit_error",
+                ),
+            )
+        ),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-finalizer-race",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError):
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    # One acquisition only: the stale finalizer never released the lease, so
+    # the ensure at queue admission did not have to acquire a second time.
+    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream")
+    # The admission-failure cleanup settles the lease exactly once.
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
+    assert session.admission_waiter_count == 0
+    assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_full_submit_unregisters_admission_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(queued_request_count=1)
+    lease = _make_lease("l9")
+    session.account_lease = lease
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-queue-full",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=1,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_queue_full"
+    assert session.admission_waiter_count == 0
+    # The session still has queued work, so its lease is retained.
+    assert session.account_lease is lease
+    release_account_lease.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_upstream_terminal_drain_releases_abandoned_session_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

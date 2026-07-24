@@ -24,7 +24,12 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountUsageRollupState, ApiKey, RequestKind, RequestLog, RequestUsageHourlyRollup
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import lock_fold_state
-from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, from_dimension
+from app.modules.accounts.usage_time_rollup import (
+    HOURLY_BUCKET_SECONDS,
+    WARMUP_REQUEST_KINDS,
+    floor_to_hour,
+    from_dimension,
+)
 from app.modules.accounts.usage_time_rollup_read import (
     RawWindow,
     earliest_hourly_bucket_at,
@@ -503,11 +508,14 @@ class RequestLogsRepository:
         result = await self._session.execute(stmt)
         value = result.scalar_one_or_none()
         raw_earliest = value if isinstance(value, datetime) else None
-        # Raw wins while it survives (sub-hour precision); once retention has
-        # pruned it, fall back to the earliest folded bucket at whole-hour
-        # precision so history-dependent UI (e.g. canCompare) keeps working.
+        # Raw wins while it survives (sub-hour precision); the whole-hour
+        # rollup fallback (keeps history-dependent UI like canCompare
+        # working) applies only when the earliest folded bucket lies STRICTLY
+        # below raw's own bucket — i.e. retention has pruned earlier raw
+        # rows. A folded bucket that merely floors the still-present earliest
+        # raw row must not round the result down to the hour.
         rollup_earliest = await earliest_hourly_bucket_at(self._session)
-        if rollup_earliest is not None and (raw_earliest is None or rollup_earliest < raw_earliest):
+        if rollup_earliest is not None and (raw_earliest is None or rollup_earliest < floor_to_hour(raw_earliest)):
             return rollup_earliest
         return raw_earliest
 
@@ -659,11 +667,12 @@ class RequestLogsRepository:
         and we rewrite it here once the public effective model is known so
         the dashboard and usage views surface the user-visible model.
 
-        Only rows in the un-folded live tail (at or above every rollup
-        watermark) are rewritten: ``model`` is a rollup dimension and
-        ``cost_usd`` a folded measure, so mutating a row below a watermark
-        would silently diverge the permanent rollups from raw (and the
-        divergence becomes unrepairable once retention prunes the raw row).
+        Only rows in the un-folded live tail — at or above EVERY rollup
+        watermark, i.e. ``max(lifetime, hourly)`` — are rewritten: ``model``
+        is a rollup dimension and ``cost_usd`` a folded measure, so mutating
+        a row below either watermark would silently diverge that rollup from
+        raw (and the divergence becomes unrepairable once retention prunes
+        the raw row).
         A matching row below the watermarks can only be a client-reused
         request id colliding with unrelated old traffic — the rewrite's
         target is the row the caller inserted moments ago. The fold-state
@@ -690,7 +699,10 @@ class RequestLogsRepository:
                 # label with host-model pricing and report inaccurate cost.
                 stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
                 if watermarks is not None:
-                    stmt = stmt.where(RequestLog.requested_at >= min(watermarks))
+                    # max(): a row is un-folded by EVERY rollup only when it
+                    # is at or above the most advanced watermark (min() is
+                    # the retention gate's direction, not the rewrite gate's).
+                    stmt = stmt.where(RequestLog.requested_at >= max(watermarks))
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())
                 if not logs:

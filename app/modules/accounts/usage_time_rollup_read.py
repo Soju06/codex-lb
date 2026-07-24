@@ -11,9 +11,13 @@ apart across consumers:
   until)))``. The watermark is always hour-aligned (and 3600 % 900 == 0), so
   a folded bucket is never split between the rollup segment and the raw tail.
 - The raw windows are the exact complement: a partial leading bucket
-  ``[since, ceil_grid(since))`` (always served from raw — if retention has
-  already pruned it, the loss is a deterministic sub-bucket undercount,
-  documented as out of parity scope) and the tail ``[hi, until)``.
+  ``[since, ceil_grid(since))`` and the tail ``[hi, until)`` (which for a
+  fully historical window is a partial trailing bucket). Both are always
+  served from raw — if retention has already pruned them, the loss is a
+  deterministic ≤1-bucket undercount per unaligned edge, documented as out
+  of parity scope (sub-bucket boundary contributions cannot be represented
+  in the rollup grid; serving the whole edge bucket instead would
+  over-count).
 - Rollup rows and the watermark are read in ONE statement (state LEFT JOIN
   rollup, inherited from ``RequestUsageTimeRollupRepository``): a fold slice
   committing between the rollup read and the raw-tail read can never drop or

@@ -667,10 +667,11 @@ async def test_hourly_fold_is_idempotent(db_setup):
 
 @pytest.mark.asyncio
 async def test_model_rewrite_skips_folded_rows(db_setup):
-    """`update_model_for_request` must never rewrite rows below a rollup
-    watermark: model is a folded dimension and cost a folded measure, so a
-    pre-watermark rewrite (a client-reused request id colliding with old
-    traffic) would silently diverge the permanent rollups from raw."""
+    """`update_model_for_request` must never rewrite rows below ANY rollup
+    watermark (the bound is max(lifetime, hourly)): model is a folded
+    dimension and cost a folded measure, so a pre-watermark rewrite (a
+    client-reused request id colliding with old traffic) would silently
+    diverge the permanent rollups from raw."""
     now = utcnow()
     old_at = floor_to_hour(now - timedelta(days=3)) + timedelta(seconds=30)
     async with SessionLocal() as session:
@@ -680,18 +681,23 @@ async def test_model_rewrite_skips_folded_rows(db_setup):
         await _add_log(logs, account_id="acc_rw", request_id="r_rw", requested_at=now)
 
     assert await run_hourly_fold_pass(now=now) >= 1
-    # The bound is min(lifetime, hourly) watermark; advance the lifetime one
-    # to match so the hourly watermark is what gates the rewrite.
+    # Make the watermarks DIVERGE (lifetime two hours ahead) and add a row
+    # between them: folded by the lifetime rollup but not yet by the hourly
+    # one, it must still be skipped — the gate is the max, not the min.
     async with SessionLocal() as session:
         state = (
             await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
         ).scalar_one()
+        hourly_watermark = state.hourly_folded_through
         await session.execute(
             update(AccountUsageRollupState)
             .where(AccountUsageRollupState.id == 1)
-            .values(folded_through=state.hourly_folded_through)
+            .values(folded_through=hourly_watermark + timedelta(hours=2))
         )
         await session.commit()
+    between_at = hourly_watermark + timedelta(minutes=30)
+    async with SessionLocal() as session:
+        await _add_log(RequestLogsRepository(session), account_id="acc_rw", request_id="r_rw", requested_at=between_at)
 
     async with SessionLocal() as session:
         updated = await RequestLogsRepository(session).update_model_for_request("r_rw", "gpt-image-1")
@@ -699,7 +705,8 @@ async def test_model_rewrite_skips_folded_rows(db_setup):
 
     async with SessionLocal() as session:
         models_by_age = dict((await session.execute(select(RequestLog.requested_at, RequestLog.model))).all())
-    assert models_by_age[old_at] == "gpt-5.1-codex"
+    assert models_by_age[old_at] == "gpt-5.1-codex"  # below both watermarks
+    assert models_by_age[between_at] == "gpt-5.1-codex"  # below the lifetime watermark
     assert models_by_age[now] == "gpt-image-1"
 
     # The folded hourly bucket still carries the original model dimension.

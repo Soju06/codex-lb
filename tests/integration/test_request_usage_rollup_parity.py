@@ -165,6 +165,10 @@ def _corpus() -> list[RequestLog]:
             cached_input_tokens=44,
         )
     )
+    # UNaligned earliest row: while it survives, earliest_activity_at must
+    # keep the exact sub-hour timestamp even though its folded bucket floors
+    # it (the rollup fallback applies only once raw is pruned).
+    rows.append(_log(BASE - timedelta(minutes=23), request_id_suffix="first"))
     rows.append(
         _log(
             BASE + timedelta(days=3, hours=1),

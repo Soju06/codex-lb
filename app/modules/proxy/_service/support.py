@@ -77,6 +77,7 @@ _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
     }
 )
 _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
+_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS = 2.0
 _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
@@ -320,6 +321,13 @@ def _account_selection_recovery_sleep_seconds_from_message(
 
     if "hit your spend cap set by the owner of your workspace" in lowered:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    # A hard affinity row is an ownership constraint, so it must not spill to
+    # another account. Capacity/health transitions can nevertheless make the
+    # owner briefly unavailable; give that owner a short recovery window before
+    # surfacing a 503 rather than rebinding the logical session.
+    if error_code == "hard_affinity_saturated":
+        return _HARD_AFFINITY_RECOVERY_SLEEP_SECONDS
 
     if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS

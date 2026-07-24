@@ -454,6 +454,16 @@ def test_account_selection_recovery_sleep_treats_workspace_spend_cap_as_recovera
     assert _account_selection_recovery_sleep_seconds(selection) == 30.0
 
 
+def test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly():
+    selection = AccountSelection(
+        account=None,
+        error_message="Hard affinity owner account is unavailable",
+        error_code="hard_affinity_saturated",
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) == 2.0
+
+
 def test_account_selection_recovery_sleep_ignores_generic_no_available_accounts():
     selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
 

@@ -23,6 +23,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _as_image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
+    _is_native_codex_request,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -163,6 +164,7 @@ from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
+    _request_allows_bare_session_cap_spillover,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
@@ -916,6 +918,40 @@ def _http_bridge_parallel_fork_key(
         owner_check_applied=False,
     )
     return fork_key
+
+
+def _http_bridge_request_is_unanchored_one_shot(
+    payload: "ResponsesRequest",
+    headers: Mapping[str, str],
+    *,
+    forwarded_request: bool,
+) -> bool:
+    """Whether a request is a self-contained, tool-less one-shot completion.
+
+    Agent clients send side calls (title, summary, compaction) on the same
+    session identity as their agent turns, but without tool definitions or
+    continuity anchors: OpenCode's title and compaction calls send
+    ``tools: {}``, OpenClaw's usage-rollup and transcript summaries send
+    ``tools: []``, while every real agent turn carries its tool list (Codex
+    CLI attaches tools to every turn). Such one-shots gain nothing from a
+    persistent bridge WebSocket and would otherwise fork an independent
+    bridge lane per overlap. The request must carry a client session
+    identity header — that is what routes side calls into the agent
+    session's bridge in the first place; anonymous requests keep their
+    existing bridge behavior. Native Codex clients are excluded so their
+    websocket-mode behavior stays codex-faithful.
+    """
+    if forwarded_request:
+        return False
+    if payload.tools:
+        return False
+    if _sticky_key_from_session_header(headers) is None:
+        return False
+    if _sticky_key_from_turn_state_header(headers) is not None:
+        return False
+    if _is_native_codex_request(headers):
+        return False
+    return _request_allows_bare_session_cap_spillover(payload)
 
 
 def _http_bridge_request_needs_unanchored_handoff(

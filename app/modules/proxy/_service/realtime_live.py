@@ -27,7 +27,8 @@ from app.core.errors import openai_error
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, StickySessionKind
+from app.db.models import Account, AccountStatus, StickySessionKind
+from app.db.session import detach_session_objects
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id
@@ -45,6 +46,13 @@ _REALTIME_CALL_UUID_PATTERN = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_UNAVAILABLE_LIVE_OWNER_STATUSES = frozenset(
+    {
+        AccountStatus.PAUSED,
+        AccountStatus.REAUTH_REQUIRED,
+        AccountStatus.DEACTIVATED,
+    }
+)
 
 _realtime_call_cleanup_lock = asyncio.Lock()
 _realtime_call_cleanup_last_monotonic = 0.0
@@ -374,6 +382,24 @@ class _RealtimeLiveMixin:
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         route: ResolvedUpstreamRoute | None = None
         try:
+            # Account-selection inputs are intentionally cached for routing, but
+            # live sideband attachment is a credential-use boundary. A forced
+            # refresh during call creation can commit a new token/identity while
+            # that cache still holds the rejected snapshot, so reload the exact
+            # leased owner from storage before decrypting credentials or routing.
+            async with proxy._repo_factory() as repos:
+                current_account = await repos.accounts.get_by_id_fresh(owner_account_id)
+                detach_session_objects(repos.accounts.session)
+            if current_account is None or current_account.status in _UNAVAILABLE_LIVE_OWNER_STATUSES:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "continuity_owner_unavailable",
+                        "Realtime call owner is unavailable",
+                        error_type="server_error",
+                    ),
+                )
+            account = current_account
             encrypted_access_token = account.access_token_encrypted
             if not encrypted_access_token:
                 raise ProxyResponseError(

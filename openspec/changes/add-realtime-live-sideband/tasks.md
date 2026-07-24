@@ -15,7 +15,7 @@
 
 - [x] 3.1 Test call-id and `Location` parsing, mandatory API-key-scoped hashing, immutable owner insertion, raw-value non-persistence, TTL expiry, and throttled bounded cleanup.
 - [x] 3.2 Test final account capture across initial success, pre-visible failover, and forced-refresh success paths.
-- [x] 3.3 Test API-key-required sideband routing even in auth-disabled mode, exact-owner selection, assignment-scope enforcement, missing/stale binding denial, and no-account-failover behavior.
+- [x] 3.3 Test API-key-required sideband routing even in auth-disabled mode, exact-owner selection, assignment-scope enforcement, missing/stale binding denial, no-account-failover behavior, and immediate post-refresh attachment against a nonzero stale selection cache using the freshly persisted token and identities.
 - [x] 3.4 Test upstream URL/header construction, credential and installation replacement, attestation/alpha preservation, Responses-beta omission, direct/proxied egress, denial status preservation, and no definitive-denial replay.
 - [x] 3.5 Test text/binary relay, bidirectional close-code/reason propagation, transport liveness, disconnect cancellation, stream-lease release, SDP trace suppression, path/query log redaction, and no token-refresh invocation.
 

@@ -58,7 +58,7 @@ When a valid proxy API key authenticates `POST /backend-api/codex/realtime/calls
 
 ### Requirement: Frameless live WebSockets use the bound call account without refresh or failover
 
-The proxy SHALL expose `WS /v1/live/{call_id}` forwarding only to a valid proxy API key, even when ordinary proxy API-key authentication is disabled, and only for that key's live binding. It MUST re-evaluate current API-key validity and assigned-account scope, resolve the exact bound account as hard ownership, acquire that account's stream capacity under reattach policy, and connect to `wss://api.openai.com/v1/live/{call_id}`. The attach MUST NOT refresh the account token, select another account, replay a definitive handshake denial through another route endpoint, replay the handshake through another account, or mutate global account health on capability-specific failure.
+The proxy SHALL expose `WS /v1/live/{call_id}` forwarding only to a valid proxy API key, even when ordinary proxy API-key authentication is disabled, and only for that key's live binding. It MUST re-evaluate current API-key validity and assigned-account scope, resolve the exact bound account as hard ownership, acquire that account's stream capacity under reattach policy, fresh-load that leased owner's currently persisted credential and identity snapshot at the credential-use boundary, and connect to `wss://api.openai.com/v1/live/{call_id}`. The attach MUST NOT refresh the account token, select another account, replay a definitive handshake denial through another route endpoint, replay the handshake through another account, or mutate global account health on capability-specific failure.
 
 #### Scenario: live attachment requires an API key in trusted auth-disabled mode
 
@@ -74,6 +74,16 @@ The proxy SHALL expose `WS /v1/live/{call_id}` forwarding only to a valid proxy 
 - **THEN** the proxy selects `account_a` as required continuity ownership
 - **AND** it reserves and later releases `account_a` stream capacity
 - **AND** it opens upstream `/v1/live/rtc_example` with `account_a` credentials
+
+#### Scenario: call creation refreshed the owner while routing inputs remained cached
+
+- **GIVEN** call creation first used rejected credential snapshot `token_a`
+- **AND** its forced refresh committed `token_b` plus updated account and installation identity before successfully creating and binding the call
+- **AND** the routing-selection cache still contains the pre-refresh `token_a` snapshot
+- **WHEN** the client immediately attaches the live sideband
+- **THEN** the proxy fresh-loads the exact leased owner from persistent storage before credential decryption and route resolution
+- **AND** it opens upstream with `token_b` and the updated persisted identities
+- **AND** it does not invoke token refresh or account failover during attachment
 
 #### Scenario: another API key knows the call id
 

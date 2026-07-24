@@ -11,9 +11,11 @@ from starlette.testclient import WebSocketDenialResponse
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
-from app.core.clients.proxy import CodexControlResponse
+from app.core.clients.proxy import CodexControlResponse, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.exceptions import ProxyAuthError
+from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy.account_cache import AccountSelectionCache
 
 pytestmark = pytest.mark.integration
 
@@ -116,13 +118,37 @@ async def test_v1_live_full_account_bound_lifecycle_and_cross_key_denial(
         validate_required_proxy_api_key_authorization,
     )
     connector_calls = []
+    control_calls: list[tuple[str, str | None]] = []
 
-    async def fake_codex_control_request(*_args, **_kwargs):
+    async def fake_codex_control_request(*_args, access_token, account_id=None, **_kwargs):
+        control_calls.append((access_token, account_id))
+        if len(control_calls) == 1:
+            raise ProxyResponseError(
+                401,
+                {"error": {"code": "invalid_api_key", "message": "expired"}},
+            )
         return CodexControlResponse(
             status_code=201,
             body=b"v=answer\r\n",
             headers={"content-type": "application/sdp", "location": "/v1/live/rtc_full_lifecycle"},
         )
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        if not force:
+            return account
+        async with self._repo_factory() as repos:
+            refreshed = await repos.accounts.get_by_id_fresh(account.id)
+            assert refreshed is not None
+            refreshed.access_token_encrypted = self._encryptor.encrypt("rotated-access-token")
+            refreshed.refresh_token_encrypted = self._encryptor.encrypt("rotated-refresh-token")
+            refreshed.chatgpt_account_id = "acc_live_rotated"
+            refreshed.codex_installation_id = "00000000-0000-4000-8000-000000000002"
+            await repos.accounts.session.commit()
+            refreshed = await repos.accounts.get_by_id_fresh(account.id)
+            assert refreshed is not None
+            repos.accounts.session.expunge(refreshed)
+            return refreshed
 
     class Upstream:
         uses_proxy = False
@@ -165,6 +191,7 @@ async def test_v1_live_full_account_bound_lifecycle_and_cross_key_denial(
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
     monkeypatch.setattr(proxy_module, "connect_live_websocket", fake_connect_live_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
 
     auth_json = _auth_json("acc_live_full", "live-full@example.com")
     imported = await async_client.post(
@@ -179,14 +206,22 @@ async def test_v1_live_full_account_bound_lifecycle_and_cross_key_denial(
     key_a = key_a_response.json()["key"]
     key_b = key_b_response.json()["key"]
 
+    selection_cache = AccountSelectionCache(ttl_seconds=5)
+    get_proxy_service_for_app(app_instance)._load_balancer._selection_inputs_cache = selection_cache
+
     created = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
         headers={"content-type": "application/sdp", "Authorization": f"Bearer {key_a}"},
     )
     assert created.status_code == 201
+    assert control_calls == [
+        ("access-token", "acc_live_full"),
+        ("rotated-access-token", "acc_live_rotated"),
+    ]
 
     with TestClient(app_instance) as client:
+        app_instance.state.proxy_service._load_balancer._selection_inputs_cache = selection_cache
         with pytest.raises(WebSocketDenialResponse) as denied:
             with client.websocket_connect(
                 "/v1/live/rtc_full_lifecycle",
@@ -203,8 +238,9 @@ async def test_v1_live_full_account_bound_lifecycle_and_cross_key_denial(
 
     assert len(connector_calls) == 1
     assert connector_calls[0]["call_id"] == "rtc_full_lifecycle"
-    assert connector_calls[0]["access_token"] == "access-token"
-    assert connector_calls[0]["account_id"] == "acc_live_full"
+    assert connector_calls[0]["access_token"] == "rotated-access-token"
+    assert connector_calls[0]["account_id"] == "acc_live_rotated"
+    assert connector_calls[0]["headers"]["x-codex-installation-id"] == "00000000-0000-4000-8000-000000000002"
     assert connector_calls[0]["kwargs"]["query_params"] == [("intent", "quicksilver")]
 
 

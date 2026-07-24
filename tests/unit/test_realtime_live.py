@@ -18,7 +18,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
     UpstreamWebSocketMessage,
 )
-from app.db.models import StickySessionKind
+from app.db.models import AccountStatus, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.realtime_live import (
     _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
@@ -129,9 +129,40 @@ class _FakeLoadBalancer:
         self.released.append(lease)
 
 
-class _ProxyService(_RealtimeLiveMixin):
-    def __init__(self, account, lease, *, owner_account_id: str = "account-a") -> None:
+class _FakeAccountsRepository:
+    def __init__(self, account) -> None:
         self.account = account
+        self.fresh_reads: list[str] = []
+        self.session = SimpleNamespace(expunge_all=lambda: None)
+
+    async def get_by_id_fresh(self, account_id: str):
+        self.fresh_reads.append(account_id)
+        return self.account
+
+
+class _FakeProxyRepoContext:
+    def __init__(self, accounts: _FakeAccountsRepository) -> None:
+        self._repos = SimpleNamespace(accounts=accounts)
+
+    async def __aenter__(self):
+        return self._repos
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+
+class _ProxyService(_RealtimeLiveMixin):
+    def __init__(
+        self,
+        account,
+        lease,
+        *,
+        owner_account_id: str = "account-a",
+        current_account=None,
+    ) -> None:
+        self.account = account
+        self.current_account = account if current_account is None else current_account
+        self.accounts = _FakeAccountsRepository(self.current_account)
         self.owner_account_id = owner_account_id
         self.lease = lease
         self.selection_kwargs: dict[str, object] | None = None
@@ -139,6 +170,9 @@ class _ProxyService(_RealtimeLiveMixin):
         self.decrypt_calls: list[str] = []
         self._encryptor = SimpleNamespace(decrypt=self._decrypt)
         self.logs: list[dict[str, Any]] = []
+
+    def _repo_factory(self):
+        return _FakeProxyRepoContext(self.accounts)
 
     def _decrypt(self, value: str) -> str:
         self.decrypt_calls.append(value)
@@ -154,7 +188,7 @@ class _ProxyService(_RealtimeLiveMixin):
         return AccountSelection(self.account, None, lease=self.lease)
 
     async def _resolve_upstream_route_for_account(self, account, *, operation: str):
-        assert account is self.account
+        assert account is self.current_account
         assert operation == "realtime_live_websocket"
         return None
 
@@ -603,13 +637,20 @@ def test_live_header_builder_replaces_identity_and_preserves_frameless_metadata(
 @pytest.mark.asyncio
 async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(monkeypatch) -> None:
     lease = cast(AccountLease, object())
-    account = SimpleNamespace(
+    selected_account = SimpleNamespace(
         id="account-a",
-        access_token_encrypted="encrypted-token",
-        chatgpt_account_id="chatgpt-account-a",
-        codex_installation_id="installation-a",
+        access_token_encrypted="stale-encrypted-token",
+        chatgpt_account_id="stale-chatgpt-account-a",
+        codex_installation_id="stale-installation-a",
     )
-    service = _ProxyService(account, lease)
+    current_account = SimpleNamespace(
+        id="account-a",
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted="current-encrypted-token",
+        chatgpt_account_id="current-chatgpt-account-a",
+        codex_installation_id="current-installation-a",
+    )
+    service = _ProxyService(selected_account, lease, current_account=current_account)
     api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
     downstream = _FakeDownstreamWebSocket()
     upstream = _FakeUpstreamWebSocket()
@@ -655,10 +696,10 @@ async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(
             "headers": {
                 "OpenAI-Alpha": "quicksilver=v2",
                 "x-oai-attestation": "attestation",
-                "x-codex-installation-id": "installation-a",
+                "x-codex-installation-id": "current-installation-a",
             },
-            "access_token": "decrypted:encrypted-token",
-            "account_id": "chatgpt-account-a",
+            "access_token": "decrypted:current-encrypted-token",
+            "account_id": "current-chatgpt-account-a",
             "kwargs": {
                 "route": None,
                 "allow_direct_egress": True,
@@ -666,12 +707,41 @@ async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(
             },
         }
     ]
+    assert service.accounts.fresh_reads == ["account-a"]
     assert service._load_balancer.released == [lease]
     assert service.logs[-1]["status"] == "success"
     assert service.logs[-1]["account_id"] == "account-a"
     assert service.logs[-1]["model"] is None
     assert service.logs[-1]["request_kind"] == "realtime_live"
     assert _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS == 2 * 60 * 60
+
+
+@pytest.mark.asyncio
+async def test_live_sideband_fails_closed_when_fresh_owner_snapshot_is_unavailable() -> None:
+    lease = cast(AccountLease, object())
+    selected_account = SimpleNamespace(id="account-a")
+    paused_account = SimpleNamespace(
+        id="account-a",
+        status=AccountStatus.PAUSED,
+        access_token_encrypted="current-encrypted-token",
+    )
+    service = _ProxyService(selected_account, lease, current_account=paused_account)
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
+    downstream = _FakeDownstreamWebSocket()
+
+    with pytest.raises(ProxyResponseError) as raised:
+        await service.proxy_realtime_live_websocket(
+            cast(Any, downstream),
+            "rtc_example",
+            {},
+            api_key=api_key,
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.payload["error"]["code"] == "continuity_owner_unavailable"
+    assert service.accounts.fresh_reads == ["account-a"]
+    assert service.decrypt_calls == []
+    assert service._load_balancer.released == [lease]
 
 
 @pytest.mark.asyncio

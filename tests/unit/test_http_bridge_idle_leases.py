@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -13,6 +14,7 @@ import pytest
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.errors import openai_error
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
@@ -123,3 +125,64 @@ async def test_reacquire_noop_when_lease_already_held() -> None:
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_response_create_admission_failure_releases_reacquired_stream_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    lease = _make_lease("l5")
+    acquire_account_lease = AsyncMock(return_value=lease)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_inline_http_bridge_image_urls",
+        AsyncMock(return_value='{"type":"response.create","model":"gpt-5.2","input":"hi"}'),
+    )
+    monkeypatch.setattr(
+        service,
+        "_acquire_request_state_response_create_admission",
+        AsyncMock(
+            side_effect=ProxyResponseError(
+                429,
+                openai_error(
+                    "account_response_create_cap",
+                    "Account response-create capacity is exhausted.",
+                    error_type="rate_limit_error",
+                ),
+            )
+        ),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-admission-failure",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_response_create_cap"
+    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream")
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
+    assert session.queued_request_count == 0
+    assert session.admission_waiter_count == 0

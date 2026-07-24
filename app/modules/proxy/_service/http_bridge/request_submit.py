@@ -1240,6 +1240,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 detail="last_admission_waiter_cancelled",
             )
+        await self._maybe_release_idle_http_bridge_session_lease(session)
 
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,

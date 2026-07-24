@@ -365,10 +365,15 @@ the release PR, when the delta since the last soaked beta contains only:
 - documentation, CI, or release-tooling changes, or
 - a security or outage hotfix where waiting out the soak is the greater risk.
 
-Before merging a release PR that includes migrations, check the changelog for
-data-backfill migrations and estimate their duration against a
-production-sized dataset — they run at startup and block serving until they
-finish.
+Before merging a release PR whose train includes migrations, inspect the
+Alembic revisions directly (`git diff vPREV..HEAD -- app/db/alembic/versions`)
+for data backfills and estimate their duration against a production-sized
+dataset — they run at startup and block serving until they finish. Changelog
+titles do not reveal backfills.
+
+The normative requirements live in
+[`openspec/specs/release-management/`](../openspec/specs/release-management/)
+(delta: `openspec/changes/require-beta-soak-before-stable/`).
 
 ## Security issues
 

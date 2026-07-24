@@ -2522,3 +2522,4 @@ class _HTTPBridgeStreamingMixin:
             with anyio.CancelScope(shield=True):
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
+                await self._maybe_release_idle_http_bridge_session_lease(session)

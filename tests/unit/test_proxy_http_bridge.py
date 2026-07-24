@@ -19128,7 +19128,14 @@ def test_http_bridge_capacity_wait_plan_gate_timeout_ignores_ceiling(monkeypatch
 
 def test_http_bridge_capacity_wait_deadline_anchors_once(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_CAPACITY_WAIT_MAX_SECONDS", 50.0)
-    request_state = SimpleNamespace(account_capacity_wait_deadline=None)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-capacity-wait-deadline",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
 
     first = http_bridge_streaming_module._http_bridge_capacity_wait_deadline(request_state)
     second = http_bridge_streaming_module._http_bridge_capacity_wait_deadline(request_state)

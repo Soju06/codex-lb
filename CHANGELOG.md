@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.23.0](https://github.com/Soju06/codex-lb/compare/v1.22.0...v1.23.0) (2026-07-24)
+
+
+### Features
+
+* **rollups:** permanent hourly usage rollups with raw live-tail reads ([#1478](https://github.com/Soju06/codex-lb/issues/1478)) ([f85fbcb](https://github.com/Soju06/codex-lb/commit/f85fbcbd88330b0fa7600dcc4d66d3a4bbcb0be1))
+
+
+### Documentation
+
+* **contributing:** require beta soak before stable releases ([#1469](https://github.com/Soju06/codex-lb/issues/1469)) ([3e9e36a](https://github.com/Soju06/codex-lb/commit/3e9e36aaee059d5824e9ba9bcb3897d0ce23dc3a))
+
 ## [1.22.0](https://github.com/Soju06/codex-lb/compare/v1.21.0...v1.22.0) (2026-07-24)
 
 

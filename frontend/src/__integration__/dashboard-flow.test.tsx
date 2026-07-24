@@ -72,7 +72,7 @@ describe("dashboard flow integration", () => {
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-    expect(await screen.findByText("Request Logs")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(overviewCalls).toBeGreaterThan(0);
@@ -280,5 +280,39 @@ describe("dashboard flow integration", () => {
     expect(overviewCalls).toBe(overviewCallsBeforeRetry);
     expect(projectionsCalls).toBe(projectionsCallsBeforeRetry);
     expect(optionsCalls).toBe(optionsCallsBeforeRetry);
+  });
+
+  it("switches to conversations without reinterpreting request-log URL state", async () => {
+    const user = userEvent.setup({ delay: null });
+    window.history.pushState(
+      {},
+      "",
+      "/dashboard?search=requestlog&limit=10&offset=25",
+    );
+
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Conversations" }));
+
+    expect(await screen.findByText("conv_abc")).toBeInTheDocument();
+    expect(window.location.search).toContain("view=conversations");
+    expect(window.location.search).toContain("search=requestlog");
+    expect(window.location.search).toContain("limit=10");
+    expect(window.location.search).toContain("offset=25");
+
+    await user.type(screen.getByRole("searchbox"), "opencode");
+    expect(window.location.search).toContain("conversationSearch=opencode");
+    expect(window.location.search).toContain("conversationOffset=0");
+    expect(window.location.search).toContain("offset=25");
+
+    await user.click(screen.getByRole("button", { name: "Conversations" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Request Logs" }));
+
+    await waitFor(() => expect(window.location.search).not.toContain("view=conversations"));
+    expect(window.location.search).toContain("search=requestlog");
+    expect(window.location.search).toContain("offset=25");
+    expect(window.location.search).toContain("conversationSearch=opencode");
   });
 });

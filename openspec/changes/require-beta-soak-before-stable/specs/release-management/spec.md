@@ -74,8 +74,8 @@ the train contains no data backfills.
   the stable release PR for `1.23.0` is merged
 - **WHEN** a maintainer considers promoting `1.23.0` to stable
 - **THEN** the post-beta change is part of the unsoaked delta
-- **AND** promotion requires either a new soaked prerelease covering it or a
-  recorded safe-delta exception
+- **AND** because a feature or migration change is not exception-eligible,
+  promotion requires a new soaked prerelease covering it
 
 #### Scenario: data backfills are identified from Alembic revisions
 

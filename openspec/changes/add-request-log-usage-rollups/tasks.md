@@ -1,13 +1,13 @@
 ## 1. Pre-implementation evidence
 
 - [ ] 1.1 Measure production hourly distinct dimension-combination cardinality (`bucket, account_id, api_key_id, model, service_tier, request_kind, deleted?`); if >1,000/hour, demote `service_tier` to a satellite before authoring the schema.
-- [ ] 1.2 Re-verify the Alembic single head is `20260722_000000_backfill_request_log_useragent_families` immediately before authoring the revision.
+- [x] 1.2 Re-verify the Alembic single head is `20260722_000000_backfill_request_log_useragent_families` immediately before authoring the revision.
 
 ## 2. Schema and migration (PR1)
 
-- [ ] 2.1 Declare `RequestUsageHourlyRollup`, `RequestUsageHourlyErrorRollup`, and `RequestDemandQuarterRollup` models plus the `hourly_folded_through` state column in `app/db/models.py` (BIGINT epoch bucket keys, `''` sentinels for nullable dimensions, no secondary indexes).
-- [ ] 2.2 Author guarded, idempotent, DDL-only revision `20260724_000000_add_request_usage_time_rollups` (inspector-checked creates, batch_alter_table on SQLite, guarded downgrade); leave `folded_through` and lifetime rollups untouched.
-- [ ] 2.3 Migration round-trip test: upgrade → schema assertions → downgrade → re-upgrade idempotence on SQLite; confirm the PostgreSQL drift contract covers the new models.
+- [x] 2.1 Declare `RequestUsageHourlyRollup`, `RequestUsageHourlyErrorRollup`, and `RequestDemandQuarterRollup` models plus the `hourly_folded_through` state column in `app/db/models.py` (BIGINT epoch bucket keys, `''` sentinels for nullable dimensions, no secondary indexes).
+- [x] 2.2 Author guarded, idempotent, DDL-only revision `20260724_000000_add_request_usage_time_rollups` (inspector-checked creates, batch_alter_table on SQLite, guarded downgrade); leave `folded_through` and lifetime rollups untouched.
+- [x] 2.3 Migration round-trip test: upgrade → schema assertions → downgrade → re-upgrade idempotence on SQLite; confirm the PostgreSQL drift contract covers the new models.
 
 ## 3. Hourly fold pass (PR1)
 

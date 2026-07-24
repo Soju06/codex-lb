@@ -1195,3 +1195,94 @@ async def test_request_log_conversation_id_migration_upgrade_and_downgrade(tmp_p
         assert "conversation_id" not in columns
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_request_usage_time_rollups_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'request-usage-time-rollups.sqlite'}"
+    parent_revision = "20260722_000000_backfill_request_log_useragent_families"
+    rollups_revision = "20260724_000000_add_request_usage_time_rollups"
+    rollup_tables = (
+        "request_usage_hourly_rollups",
+        "request_usage_hourly_error_rollups",
+        "request_demand_quarter_rollups",
+    )
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        return {
+            "tables": {name for name in rollup_tables if inspector.has_table(name)},
+            "state_columns": {column["name"] for column in inspector.get_columns("account_usage_rollup_state")},
+            "hourly_pk": (
+                inspector.get_pk_constraint("request_usage_hourly_rollups")["constrained_columns"]
+                if inspector.has_table("request_usage_hourly_rollups")
+                else None
+            ),
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set()
+        assert "hourly_folded_through" not in state["state_columns"]
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollups_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set(rollup_tables)
+        assert "hourly_folded_through" in state["state_columns"]
+        assert state["hourly_pk"] == [
+            "bucket_epoch",
+            "account_id",
+            "api_key_id",
+            "model",
+            "service_tier",
+            "request_kind",
+            "is_deleted",
+        ]
+
+        # The migration-seeded fold-state row (older revision) must have been
+        # backfilled to the epoch by the new column's server default, without
+        # touching the lifetime watermark.
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT folded_through, hourly_folded_through FROM account_usage_rollup_state WHERE id = 1")
+                )
+            ).one()
+        assert str(row[1]).startswith("1970-01-01")
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set()
+        assert "hourly_folded_through" not in state["state_columns"]
+
+        # Guarded upgrade: pre-create one rollup table, then walk to the
+        # revision again — inspector guards must skip existing objects.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE request_demand_quarter_rollups ("
+                    "slot_epoch BIGINT NOT NULL, account_id VARCHAR NOT NULL DEFAULT '', "
+                    "request_kind VARCHAR NOT NULL, is_deleted BOOLEAN NOT NULL DEFAULT 0, "
+                    "request_count BIGINT NOT NULL DEFAULT 0, input_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "output_or_reasoning_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "cached_input_tokens BIGINT NOT NULL DEFAULT 0, cost_usd FLOAT NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (slot_epoch, account_id, request_kind, is_deleted))"
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollups_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set(rollup_tables)
+        assert "hourly_folded_through" in state["state_columns"]
+    finally:
+        await engine.dispose()

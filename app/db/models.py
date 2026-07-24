@@ -220,6 +220,110 @@ class AccountUsageRollupState(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     folded_through: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Hour-aligned watermark for the time-axis rollups below. Kept as a
+    # SEPARATE column (not shared with `folded_through`) so the hourly
+    # backfill never resets or rewrites the lifetime rollups, which cannot
+    # be recomputed once retention has pruned raw request logs. Invariant:
+    # always a whole UTC hour (epoch % 3600 == 0); rows with
+    # `requested_at < hourly_folded_through` are fully folded, newer rows
+    # are the live tail.
+    hourly_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
+
+
+class RequestUsageHourlyRollup(Base):
+    """Hour-bucketed request-usage sums (time-axis rollup).
+
+    One row per UTC hour x dimension combination, folded from raw
+    ``request_logs`` below the ``hourly_folded_through`` watermark. Rows are
+    written by the hourly fold pass (DELETE-then-INSERT per slice, so
+    re-folds always converge) and mutated afterwards only by the account
+    lifecycle mirrors (soft/hard delete, consolidation) — never recomputed
+    from raw, so buckets survive request-log retention pruning.
+
+    Nullable raw dimensions (``account_id``/``api_key_id``/``service_tier``)
+    are stored as ``''`` sentinels so they can participate in the primary key
+    on both dialects (UNIQUE treats NULLs as distinct). ``request_kind`` is
+    NOT NULL at the source and stored verbatim (warmup kinds included; reads
+    filter by dimension). No FKs: rollup rows must outlive account deletion.
+    """
+
+    __tablename__ = "request_usage_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    service_tier: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    request_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(status != 'success') — status is folded as a measure, not a dimension.
+    error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(coalesce(output_tokens, reasoning_tokens, 0)) — not derivable from
+    # the two sums above (planner / trends / usage-summary semantics).
+    output_or_reasoning_tokens: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(max(0, min(coalesce(cached, 0), coalesce(input, 0)))) — pre-folded
+    # for the future usage-summary switch (one-way door once raw is pruned).
+    cached_input_tokens_clamped: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+    # count(cost_usd IS NOT NULL) — preserves the "all-NULL model excluded"
+    # rule of cost-by-model aggregations.
+    cost_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+
+
+class RequestUsageHourlyErrorRollup(Base):
+    """Hour-bucketed error-code counts (top-error satellite).
+
+    ``error_code`` has unbounded cardinality, so it is isolated from the main
+    hourly rollup. Fold filter reproduces the top-error read exactly:
+    non-warmup kinds, ``status != 'success'``, ``error_code IS NOT NULL``
+    (soft-deleted rows included). ``account_id`` is carried only so account
+    hard-deletion can mirror raw row removal.
+    """
+
+    __tablename__ = "request_usage_hourly_error_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    error_code: Mapped[str] = mapped_column(String, primary_key=True)
+    error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+
+
+class RequestDemandQuarterRollup(Base):
+    """Quarter-hour demand sums for the quota planner (the only sub-hour
+    consumer, ``DEFAULT_SLOT_SECONDS = 900``).
+
+    ``is_deleted`` is a dimension (not a fold-time filter) and ``account_id``
+    a carried key so account soft/hard deletion — which retroactively detaches
+    or removes the account's entire raw history — can be mirrored here instead
+    of permanently diverging from the planner's ``deleted_at IS NULL`` view.
+    """
+
+    __tablename__ = "request_demand_quarter_rollups"
+
+    slot_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    request_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_or_reasoning_tokens: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
 
 
 class AdditionalUsageHistory(Base):

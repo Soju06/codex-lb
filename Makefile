@@ -18,6 +18,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_db_session_timezone.py \
 	tests/test_request_logs_options_api.py \
 	tests/integration/test_account_usage_rollup.py \
+	tests/integration/test_request_usage_time_rollup.py \
+	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py
 SHELL := /bin/bash
 

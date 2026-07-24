@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -138,7 +139,12 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
     release_account_lease = AsyncMock()
     monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
-    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+
+    async def assert_prewarm_has_stream_lease(*_args: object, **_kwargs: object) -> None:
+        assert session.account_lease is lease
+
+    prewarm = AsyncMock(side_effect=assert_prewarm_has_stream_lease)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", prewarm)
     monkeypatch.setattr(
         service,
         "_inline_http_bridge_image_urls",
@@ -182,7 +188,56 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
 
     assert exc_info.value.payload["error"]["code"] == "account_response_create_cap"
     acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream")
+    prewarm.assert_awaited_once()
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
     assert session.queued_request_count == 0
     assert session.admission_waiter_count == 0
+
+
+@pytest.mark.asyncio
+async def test_upstream_terminal_drain_releases_abandoned_session_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    lease = _make_lease("l6")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-upstream-terminal-drain",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp-upstream-terminal-drain",
+        awaiting_response_created=False,
+        event_queue=None,
+        transport="http",
+        skip_request_log=True,
+        draining_until_terminal=True,
+    )
+    session = _make_bridge_session()
+    session.pending_requests.append(request_state)
+    session.account_lease = lease
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": request_state.response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert not session.pending_requests
+    assert session.account_lease is None
+    release_account_lease.assert_awaited_once_with(lease)

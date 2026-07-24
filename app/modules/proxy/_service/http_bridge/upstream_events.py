@@ -1375,14 +1375,17 @@ class _HTTPBridgeUpstreamEventsMixin:
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
 
-        await self._finalize_websocket_request_state(
-            terminal_request_state,
-            account=session.account,
-            account_id_value=session.account.id,
-            event=settlement_event,
-            event_type=settlement_event_type,
-            payload=settlement_payload,
-            api_key=terminal_request_state.api_key,
-            upstream_control=session.upstream_control,
-            response_create_gate=session.response_create_gate,
-        )
+        try:
+            await self._finalize_websocket_request_state(
+                terminal_request_state,
+                account=session.account,
+                account_id_value=session.account.id,
+                event=settlement_event,
+                event_type=settlement_event_type,
+                payload=settlement_payload,
+                api_key=terminal_request_state.api_key,
+                upstream_control=session.upstream_control,
+                response_create_gate=session.response_create_gate,
+            )
+        finally:
+            await self._maybe_release_idle_http_bridge_session_lease(session)

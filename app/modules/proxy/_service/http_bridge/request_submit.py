@@ -660,6 +660,8 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         request_state.session_previous_gap_ms = int(max(0.0, request_state.started_at - session.last_used_at) * 1000)
+        async with session.pending_lock:
+            await self._ensure_http_bridge_session_stream_lease_locked(session)
         try:
             await self._maybe_prewarm_http_bridge_session(
                 session,
@@ -669,6 +671,7 @@ class _HTTPBridgeRequestSubmitMixin:
         except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
+            await self._maybe_release_idle_http_bridge_session_lease(session)
             raise
         gate_acquired = False
         request_enqueued = False

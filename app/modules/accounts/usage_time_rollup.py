@@ -32,23 +32,46 @@ recomputed from raw — raw may already be pruned by retention).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import astuple, dataclass
-from datetime import datetime
+from dataclasses import astuple, dataclass, replace
+from datetime import datetime, timedelta
 
-from sqlalchemy import and_, select, true
+from sqlalchemy import BigInteger, ColumnElement, Integer, and_, case, cast, delete, func, insert, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.utils.time import utcnow
 from app.db.models import (
     AccountUsageRollupState,
     RequestDemandQuarterRollup,
+    RequestLog,
     RequestUsageHourlyErrorRollup,
     RequestUsageHourlyRollup,
 )
-from app.modules.accounts.usage_rollup import _STATE_ROW_ID, _insert_fn
+from app.db.session import get_background_session, sqlite_writer_section
+from app.modules.accounts.usage_rollup import (
+    _STATE_ROW_ID,
+    FOLD_LAG,
+    _FoldStatus,
+    _insert_fn,
+    _locked_state,
+    _state_bootstrap_stmt,
+)
+
+logger = logging.getLogger(__name__)
 
 HOURLY_BUCKET_SECONDS = 3600
 QUARTER_SLOT_SECONDS = 900
+
+# Historical backfill folds at most this much history per slice transaction
+# and at most TS_MAX_SLICES_PER_PASS slices per pass, so the initial backfill
+# (millions of raw rows) spreads its I/O bursts and fold-state row-lock
+# occupancy across scheduler ticks instead of one giant catch-up.
+TS_FOLD_SLICE = timedelta(hours=48)
+TS_MAX_SLICES_PER_PASS = 20
+
+_EPOCH = datetime(1970, 1, 1)
+_EXCLUDED_REQUEST_KINDS = ("warmup", "limit_warmup")
 
 # Stored stand-in for NULL account_id / api_key_id / service_tier (PK columns
 # cannot be NULL, and NULLs would be distinct under a unique constraint).
@@ -288,3 +311,280 @@ class RequestUsageTimeRollupRepository:
             return [], None
         watermark = rows[0][0]
         return [row_type(*row[1:]) for row in rows if row[1] is not None], watermark
+
+
+def epoch_seconds(value: datetime) -> int:
+    """Naive-UTC datetime to Unix epoch seconds (truncating sub-seconds)."""
+    return int((value - _EPOCH).total_seconds())
+
+
+def floor_to_hour(value: datetime) -> datetime:
+    """Floor a naive-UTC datetime to its whole UTC hour."""
+    return _EPOCH + timedelta(seconds=(epoch_seconds(value) // HOURLY_BUCKET_SECONDS) * HOURLY_BUCKET_SECONDS)
+
+
+def _requested_at_epoch_bucket_expr(session: AsyncSession, bucket_seconds: int) -> ColumnElement:
+    """Dialect-split bucket expression, identical arithmetic to the runtime
+    bucketing the read paths use (`RequestLogsRepository._bucket_epoch_expr`),
+    so folded buckets and legacy raw bucketing can never disagree."""
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        return cast(
+            func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds,
+            BigInteger,
+        )
+    epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+    return cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+
+
+def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
+    bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
+    account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
+    api_key_id = func.coalesce(RequestLog.api_key_id, DIMENSION_SENTINEL).label("api_key_id")
+    service_tier = func.coalesce(RequestLog.service_tier, DIMENSION_SENTINEL).label("service_tier")
+    is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
+    output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+    cached = func.coalesce(RequestLog.cached_input_tokens, 0)
+    input_tokens = func.coalesce(RequestLog.input_tokens, 0)
+    # max(0, min(cached, input)) without GREATEST/LEAST (absent on SQLite).
+    lesser = case((cached < input_tokens, cached), else_=input_tokens)
+    cached_clamped = case((lesser < 0, 0), else_=lesser)
+    stmt = (
+        select(
+            bucket,
+            account_id,
+            api_key_id,
+            RequestLog.model,
+            service_tier,
+            RequestLog.request_kind,
+            is_deleted,
+            func.count(RequestLog.id),
+            func.coalesce(func.sum(case((RequestLog.status != "success", 1), else_=0)), 0),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0),
+            func.coalesce(func.sum(RequestLog.output_tokens), 0),
+            func.coalesce(func.sum(RequestLog.reasoning_tokens), 0),
+            func.coalesce(func.sum(output_or_reasoning), 0),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0),
+            func.coalesce(func.sum(cached_clamped), 0),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+            func.coalesce(func.sum(case((RequestLog.cost_usd.is_not(None), 1), else_=0)), 0),
+        )
+        .where(*window)
+        .group_by(bucket, account_id, api_key_id, RequestLog.model, service_tier, RequestLog.request_kind, is_deleted)
+    )
+    return insert(RequestUsageHourlyRollup).from_select(list(_HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS), stmt)
+
+
+def _error_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
+    bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
+    account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
+    # Exact reproduction of the top-error read filter (`_top_error_stmt`):
+    # warmup kinds excluded, soft-deleted rows INCLUDED.
+    stmt = (
+        select(bucket, account_id, RequestLog.error_code, func.count(RequestLog.id))
+        .where(
+            *window,
+            RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+            RequestLog.status != "success",
+            RequestLog.error_code.is_not(None),
+        )
+        .group_by(bucket, account_id, RequestLog.error_code)
+    )
+    return insert(RequestUsageHourlyErrorRollup).from_select(list(_ERROR_KEY_COLUMNS + _ERROR_MEASURE_COLUMNS), stmt)
+
+
+def _demand_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
+    slot = _requested_at_epoch_bucket_expr(session, QUARTER_SLOT_SECONDS).label("slot_epoch")
+    account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
+    is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
+    output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+    stmt = (
+        select(
+            slot,
+            account_id,
+            RequestLog.request_kind,
+            is_deleted,
+            func.count(RequestLog.id),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0),
+            func.coalesce(func.sum(output_or_reasoning), 0),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+        )
+        .where(*window)
+        .group_by(slot, account_id, RequestLog.request_kind, is_deleted)
+    )
+    return insert(RequestDemandQuarterRollup).from_select(list(_QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS), stmt)
+
+
+async def run_hourly_fold_pass(*, now: datetime | None = None) -> int:
+    """Advance the hourly watermark toward `floor_hour(now - FOLD_LAG)`.
+
+    Bounded slices, each committed in its own transaction; at most
+    `TS_MAX_SLICES_PER_PASS` slices per pass, so the initial backfill resumes
+    across scheduler ticks instead of monopolizing one. Returns the number of
+    committed slices. Crash-safe: the defensive DELETE, the three
+    INSERT..SELECTs and the watermark advance commit atomically, so a crash
+    rolls the whole slice back and the retry recomputes it from scratch —
+    re-folding always converges to the same values (no add-fold double
+    counting is possible).
+    """
+    target = floor_to_hour((now or utcnow()) - FOLD_LAG)
+    committed = 0
+    while committed < TS_MAX_SLICES_PER_PASS:
+        async with get_background_session() as session:
+            status, wrote = await _fold_next_hourly_slice(session, target)
+        if wrote:
+            committed += 1
+        if status is _FoldStatus.DONE:
+            break
+    return committed
+
+
+async def _fold_next_hourly_slice(session: AsyncSession, target: datetime) -> tuple[_FoldStatus, bool]:
+    async with sqlite_writer_section():
+        # Same state row (id=1) as the lifetime fold: one FOR UPDATE row lock
+        # serializes concurrent hourly passes, lifetime passes, and lifecycle
+        # mirrors. Re-read the watermark AFTER taking the lock — a concurrent
+        # pass may have advanced it while we waited.
+        state = await _locked_state(session)
+        if state is None:
+            await session.execute(_state_bootstrap_stmt(session))
+            await session.commit()
+            state = await _locked_state(session)
+        if state is None:
+            logger.warning("account_usage_rollup_state row missing; skipping hourly fold pass")
+            return _FoldStatus.DONE, False
+        watermark = state.hourly_folded_through
+        if watermark >= target:
+            return _FoldStatus.DONE, False
+
+        # Next populated instant in [watermark, target): jumps the empty
+        # prefix on first backfill and any mid-history gap on later slices,
+        # and guarantees the slice's first hour actually holds rows. Every
+        # row counts for at least one of the three aggregates (the hourly
+        # fold has no filter), so no filtered variant is needed.
+        next_populated = (
+            await session.execute(
+                select(func.min(RequestLog.requested_at)).where(
+                    RequestLog.requested_at >= watermark,
+                    RequestLog.requested_at < target,
+                )
+            )
+        ).scalar_one_or_none()
+        if next_populated is None:
+            # Nothing left below the target. Advancing (rather than leaving
+            # the watermark behind) keeps the readers' raw-tail window and
+            # the retention min-gate current; FOLD_LAG guarantees no insert
+            # can land below `now - FOLD_LAG`, so nothing can appear behind
+            # the advanced watermark later.
+            await _advance_hourly_watermark(session, target)
+            await session.commit()
+            logger.info("Folded hourly usage rollups through %s (no rows below target)", target.isoformat())
+            return _FoldStatus.DONE, True
+
+        start = max(watermark, floor_to_hour(next_populated))
+        slice_end = min(start + TS_FOLD_SLICE, target)
+        start_epoch, end_epoch = epoch_seconds(start), epoch_seconds(slice_end)
+
+        # Defensive DELETE: zero rows on the normal path (the watermark only
+        # moves forward), but makes an operator watermark reset (escape
+        # hatch) converge — a re-fold can never double-count or leave rows
+        # from a previous fold generation behind.
+        await session.execute(
+            delete(RequestUsageHourlyRollup).where(
+                RequestUsageHourlyRollup.bucket_epoch >= start_epoch,
+                RequestUsageHourlyRollup.bucket_epoch < end_epoch,
+            )
+        )
+        await session.execute(
+            delete(RequestUsageHourlyErrorRollup).where(
+                RequestUsageHourlyErrorRollup.bucket_epoch >= start_epoch,
+                RequestUsageHourlyErrorRollup.bucket_epoch < end_epoch,
+            )
+        )
+        await session.execute(
+            delete(RequestDemandQuarterRollup).where(
+                RequestDemandQuarterRollup.slot_epoch >= start_epoch,
+                RequestDemandQuarterRollup.slot_epoch < end_epoch,
+            )
+        )
+
+        # Half-open [start, slice_end): hour-aligned bounds, so a display
+        # bucket is never split between the folded side and the raw tail.
+        window = (RequestLog.requested_at >= start, RequestLog.requested_at < slice_end)
+        await session.execute(_hourly_fold_insert(session, window))
+        await session.execute(_error_fold_insert(session, window))
+        await session.execute(_demand_fold_insert(session, window))
+        await _advance_hourly_watermark(session, slice_end)
+        await session.commit()
+        logger.info("Folded hourly usage rollups through %s", slice_end.isoformat())
+        return (_FoldStatus.DONE if slice_end >= target else _FoldStatus.CONTINUE), True
+
+
+async def _advance_hourly_watermark(session: AsyncSession, value: datetime) -> None:
+    await session.execute(
+        update(AccountUsageRollupState)
+        .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+        .values(hourly_folded_through=value)
+    )
+
+
+# --- Account lifecycle mirrors -------------------------------------------
+#
+# The ONLY code paths allowed to touch folded buckets after the watermark
+# passed them. They mirror the raw request_logs mutation exactly (a dimension
+# move, never a recompute — raw below the watermark may already be pruned).
+# Callers MUST hold the fold-state lock (`lock_fold_state`) in the same
+# transaction, so a mirror can never interleave with an in-flight fold slice.
+
+_ROLLUP_TABLES = (
+    (RequestUsageHourlyRollup, _HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS, HourlyUsageRollupRow, "add_hourly"),
+    (RequestUsageHourlyErrorRollup, _ERROR_KEY_COLUMNS + _ERROR_MEASURE_COLUMNS, HourlyErrorRollupRow, "add_errors"),
+    (RequestDemandQuarterRollup, _QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS, QuarterDemandRollupRow, "add_demand"),
+)
+
+
+async def _rekey_account_rows(session: AsyncSession, account_ids: list[str], rekey) -> None:
+    repo = RequestUsageTimeRollupRepository(session)
+    for model, columns, row_type, adder in _ROLLUP_TABLES:
+        stmt = select(*(getattr(model, column) for column in columns)).where(model.account_id.in_(account_ids))
+        rows = [row_type(*row) for row in (await session.execute(stmt)).all()]
+        if not rows:
+            continue
+        await session.execute(delete(model).where(model.account_id.in_(account_ids)))
+        await getattr(repo, adder)([rekey(row) for row in rows])
+
+
+async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
+    """Mirror `AccountsRepository.delete()`'s soft path, which retroactively
+    detaches the account's ENTIRE raw history (`account_id=NULL,
+    deleted_at=now`): folded buckets move to the `('', is_deleted=true)`
+    dimension (merge-added — an orphaned-deleted bucket may already exist).
+    The error satellite has no `is_deleted` dimension (its read includes
+    soft-deleted rows), so only `account_id` is re-keyed there.
+    """
+
+    def _rekey(row):
+        if isinstance(row, HourlyErrorRollupRow):
+            return replace(row, account_id=DIMENSION_SENTINEL)
+        return replace(row, account_id=DIMENSION_SENTINEL, is_deleted=True)
+
+    await _rekey_account_rows(session, [account_id], _rekey)
+
+
+async def mirror_account_hard_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
+    """Mirror the history-deleting path (raw rows physically removed)."""
+    for model, *_rest in _ROLLUP_TABLES:
+        await session.execute(delete(model).where(model.account_id == account_id))
+
+
+async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: str, duplicate_ids: list[str]) -> None:
+    """Mirror duplicate-account consolidation, which reassigns the
+    duplicates' raw logs to the canonical account: folded buckets follow
+    bucket-wise (merge-add onto the canonical dimension, then the duplicate
+    rows are removed). Must run in the consolidation transaction, under the
+    fold-state lock the caller already holds.
+    """
+    if not duplicate_ids:
+        return
+    await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_account_id))

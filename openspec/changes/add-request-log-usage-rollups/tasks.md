@@ -11,17 +11,17 @@
 
 ## 3. Hourly fold pass (PR1)
 
-- [ ] 3.1 Implement `run_hourly_fold_pass` in a new `app/modules/accounts/usage_time_rollup.py`: fold-state row lock, watermark re-read after lock, unconditional `min(requested_at)` start jump, 48 h slices / ≤20 per pass, half-open hour-aligned windows, defensive DELETE then three INSERT..SELECT statements (hourly, error satellite with the top-error filter reproduced, quarter demand), watermark advance in the same transaction.
-- [ ] 3.2 Wire the pass into `AccountUsageRollupScheduler._fold_once` directly after `run_fold_pass()` (no new scheduler, leadership, or settings surface).
-- [ ] 3.3 Fold correctness tests: idempotent re-run equality, crash-resume equality, hour-boundary attribution, exact-watermark row lands in tail, slice boundary never splits a bucket, `FOLD_LAG` respected, hour-aligned watermark invariant; dimension seeds for warmup kinds, soft-deleted, NULL account/key/tier, duplicate rows, reasoning-only, NULL cost, cached>input, multiple error codes.
+- [x] 3.1 Implement `run_hourly_fold_pass` in a new `app/modules/accounts/usage_time_rollup.py`: fold-state row lock, watermark re-read after lock, unconditional `min(requested_at)` start jump, 48 h slices / ≤20 per pass, half-open hour-aligned windows, defensive DELETE then three INSERT..SELECT statements (hourly, error satellite with the top-error filter reproduced, quarter demand), watermark advance in the same transaction.
+- [x] 3.2 Wire the pass into `AccountUsageRollupScheduler._fold_once` directly after `run_fold_pass()` (no new scheduler, leadership, or settings surface).
+- [x] 3.3 Fold correctness tests: idempotent re-run equality, crash-resume equality, hour-boundary attribution, exact-watermark row lands in tail, slice boundary never splits a bucket, `FOLD_LAG` respected, hour-aligned watermark invariant; dimension seeds for warmup kinds, soft-deleted, NULL account/key/tier, duplicate rows, reasoning-only, NULL cost, cached>input, multiple error codes.
 
 ## 4. Lifecycle mirroring and retention gate (PR1)
 
-- [ ] 4.1 Add `lock_fold_state()` to `AccountsRepository.delete()` and mirror soft delete (bucket-wise merge-add to `(account_id='', is_deleted=true)` then delete source rows) and hard delete (row deletion) across all three rollup tables in the same transaction.
-- [ ] 4.2 Mirror duplicate-account consolidation (bucket-wise merge-add dup→canonical, delete dup rows) in the existing consolidation transaction.
-- [ ] 4.3 Document the history-rewrite discipline (fold-state lock + rollup mirror for any mutation below the watermark) in the module docstring.
-- [ ] 4.4 Gate `_prune_request_logs` on `min(folded_through, hourly_folded_through)` including the two-fold-lag currency check; tests for the three branches (hourly missing/behind → skip, both current → prune below min−lag, one stalled → skip) and post-prune statistics invariance.
-- [ ] 4.5 Lifecycle tests: soft delete preserves totals under the deleted dimension, hard delete removes them, consolidation reattributes them; fold/mirror interleaving is serialized (two sessions).
+- [x] 4.1 Add `lock_fold_state()` to `AccountsRepository.delete()` and mirror soft delete (bucket-wise merge-add to `(account_id='', is_deleted=true)` then delete source rows) and hard delete (row deletion) across all three rollup tables in the same transaction.
+- [x] 4.2 Mirror duplicate-account consolidation (bucket-wise merge-add dup→canonical, delete dup rows) in the existing consolidation transaction.
+- [x] 4.3 Document the history-rewrite discipline (fold-state lock + rollup mirror for any mutation below the watermark) in the module docstring.
+- [x] 4.4 Gate `_prune_request_logs` on `min(folded_through, hourly_folded_through)` including the two-fold-lag currency check; tests for the three branches (hourly missing/behind → skip, both current → prune below min−lag, one stalled → skip) and post-prune statistics invariance.
+- [x] 4.5 Lifecycle tests: soft delete preserves totals under the deleted dimension, hard delete removes them, consolidation reattributes them; fold/mirror interleaving is serialized (two sessions).
 
 ## 5. Read-path switch (PR2)
 

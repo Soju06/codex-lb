@@ -84,6 +84,13 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
     exists only in the live table, so pruning them would silently shrink
     lifetime account totals. No watermark (fold never ran) means skip.
 
+    The effective watermark is the MIN of the lifetime fold watermark and the
+    hourly time-axis watermark: a raw row is only prunable once EVERY rollup
+    that must outlive it has folded it. While the hourly backfill is catching
+    up (its watermark starts at the epoch), the min fails the currency check
+    below and pruning pauses entirely — the pre-existing "never delete what
+    is not folded" invariant extended to the time-axis rollups.
+
     Pruning also requires the fold to be CURRENT (watermark within two fold
     lags of now) and stays a full fold lag below it. Summary reads load the
     watermark and the live tail in separate statements; a fold committing
@@ -99,11 +106,15 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
     while True:
         async with get_background_session() as session:
             async with sqlite_writer_section():
-                watermark = (
+                watermarks = (
                     await session.execute(
-                        select(AccountUsageRollupState.folded_through).where(AccountUsageRollupState.id == 1)
+                        select(
+                            AccountUsageRollupState.folded_through,
+                            AccountUsageRollupState.hourly_folded_through,
+                        ).where(AccountUsageRollupState.id == 1)
                     )
-                ).scalar_one_or_none()
+                ).first()
+                watermark = min(watermarks) if watermarks is not None else None
                 if watermark is None:
                     if total == 0:
                         logger.info("Retention: skipping request_logs pruning (no rollup watermark yet)")

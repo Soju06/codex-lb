@@ -38,6 +38,8 @@ class _WebSocketServiceProtocol(Protocol):
     _revalidate_open_websocket_account: Any
     _relay_upstream_websocket_messages: Any
     _release_websocket_request_state_reservation: Any
+    _schedule_cancel_safe_cleanup: Any
+    _settle_deferred_websocket_reservations_and_apply_health_penalty: Any
     _release_websocket_reservation: Any
     _release_request_state_account_response_create_lease: Any
     _remember_websocket_previous_response_owner: Any

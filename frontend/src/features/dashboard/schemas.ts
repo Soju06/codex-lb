@@ -257,3 +257,70 @@ export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSche
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;
 export type ServerWeeklyCreditPace = z.infer<typeof WeeklyCreditPaceSchema>;
+
+export const DashboardViewSchema = z.enum(["request-logs", "conversations"]);
+export type DashboardView = z.infer<typeof DashboardViewSchema>;
+export const DEFAULT_DASHBOARD_VIEW: DashboardView = "request-logs";
+
+export function parseDashboardView(value: string | null | undefined): DashboardView {
+  const parsed = DashboardViewSchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_DASHBOARD_VIEW;
+}
+
+const ConversationModelEffortSchema = z.object({
+  model: z.string(),
+  reasoningEffort: z.string().nullable().optional().default(null),
+});
+
+export const ConversationModelStatSchema = z.object({
+  modelEffort: ConversationModelEffortSchema,
+  reqs: z.number().int().nonnegative(),
+  totalElapsedTime: z.number().int().nonnegative(),
+  totalInputTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative().nullable(),
+  totalOutputTokens: z.number().int().nonnegative(),
+  totalCostUsd: z.number(),
+});
+
+export const ConversationEntrySchema = z.object({
+  conversationId: z.string(),
+  lastRequest: z.iso.datetime({ offset: true }),
+  representativeAccount: z.string().nullable().optional().default(null),
+  remainingAccountCount: z.number().int().nonnegative(),
+  apiKeyId: z.string().nullable().optional().default(null),
+  apiKeyName: z.string().nullable().optional().default(null),
+  representativeModel: z.string().nullable().optional().default(null),
+  remainingModelCount: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  cachedInputTokens: z.number().int().nonnegative().nullable(),
+  totalCostUsd: z.number(),
+});
+
+export const ConversationsResponseSchema = z.object({
+  conversations: z.array(ConversationEntrySchema),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+});
+
+export const ConversationDetailsSchema = z.object({
+  conversationId: z.string(),
+  start: z.iso.datetime({ offset: true }),
+  latest: z.iso.datetime({ offset: true }),
+  accountCount: z.number().int().nonnegative(),
+  totalElapsedTime: z.number().int().nonnegative(),
+  dominantUseragentGroup: z.string().nullable().optional().default(null),
+  modelStats: z.array(ConversationModelStatSchema).default([]),
+});
+
+export const ConversationFilterStateSchema = z.object({
+  search: z.string(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+
+export type ConversationModelEffort = z.infer<typeof ConversationModelEffortSchema>;
+export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
+export type ConversationEntry = z.infer<typeof ConversationEntrySchema>;
+export type ConversationsResponse = z.infer<typeof ConversationsResponseSchema>;
+export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
+export type ConversationFilterState = z.infer<typeof ConversationFilterStateSchema>;

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
+    ConversationDetailsResponse,
+    ConversationsResponse,
     RequestLogApiKeyOption,
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
@@ -16,6 +18,12 @@ from app.modules.request_logs.service import RequestLogModelOption as ServiceReq
 
 router = APIRouter(
     prefix="/api/request-logs",
+    tags=["dashboard"],
+    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+)
+
+conversations_router = APIRouter(
+    prefix="/api/conversations",
     tags=["dashboard"],
     dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
 )
@@ -116,4 +124,38 @@ async def list_request_log_filter_options(
             for option in options.api_keys
         ],
         statuses=options.statuses,
+    )
+
+
+@conversations_router.get("", response_model=ConversationsResponse)
+async def list_conversations(
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(default=None),
+    context: RequestLogsContext = Depends(get_request_logs_context),
+) -> ConversationsResponse:
+    page = await context.service.list_conversations(limit=limit, offset=offset, search=search)
+    return ConversationsResponse(
+        conversations=page.conversations,
+        total=page.total,
+        has_more=page.has_more,
+    )
+
+
+@conversations_router.get("/{conversation_id}", response_model=ConversationDetailsResponse)
+async def get_conversation_details(
+    conversation_id: str,
+    context: RequestLogsContext = Depends(get_request_logs_context),
+) -> ConversationDetailsResponse:
+    details = await context.service.get_conversation_details(conversation_id)
+    if details is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationDetailsResponse(
+        conversation_id=details.conversation_id,
+        start=details.start,
+        latest=details.latest,
+        account_count=details.account_count,
+        total_elapsed_time=details.total_elapsed_time,
+        dominant_useragent_group=details.dominant_useragent_group,
+        model_stats=details.model_stats,
     )

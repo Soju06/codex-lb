@@ -474,6 +474,33 @@ async def test_request_logs_search_matches_email_and_error(async_client, db_setu
 
 
 @pytest.mark.asyncio
+async def test_request_logs_search_preserves_wildcard_behavior(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        for request_id in ("req_wildcard_a", "req_wildcard_b"):
+            await logs_repo.add_log(
+                account_id=None,
+                request_id=request_id,
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=10,
+                status="success",
+                error_code=None,
+                requested_at=now,
+            )
+
+    response = await async_client.get("/api/request-logs?search=%25&limit=50")
+
+    assert response.status_code == 200
+    assert {entry["requestId"] for entry in response.json()["requests"]} == {
+        "req_wildcard_a",
+        "req_wildcard_b",
+    }
+
+
+@pytest.mark.asyncio
 async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

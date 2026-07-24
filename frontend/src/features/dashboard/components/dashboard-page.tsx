@@ -15,6 +15,8 @@ import { AccountList } from "@/features/dashboard/components/account-list";
 import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
 import { AccountViewModeToggle } from "@/features/dashboard/components/account-view-mode-toggle";
 import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-skeleton";
+import { ConversationsView } from "@/features/dashboard/components/conversations-view";
+import { DashboardViewSelector } from "@/features/dashboard/components/filters/dashboard-view-selector";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
@@ -23,10 +25,12 @@ import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
+  parseDashboardView,
   parseOverviewTimeframe,
   type AccountSummary,
   type OverviewTimeframe,
@@ -56,14 +60,25 @@ export function DashboardPage() {
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
   );
+  const dashboardView = useMemo(
+    () => parseDashboardView(searchParams.get("view")),
+    [searchParams],
+  );
   const dashboardQuery = useDashboard(overviewTimeframe);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
-  const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
+  const conversationsState = useConversations({ enabled: dashboardView === "conversations" });
+  const { conversationsQuery } = conversationsState;
+  const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
+    enabled: dashboardView === "request-logs",
+  });
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
   const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
 
-  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching;
+  const activeListIsFetching = dashboardView === "request-logs"
+    ? logsQuery.isFetching
+    : conversationsQuery.isFetching;
+  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || activeListIsFetching;
 
   const handleRefresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -76,6 +91,19 @@ export function DashboardPage() {
         next.delete("overviewTimeframe");
       } else {
         next.set("overviewTimeframe", timeframe);
+      }
+      setSearchParams(next);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const handleDashboardViewChange = useCallback(
+    (nextView: "request-logs" | "conversations") => {
+      const next = new URLSearchParams(searchParams);
+      if (nextView === "request-logs") {
+        next.delete("view");
+      } else {
+        next.set("view", nextView);
       }
       setSearchParams(next);
     },
@@ -273,7 +301,7 @@ export function DashboardPage() {
 
   const errorMessage =
     (dashboardQuery.error instanceof Error && dashboardQuery.error.message) ||
-    (optionsQuery.error instanceof Error && optionsQuery.error.message) ||
+    (dashboardView === "request-logs" && optionsQuery.error instanceof Error && optionsQuery.error.message) ||
     null;
 
   return (
@@ -287,18 +315,21 @@ export function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <OverviewTimeframeSelect
-            value={overviewTimeframe}
-            onChange={handleOverviewTimeframeChange}
-          />
+          {dashboardView === "request-logs" ? (
+            <OverviewTimeframeSelect
+              value={overviewTimeframe}
+              onChange={handleOverviewTimeframeChange}
+            />
+          ) : null}
           <button
             type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
             className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+            aria-label={t("dashboard.page.refresh")}
             title={t("dashboard.page.refresh")}
           >
-            <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} />
+            <RefreshCw className={`h-4 w-4${isRefreshing ? " animate-spin" : ""}`} aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -361,11 +392,14 @@ export function DashboardPage() {
           </section>
 
           <section className="space-y-4">
-            <div className="flex items-center gap-3">
-              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("dashboard.requests.title")}</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">
+                {t(dashboardView === "request-logs" ? "dashboard.requests.title" : "dashboard.conversations.title")}
+              </h2>
+              <DashboardViewSelector value={dashboardView} onChange={handleDashboardViewChange} />
               <div className="h-px flex-1 bg-border" />
             </div>
-            {logsQuery.isPending && !logPage ? (
+            {dashboardView === "conversations" ? <ConversationsView state={conversationsState} /> : logsQuery.isPending && !logPage ? (
               <div className="rounded-xl border bg-card py-8">
                 <SpinnerBlock />
               </div>

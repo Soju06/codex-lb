@@ -9,18 +9,23 @@ import {
 import {
   type AccountSummary,
   type ApiKey,
+  type ConversationDetails,
+  type ConversationEntry,
   createAccountSummary,
   createAccountTrends,
   createApiKey,
   createApiKeyCreateResponse,
   createApiKeyTrends,
   createApiKeyUsage7Day,
+  createConversationDetails,
+  createConversationsResponse,
   createDashboardAuthSession,
   createDashboardOverview,
   createDashboardProjections,
   createDashboardSettings,
   createDefaultAccounts,
   createDefaultApiKeys,
+  createDefaultConversations,
   createDefaultModelSources,
   createDefaultRequestLogs,
   createModelSource,
@@ -239,6 +244,8 @@ async function parseJsonBody<T>(
 type MockState = {
   accounts: AccountSummary[];
   requestLogs: RequestLogEntry[];
+  conversations: ConversationEntry[];
+  conversationDetails: ConversationDetails[];
   authSession: DashboardAuthSession;
   settings: DashboardSettings;
   quotaPlannerSettings: QuotaPlannerSettings;
@@ -322,6 +329,15 @@ function createInitialState(): MockState {
   return {
     accounts: createDefaultAccounts(),
     requestLogs: createDefaultRequestLogs(),
+    conversations: createDefaultConversations(),
+    conversationDetails: [
+      createConversationDetails({ conversationId: "conv_abc" }),
+      createConversationDetails({
+        conversationId: "conv_def",
+        accountCount: 1,
+        dominantUseragentGroup: "codex",
+      }),
+    ],
     authSession: createDashboardAuthSession(),
     settings: createDashboardSettings(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
@@ -766,6 +782,49 @@ export const handlers = [
     return HttpResponse.json(
       requestLogOptionsFromEntries(filtered, apiKeyFiltered),
     );
+  }),
+
+  http.get("/api/conversations", ({ request }) => {
+    const url = new URL(request.url);
+    const search = (url.searchParams.get("search") || "").trim().toLowerCase();
+    const filtered = state.conversations.filter((entry) => {
+      if (search.length === 0) {
+        return true;
+      }
+      return entry.conversationId.toLowerCase().includes(search);
+    });
+    const total = filtered.length;
+    const limitRaw = Number(url.searchParams.get("limit") ?? 50);
+    const offsetRaw = Number(url.searchParams.get("offset") ?? 0);
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 50;
+    const offset =
+      Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
+    const conversations = filtered.slice(offset, offset + limit);
+    return HttpResponse.json(
+      createConversationsResponse(conversations, total, offset + limit < total),
+    );
+  }),
+
+  http.get("/api/conversations/:conversationId", ({ params }) => {
+    const rawId = decodeURIComponent(String(params.conversationId));
+    const trimmed = rawId.trim();
+    if (!trimmed) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Conversation not found" } },
+        { status: 404 },
+      );
+    }
+    const details = state.conversationDetails.find(
+      (item) => item.conversationId === trimmed,
+    );
+    if (!details) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Conversation not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json(details);
   }),
 
   http.get("/api/accounts", () => {

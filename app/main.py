@@ -686,6 +686,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_api.router)
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
+    app.include_router(request_logs_api.conversations_router)
     app.include_router(quota_planner_api.router)
     app.include_router(reports_api.router)
     app.include_router(conversation_archive_api.router)

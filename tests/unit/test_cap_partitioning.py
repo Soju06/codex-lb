@@ -630,6 +630,35 @@ class TestStreamShareBorrowing:
             == 0
         )
 
+    def test_snapshot_from_previous_peers_disables_borrowing(self) -> None:
+        # Same-count rolling replacement: membership now expects new-peer,
+        # but a still-fresh snapshot covers only the departed peer. Length
+        # alone matches, identity must not.
+        cap_partitioning_module.observe_ring_members(["self", "new-peer"], "self")
+        cap_partitioning_module.observe_peer_stream_inflight({"old-peer": {}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 0
+        )
+
+    def test_snapshot_matching_membership_allows_borrowing(self) -> None:
+        cap_partitioning_module.observe_ring_members(["self", "peer-1"], "self")
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+        assert (
+            cap_partitioning_module.stream_share_borrow_allowance(
+                "acct",
+                local_inflight=4,
+                configured_stream_limit=8,
+                replica_count=2,
+            )
+            == 2
+        )
+
     def test_no_snapshot_disables_borrowing(self) -> None:
         assert (
             cap_partitioning_module.stream_share_borrow_allowance(
@@ -771,6 +800,21 @@ class TestEffectiveStreamAdmissionCap:
                 stream_reserve_slots=1,
             )
             == 2
+        )
+
+    def test_mismatched_snapshot_peers_keep_static_share_unclamped(self) -> None:
+        # A fresh snapshot from departed peers is unusable for the clamp:
+        # fail safe to the static-share entitlement.
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_ring_members(["self", "new-peer"], "self")
+        cap_partitioning_module.observe_peer_stream_inflight({"old-peer": {"acct": 5}})
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=3,
+                caps=caps,
+            )
+            == 4
         )
 
     def test_static_share_kept_when_peer_counts_missing(self) -> None:

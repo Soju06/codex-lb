@@ -200,6 +200,14 @@ class _PeerStreamInflightHolder:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._snapshot: PeerStreamInflightSnapshot | None = None
+        self._expected_peer_ids: frozenset[str] | None = None
+
+    @property
+    def expected_peer_ids(self) -> frozenset[str] | None:
+        return self._expected_peer_ids
+
+    def set_expected_peer_ids(self, peer_ids: frozenset[str]) -> None:
+        self._expected_peer_ids = peer_ids
 
     def observe(
         self,
@@ -297,12 +305,19 @@ def _fresh_complete_peer_inflight(account_id: str, *, replica_count: int) -> int
     Returns None when the partition has a single member, when no fresh
     snapshot exists, when the snapshot does not cover every other active
     member, or when any covered member published no counts — missing data is
-    never treated as zero.
+    never treated as zero. Coverage is validated against the active peer
+    *identities* observed by the latest membership refresh, not just the
+    member count: a same-count membership change (rolling replacement) must
+    not let a still-fresh snapshot from the previous peers vouch for members
+    it never observed.
     """
     if replica_count <= 1:
         return None
     snapshot = _peer_inflight_holder.fresh_snapshot(max_age_seconds=PEER_INFLIGHT_MAX_AGE_SECONDS)
     if snapshot is None:
+        return None
+    expected_peer_ids = _peer_inflight_holder.expected_peer_ids
+    if expected_peer_ids is not None and set(snapshot.counts_by_instance) != expected_peer_ids:
         return None
     if len(snapshot.counts_by_instance) < replica_count - 1:
         return None
@@ -400,6 +415,11 @@ def observe_ring_members(
     scale_down_seconds = float(
         getattr(settings, "proxy_account_cap_partition_scale_down_seconds", DEFAULT_SCALE_DOWN_SECONDS)
     )
+    # Record the peer identities this membership view expects so peer-count
+    # snapshots are validated against the actual active peers, never by
+    # member count alone (a same-count rolling replacement must not let a
+    # still-fresh snapshot from the previous peers authorize borrowing).
+    _peer_inflight_holder.set_expected_peer_ids(frozenset(set(active_instance_ids) - {self_instance_id}))
     previous = _holder.current
     changed = _holder.observe_members(
         active_instance_ids,

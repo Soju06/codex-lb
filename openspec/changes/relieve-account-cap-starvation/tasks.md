@@ -13,6 +13,7 @@
 - [x] 2.2 Apply the allowance in the sticky-selection cap filter and the lease admission check for stream leases only.
 - [x] 2.3 Record borrowed-lease admissions in a metric.
 - [x] 2.4 Clamp static-share admission by fresh cluster headroom so peer borrows are not re-admitted locally.
+- [x] 2.5 Validate peer-count snapshots against the active peer identities from the latest membership refresh, not member count alone.
 
 ## 3. Bounded account-capacity wait
 

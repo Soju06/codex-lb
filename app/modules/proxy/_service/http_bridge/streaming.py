@@ -149,6 +149,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
+    _request_log_client_fields,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _ttft_event_visible_at,
@@ -591,6 +592,49 @@ class _HTTPBridgeStreamingMixin:
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
+
+    async def _write_account_cap_overload_request_log(
+        self: Any,
+        *,
+        request_state: _WebSocketRequestState,
+        exc: ProxyResponseError,
+        api_key: ApiKeyData | None,
+        headers: Mapping[str, str],
+        client_ip: str | None,
+    ) -> None:
+        """Record a terminal account-capacity overload before session creation.
+
+        These failures raise before any submission or settlement runs, so the
+        normal settlement-time request logging never sees them; without this
+        row the dashboard is blind to capacity-wait 429s.
+        """
+        error_code, error_message = _proxy_error_code_message(exc)
+        if not _is_local_account_cap_code(error_code):
+            return
+        try:
+            useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
+            await self._write_request_log(
+                account_id=None,
+                api_key=api_key,
+                request_id=request_state.request_id,
+                model=request_state.model or "",
+                latency_ms=int(max(0.0, _service_time().monotonic() - request_state.started_at) * 1000),
+                status="error",
+                error_code=error_code,
+                error_message=error_message,
+                failure_phase="account_capacity_wait",
+                reasoning_effort=request_state.reasoning_effort,
+                transport=request_state.transport,
+                requested_service_tier=request_state.requested_service_tier,
+                actual_service_tier=request_state.actual_service_tier,
+                session_id=request_state.session_id,
+                useragent=useragent,
+                useragent_group=useragent_group,
+                conversation_id=conversation_id,
+                client_ip=client_ip,
+            )
+        except Exception:
+            logger.warning("Failed to record account-capacity overload request log", exc_info=True)
 
     async def _stream_http_bridge_or_retry(
         self: Any,
@@ -1367,8 +1411,22 @@ class _HTTPBridgeStreamingMixin:
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
+                            await self._write_account_cap_overload_request_log(
+                                request_state=request_state,
+                                exc=exc,
+                                api_key=api_key,
+                                headers=headers,
+                                client_ip=client_ip,
+                            )
                             raise
                         continue
+                    await self._write_account_cap_overload_request_log(
+                        request_state=request_state,
+                        exc=exc,
+                        api_key=api_key,
+                        headers=headers,
+                        client_ip=client_ip,
+                    )
                     raise
                 switch_to_account_neutral_replay()
                 continue

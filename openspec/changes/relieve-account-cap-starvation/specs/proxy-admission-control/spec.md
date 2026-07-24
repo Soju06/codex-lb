@@ -8,7 +8,7 @@ When an account is at either cap, new soft-affinity work MUST prefer another eli
 
 An unanchored parallel fork bridge session whose payload is self-contained (no `previous_response_id`, no `conversation`, and no input file references) carries no continuity ownership; when its preferred account is rejected by a local account cap (`account_stream_cap` or `account_response_create_cap`) during session creation, the proxy MUST drop the preferred-account hint exactly once for that request and retry account selection among eligible accounts before entering the recoverable account-capacity wait. Payloads that carry any continuity owner signal MUST NOT spill and keep the existing preferred-owner behavior.
 
-The recoverable account-capacity wait entered by bridged Responses session creation and recovery when every eligible account is capped MUST be bounded by a fixed 120-second ceiling in addition to the bridge request budget, anchored per request at the first capacity wait. When the bound expires the proxy MUST surface the original HTTP 429 local-cap error envelope (`account_stream_cap` or `account_response_create_cap`) instead of continuing to hold the request. Per-session response-create gate waits (`response_create_gate_timeout`) MUST remain bounded by the bridge request budget only.
+The recoverable account-capacity wait entered by bridged Responses session creation and recovery when every eligible account is capped MUST be bounded by a fixed 120-second ceiling in addition to the bridge request budget, anchored per request at the first capacity wait. When the bound expires the proxy MUST surface the original HTTP 429 local-cap error envelope (`account_stream_cap` or `account_response_create_cap`) instead of continuing to hold the request, and MUST record the terminal failure in the request log with the local-cap error code — these failures raise before submission, so settlement-time logging never observes them. Per-session response-create gate waits (`response_create_gate_timeout`) MUST remain bounded by the bridge request budget only.
 
 #### Scenario: Soft work avoids saturated account
 
@@ -59,6 +59,7 @@ The recoverable account-capacity wait entered by bridged Responses session creat
 - **WHEN** the recoverable account-capacity wait exceeds the 120-second ceiling
 - **THEN** the request fails with HTTP 429 and `error.code = "account_stream_cap"`
 - **AND** the connection is still open to deliver the error envelope
+- **AND** a request-log row records the failure with `error.code = "account_stream_cap"`
 
 #### Scenario: Gate contention is not bounded by the capacity ceiling
 

@@ -19196,3 +19196,65 @@ def test_unanchored_fork_cap_spill_predicate() -> None:
         payload=self_contained,
         preferred_account_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_account_cap_overload_writes_request_log() -> None:
+    mixin = http_bridge_streaming_module._HTTPBridgeStreamingMixin
+    fake_self = SimpleNamespace(_write_request_log=AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-cap-log",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 120.0,
+        transport="http",
+        session_id="ses-cap-log",
+    )
+    headers = {"user-agent": "opencode/1.18.3", "x-parent-session-id": "parent-1"}
+
+    await mixin._write_account_cap_overload_request_log(
+        fake_self,
+        request_state=request_state,
+        exc=_account_stream_cap_error(),
+        api_key=None,
+        headers=headers,
+        client_ip="10.0.0.9",
+    )
+
+    fake_self._write_request_log.assert_awaited_once()
+    kwargs = fake_self._write_request_log.await_args.kwargs
+    assert kwargs["status"] == "error"
+    assert kwargs["error_code"] == "account_stream_cap"
+    assert kwargs["failure_phase"] == "account_capacity_wait"
+    assert kwargs["request_id"] == "req-cap-log"
+    assert kwargs["account_id"] is None
+    assert kwargs["useragent_group"] == "opencode"
+    assert kwargs["conversation_id"] == "parent-1"
+    assert kwargs["latency_ms"] >= 119_000
+
+
+@pytest.mark.asyncio
+async def test_non_cap_errors_do_not_write_capacity_overload_log() -> None:
+    mixin = http_bridge_streaming_module._HTTPBridgeStreamingMixin
+    fake_self = SimpleNamespace(_write_request_log=AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-other",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+
+    await mixin._write_account_cap_overload_request_log(
+        fake_self,
+        request_state=request_state,
+        exc=ProxyResponseError(502, openai_error("upstream_unavailable", "nope")),
+        api_key=None,
+        headers={},
+        client_ip=None,
+    )
+
+    fake_self._write_request_log.assert_not_awaited()

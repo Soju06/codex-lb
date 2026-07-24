@@ -17,6 +17,7 @@
 - [x] 3.1 Add a fixed 120-second account-capacity wait ceiling (no new setting; simplicity gates).
 - [x] 3.2 Clamp the bridge capacity-wait plan for account-capacity errors to the ceiling while leaving `response_create_gate_timeout` waits budget-bounded.
 - [x] 3.3 Surface the original HTTP 429 cap envelope when the ceiling expires.
+- [x] 3.4 Record the terminal capacity overload in the request log (settlement-time logging never sees pre-submission failures).
 
 ## 4. Unanchored parallel fork spillover
 

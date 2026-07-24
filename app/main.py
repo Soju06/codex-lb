@@ -474,6 +474,12 @@ async def lifespan(app: FastAPI):
                     account_stream_inflight = await proxy_service._load_balancer.stream_inflight_by_account()
                 except Exception:
                     logger.warning("Stream-inflight snapshot for ring heartbeat failed", exc_info=True)
+            else:
+                # The proxy service is created lazily on the first proxied
+                # request; a replica without one has never issued a lease, so
+                # publish idle ({}) rather than missing — otherwise peers can
+                # never borrow from a replica that has not served traffic yet.
+                account_stream_inflight = {}
             try:
                 await svc.heartbeat(
                     iid,

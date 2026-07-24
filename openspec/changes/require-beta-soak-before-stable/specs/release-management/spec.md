@@ -9,17 +9,18 @@ release-please stable release PR for the corresponding base version. Stable
 promotion SHALL rebuild PyPI, Docker, Helm, and GitHub Release artifacts with
 the stable version instead of retagging prerelease artifacts.
 
-Before the stable release PR for `X.Y.Z` is merged, a `vX.Y.Z-beta.N`
-prerelease SHALL have been published and deployed to at least one
-production-scale environment for a soak of at least 48 hours without new
-regressions attributable to the release train. A maintainer MAY promote
-directly to stable without a completed soak only when the entire unsoaked
-delta (every change since the last soaked prerelease of the train, or since
-the previous stable release when no prerelease exists) consists solely of
-documentation, CI, or release-tooling changes, an urgent security or outage
-hotfix, or a combination of these; a train that also carries unrelated
-unsoaked changes SHALL NOT use this exception. The exception and its reason
-SHALL be recorded on the stable release PR before merge.
+Before the stable release PR for `X.Y.Z` is merged, the changes in the
+release candidate SHALL be covered by a `vX.Y.Z-beta.N` prerelease that has
+been published and deployed to at least one production-scale environment for
+a soak of at least 48 hours without new regressions attributable to the
+release train. The unsoaked delta — every change not covered by such a soaked
+prerelease, whether because no prerelease of the train completed a soak or
+because the change landed after the last soaked prerelease — SHALL consist
+solely of documentation, CI, or release-tooling changes, an urgent security
+or outage hotfix, or a combination of these; otherwise the train SHALL soak
+(again) as a new prerelease before stable promotion. When promotion relies on
+this exception, the exception and its reason SHALL be recorded on the stable
+release PR before merge.
 
 When the release train contains Alembic revisions, the maintainer SHALL review
 the revisions between the previous stable tag and the release candidate
@@ -63,6 +64,16 @@ the train contains no data backfills.
 - **THEN** the hotfix exception does not apply to the train
 - **AND** the train either soaks as a beta or the hotfix is released
   separately
+
+#### Scenario: changes landing after the soaked beta restart the soak
+
+- **GIVEN** `v1.23.0-beta.1` completed a 48-hour production-scale soak
+- **AND** a feature or migration change lands on `main` afterwards, before
+  the stable release PR for `1.23.0` is merged
+- **WHEN** a maintainer considers promoting `1.23.0` to stable
+- **THEN** the post-beta change is part of the unsoaked delta
+- **AND** promotion requires either a new soaked prerelease covering it or a
+  recorded safe-delta exception
 
 #### Scenario: data backfills are identified from Alembic revisions
 

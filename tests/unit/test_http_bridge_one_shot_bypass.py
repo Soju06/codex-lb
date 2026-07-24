@@ -40,6 +40,20 @@ def test_agent_turns_with_tools_are_not_one_shot() -> None:
     assert not _is_one_shot(payload, _OPENCODE_HEADERS)
 
 
+def test_responses_lite_agent_turns_with_tools_are_not_one_shot() -> None:
+    payload = _payload(
+        input=[
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "function", "name": "bash", "parameters": {"type": "object"}}],
+            },
+            {"role": "user", "content": "Run the command"},
+        ]
+    )
+    assert not _is_one_shot(payload, _OPENCODE_HEADERS)
+
+
 def test_continuity_bearing_requests_are_not_one_shot() -> None:
     assert not _is_one_shot(_payload(previous_response_id="resp_1"), _OPENCODE_HEADERS)
     assert not _is_one_shot(_payload(conversation="conv_1"), _OPENCODE_HEADERS)

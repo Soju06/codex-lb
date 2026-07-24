@@ -58,6 +58,7 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+    responses_input_uses_lite_tools,
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
@@ -960,7 +961,7 @@ def _http_bridge_request_is_unanchored_one_shot(
     """
     if forwarded_request:
         return False
-    if payload.tools:
+    if payload.tools or responses_input_uses_lite_tools(payload.input):
         return False
     if not _session_identity_is_client_declared(headers):
         return False

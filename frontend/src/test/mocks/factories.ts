@@ -38,6 +38,10 @@ import type {
 	OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 import {
+	ConversationDetailsSchema,
+	ConversationEntrySchema,
+	ConversationsResponseSchema,
+	ConversationModelStatSchema,
 	DEFAULT_OVERVIEW_TIMEFRAME,
 	DashboardOverviewSchema,
 	DashboardProjectionsSchema,
@@ -62,6 +66,10 @@ import {
 // Backward-compatible type aliases
 export type RequestLogEntry = RequestLog;
 export type DashboardAuthSession = AuthSession;
+export type ConversationEntry = z.infer<typeof ConversationEntrySchema>;
+export type ConversationsResponse = z.infer<typeof ConversationsResponseSchema>;
+export type ConversationDetails = z.infer<typeof ConversationDetailsSchema>;
+export type ConversationModelStat = z.infer<typeof ConversationModelStatSchema>;
 export type { QuotaPlannerDecision, QuotaPlannerForecast, QuotaPlannerSettings };
 export type QuotaPlannerWarmupActionResponse = z.infer<typeof QuotaPlannerWarmupActionResponseSchema>;
 export type OauthCompleteResponse = z.infer<typeof OauthCompleteResponseSchema>;
@@ -788,6 +796,97 @@ export function createApiKeyUsage7Day(
 		cachedInputTokens: 45_000,
 		totalRequests: 350,
 		totalCostUsd: 2.47,
+		...overrides,
+	});
+}
+
+export function createConversationEntry(
+	overrides: Partial<ConversationEntry> = {},
+): ConversationEntry {
+	return ConversationEntrySchema.parse({
+		conversationId: "conv_abc",
+		lastRequest: offsetIso(-1),
+		representativeAccount: "acc_primary",
+		remainingAccountCount: 1,
+		apiKeyId: "key_1",
+		apiKeyName: "Primary Key",
+		representativeModel: "gpt-5.1",
+		remainingModelCount: 1,
+		totalTokens: 1800,
+		cachedInputTokens: 320,
+		totalCostUsd: 0.0132,
+		...overrides,
+	});
+}
+
+export function createDefaultConversations(): ConversationEntry[] {
+	return [
+		createConversationEntry(),
+		createConversationEntry({
+			conversationId: "conv_def",
+			lastRequest: offsetIso(-2),
+			representativeAccount: "acc_secondary",
+			remainingAccountCount: 0,
+			apiKeyId: "key_2",
+			apiKeyName: "Secondary Key",
+			representativeModel: "gpt-5.1-codex",
+			remainingModelCount: 0,
+			totalTokens: 4200,
+			cachedInputTokens: 0,
+			totalCostUsd: 0.04,
+		}),
+	];
+}
+
+export function createConversationsResponse(
+	conversations: ConversationEntry[],
+	total: number,
+	hasMore: boolean,
+): ConversationsResponse {
+	return ConversationsResponseSchema.parse({
+		conversations,
+		total,
+		hasMore,
+	});
+}
+
+export function createConversationModelStat(
+	overrides: Partial<ConversationModelStat> = {},
+): ConversationModelStat {
+	return ConversationModelStatSchema.parse({
+		modelEffort: { model: "gpt-5.1", reasoningEffort: "high" },
+		reqs: 4,
+		totalElapsedTime: 1200,
+		totalInputTokens: 1000,
+		cachedInputTokens: 200,
+		totalOutputTokens: 300,
+		totalCostUsd: 0.05,
+		...overrides,
+	});
+}
+
+export function createConversationDetails(
+	overrides: Partial<ConversationDetails> = {},
+): ConversationDetails {
+	return ConversationDetailsSchema.parse({
+		conversationId: "conv_abc",
+		start: offsetIso(-10),
+		latest: offsetIso(-1),
+		accountCount: 2,
+		totalElapsedTime: 4200,
+		dominantUseragentGroup: "opencode",
+		modelStats: [
+			createConversationModelStat(),
+			createConversationModelStat({
+				modelEffort: { model: "gpt-5.1", reasoningEffort: null },
+				reqs: 2,
+				totalElapsedTime: 600,
+				totalInputTokens: 500,
+				cachedInputTokens: 0,
+				totalOutputTokens: 100,
+				totalCostUsd: 0.02,
+			}),
+		],
 		...overrides,
 	});
 }

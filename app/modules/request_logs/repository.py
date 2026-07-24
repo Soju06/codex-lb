@@ -64,6 +64,17 @@ _CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 _recent_count_cache: dict[tuple, tuple[int, float]] = {}
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _normalize_conversation_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip(_CONVERSATION_WHITESPACE)
+    return normalized or None
+
+
 def _clear_recent_count_cache() -> None:
     _recent_count_cache.clear()
 
@@ -93,6 +104,55 @@ class PreviousResponseOwnerRecord:
     session_id: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationListSummary:
+    conversation_id: str
+    last_requested_at: datetime
+    account_count: int
+    total_tokens: int
+    cached_input_tokens: int | None
+    cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationFacet:
+    conversation_id: str
+    value: str
+    request_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationListResult:
+    summaries: list[ConversationListSummary]
+    account_facets: list[ConversationFacet]
+    api_key_facets: list[ConversationFacet]
+    model_facets: list[ConversationFacet]
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationModelStatRow:
+    model: str
+    reasoning_effort: str | None
+    request_count: int
+    total_elapsed_ms: int
+    input_tokens: int
+    cached_input_tokens: int | None
+    output_tokens: int
+    cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationDetailsResult:
+    conversation_id: str
+    started_at: datetime
+    last_requested_at: datetime
+    account_count: int
+    total_elapsed_ms: int
+    useragent_group: str | None
+    model_stats: list[ConversationModelStatRow]
+
+
 class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -108,6 +168,238 @@ class RequestLogsRepository:
             _CONVERSATION_WHITESPACE,
         )
         return func.nullif(trimmed, "")
+
+    def _conversation_output_expr(self) -> ColumnElement:
+        return func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+
+    def _conversation_cached_expr(self) -> ColumnElement:
+        dialect = self._session.get_bind().dialect.name
+        least = func.least if dialect == "postgresql" else func.min
+        greatest = func.greatest if dialect == "postgresql" else func.max
+        return case(
+            (RequestLog.cached_input_tokens.is_(None), None),
+            (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
+            else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
+        )
+
+    def _conversation_conditions(self) -> list[ColumnElement[bool]]:
+        return [
+            RequestLog.deleted_at.is_(None),
+            self._exclude_warmup_clause(),
+            self._conversation_id_expr().is_not(None),
+        ]
+
+    def _reasoning_effort_sort_key(self) -> list[ColumnElement]:
+        rank = case(
+            (RequestLog.reasoning_effort.is_(None), 0),
+            (RequestLog.reasoning_effort == "", 1),
+            else_=2,
+        )
+        return [rank, func.coalesce(RequestLog.reasoning_effort, "")]
+
+    async def list_conversations(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        since: datetime | None = None,
+    ) -> ConversationListResult:
+        conversation_id = self._conversation_id_expr()
+        conditions = self._conversation_conditions()
+        if search and search.strip():
+            pattern = f"%{_escape_like(search.strip())}%"
+            matching_ids = (
+                select(conversation_id.label("conversation_id"))
+                .where(
+                    *conditions,
+                    or_(
+                        conversation_id.ilike(pattern, escape="\\"),
+                        RequestLog.useragent_group.ilike(pattern, escape="\\"),
+                    ),
+                )
+                .distinct()
+                .subquery()
+            )
+            conditions = [*conditions, conversation_id.in_(select(matching_ids.c.conversation_id))]
+
+        output = self._conversation_output_expr()
+        cached = self._conversation_cached_expr()
+        summary_stmt = (
+            select(
+                conversation_id.label("conversation_id"),
+                func.max(RequestLog.requested_at).label("last_requested_at"),
+                func.count(func.distinct(RequestLog.account_id)).label("account_count"),
+                func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0) + output), 0).label("total_tokens"),
+                func.sum(cached).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+            )
+            .where(*conditions)
+            .group_by(conversation_id)
+        )
+        if since is not None:
+            summary_stmt = summary_stmt.having(func.min(RequestLog.requested_at) >= since)
+        summary_subquery = summary_stmt.subquery()
+        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
+        if ttl_seconds <= 0:
+            total = int((await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one())
+        else:
+            cache_key = (search, since)
+            total = _cached_recent_count(cache_key)
+            if total is None:
+                total = int(
+                    (await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one()
+                )
+                _store_recent_count(cache_key, total, ttl_seconds)
+        page_rows = (
+            await self._session.execute(
+                select(summary_subquery)
+                .order_by(summary_subquery.c.last_requested_at.desc(), summary_subquery.c.conversation_id.asc())
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
+        summaries = [
+            ConversationListSummary(
+                conversation_id=row.conversation_id,
+                last_requested_at=row.last_requested_at,
+                account_count=int(row.account_count),
+                total_tokens=int(row.total_tokens),
+                cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),
+                cost_usd=float(row.cost_usd or 0.0),
+            )
+            for row in page_rows
+        ]
+
+        page_ids = [summary.conversation_id for summary in summaries]
+        account_facets: list[ConversationFacet] = []
+        api_key_facets: list[ConversationFacet] = []
+        model_facets: list[ConversationFacet] = []
+        if page_ids:
+            account_facets = await self._conversation_facets(conditions, page_ids, RequestLog.account_id)
+            api_key_facets = await self._conversation_facets(conditions, page_ids, RequestLog.api_key_id)
+            model_facets = await self._conversation_facets(conditions, page_ids, RequestLog.model)
+        return ConversationListResult(
+            summaries=summaries,
+            account_facets=account_facets,
+            api_key_facets=api_key_facets,
+            model_facets=model_facets,
+            total=total,
+        )
+
+    async def _conversation_facets(
+        self,
+        conditions: list[ColumnElement[bool]],
+        page_ids: list[str],
+        value_column: InstrumentedAttribute[str | None] | InstrumentedAttribute[str],
+    ) -> list[ConversationFacet]:
+        conversation_id = self._conversation_id_expr()
+        facet_conditions = [*conditions, conversation_id.in_(page_ids), value_column.is_not(None)]
+        if getattr(value_column, "key", None) == RequestLog.api_key_id.key:
+            facet_conditions.append(value_column.in_(select(ApiKey.id)))
+        stmt = (
+            select(
+                conversation_id.label("conversation_id"),
+                value_column.label("value"),
+                func.count().label("request_count"),
+            )
+            .where(*facet_conditions)
+            .group_by(conversation_id, value_column)
+            .order_by(
+                conversation_id.asc(),
+                func.count().desc(),
+                func.max(RequestLog.requested_at).desc(),
+                value_column.asc(),
+            )
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            ConversationFacet(
+                conversation_id=row.conversation_id,
+                value=row.value,
+                request_count=int(row.request_count),
+            )
+            for row in rows
+        ]
+
+    async def get_conversation_details(self, conversation_id: str) -> ConversationDetailsResult | None:
+        target = _normalize_conversation_id(conversation_id)
+        if not target:
+            return None
+        normalized_id = self._conversation_id_expr()
+        conditions = [*self._conversation_conditions(), normalized_id == target]
+        summary = (
+            await self._session.execute(
+                select(
+                    func.min(RequestLog.requested_at).label("started_at"),
+                    func.max(RequestLog.requested_at).label("last_requested_at"),
+                    func.count(func.distinct(RequestLog.account_id)).label("account_count"),
+                    func.coalesce(func.sum(func.coalesce(RequestLog.latency_ms, 0)), 0).label("total_elapsed_ms"),
+                ).where(*conditions)
+            )
+        ).one()
+        if summary.started_at is None:
+            return None
+
+        dominant = (
+            await self._session.execute(
+                select(RequestLog.useragent_group)
+                .where(*conditions, RequestLog.useragent_group.is_not(None))
+                .group_by(RequestLog.useragent_group)
+                .order_by(
+                    func.count().desc(),
+                    func.max(RequestLog.requested_at).desc(),
+                    RequestLog.useragent_group.asc(),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        output = self._conversation_output_expr()
+        cached = self._conversation_cached_expr()
+        model_rows = (
+            await self._session.execute(
+                select(
+                    RequestLog.model.label("model"),
+                    RequestLog.reasoning_effort.label("reasoning_effort"),
+                    func.count().label("request_count"),
+                    func.coalesce(func.sum(func.coalesce(RequestLog.latency_ms, 0)), 0).label("total_elapsed_ms"),
+                    func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0)), 0).label("input_tokens"),
+                    func.sum(cached).label("cached_input_tokens"),
+                    func.coalesce(func.sum(output), 0).label("output_tokens"),
+                    func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                )
+                .where(*conditions)
+                .group_by(RequestLog.model, RequestLog.reasoning_effort)
+                .order_by(
+                    func.count().desc(),
+                    func.max(RequestLog.requested_at).desc(),
+                    RequestLog.model.asc(),
+                    *self._reasoning_effort_sort_key(),
+                )
+            )
+        ).all()
+        return ConversationDetailsResult(
+            conversation_id=target,
+            started_at=summary.started_at,
+            last_requested_at=summary.last_requested_at,
+            account_count=int(summary.account_count),
+            total_elapsed_ms=int(summary.total_elapsed_ms),
+            useragent_group=dominant,
+            model_stats=[
+                ConversationModelStatRow(
+                    model=row.model,
+                    reasoning_effort=row.reasoning_effort,
+                    request_count=int(row.request_count),
+                    total_elapsed_ms=int(row.total_elapsed_ms),
+                    input_tokens=int(row.input_tokens),
+                    cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),
+                    output_tokens=int(row.output_tokens),
+                    cost_usd=float(row.cost_usd or 0.0),
+                )
+                for row in model_rows
+            ],
+        )
 
     def _bucket_epoch_expr(self, bucket_seconds: int) -> ColumnElement:
         bind = self._session.get_bind()
@@ -585,7 +877,7 @@ class RequestLogsRepository:
             resolved_useragent_group = (
                 useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
             )
-            resolved_conversation_id = (conversation_id or "").strip() or None
+            resolved_conversation_id = _normalize_conversation_id(conversation_id)
             resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
             log = RequestLog(
                 account_id=account_id,

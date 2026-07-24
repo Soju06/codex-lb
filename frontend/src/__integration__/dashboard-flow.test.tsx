@@ -10,6 +10,8 @@ import {
   createAccountSummary,
   createDashboardOverview,
   createDashboardProjections,
+  createConversationEntry,
+  createConversationsResponse,
   createDefaultRequestLogs,
   createRequestLogEntry,
   createRequestLogFilterOptions,
@@ -72,7 +74,7 @@ describe("dashboard flow integration", () => {
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-    expect(await screen.findByText("Request Logs")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(overviewCalls).toBeGreaterThan(0);
@@ -280,5 +282,50 @@ describe("dashboard flow integration", () => {
     expect(overviewCalls).toBe(overviewCallsBeforeRetry);
     expect(projectionsCalls).toBe(projectionsCallsBeforeRetry);
     expect(optionsCalls).toBe(optionsCallsBeforeRetry);
+  });
+
+  it("switches to conversations without reinterpreting request-log URL state", async () => {
+    const user = userEvent.setup({ delay: null });
+    server.use(
+      http.get("/api/conversations", () =>
+        HttpResponse.json(
+          createConversationsResponse([
+            createConversationEntry({ conversationId: "opencode_conversation" }),
+          ], 1, false),
+        ),
+      ),
+    );
+    window.history.pushState(
+      {},
+      "",
+      "/dashboard?search=requestlog&limit=10&offset=25&conversationSearch=opencode&conversationLimit=15&conversationOffset=7",
+    );
+
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Conversations" }));
+
+    expect(await screen.findByText("opencode_conversation")).toBeInTheDocument();
+    expect(window.location.search).toContain("view=conversations");
+    expect(window.location.search).toContain("search=requestlog");
+    expect(window.location.search).toContain("limit=10");
+    expect(window.location.search).toContain("offset=25");
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    expect(window.location.search).toContain("conversationSearch=opencode");
+    expect(window.location.search).toContain("conversationLimit=15");
+    expect(window.location.search).toContain("conversationOffset=7");
+
+    await user.click(screen.getByRole("button", { name: "Conversations" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Request Logs" }));
+
+    await waitFor(() => expect(window.location.search).not.toContain("view=conversations"));
+    expect(window.location.search).toContain("search=requestlog");
+    expect(window.location.search).toContain("limit=10");
+    expect(window.location.search).toContain("offset=25");
+    expect(window.location.search).toContain("conversationSearch=opencode");
+    expect(window.location.search).toContain("conversationLimit=15");
+    expect(window.location.search).toContain("conversationOffset=7");
   });
 });

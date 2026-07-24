@@ -7,15 +7,17 @@ import { createDashboardOverview, createDashboardProjections } from "@/test/mock
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
 import { DashboardPage } from "./dashboard-page";
 
-const { accountCardsSpy, accountListSpy, accountSummaryLineSpy } = vi.hoisted(() => ({
+const { accountCardsSpy, accountListSpy, accountSummaryLineSpy, conversationsViewSpy } = vi.hoisted(() => ({
   accountCardsSpy: vi.fn(),
   accountListSpy: vi.fn(),
   accountSummaryLineSpy: vi.fn(),
+  conversationsViewSpy: vi.fn(),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -29,6 +31,10 @@ vi.mock("@/features/dashboard/hooks/use-dashboard", () => ({
 
 vi.mock("@/features/dashboard/hooks/use-request-logs", () => ({
   useRequestLogs: vi.fn(),
+}));
+
+vi.mock("@/features/dashboard/hooks/use-conversations", () => ({
+  useConversations: vi.fn(),
 }));
 
 vi.mock("@/features/dashboard/utils", () => ({
@@ -76,8 +82,29 @@ vi.mock("@/features/dashboard/components/dashboard-skeleton", () => ({
   DashboardSkeleton: () => <div data-testid="dashboard-skeleton" />,
 }));
 
+vi.mock("@/features/dashboard/components/conversations-view", () => ({
+  ConversationsView: (props: { state?: ReturnType<typeof useConversations>; accounts?: unknown[] }) => {
+    conversationsViewSpy(props);
+    return <div data-testid="conversations-view" />;
+  },
+}));
+
 vi.mock("@/features/dashboard/components/filters/overview-timeframe-select", () => ({
   OverviewTimeframeSelect: () => <div data-testid="overview-timeframe-select" />,
+}));
+
+vi.mock("@/features/dashboard/components/filters/conversation-timeframe-select", () => ({
+  ConversationTimeframeSelect: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange: (value: "30d") => void;
+  }) => (
+    <button type="button" data-testid="conversation-timeframe-select" onClick={() => onChange("30d")}>
+      {value}
+    </button>
+  ),
 }));
 
 vi.mock("@/features/dashboard/components/filters/request-filters", async () => {
@@ -105,6 +132,7 @@ const useAccountMutationsMock = vi.mocked(useAccountMutations);
 const useDashboardMock = vi.mocked(useDashboard);
 const useDashboardProjectionsMock = vi.mocked(useDashboardProjections);
 const useRequestLogsMock = vi.mocked(useRequestLogs);
+const useConversationsMock = vi.mocked(useConversations);
 const buildDashboardViewMock = vi.mocked(buildDashboardView);
 
 type RequestLogsQueryOverrides = {
@@ -116,15 +144,21 @@ type RequestLogsQueryOverrides = {
   isSuccess?: boolean;
 };
 
+type ConversationsQueryOverrides = {
+  isFetching?: boolean;
+};
+
 describe("DashboardPage", () => {
   beforeEach(() => {
     accountCardsSpy.mockReset();
     accountListSpy.mockReset();
     accountSummaryLineSpy.mockReset();
+    conversationsViewSpy.mockReset();
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
     useRequestLogsMock.mockReset();
+    useConversationsMock.mockReset();
     buildDashboardViewMock.mockReset();
     useDashboardPreferencesStore.setState({
       accountBurnrateEnabled: true,
@@ -134,7 +168,11 @@ describe("DashboardPage", () => {
     });
   });
 
-  function mockReadyDashboard(logsQueryOverrides: RequestLogsQueryOverrides = {}) {
+  function mockReadyDashboard(
+    logsQueryOverrides: RequestLogsQueryOverrides = {},
+    optionsError: Error | null = null,
+    conversationsQueryOverrides: ConversationsQueryOverrides = {},
+  ) {
     const overview = createDashboardOverview();
 
     useAccountMutationsMock.mockReturnValue({
@@ -190,10 +228,24 @@ describe("DashboardPage", () => {
       },
       optionsQuery: {
         data: { accountIds: [], apiKeys: [], modelOptions: [], statuses: [] },
-        error: null,
+        error: optionsError,
       },
       updateFilters: vi.fn(),
     } as unknown as ReturnType<typeof useRequestLogs>);
+    useConversationsMock.mockReturnValue({
+      filters: { search: "", limit: 25, offset: 0 },
+      listFilters: { limit: 25, offset: 0 },
+      conversationsQuery: {
+        data: { conversations: [], total: 0, hasMore: false },
+        error: null,
+        isFetching: conversationsQueryOverrides.isFetching ?? false,
+        isLoading: false,
+        isPending: false,
+        isSuccess: true,
+        refetch: vi.fn(),
+      },
+      updateFilters: vi.fn(),
+    } as unknown as ReturnType<typeof useConversations>);
     buildDashboardViewMock.mockReturnValue({
       stats: [],
       weeklyCreditPace: null,
@@ -245,6 +297,109 @@ describe("DashboardPage", () => {
     expect(within(requestLogsSection as HTMLElement).getByText("Loading...")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reset/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId("recent-requests-table")).not.toBeInTheDocument();
+  });
+
+  it("surfaces request-log option errors only while Request Logs is active", () => {
+    const optionsError = new Error("request-log options unavailable");
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard({}, optionsError);
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.queryByText(optionsError.message)).not.toBeInTheDocument();
+  });
+
+  it("surfaces active request-log option errors", () => {
+    const optionsError = new Error("request-log options unavailable");
+    window.history.pushState({}, "", "/dashboard");
+    mockReadyDashboard({}, optionsError);
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByText(optionsError.message)).toBeInTheDocument();
+  });
+
+  it("uses the active conversation query for refresh state", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard({ isFetching: true }, null, { isFetching: false });
+
+    renderWithProviders(<DashboardPage />);
+
+    const refreshButton = screen.getByRole("button", { name: "Refresh dashboard" });
+    expect(refreshButton).not.toBeDisabled();
+    expect(refreshButton.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("disables refresh while the active conversation query is fetching", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard({ isFetching: false }, null, { isFetching: true });
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("button", { name: "Refresh dashboard" })).toBeDisabled();
+  });
+
+  it("passes the single conversation observer and overview accounts into the conversations view", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    const overview = mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(useConversationsMock).toHaveBeenCalledTimes(1);
+    expect(conversationsViewSpy).toHaveBeenCalledTimes(1);
+    expect(conversationsViewSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: expect.objectContaining({ conversationsQuery: expect.any(Object) }),
+        accounts: overview.accounts,
+      }),
+    );
+  });
+
+  it("renders only one Conversations view selector", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    const conversationHeadings = screen
+      .getAllByRole("heading", { level: 2 })
+      .filter((heading) => heading.textContent?.includes("Conversations"));
+
+    expect(conversationHeadings).toHaveLength(1);
+    expect(within(conversationHeadings[0] as HTMLElement).getByRole("button", { name: "Conversations" })).toBeInTheDocument();
+  });
+
+  it("renders the conversation timeframe selector only for Conversations and resets its offset", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations&conversationOffset=25");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("7d");
+    expect(screen.queryByTestId("overview-timeframe-select")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("conversation-timeframe-select"));
+
+    expect(useConversationsMock.mock.results[0]?.value.updateFilters).toHaveBeenCalledWith({
+      timeframe: "30d",
+      offset: 0,
+    });
+  });
+
+  it("restores the retained conversation timeframe after switching views", async () => {
+    const user = userEvent.setup();
+    window.history.pushState({}, "", "/dashboard?view=conversations&conversationTimeframe=30d");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("30d");
+    await user.click(screen.getByRole("button", { name: "Conversations" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: "Request Logs" }));
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: "Conversations" }));
+
+    expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("30d");
   });
 
   it("renders the account summary line in the Accounts header using overview accounts", () => {

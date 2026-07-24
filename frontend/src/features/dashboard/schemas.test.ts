@@ -3,10 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   AccountSummarySchema,
   AccountAdditionalQuotaSchema,
+  ConversationDetailsSchema,
+  ConversationEntrySchema,
+  ConversationFilterStateSchema,
+  ConversationsResponseSchema,
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DepletionSchema,
   FilterStateSchema,
+  parseDashboardView,
   parseOverviewTimeframe,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
@@ -805,5 +810,244 @@ describe("DashboardOverviewSchema with additional quotas", () => {
     });
 
     expect(parsed.additionalQuotas).toEqual([]);
+  });
+});
+
+describe("ConversationsResponseSchema", () => {
+  it("parses a conversation row with nullable representative/key fields", () => {
+    const parsed = ConversationsResponseSchema.parse({
+      conversations: [
+        {
+          conversationId: "conv_abc",
+          lastRequest: ISO,
+          representativeAccount: null,
+          remainingAccountCount: 0,
+          apiKeyId: null,
+          apiKeyName: null,
+          representativeModel: "gpt-5.1",
+          remainingModelCount: 2,
+          totalTokens: 1800,
+          cachedInputTokens: 320,
+          totalCostUsd: 0.0132,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.conversations).toHaveLength(1);
+    expect(parsed.conversations[0]?.conversationId).toBe("conv_abc");
+    expect(parsed.conversations[0]?.representativeAccount).toBeNull();
+    expect(parsed.conversations[0]?.apiKeyName).toBeNull();
+    expect(parsed.conversations[0]?.remainingModelCount).toBe(2);
+    expect(parsed.conversations[0]?.cachedInputTokens).toBe(320);
+  });
+
+  it("requires pagination metadata", () => {
+    const result = ConversationsResponseSchema.safeParse({
+      conversations: [],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("parses a populated row with all fields present", () => {
+    const parsed = ConversationsResponseSchema.parse({
+      conversations: [
+        {
+          conversationId: "conv_full",
+          lastRequest: ISO,
+          representativeAccount: "acc_primary",
+          remainingAccountCount: 1,
+          apiKeyId: "key_1",
+          apiKeyName: "Primary Key",
+          representativeModel: "gpt-5.1",
+          remainingModelCount: 0,
+          totalTokens: 100,
+          cachedInputTokens: 0,
+          totalCostUsd: 0,
+        },
+      ],
+      total: 1,
+      hasMore: true,
+    });
+
+    expect(parsed.conversations[0]?.representativeAccount).toBe("acc_primary");
+    expect(parsed.conversations[0]?.apiKeyName).toBe("Primary Key");
+    expect(parsed.hasMore).toBe(true);
+  });
+});
+
+describe("ConversationEntrySchema", () => {
+  it("keeps representative account/id as nullable", () => {
+    const parsed = ConversationEntrySchema.parse({
+      conversationId: "c",
+      lastRequest: ISO,
+      representativeAccount: null,
+      remainingAccountCount: 0,
+      apiKeyId: null,
+      apiKeyName: null,
+      representativeModel: null,
+      remainingModelCount: 0,
+      totalTokens: 0,
+      cachedInputTokens: 0,
+      totalCostUsd: 0,
+    });
+
+    expect(parsed.representativeAccount).toBeNull();
+    expect(parsed.apiKeyId).toBeNull();
+    expect(parsed.representativeModel).toBeNull();
+  });
+
+  it("accepts null cached input totals from the list endpoint", () => {
+    const parsed = ConversationEntrySchema.parse({
+      conversationId: "c-null-cache",
+      lastRequest: ISO,
+      representativeAccount: "acc-1",
+      remainingAccountCount: 0,
+      apiKeyId: null,
+      apiKeyName: null,
+      representativeModel: "gpt-5.1",
+      remainingModelCount: 0,
+      totalTokens: 0,
+      cachedInputTokens: null,
+      totalCostUsd: 0,
+    });
+
+    expect(parsed.cachedInputTokens).toBeNull();
+  });
+});
+
+describe("ConversationDetailsSchema", () => {
+  it("parses metadata and model/effort rows", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv_d",
+      start: ISO,
+      latest: ISO,
+      accountCount: 3,
+      totalElapsedTime: 4200,
+      dominantUseragentGroup: "opencode",
+      modelStats: [
+        {
+          modelEffort: { model: "gpt-5.1", reasoningEffort: "high" },
+          reqs: 4,
+          totalElapsedTime: 1200,
+          totalInputTokens: 1000,
+          cachedInputTokens: 200,
+          totalOutputTokens: 300,
+          totalCostUsd: 0.05,
+        },
+      ],
+    });
+
+    expect(parsed.accountCount).toBe(3);
+    expect(parsed.totalElapsedTime).toBe(4200);
+    expect(parsed.dominantUseragentGroup).toBe("opencode");
+    expect(parsed.modelStats[0]?.modelEffort.model).toBe("gpt-5.1");
+    expect(parsed.modelStats[0]?.modelEffort.reasoningEffort).toBe("high");
+    expect(parsed.modelStats[0]?.reqs).toBe(4);
+    expect(parsed.modelStats[0]?.cachedInputTokens).toBe(200);
+  });
+
+  it("accepts nullable dominant user-agent and reasoning effort", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv_null",
+      start: ISO,
+      latest: ISO,
+      accountCount: 1,
+      totalElapsedTime: 0,
+      dominantUseragentGroup: null,
+      modelStats: [
+        {
+          modelEffort: { model: "gpt-5.1", reasoningEffort: null },
+          reqs: 1,
+          totalElapsedTime: 0,
+          totalInputTokens: 0,
+          cachedInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCostUsd: 0,
+        },
+      ],
+    });
+
+    expect(parsed.dominantUseragentGroup).toBeNull();
+    expect(parsed.modelStats[0]?.modelEffort.reasoningEffort).toBeNull();
+  });
+
+  it("accepts null cached input totals from the detail endpoint", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv-null-cache",
+      start: ISO,
+      latest: ISO,
+      accountCount: 1,
+      totalElapsedTime: 0,
+      dominantUseragentGroup: null,
+      modelStats: [
+        {
+          modelEffort: { model: "gpt-5.1", reasoningEffort: null },
+          reqs: 1,
+          totalElapsedTime: 0,
+          totalInputTokens: 0,
+          cachedInputTokens: null,
+          totalOutputTokens: 0,
+          totalCostUsd: 0,
+        },
+      ],
+    });
+
+    expect(parsed.modelStats[0]?.cachedInputTokens).toBeNull();
+  });
+
+  it("defaults modelStats to an empty array", () => {
+    const parsed = ConversationDetailsSchema.parse({
+      conversationId: "conv_empty",
+      start: ISO,
+      latest: ISO,
+      accountCount: 0,
+      totalElapsedTime: 0,
+      dominantUseragentGroup: null,
+    });
+
+    expect(parsed.modelStats).toEqual([]);
+  });
+});
+
+describe("ConversationFilterStateSchema", () => {
+  it("parses search, limit, offset, and timeframe", () => {
+    const parsed = ConversationFilterStateSchema.parse({
+      search: "opencode",
+      limit: 25,
+      offset: 0,
+      timeframe: "7d",
+    });
+
+    expect(parsed.search).toBe("opencode");
+    expect(parsed.limit).toBe(25);
+    expect(parsed.offset).toBe(0);
+    expect(parsed.timeframe).toBe("7d");
+  });
+
+  it("rejects invalid timeframe values and strips other request-log keys", () => {
+    const result = ConversationFilterStateSchema.safeParse({
+      search: "x",
+      limit: 25,
+      offset: 0,
+      timeframe: "24h",
+      accountId: ["acc_1"],
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("parseDashboardView", () => {
+  it("defaults to request-logs", () => {
+    expect(parseDashboardView(null)).toBe("request-logs");
+    expect(parseDashboardView(undefined)).toBe("request-logs");
+    expect(parseDashboardView("unknown")).toBe("request-logs");
+  });
+
+  it("returns conversations for the conversations value", () => {
+    expect(parseDashboardView("conversations")).toBe("conversations");
   });
 });

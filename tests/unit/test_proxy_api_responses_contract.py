@@ -891,6 +891,30 @@ async def test_normalize_public_responses_stream_sequences_unsequenced_leading_f
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_replaces_non_integer_failure_sequence() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":7,'
+                    '"response":{"id":"resp_err","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.failed","sequence_number":"error",'
+                    '"response":{"id":"resp_err","object":"response","status":"failed",'
+                    '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 8
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_sequences_failure_after_reasoning() -> None:
     blocks = [
         block

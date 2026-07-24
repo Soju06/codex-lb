@@ -35,6 +35,11 @@ from app.modules.accounts.usage_rollup import (
     lock_fold_state,
     merge_rollups_into,
 )
+from app.modules.accounts.usage_time_rollup import (
+    merge_time_rollups_into,
+    mirror_account_hard_delete_into_time_rollups,
+    mirror_account_soft_delete_into_time_rollups,
+)
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
@@ -485,6 +490,10 @@ class AccountsRepository:
         # canonical account silently loses the duplicates' pre-watermark
         # history from its lifetime totals.
         await merge_rollups_into(self._session, canonical.id, duplicate_ids)
+        # Folded time-axis buckets follow the reassigned request logs too:
+        # bucket-wise merge-add onto the canonical account, duplicates
+        # removed, in this same fold-state-locked transaction.
+        await merge_time_rollups_into(self._session, canonical.id, duplicate_ids)
         await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
         return True
 
@@ -660,15 +669,29 @@ class AccountsRepository:
 
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
+            # Serialize against fold passes before touching the account's
+            # request logs: without the fold-state lock an in-flight hourly
+            # slice could aggregate the pre-delete attribution but commit
+            # after this transaction, resurrecting the account's folded rows
+            # the mirrors below just moved or removed.
+            await lock_fold_state(self._session)
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+                # Mirror the raw DELETE into the folded time-axis buckets;
+                # raw below the watermark may already be pruned, so folded
+                # rows can never be recomputed and must be removed directly.
+                await mirror_account_hard_delete_into_time_rollups(self._session, account_id)
             else:
                 await self._session.execute(
                     update(RequestLog)
                     .where(RequestLog.account_id == account_id)
                     .values(account_id=None, deleted_at=utcnow()),
                 )
+                # Mirror the retroactive detach (account_id=NULL, deleted_at
+                # set) into the folded buckets: move them to the orphaned
+                # deleted dimension so time-series totals are preserved.
+                await mirror_account_soft_delete_into_time_rollups(self._session, account_id)
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             await self._session.execute(delete(AccountUsageRollup).where(AccountUsageRollup.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))

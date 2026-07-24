@@ -1195,3 +1195,204 @@ async def test_request_log_conversation_id_migration_upgrade_and_downgrade(tmp_p
         assert "conversation_id" not in columns
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_request_usage_time_rollups_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'request-usage-time-rollups.sqlite'}"
+    parent_revision = "20260722_000000_backfill_request_log_useragent_families"
+    rollups_revision = "20260724_000000_add_request_usage_time_rollups"
+    rollup_tables = (
+        "request_usage_hourly_rollups",
+        "request_usage_hourly_error_rollups",
+        "request_demand_quarter_rollups",
+    )
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        return {
+            "tables": {name for name in rollup_tables if inspector.has_table(name)},
+            "state_columns": {column["name"] for column in inspector.get_columns("account_usage_rollup_state")},
+            "hourly_pk": (
+                inspector.get_pk_constraint("request_usage_hourly_rollups")["constrained_columns"]
+                if inspector.has_table("request_usage_hourly_rollups")
+                else None
+            ),
+            "quarter_pk": (
+                inspector.get_pk_constraint("request_demand_quarter_rollups")["constrained_columns"]
+                if inspector.has_table("request_demand_quarter_rollups")
+                else None
+            ),
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set()
+        assert "hourly_folded_through" not in state["state_columns"]
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollups_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set(rollup_tables)
+        assert "hourly_folded_through" in state["state_columns"]
+        assert state["hourly_pk"] == [
+            "bucket_epoch",
+            "account_id",
+            "api_key_id",
+            "model",
+            "service_tier",
+            "request_kind",
+            "is_deleted",
+        ]
+        quarter_pk = [
+            "slot_epoch",
+            "account_id",
+            "api_key_id",
+            "model",
+            "reasoning_effort",
+            "request_kind",
+            "status",
+            "is_deleted",
+        ]
+        assert state["quarter_pk"] == quarter_pk
+
+        # The migration-seeded fold-state row (older revision) must have been
+        # backfilled to the epoch by the new column's server default, without
+        # touching the lifetime watermark.
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT folded_through, hourly_folded_through FROM account_usage_rollup_state WHERE id = 1")
+                )
+            ).one()
+        assert str(row[1]).startswith("1970-01-01")
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set()
+        assert "hourly_folded_through" not in state["state_columns"]
+
+        # Guarded upgrade against the PRE-MERGE quarter shape (an unreleased
+        # revision of this same migration created it without the fine-grain
+        # planner dimensions): the upgrade must rebuild the table to the new
+        # shape and reset the hourly watermark so the fold repopulates it.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE request_demand_quarter_rollups ("
+                    "slot_epoch BIGINT NOT NULL, account_id VARCHAR NOT NULL DEFAULT '', "
+                    "request_kind VARCHAR NOT NULL, is_deleted BOOLEAN NOT NULL DEFAULT 0, "
+                    "request_count BIGINT NOT NULL DEFAULT 0, input_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "output_or_reasoning_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "cached_input_tokens BIGINT NOT NULL DEFAULT 0, cost_usd FLOAT NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (slot_epoch, account_id, request_kind, is_deleted))"
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollups_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set(rollup_tables)
+        assert "hourly_folded_through" in state["state_columns"]
+        assert state["quarter_pk"] == quarter_pk
+
+        # Guarded upgrade against the PRE-MERGE ''-sentinel ENCODING (an
+        # unreleased revision declared DEFAULT '' on the dimension columns
+        # and stored NULL dimensions as '', colliding with legitimate
+        # empty-string values): the upgrade must rebuild the tables empty and
+        # reset the hourly watermark so the fold re-encodes from raw.
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        # (Fresh connect between the thread-side alembic op and the next
+        # async DDL, matching the other legs: asserts the downgrade landed
+        # and refreshes the pooled connection's schema snapshot.)
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["tables"] == set()
+        assert "hourly_folded_through" not in state["state_columns"]
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE account_usage_rollup_state ADD COLUMN hourly_folded_through DATETIME "
+                    "NOT NULL DEFAULT '2025-07-01 00:00:00'"
+                )
+            )
+            await conn.execute(
+                text(
+                    "CREATE TABLE request_demand_quarter_rollups ("
+                    "slot_epoch BIGINT NOT NULL, account_id VARCHAR NOT NULL DEFAULT '', "
+                    "api_key_id VARCHAR NOT NULL DEFAULT '', model VARCHAR NOT NULL, "
+                    "reasoning_effort VARCHAR NOT NULL DEFAULT '', request_kind VARCHAR NOT NULL, "
+                    "status VARCHAR NOT NULL, is_deleted BOOLEAN NOT NULL DEFAULT 0, "
+                    "request_count BIGINT NOT NULL DEFAULT 0, input_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "output_or_reasoning_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "cached_input_tokens BIGINT NOT NULL DEFAULT 0, cost_usd FLOAT NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (slot_epoch, account_id, api_key_id, model, reasoning_effort, request_kind, "
+                    "status, is_deleted))"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO request_demand_quarter_rollups "
+                    "(slot_epoch, account_id, api_key_id, model, reasoning_effort, request_kind, status, is_deleted, "
+                    "request_count) VALUES (900, 'acc', '', 'gpt-5.1-codex', '', 'normal', 'success', 0, 3)"
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollups_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            stale_encoded = (
+                await conn.execute(text("SELECT COUNT(*) FROM request_demand_quarter_rollups"))
+            ).scalar_one()
+            watermark = (
+                await conn.execute(text("SELECT hourly_folded_through FROM account_usage_rollup_state WHERE id = 1"))
+            ).scalar_one()
+        assert state["tables"] == set(rollup_tables)
+        assert state["quarter_pk"] == quarter_pk
+        assert stale_encoded == 0
+        assert str(watermark).startswith("1970-01-01")
+
+        # Guarded upgrade with the CURRENT shape already present (no
+        # dimension-column defaults): inspector guards must skip (not
+        # rebuild) existing objects, preserving table contents.
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE request_demand_quarter_rollups ("
+                    "slot_epoch BIGINT NOT NULL, account_id VARCHAR NOT NULL, "
+                    "api_key_id VARCHAR NOT NULL, model VARCHAR NOT NULL, "
+                    "reasoning_effort VARCHAR NOT NULL, request_kind VARCHAR NOT NULL, "
+                    "status VARCHAR NOT NULL, is_deleted BOOLEAN NOT NULL DEFAULT 0, "
+                    "request_count BIGINT NOT NULL DEFAULT 0, input_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "output_or_reasoning_tokens BIGINT NOT NULL DEFAULT 0, "
+                    "cached_input_tokens BIGINT NOT NULL DEFAULT 0, cost_usd FLOAT NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (slot_epoch, account_id, api_key_id, model, reasoning_effort, request_kind, "
+                    "status, is_deleted))"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO request_demand_quarter_rollups "
+                    "(slot_epoch, account_id, api_key_id, model, reasoning_effort, request_kind, status, is_deleted, "
+                    "request_count) VALUES (900, 'acc', '', 'gpt-5.1-codex', '', 'normal', 'success', 0, 3)"
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, rollups_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            survivor = (
+                await conn.execute(text("SELECT request_count FROM request_demand_quarter_rollups"))
+            ).scalar_one()
+        assert state["tables"] == set(rollup_tables)
+        assert state["quarter_pk"] == quarter_pk
+        assert survivor == 3
+    finally:
+        await engine.dispose()

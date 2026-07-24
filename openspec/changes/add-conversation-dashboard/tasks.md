@@ -58,14 +58,13 @@
 
 - [x] 4.1 Add a styled Radix-style selector using `ChevronDown`, with Request
   Logs as the default and URL-backed `view=conversations` selection.
-- [x] 4.2 Add the Conversations view with one search input only; query the list
-  endpoint using `limit`, `offset`, and `search`, and retain established loading,
-  error, empty, and pagination behavior without date/timeframe controls. Keep
-  separate URL-backed query state for Request Logs and Conversations, so
-  switching views neither reinterprets nor clears the other view's filters or
-  pagination. Changing conversation search MUST reset only the conversation
-  page/offset to zero.
-- [x] 4.3 Render exactly the list columns Conversation, Last request, Accounts,
+- [x] 4.2 Add the Conversations view; query the list endpoint using `limit`,
+  `offset`, and `search`, and retain established loading, error, empty, and
+  pagination behavior without date/timeframe controls. Keep separate URL-backed
+  query state for Request Logs and Conversations, so switching views neither
+  reinterprets nor clears the other view's state.
+- [x] 4.3 Render the conversation list columns Last request, Conversation,
+  Accounts,
   API key, Models, Tokens, Cost, and Details. Render account/model remainder as a
   smaller muted `+ N more` secondary line, put cached tokens on a subordinate
   line below total tokens, use the existing Details button, and display only the
@@ -75,9 +74,9 @@
   these displayed columns: Model (effort), Reqs, Total elapsed, Total input (with
   total cache as a subordinate/parenthetical value), Total output, and Total cost.
   Default to Reqs descending and sort every displayed column client-side only.
-- [x] 4.5 Add frontend tests for selector default/switching, one search input,
-  exact list columns and rendering, independent retained URL-backed query state,
-  conversation-search pagination reset, detail layout and client-side sorting,
+- [x] 4.5 Add frontend tests for selector default/switching, exact list columns
+  and rendering, independent retained URL-backed query state, detail layout and
+  client-side sorting,
   detail loading and standard error/retry display for unknown or malformed IDs,
   established em-dash/fallback rendering for nullable optional aggregates, and
   the established empty state for an empty conversation list.
@@ -90,3 +89,16 @@
   `git diff --check`.
 - [x] 5.3 Confirm the change adds no migration, dependency, setting, README, or
   changelog work and does not synchronize the main capability specs.
+
+## 6. Conversation Dashboard UI Refinement
+
+- [x] 6.1 Make the original-styled list title the single Request
+  Logs/Conversations selector and remove the separate selector to its right.
+- [x] 6.2 Remove the Conversations filter input, reorder Last request before
+  Conversation, and format Last request like the request-log Time column.
+- [x] 6.3 Resolve representative account IDs to dashboard account display names,
+  with email and ID fallbacks, without changing the list API aggregation key.
+- [x] 6.4 Remove the conversation-ID copy action from the details dialog while
+  retaining the displayed ID.
+- [x] 6.5 Update focused frontend tests and run the relevant frontend and strict
+  OpenSpec validation commands.

@@ -35,5 +35,38 @@
   passed (`Change 'add-conversation-dashboard' is valid`).
 - `git diff --check`: passed.
 
-No OpenSpec requirements or main specs, dependencies, feature documentation,
-screenshots, or visual behavior were changed by this follow-up.
+### UI refinement final follow-up
+
+- Integration regression update: `frontend/src/__integration__/dashboard-flow.test.tsx`
+  now seeds `conversationSearch=opencode`, `conversationLimit=15`, and
+  `conversationOffset=7`, asserts the removed Conversations searchbox is absent,
+  and verifies both conversation and request-log URL state survive view switches.
+- Privacy RED: `cd frontend && bun run test --
+  src/features/dashboard/components/conversation-table.test.tsx` failed with
+  `1 failed | 6 passed (7)` because the email fallback lacked `privacy-blur`.
+- Privacy GREEN: the same command passed with `7 passed (7)` after applying the
+  established `usePrivacyStore`/`isEmailLabel`/account-ID tracking pattern;
+  display-name and unknown-ID fallbacks remain unblurred. Tests reset privacy
+  state before each case.
+- Header RED/GREEN: the selector test first failed with `1 failed | 6 passed
+  (7)` when it asserted the trigger's classes; after moving the complete title
+  classes onto the actual trigger, it passed `7 passed (7)`.
+- Integration: `cd frontend && bun x vitest run
+  src/__integration__/dashboard-flow.test.tsx` passed.
+- Full dashboard suite: `cd frontend && bun x vitest run src/features/dashboard
+  src/__integration__/dashboard-flow.test.tsx` passed.
+- Focused refinement suite: the five dashboard files passed `42/42` tests.
+- Visual validation passed at `1440x900` and `390x844`, including the uppercase
+  selector, absent conversation filter, reordered/two-line Last request,
+  display-name/email/ID account fallbacks, and copy-free details dialog. The
+  four after-state PNGs were stored outside the repository at:
+  `/var/folders/f_/2dskvbc54gvfr8smd02zz6hr0000gn/T/opencode/conversation-dashboard-evidence/`.
+- Base-commit before-state captures were generated outside the repository from
+  commit `3406c0a100e86b574439b1ca3256d71e74d518da` under the same evidence
+  directory; no git worktree, HEAD, or index was mutated.
+- `cd frontend && bun run typecheck`: passed.
+- `cd frontend && bun run lint`: passed.
+- `openspec validate add-conversation-dashboard --type change --strict`:
+  passed.
+- `openspec validate --specs`: passed (`47 passed, 0 failed`).
+- `git diff --check`: passed.

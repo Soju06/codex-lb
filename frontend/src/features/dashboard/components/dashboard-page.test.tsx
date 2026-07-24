@@ -83,8 +83,8 @@ vi.mock("@/features/dashboard/components/dashboard-skeleton", () => ({
 }));
 
 vi.mock("@/features/dashboard/components/conversations-view", () => ({
-  ConversationsView: (props: { state?: ReturnType<typeof useConversations> }) => {
-    conversationsViewSpy(props.state);
+  ConversationsView: (props: { state?: ReturnType<typeof useConversations>; accounts?: unknown[] }) => {
+    conversationsViewSpy(props);
     return <div data-testid="conversations-view" />;
   },
 }));
@@ -325,17 +325,34 @@ describe("DashboardPage", () => {
     expect(screen.getByRole("button", { name: "Refresh dashboard" })).toBeDisabled();
   });
 
-  it("passes the single conversation observer into the conversations view", () => {
+  it("passes the single conversation observer and overview accounts into the conversations view", () => {
     window.history.pushState({}, "", "/dashboard?view=conversations");
-    mockReadyDashboard();
+    const overview = mockReadyDashboard();
 
     renderWithProviders(<DashboardPage />);
 
     expect(useConversationsMock).toHaveBeenCalledTimes(1);
     expect(conversationsViewSpy).toHaveBeenCalledTimes(1);
     expect(conversationsViewSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ conversationsQuery: expect.any(Object) }),
+      expect.objectContaining({
+        state: expect.objectContaining({ conversationsQuery: expect.any(Object) }),
+        accounts: overview.accounts,
+      }),
     );
+  });
+
+  it("renders only one Conversations view selector", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    const conversationHeadings = screen
+      .getAllByRole("heading", { level: 2 })
+      .filter((heading) => heading.textContent?.includes("Conversations"));
+
+    expect(conversationHeadings).toHaveLength(1);
+    expect(within(conversationHeadings[0] as HTMLElement).getByRole("button", { name: "Conversations" })).toBeInTheDocument();
   });
 
   it("renders the account summary line in the Accounts header using overview accounts", () => {

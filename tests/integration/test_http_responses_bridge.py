@@ -7017,6 +7017,104 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridge_send(async_client, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_preserve_fresh_reattach",
+        "http-bridge-preserve-fresh-reattach@example.com",
+    )
+    account = await _get_account(account_id)
+    first_upstream = _ClosingBridgeUpstreamWebSocket("resp_preserve_source")
+    replay_upstream = _FakeBridgeUpstreamWebSocket("resp_preserve_replay")
+    upstreams = [first_upstream, replay_upstream]
+    connect_headers: list[dict[str, str]] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, account_id_header, base_url, session
+        connect_headers.append(dict(headers))
+        return upstreams[len(connect_headers) - 1]
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    session_headers = {"x-codex-session-id": "fresh-reattach-full-resend"}
+    historical_input = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+        }
+    ]
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": historical_input,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200, first.text
+
+    full_resend = [
+        *historical_input,
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "first result",
+        },
+    ]
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": full_resend,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == "resp_preserve_replay_1"
+    assert len(connect_headers) == 2
+    replay_connect_headers = {key.lower(): value for key, value in connect_headers[1].items()}
+    assert replay_connect_headers["x-codex-session-id"] == session_headers["x-codex-session-id"]
+    assert len(first_upstream.sent_text) == 1
+    assert len(replay_upstream.sent_text) == 1
+    replay_payload = json.loads(replay_upstream.sent_text[0])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == full_resend
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_other_account_exists(
     async_client, monkeypatch
 ):

@@ -931,7 +931,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
-            if (
+            fresh_reattach_can_use_durable_anchor = (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
@@ -939,7 +939,20 @@ class _HTTPBridgeStreamingMixin:
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
-            ):
+            )
+            if fresh_reattach_can_use_durable_anchor and payload_looks_like_full_resend:
+                # The client already supplied a complete fresh request. Adding
+                # a durable anchor here can strand it on the new WebSocket.
+                _log_http_bridge_event(
+                    "fresh_reattach_full_resend_preserved",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail="outcome=client_unanchored_full_resend",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
+            elif fresh_reattach_can_use_durable_anchor:
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
@@ -955,19 +968,6 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-                if payload_looks_like_full_resend:
-                    _log_http_bridge_event(
-                        "durable_full_resend_anchor_injected",
-                        bridge_session_key,
-                        account_id=None,
-                        model=payload.model,
-                        detail=(
-                            f"response_id={durable_lookup.latest_response_id} "
-                            f"stored_items={durable_full_resend_anchor_count}"
-                        ),
-                        cache_key_family=bridge_session_key.affinity_kind,
-                        model_class=_extract_model_class(payload.model) if payload.model else None,
-                    )
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=bridge_session_key.affinity_kind,
             key=bridge_session_key.affinity_key,
@@ -1593,7 +1593,8 @@ class _HTTPBridgeStreamingMixin:
                 return
         session = session_or_forward
         if (
-            durable_full_resend_anchor_count is not None
+            proxy_injected_previous_response_id
+            and durable_full_resend_anchor_count is not None
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None

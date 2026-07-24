@@ -4,6 +4,7 @@
 
 - [x] 1.1 Release the session's account stream lease when its last in-flight turn detaches (no queued requests, admission waiters, or pending requests), leaving the session alive for reuse.
 - [x] 1.2 Keep session-close settlement untouched (release is idempotent; a released-idle session has nothing to settle at close).
+- [x] 1.3 Release the lease on the grouped terminal-error settlement path too (multiple detached follow-ups popped and finalized together return before the single terminal path's release hook).
 
 ## 2. Turn-admission reacquisition
 
@@ -13,3 +14,4 @@
 ## 3. Tests
 
 - [x] 3.1 Idle release, busy/closed retention, reacquisition, denial envelope, and held-lease no-op coverage.
+- [x] 3.2 Grouped terminal-error settlement of detached requests releases the abandoned session's lease.

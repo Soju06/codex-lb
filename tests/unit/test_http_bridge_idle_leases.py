@@ -241,3 +241,60 @@ async def test_upstream_terminal_drain_releases_abandoned_session_lease(
     assert not session.pending_requests
     assert session.account_lease is None
     release_account_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
+async def test_grouped_terminal_error_releases_abandoned_session_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grouped terminal errors on detached requests must release the idle lease.
+
+    Two detached follow-ups (event_queue=None, draining) sharing the same
+    previous_response_id are settled together by the grouped
+    previous_response_not_found branch, which returns before the single
+    terminal path's release hook; no downstream stream finalizer remains,
+    so the branch itself must release the now-idle session's stream lease.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    lease = _make_lease("l7")
+    session = _make_bridge_session()
+    for index in range(2):
+        session.pending_requests.append(
+            proxy_service._WebSocketRequestState(
+                request_id=f"req-grouped-{index}",
+                model="gpt-5.2",
+                service_tier=None,
+                reasoning_effort=None,
+                api_key_reservation=None,
+                started_at=1.0,
+                previous_response_id="resp-grouped-prev",
+                awaiting_response_created=False,
+                event_queue=None,
+                transport="http",
+                skip_request_log=True,
+                draining_until_terminal=True,
+            )
+        )
+    session.account_lease = lease
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "code": "previous_response_not_found",
+                "message": "Previous response with id 'resp-grouped-prev' not found.",
+                "param": "previous_response_id",
+            }
+        ),
+    )
+
+    assert not session.pending_requests
+    assert finalize.await_count == 2
+    assert session.upstream_control.reconnect_requested is True
+    assert session.account_lease is None
+    release_account_lease.assert_awaited_once_with(lease)

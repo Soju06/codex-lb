@@ -862,32 +862,39 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if is_missing_tool_output_event
                 else "stream_incomplete"
             )
-            for grouped_request_state in grouped_previous_response_request_states:
-                grouped_request_state.error_http_status_override = 502
-                (
-                    _grouped_downstream_text,
-                    grouped_event_block,
-                    grouped_event,
-                    grouped_payload,
-                    grouped_event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(
-                    grouped_request_state,
-                    reason=grouped_error_reason,
-                )
-                if grouped_request_state.event_queue is not None:
-                    await grouped_request_state.event_queue.put(grouped_event_block)
-                    await grouped_request_state.event_queue.put(None)
-                await self._finalize_websocket_request_state(
-                    grouped_request_state,
-                    account=session.account,
-                    account_id_value=session.account.id,
-                    event=grouped_event,
-                    event_type=grouped_event_type,
-                    payload=grouped_payload,
-                    api_key=grouped_request_state.api_key,
-                    upstream_control=session.upstream_control,
-                    response_create_gate=session.response_create_gate,
-                )
+            try:
+                for grouped_request_state in grouped_previous_response_request_states:
+                    grouped_request_state.error_http_status_override = 502
+                    (
+                        _grouped_downstream_text,
+                        grouped_event_block,
+                        grouped_event,
+                        grouped_payload,
+                        grouped_event_type,
+                    ) = _build_stream_incomplete_terminal_event_for_request(
+                        grouped_request_state,
+                        reason=grouped_error_reason,
+                    )
+                    if grouped_request_state.event_queue is not None:
+                        await grouped_request_state.event_queue.put(grouped_event_block)
+                        await grouped_request_state.event_queue.put(None)
+                    await self._finalize_websocket_request_state(
+                        grouped_request_state,
+                        account=session.account,
+                        account_id_value=session.account.id,
+                        event=grouped_event,
+                        event_type=grouped_event_type,
+                        payload=grouped_payload,
+                        api_key=grouped_request_state.api_key,
+                        upstream_control=session.upstream_control,
+                        response_create_gate=session.response_create_gate,
+                    )
+            finally:
+                # Grouped terminal errors settle detached/abandoned requests
+                # (event_queue is None) with no downstream stream finalizer
+                # left to run, so release the now-idle session's account
+                # stream lease here just like the single terminal path below.
+                await self._maybe_release_idle_http_bridge_session_lease(session)
             return
 
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:

@@ -31,6 +31,13 @@ An HTTP bridge session's per-account stream lease MUST be held only while the se
 - **THEN** the turn fails with HTTP 429 and `error.code = "account_stream_cap"`
 - **AND** the recoverable account-capacity wait applies to the retry
 
+#### Scenario: Grouped terminal errors release an abandoned session's lease
+
+- **GIVEN** a bridge session whose only pending turns are detached follow-ups (no downstream consumers remain)
+- **WHEN** a grouped terminal error (for example `previous_response_not_found`) settles all of them together
+- **THEN** the session releases its account stream lease
+- **AND** the freed slot admits new work without waiting for session close or idle TTL expiry
+
 #### Scenario: Busy sessions keep their lease
 
 - **GIVEN** a bridge session with another turn still queued or pending

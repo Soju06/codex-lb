@@ -9923,6 +9923,60 @@ def test_sticky_key_from_session_header_accepts_aliases_in_priority_order():
     )
 
 
+def test_sticky_key_from_session_header_accepts_client_identity_headers():
+    # OpenCode / OpenClaw
+    assert proxy_service._sticky_key_from_session_header({"x-session-affinity": "ses_oc1"}) == "ses_oc1"
+    assert proxy_service._sticky_key_from_session_header({"X-Session-Id": "ses_oc2"}) == "ses_oc2"
+    assert proxy_service._sticky_key_from_session_header({"x-opencode-session": "ses_oc3"}) == "ses_oc3"
+    # Claude Code
+    assert proxy_service._sticky_key_from_session_header({"x-claude-code-agent-id": "agent_1"}) == "agent_1"
+    assert proxy_service._sticky_key_from_session_header({"x-claude-remote-session-id": "remote_1"}) == "remote_1"
+    # Codex names keep precedence over client identity headers.
+    assert (
+        proxy_service._sticky_key_from_session_header({"x-session-affinity": "ses_oc1", "session_id": "sid_codex"})
+        == "sid_codex"
+    )
+
+
+def test_sticky_key_from_session_header_ignores_parent_and_request_id_headers():
+    # Parent identity would collapse every subagent onto one session key.
+    assert (
+        proxy_service._sticky_key_from_session_header(
+            {
+                "x-parent-session-id": "parent_a",
+                "x-codex-parent-thread-id": "parent_b",
+                "x-claude-code-parent-agent-id": "parent_c",
+                "x-openai-subagent": "review",
+            }
+        )
+        is None
+    )
+    # Per-request ids are not stable session identity.
+    assert proxy_service._sticky_key_from_session_header({"x-client-request-id": "req_1"}) is None
+    assert (
+        proxy_service._sticky_key_from_session_header({"x-parent-session-id": "parent_a", "x-session-id": "own_1"})
+        == "own_1"
+    )
+
+
+def test_account_neutral_replay_strips_client_identity_headers():
+    from app.modules.proxy.continuity import without_http_bridge_session_affinity_headers
+
+    stripped = without_http_bridge_session_affinity_headers(
+        {
+            "session_id": "sid",
+            "x-session-affinity": "ses_1",
+            "X-Session-Id": "ses_1",
+            "x-opencode-session": "ses_1",
+            "x-claude-code-agent-id": "agent_1",
+            "x-claude-remote-session-id": "remote_1",
+            "x-parent-session-id": "parent_1",
+            "user-agent": "opencode/1.18.3",
+        }
+    )
+    assert set(stripped) == {"x-parent-session-id", "user-agent"}
+
+
 def test_owner_lookup_session_id_from_headers_prefers_turn_state_then_session_aliases():
     assert proxy_service._owner_lookup_session_id_from_headers({"x-codex-turn-state": "turn_1"}) == "turn_1"
     assert (

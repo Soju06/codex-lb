@@ -251,9 +251,34 @@ def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
     return stripped or None
 
 
+# Client-declared session identity headers, in precedence order. The Codex
+# CLI names come first (codex-faithful), then the identity headers other
+# agent clients send with each provider request: OpenCode and OpenClaw send
+# `x-session-affinity` / `x-session-id` (OpenCode also `x-opencode-session`
+# to opencode-branded providers), Claude Code sends `x-claude-code-agent-id`
+# per agent and `x-claude-remote-session-id` for remote sessions. Parent
+# identity headers (`x-parent-session-id`, `x-codex-parent-thread-id`,
+# `x-claude-code-parent-agent-id`, `x-openai-subagent`) are deliberately
+# excluded: keying on the parent would collapse every subagent onto one
+# session. `x-client-request-id` is excluded because clients also populate
+# it with per-request ids, so it is not a stable session identity.
+_SESSION_IDENTITY_HEADERS = (
+    "session_id",
+    "session-id",
+    "x-codex-session-id",
+    "x-codex-conversation-id",
+    "thread-id",
+    "x-session-affinity",
+    "x-session-id",
+    "x-opencode-session",
+    "x-claude-code-agent-id",
+    "x-claude-remote-session-id",
+)
+
+
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
     normalized = {key.lower(): value for key, value in headers.items()}
-    for key in ("session_id", "session-id", "x-codex-session-id", "x-codex-conversation-id", "thread-id"):
+    for key in _SESSION_IDENTITY_HEADERS:
         value = normalized.get(key)
         if not isinstance(value, str):
             continue

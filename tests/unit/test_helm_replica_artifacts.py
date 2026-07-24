@@ -134,14 +134,10 @@ def test_grafana_dashboard_titles_can_be_overridden() -> None:
     default_config = next(
         document
         for document in _helm_documents(default_rendered)
-        if document["kind"] == "ConfigMap"
-        and document["metadata"]["name"] == "codex-lb-dashboard"
+        if document["kind"] == "ConfigMap" and document["metadata"]["name"] == "codex-lb-dashboard"
     )
     assert json.loads(default_config["data"]["codex-lb.json"])["title"] == "codex-lb"
-    assert (
-        json.loads(default_config["data"]["ttft-breakdown.json"])["title"]
-        == "codex-lb TTFT Breakdown"
-    )
+    assert json.loads(default_config["data"]["ttft-breakdown.json"])["title"] == "codex-lb TTFT Breakdown"
 
     rendered = _helm_template(
         "--set",
@@ -154,15 +150,11 @@ def test_grafana_dashboard_titles_can_be_overridden() -> None:
     dashboard_config = next(
         document
         for document in _helm_documents(rendered)
-        if document["kind"] == "ConfigMap"
-        and document["metadata"]["name"] == "codex-lb-dashboard"
+        if document["kind"] == "ConfigMap" and document["metadata"]["name"] == "codex-lb-dashboard"
     )
 
     assert json.loads(dashboard_config["data"]["codex-lb.json"])["title"] == "Overview"
-    assert (
-        json.loads(dashboard_config["data"]["ttft-breakdown.json"])["title"]
-        == "TTFT Breakdown"
-    )
+    assert json.loads(dashboard_config["data"]["ttft-breakdown.json"])["title"] == "TTFT Breakdown"
 
 
 def _prod_overlay_args(*args: str) -> tuple[str, ...]:

@@ -785,6 +785,78 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_r
     )
 
 
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_mark_duplicate_parallel_code_mode_calls_keeps_distinct_outer_call_ids(recipient_name: str):
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    arguments = json.dumps(
+        {"tool_uses": [{"recipient_name": recipient_name, "parameters": {"cmd": "same"}}]},
+        separators=(",", ":"),
+    )
+
+    for call_id in ("call_code_first", "call_code_second"):
+        payload: dict[str, JsonValue] = {
+            "type": "response.output_item.done",
+            "response_id": "resp_parallel_code",
+            "item": {
+                "type": "function_call",
+                "name": "multi_tool_use.parallel",
+                "arguments": arguments,
+                "call_id": call_id,
+            },
+        }
+        assert (
+            tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+                payload,
+                seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+                response_id="resp_parallel_code",
+            )
+            is False
+        )
+
+
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_mark_duplicate_parallel_code_mode_replay_survives_non_side_effect_event(recipient_name: str):
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    arguments = json.dumps(
+        {"tool_uses": [{"recipient_name": recipient_name, "parameters": {"cmd": "same"}}]},
+        separators=(",", ":"),
+    )
+
+    def parallel_payload(response_id: str) -> dict[str, JsonValue]:
+        return {
+            "type": "response.output_item.done",
+            "response_id": response_id,
+            "item": {
+                "type": "function_call",
+                "name": "multi_tool_use.parallel",
+                "arguments": arguments,
+                "call_id": "call_code_stable",
+            },
+        }
+
+    reasoning_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_reasoning_between",
+        "item": {"type": "reasoning", "id": "reasoning_between"},
+    }
+
+    outcomes = [
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id=response_id,
+            scope_side_effects_by_response_id=False,
+        )
+        for payload, response_id in (
+            (parallel_payload("resp_code_first"), "resp_code_first"),
+            (reasoning_payload, "resp_reasoning_between"),
+            (parallel_payload("resp_code_replay"), "resp_code_replay"),
+        )
+    ]
+
+    assert outcomes == [False, False, True]
+
+
 def test_mark_duplicate_tool_call_downstream_event_trims_overlapping_parallel_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_arguments = json.dumps(
@@ -1634,6 +1706,82 @@ def test_dedupe_replayed_side_effect_input_items_keeps_distinct_code_mode_calls(
 
     assert removed_count == 0
     assert deduped_items == input_items
+
+
+@pytest.mark.parametrize("recipient_name", ["functions.exec", "functions.collaboration"])
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_parallel_code_mode_calls(
+    recipient_name: str,
+):
+    arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": recipient_name,
+                    "parameters": {"cmd": "touch marker"},
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_parallel_first",
+        },
+        {"type": "function_call_output", "call_id": "call_parallel_first", "output": "first"},
+        {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_parallel_second",
+        },
+        {"type": "function_call_output", "call_id": "call_parallel_second", "output": "second"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_suppresses_ordinary_parallel_replay_with_new_outer_id():
+    arguments = json.dumps(
+        {
+            "tool_uses": [
+                {
+                    "recipient_name": "functions.exec_command",
+                    "parameters": {"cmd": "touch marker"},
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    first_call = {
+        "type": "function_call",
+        "name": "multi_tool_use.parallel",
+        "arguments": arguments,
+        "call_id": "call_parallel_first",
+    }
+    first_output = {"type": "function_call_output", "call_id": "call_parallel_first", "output": "first"}
+    input_items: list[JsonValue] = [
+        first_call,
+        first_output,
+        {
+            "type": "function_call",
+            "name": "multi_tool_use.parallel",
+            "arguments": arguments,
+            "call_id": "call_parallel_replayed",
+        },
+        {"type": "function_call_output", "call_id": "call_parallel_replayed", "output": "replayed"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert deduped_items[:2] == [first_call, first_output]
+    assert not any(isinstance(item, dict) and item.get("call_id") == "call_parallel_replayed" for item in deduped_items)
 
 
 @pytest.mark.parametrize(

@@ -31,6 +31,9 @@ def decision(module: ModuleType, **overrides: Any) -> Any:
         "has_needs_work_label": False,
         "wants_needs_work_label": False,
         "needs_work_action": "keep",
+        "has_needs_rebase_label": False,
+        "wants_needs_rebase_label": False,
+        "needs_rebase_action": "keep",
         "legacy_labels": frozenset(),
         "reason": "checks are pending",
         "review_url": None,
@@ -42,6 +45,85 @@ def decision(module: ModuleType, **overrides: Any) -> Any:
     }
     values.update(overrides)
     return module.SyncDecision(**values)
+
+
+@pytest.mark.parametrize("merge_state", ["CONFLICTING", "DIRTY"])
+def test_needs_rebase_label_target_adds_for_confirmed_conflicts(merge_state: str) -> None:
+    module = load_sync_module()
+
+    assert module.needs_rebase_label_target(merge_state, has_label=False) is True
+
+
+@pytest.mark.parametrize("merge_state", ["BEHIND", "BLOCKED", "CLEAN", "DRAFT", "HAS_HOOKS", "UNSTABLE"])
+def test_needs_rebase_label_target_removes_for_known_non_conflict_states(merge_state: str) -> None:
+    module = load_sync_module()
+
+    assert module.needs_rebase_label_target(merge_state, has_label=True) is False
+
+
+@pytest.mark.parametrize("has_label", [False, True])
+def test_needs_rebase_label_target_preserves_unknown_state(has_label: bool) -> None:
+    module = load_sync_module()
+
+    assert module.needs_rebase_label_target("UNKNOWN", has_label=has_label) is has_label
+
+
+def test_apply_decision_adds_needs_rebase_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    calls: list[tuple[str, str, Any | None]] = []
+
+    def capture_write(path: str, *, method: str = "GET", input_json: Any | None = None) -> None:
+        calls.append((method, path, input_json))
+
+    monkeypatch.setattr(module, "gh_api", capture_write)
+
+    warnings = module.apply_decision(
+        decision(
+            module,
+            ok_action="keep",
+            has_needs_rebase_label=False,
+            wants_needs_rebase_label=True,
+            needs_rebase_action="add",
+        )
+    )
+
+    assert warnings == ()
+    assert calls == [
+        (
+            "POST",
+            "/repos/Soju06/codex-lb/issues/714/labels",
+            {"labels": ["needs rebase"]},
+        )
+    ]
+
+
+def test_apply_decision_removes_stale_needs_rebase_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    calls: list[tuple[str, str, Any | None]] = []
+
+    def capture_write(path: str, *, method: str = "GET", input_json: Any | None = None) -> None:
+        calls.append((method, path, input_json))
+
+    monkeypatch.setattr(module, "gh_api", capture_write)
+
+    warnings = module.apply_decision(
+        decision(
+            module,
+            ok_action="keep",
+            has_needs_rebase_label=True,
+            wants_needs_rebase_label=False,
+            needs_rebase_action="remove",
+        )
+    )
+
+    assert warnings == ()
+    assert calls == [
+        (
+            "DELETE",
+            "/repos/Soju06/codex-lb/issues/714/labels/needs%20rebase",
+            None,
+        )
+    ]
 
 
 def test_classify_check_state_uses_latest_run_for_duplicate_check_names() -> None:

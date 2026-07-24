@@ -47,6 +47,7 @@ from app.core.metrics.prometheus import (
     account_lease_acquired_total,
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
+    account_stream_share_borrows_total,
 )
 from app.core.openai.model_registry import canonical_service_tier_value, get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
@@ -110,6 +111,7 @@ from app.modules.proxy.additional_model_limits import get_additional_quota_key_f
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
     configured_account_concurrency_caps,
+    effective_stream_admission_cap,
     get_cap_partition,
     partition_cap,
 )
@@ -290,9 +292,17 @@ class LoadBalancer:
                     return None
             else:
                 cap = caps.stream_limit
-                if cap > 0 and runtime.inflight_streams >= cap:
-                    _record_account_cap_rejection("stream")
-                    return None
+                if cap > 0:
+                    admission_cap = effective_stream_admission_cap(
+                        account_id,
+                        local_inflight=runtime.inflight_streams,
+                        caps=caps,
+                    )
+                    if runtime.inflight_streams >= admission_cap:
+                        _record_account_cap_rejection("stream")
+                        return None
+                    if runtime.inflight_streams >= cap:
+                        _record_stream_share_borrow()
             return self._acquire_account_lease_locked(
                 account_id,
                 kind=kind,
@@ -305,6 +315,20 @@ class LoadBalancer:
             if runtime is None:
                 return 0, 0, 0.0
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
+
+    async def stream_inflight_by_account(self) -> dict[str, int]:
+        """Per-account in-flight stream-lease counts, omitting idle accounts.
+
+        Published in the bridge-ring heartbeat metadata so peers can borrow
+        idle share under partitioned account caps.
+        """
+        async with self._runtime_lock:
+            self._reclaim_stale_account_leases_locked()
+            return {
+                account_id: runtime.inflight_streams
+                for account_id, runtime in self._runtime.items()
+                if runtime.inflight_streams > 0
+            }
 
     def _acquire_account_lease_locked(
         self,
@@ -350,8 +374,15 @@ class LoadBalancer:
             cap = caps.response_create_limit
             return cap <= 0 or runtime.inflight_response_creates < cap
         cap = caps.stream_limit
-        effective_cap = max(1, cap - max(0, stream_reserve_slots))
-        return cap <= 0 or runtime.inflight_streams < effective_cap
+        if cap <= 0:
+            return True
+        effective_cap = effective_stream_admission_cap(
+            account_id,
+            local_inflight=runtime.inflight_streams,
+            caps=caps,
+            stream_reserve_slots=stream_reserve_slots,
+        )
+        return runtime.inflight_streams < effective_cap
 
     def _release_account_lease_locked(self, lease: AccountLease, *, reason: str) -> bool:
         runtime = self._runtime.get(lease.account_id)
@@ -1860,6 +1891,11 @@ def effective_account_concurrency_caps(dashboard_settings: object | None = None)
 def _record_account_lease_acquired(kind: AccountLeaseKind) -> None:
     if PROMETHEUS_AVAILABLE and account_lease_acquired_total is not None:
         account_lease_acquired_total.labels(kind=kind).inc()
+
+
+def _record_stream_share_borrow() -> None:
+    if PROMETHEUS_AVAILABLE and account_stream_share_borrows_total is not None:
+        account_stream_share_borrows_total.inc()
 
 
 def _record_account_lease_released(kind: AccountLeaseKind, reason: str) -> None:

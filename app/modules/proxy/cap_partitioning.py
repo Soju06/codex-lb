@@ -32,9 +32,13 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.core.config.settings import get_settings
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, cap_partition_replicas
+
+if TYPE_CHECKING:
+    from app.modules.proxy._load_balancer.types import AccountConcurrencyCaps
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +173,130 @@ def get_cap_partition() -> CapPartition:
     return _holder.current
 
 
+@dataclass(frozen=True, slots=True)
+class PeerStreamInflightSnapshot:
+    """Per-account in-flight stream-lease counts published by ring peers.
+
+    ``counts_by_instance`` maps every *other* active member's instance id to
+    its freshest published per-account counts; a member that published no
+    counts (mixed-version ring) maps to ``None`` and marks the snapshot
+    incomplete — missing data is never treated as zero.
+    """
+
+    counts_by_instance: dict[str, dict[str, int] | None]
+    observed_at: float
+
+    def peer_inflight(self, account_id: str) -> int | None:
+        """Sum of peers' published counts for ``account_id``; None when incomplete."""
+        total = 0
+        for counts in self.counts_by_instance.values():
+            if counts is None:
+                return None
+            total += max(0, int(counts.get(account_id, 0)))
+        return total
+
+
+class _PeerStreamInflightHolder:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._snapshot: PeerStreamInflightSnapshot | None = None
+
+    def observe(self, counts_by_instance: dict[str, dict[str, int] | None]) -> None:
+        self._snapshot = PeerStreamInflightSnapshot(
+            counts_by_instance=counts_by_instance,
+            observed_at=self._clock(),
+        )
+
+    def fresh_snapshot(self, *, max_age_seconds: float) -> PeerStreamInflightSnapshot | None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return None
+        if self._clock() - snapshot.observed_at > max_age_seconds:
+            return None
+        return snapshot
+
+
+_peer_inflight_holder = _PeerStreamInflightHolder()
+
+# Peer counts refresh on the ring heartbeat cadence (10s); allow one missed
+# tick before borrowing is disabled so a single slow heartbeat does not
+# flap the allowance.
+PEER_INFLIGHT_MAX_AGE_SECONDS = 25.0
+
+
+def observe_peer_stream_inflight(counts_by_instance: dict[str, dict[str, int] | None]) -> None:
+    """Record peers' published per-account stream-lease counts.
+
+    ``counts_by_instance`` must cover every other active ring member; a member
+    without published counts must be present with ``None`` so consumers can
+    tell incomplete data from idle peers.
+    """
+    _peer_inflight_holder.observe(counts_by_instance)
+
+
+def effective_stream_admission_cap(
+    account_id: str,
+    *,
+    local_inflight: int,
+    caps: "AccountConcurrencyCaps",
+    stream_reserve_slots: int = 0,
+) -> int:
+    """Stream admission ceiling for ``account_id`` on this replica.
+
+    Returns the reserve-adjusted static share while it still admits the next
+    lease; once the share is exhausted, adds the peer-headroom borrow
+    allowance. Callers treat a nonpositive ``caps.stream_limit`` as unlimited
+    before consulting this ceiling.
+    """
+    cap = caps.stream_limit
+    effective = max(1, cap - max(0, stream_reserve_slots))
+    if local_inflight < effective:
+        return effective
+    borrow = stream_share_borrow_allowance(
+        account_id,
+        local_inflight=local_inflight,
+        configured_stream_limit=caps.configured_stream_limit,
+        replica_count=caps.replica_count,
+    )
+    if borrow <= 0:
+        return effective
+    return max(1, cap + borrow - max(0, stream_reserve_slots))
+
+
+def stream_share_borrow_allowance(
+    account_id: str,
+    *,
+    local_inflight: int,
+    configured_stream_limit: int | None,
+    replica_count: int,
+) -> int:
+    """Extra stream-lease slots this replica may use beyond its static share.
+
+    Fair fraction of the observed cluster headroom:
+    ``floor((cap - observed cluster inflight) / R)``, floored at zero. Returns
+    0 — preserving the static share — unless the partition has multiple
+    members, the configured cap is positive, and every other active member has
+    fresh published counts. Published counts lag by up to one heartbeat, so
+    simultaneous borrows may transiently exceed the cluster cap; the fair
+    fraction bounds the sustained aggregate at the configured cap once counts
+    reflect actual usage.
+    """
+    if configured_stream_limit is None or configured_stream_limit <= 0 or replica_count <= 1:
+        return 0
+    snapshot = _peer_inflight_holder.fresh_snapshot(max_age_seconds=PEER_INFLIGHT_MAX_AGE_SECONDS)
+    if snapshot is None:
+        return 0
+    if len(snapshot.counts_by_instance) < replica_count - 1:
+        return 0
+    peer_inflight = snapshot.peer_inflight(account_id)
+    if peer_inflight is None:
+        return 0
+    headroom = configured_stream_limit - (max(0, local_inflight) + peer_inflight)
+    if headroom <= 0:
+        return 0
+    return headroom // replica_count
+
+
 def configured_account_concurrency_caps(
     dashboard_settings: object | None,
     *,
@@ -271,8 +399,9 @@ async def refresh_cap_partition(
 
 
 def reset_cap_partition_for_tests() -> None:
-    global _holder
+    global _holder, _peer_inflight_holder
     _holder = CapPartitionHolder()
+    _peer_inflight_holder = _PeerStreamInflightHolder()
 
 
 def _record_cap_partition_replicas(count: int) -> None:

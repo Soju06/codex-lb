@@ -19069,3 +19069,123 @@ async def test_cancel_api_key_reservation_heartbeat_task_does_not_wait_for_task_
     await asyncio.sleep(0)
 
     assert task.cancelled()
+
+
+def _account_stream_cap_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        429,
+        openai_error(
+            "account_stream_cap",
+            "Account stream capacity is exhausted; this replica's share is 4 of the per-account limit 8 "
+            "across 2 replicas. Increase the dashboard stream limit or wait for active streams to finish.",
+            error_type="rate_limit_error",
+        ),
+    )
+
+
+def test_http_bridge_capacity_wait_plan_clamps_account_capacity_wait() -> None:
+    exc = _account_stream_cap_error()
+    now = time.monotonic()
+
+    unbounded = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 7200.0)
+    assert unbounded is not None
+
+    clamped = http_bridge_streaming_module._http_bridge_capacity_wait_plan(
+        exc,
+        request_deadline=now + 7200.0,
+        capacity_wait_deadline=now + 5.0,
+    )
+    assert clamped is not None
+    assert clamped[0] <= 5.0
+
+    expired = http_bridge_streaming_module._http_bridge_capacity_wait_plan(
+        exc,
+        request_deadline=now + 7200.0,
+        capacity_wait_deadline=now - 1.0,
+    )
+    assert expired is None
+
+
+def test_http_bridge_capacity_wait_plan_gate_timeout_ignores_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_proxy_admission_wait_timeout_seconds",
+        lambda settings=None: 10.0,
+    )
+    exc = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    now = time.monotonic()
+
+    plan = http_bridge_streaming_module._http_bridge_capacity_wait_plan(
+        exc,
+        request_deadline=now + 120.0,
+        capacity_wait_deadline=now - 1.0,
+    )
+    assert plan is not None
+
+
+def test_http_bridge_capacity_wait_deadline_anchors_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_CAPACITY_WAIT_MAX_SECONDS", 50.0)
+    request_state = SimpleNamespace(account_capacity_wait_deadline=None)
+
+    first = http_bridge_streaming_module._http_bridge_capacity_wait_deadline(request_state)
+    second = http_bridge_streaming_module._http_bridge_capacity_wait_deadline(request_state)
+
+    assert first == second
+    assert first == pytest.approx(time.monotonic() + 50.0, abs=1.0)
+
+
+def test_unanchored_fork_cap_spill_predicate() -> None:
+    self_contained = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+    )
+    anchored = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test",
+            "input": "hello",
+            "previous_response_id": "resp_123",
+        }
+    )
+
+    assert http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    assert http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_response_create_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    # Owner-bearing payloads must not spill.
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=anchored,
+        preferred_account_id="acct-1",
+    )
+    # Only unanchored parallel fork keys are eligible.
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="session_header",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    # Non-cap errors and missing preferred accounts keep existing behavior.
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="upstream_unavailable",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id=None,
+    )

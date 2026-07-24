@@ -76,7 +76,7 @@ from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
-from app.modules.proxy.cap_partitioning import refresh_cap_partition
+from app.modules.proxy.cap_partitioning import observe_peer_stream_inflight, refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
@@ -467,17 +467,31 @@ async def lifespan(app: FastAPI):
     async def _heartbeat_only(svc: RingMembershipService, iid: str) -> None:
         while True:
             await asyncio.sleep(RING_HEARTBEAT_INTERVAL_SECONDS)
+            proxy_service = getattr(app.state, "proxy_service", None)
+            account_stream_inflight: dict[str, int] | None = None
+            if proxy_service is not None and hasattr(proxy_service, "_load_balancer"):
+                try:
+                    account_stream_inflight = await proxy_service._load_balancer.stream_inflight_by_account()
+                except Exception:
+                    logger.warning("Stream-inflight snapshot for ring heartbeat failed", exc_info=True)
             try:
-                await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
+                await svc.heartbeat(
+                    iid,
+                    endpoint_base_url=bridge_endpoint_base_url,
+                    account_stream_inflight=account_stream_inflight,
+                )
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
-            proxy_service = getattr(app.state, "proxy_service", None)
             if proxy_service is not None and hasattr(proxy_service, "reconcile_durable_http_bridge_ownership"):
                 try:
                     await proxy_service.reconcile_durable_http_bridge_ownership()
                 except Exception:
                     logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
             await refresh_cap_partition(svc.list_active, iid)
+            try:
+                observe_peer_stream_inflight(await svc.list_active_stream_inflight(iid))
+            except Exception:
+                logger.warning("Peer stream-inflight refresh failed", exc_info=True)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
         attempt = 0

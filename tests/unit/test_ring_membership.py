@@ -207,3 +207,80 @@ async def test_mark_stale_preserves_endpoint_within_grace_window(ring_service: R
     endpoint = await ring_service.resolve_endpoint("pod-grace-endpoint")
 
     assert endpoint == "http://10.0.0.15:8080"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_publishes_stream_inflight_counts(ring_service: RingMembershipService) -> None:
+    await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.11:8080")
+    await ring_service.register("pod-b", endpoint_base_url="http://10.0.0.12:8080")
+    await ring_service.heartbeat(
+        "pod-b",
+        endpoint_base_url="http://10.0.0.12:8080",
+        account_stream_inflight={"acct-1": 3, "acct-idle": 0},
+    )
+
+    counts = await ring_service.list_active_stream_inflight("pod-a")
+
+    assert counts == {"pod-b": {"acct-1": 3}}
+
+
+@pytest.mark.asyncio
+async def test_stream_inflight_reader_reports_missing_counts_not_zero(
+    ring_service: RingMembershipService,
+) -> None:
+    await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.11:8080")
+    # pod-b's metadata carries an endpoint but no published counts
+    # (mixed-version ring): the reader must report missing, not idle.
+    await ring_service.register("pod-b", endpoint_base_url="http://10.0.0.12:8080")
+
+    counts = await ring_service.list_active_stream_inflight("pod-a")
+
+    assert counts == {"pod-b": None}
+
+
+@pytest.mark.asyncio
+async def test_stream_inflight_reader_publishes_empty_counts_as_idle(
+    ring_service: RingMembershipService,
+) -> None:
+    await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.11:8080")
+    await ring_service.register("pod-b", endpoint_base_url="http://10.0.0.12:8080")
+    await ring_service.heartbeat(
+        "pod-b",
+        endpoint_base_url="http://10.0.0.12:8080",
+        account_stream_inflight={},
+    )
+
+    counts = await ring_service.list_active_stream_inflight("pod-a")
+
+    assert counts == {"pod-b": {}}
+
+
+@pytest.mark.asyncio
+async def test_stream_inflight_reader_excludes_self_and_stale_members(
+    ring_service: RingMembershipService,
+    async_session_factory,
+) -> None:
+    await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.11:8080")
+    await ring_service.register("pod-b", endpoint_base_url="http://10.0.0.12:8080")
+    await ring_service.heartbeat(
+        "pod-b",
+        endpoint_base_url="http://10.0.0.12:8080",
+        account_stream_inflight={"acct-1": 1},
+    )
+    # Age pod-b past the stale threshold.
+    from sqlalchemy import update
+
+    session = async_session_factory()
+    try:
+        await session.execute(
+            update(BridgeRingMember)
+            .where(BridgeRingMember.instance_id == "pod-b")
+            .values(last_heartbeat_at=utcnow() - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS + 5))
+        )
+        await session.commit()
+    finally:
+        await session.close()
+
+    counts = await ring_service.list_active_stream_inflight("pod-a")
+
+    assert counts == {}

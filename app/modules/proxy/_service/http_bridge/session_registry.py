@@ -295,6 +295,14 @@ class _HTTPBridgeSessionRegistryMixin:
             local_alias_was_published=not defer_durable_publication,
         )
         if not defer_durable_publication:
+            if durable_result == DurableBridgeAliasRegistration.REGISTERED:
+                async with self._http_bridge_lock:
+                    if (
+                        not session.closed
+                        and session.previous_response_alias_registration_generations.get(stripped_response_id)
+                        == registration_generation
+                    ):
+                        session.durable_previous_response_ids.add(stripped_response_id)
             return True
         if durable_result != DurableBridgeAliasRegistration.REGISTERED:
             return False
@@ -331,6 +339,7 @@ class _HTTPBridgeSessionRegistryMixin:
                 )
             self._http_bridge_previous_response_index[alias_key] = session.key
             session.previous_response_ids.add(stripped_response_id)
+            session.durable_previous_response_ids.add(stripped_response_id)
         return True
 
     async def _unregister_http_bridge_turn_states(
@@ -398,6 +407,7 @@ class _HTTPBridgeSessionRegistryMixin:
             if self._http_bridge_previous_response_index.get(alias_key) == session.key:
                 self._http_bridge_previous_response_index.pop(alias_key, None)
         session.previous_response_ids.clear()
+        session.durable_previous_response_ids.clear()
         session.previous_response_alias_registration_generations.clear()
 
     def _promote_http_bridge_session_to_codex_affinity(

@@ -901,6 +901,7 @@ class _HTTPBridgeSession:
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    durable_previous_response_ids: set[str] = field(default_factory=set)
     alias_registration_generation: int = 0
     turn_state_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)

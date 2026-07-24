@@ -952,9 +952,22 @@ def _release_http_bridge_unanchored_handoff(
     session: "_HTTPBridgeSession",
     *,
     request_scope_id: str,
-) -> None:
+    service: "_HTTPBridgeServiceProtocol | None" = None,
+) -> bool:
     if session.unanchored_reservation_id == request_scope_id:
         session.unanchored_reservation_id = None
+        if service is not None and session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
+            upstream_reader = session.upstream_reader
+            if upstream_reader is not None and not upstream_reader.done():
+                session.upstream_reader_wakeup.set()
+            else:
+                service._schedule_cancel_safe_cleanup(
+                    service._retire_http_bridge_after_drain_if_ready(session),
+                    action="http_bridge_session_close",
+                    request_id=_hash_identifier(session.key.affinity_key),
+                )
+        return True
+    return False
 
 
 async def _refresh_reused_http_bridge_session_with_handoff(
@@ -980,7 +993,11 @@ async def _refresh_reused_http_bridge_session_with_handoff(
         )
     except BaseException:
         if reserve_handoff:
-            _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+            _release_http_bridge_unanchored_handoff(
+                session,
+                request_scope_id=request_scope_id,
+                service=service,
+            )
         raise
 
 
@@ -1450,7 +1467,11 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
 
     async with service._http_bridge_lock:
         for session in service._http_bridge_sessions.values():
-            _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+            _release_http_bridge_unanchored_handoff(
+                session,
+                request_scope_id=request_scope_id,
+                service=service,
+            )
 
 
 def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:

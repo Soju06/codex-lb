@@ -547,6 +547,7 @@ class _HTTPBridgeRequestSubmitMixin:
             _release_http_bridge_unanchored_handoff(
                 session,
                 request_scope_id=request_scope_id,
+                service=self,
             )
 
     async def _submit_http_bridge_request_with_handoff(
@@ -763,6 +764,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     raise ProxyResponseError(
                         502,
                         openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
+                    )
+                if session.upstream_control.retire_after_drain:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
                     )
                 recovery_receipt: DurableBridgeAliasRegistrationReceipt | None = None
                 upstream_send_started = False
@@ -1274,7 +1280,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
             )
             should_reconnect = (
-                not has_visible_pending and session.queued_request_count == 0 and not session.upstream_close_attempted
+                not has_visible_pending
+                and session.queued_request_count == 0
+                and session.admission_waiter_count == 0
+                and session.unanchored_reservation_id is None
+                and not session.upstream_close_attempted
             )
             if should_reconnect:
                 session.pending_requests.clear()
@@ -1283,6 +1293,37 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
 
         await self._close_http_bridge_session_bounded(session, reason="retire_after_drain")
+        return True
+
+    def _mark_completed_unanchored_http_bridge_fork_for_retirement(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        response_id: str,
+    ) -> bool:
+        if session.key.affinity_kind != "internal_unanchored_parallel" or is_http_bridge_account_neutral_replay(
+            kind=session.key.affinity_kind,
+            key=session.key.affinity_key,
+        ):
+            return False
+        if session.pending_requests or session.queued_request_count > 0:
+            return False
+        if response_id not in session.durable_previous_response_ids:
+            return False
+        if not session.previous_response_ids <= session.durable_previous_response_ids:
+            return False
+        session.upstream_control.reconnect_requested = True
+        session.upstream_control.retire_after_drain = True
+        _log_http_bridge_event(
+            "retire_completed_unanchored_fork",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=len(session.pending_requests),
+            detail="retire_after_drain",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
         return True
 
     async def _retire_stale_pending_http_bridge_session(

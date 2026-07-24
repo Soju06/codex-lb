@@ -366,6 +366,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     elif wakeup_task in done:
                         wakeup_task.result()
                         wakeup_task = None
+                        if await self._retire_http_bridge_after_drain_if_ready(session):
+                            break
                         continue
                     else:
                         timed_out = True
@@ -1102,6 +1104,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event_type = "response.failed"
                 completed_usage = None
                 completed_empty_prewarm = False
+
+        if event_type == "response.completed" and response_id is not None:
+            self._mark_completed_unanchored_http_bridge_fork_for_retirement(
+                session,
+                response_id=response_id,
+            )
 
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so

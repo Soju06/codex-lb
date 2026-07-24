@@ -1373,6 +1373,54 @@ async def test_durable_bridge_release_without_draining_marks_session_closed(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_closed_fork_keeps_previous_response_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="internal_unanchored_parallel",
+        session_key_value="ordinary-completed-fork",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-original-fork-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    registration = await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_completed_fork",
+        lease_ttl_seconds=60.0,
+    )
+    assert registration == DurableBridgeAliasRegistration.REGISTERED
+
+    await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+
+    resolved = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="later-continuation",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_completed_fork",
+    )
+    assert resolved is not None
+    assert resolved.session_id == claimed.session_id
+    assert resolved.account_id == "acc-original-fork-owner"
+    assert resolved.state == "closed"
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_takeover_clears_stale_recovery_anchor_for_fresh_session(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

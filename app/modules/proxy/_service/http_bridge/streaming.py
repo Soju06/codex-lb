@@ -1585,6 +1585,7 @@ class _HTTPBridgeStreamingMixin:
                         _release_http_bridge_unanchored_handoff(
                             session,
                             request_scope_id=owner_recovery_scope_id,
+                            service=self,
                         )
                     if retry_request_state is not None:
                         with anyio.CancelScope(shield=True):
@@ -1885,6 +1886,7 @@ class _HTTPBridgeStreamingMixin:
                     _release_http_bridge_unanchored_handoff(
                         initial_handoff_session,
                         request_scope_id=initial_handoff_scope_id,
+                        service=self,
                     )
                     _reserve_http_bridge_unanchored_handoff(
                         replacement_session,
@@ -2233,12 +2235,14 @@ class _HTTPBridgeStreamingMixin:
                     _release_http_bridge_unanchored_handoff(
                         session,
                         request_scope_id=local_recovery_scope_id,
+                        service=self,
                     )
         finally:
             if initial_handoff_scope_id is not None:
                 _release_http_bridge_unanchored_handoff(
                     initial_handoff_session,
                     request_scope_id=initial_handoff_scope_id,
+                    service=self,
                 )
             try:
                 await session_events.aclose()

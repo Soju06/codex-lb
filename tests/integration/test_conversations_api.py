@@ -947,9 +947,7 @@ async def test_since_filter_composes_with_search(async_client, db_setup):
 
 
 @pytest.mark.asyncio
-async def test_conversation_listing_total_cached_across_identical_signatures(
-    async_client, db_setup, monkeypatch
-):
+async def test_conversation_listing_total_cached_across_identical_signatures(async_client, db_setup, monkeypatch):
     from app.modules.request_logs import repository as logs_repository_module
 
     monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)

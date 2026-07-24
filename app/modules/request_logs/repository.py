@@ -667,12 +667,13 @@ class RequestLogsRepository:
         and we rewrite it here once the public effective model is known so
         the dashboard and usage views surface the user-visible model.
 
-        Only rows in the un-folded live tail — at or above EVERY rollup
-        watermark, i.e. ``max(lifetime, hourly)`` — are rewritten: ``model``
-        is a rollup dimension and ``cost_usd`` a folded measure, so mutating
-        a row below either watermark would silently diverge that rollup from
-        raw (and the divergence becomes unrepairable once retention prunes
-        the raw row).
+        Only rows in the un-folded live tail — strictly above the lifetime
+        watermark (its fold interval is ``(start, end]``) AND at or above the
+        hourly watermark (half-open ``[start, end)``) — are rewritten:
+        ``model`` is a rollup dimension and ``cost_usd`` a folded measure, so
+        mutating a row either rollup already captured would silently diverge
+        that rollup from raw (and the divergence becomes unrepairable once
+        retention prunes the raw row).
         A matching row below the watermarks can only be a client-reused
         request id colliding with unrelated old traffic — the rewrite's
         target is the row the caller inserted moments ago. The fold-state
@@ -699,10 +700,16 @@ class RequestLogsRepository:
                 # label with host-model pricing and report inaccurate cost.
                 stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
                 if watermarks is not None:
-                    # max(): a row is un-folded by EVERY rollup only when it
-                    # is at or above the most advanced watermark (min() is
-                    # the retention gate's direction, not the rewrite gate's).
-                    stmt = stmt.where(RequestLog.requested_at >= max(watermarks))
+                    # A row is un-folded by EVERY rollup only when it clears
+                    # both bounds, each matching its fold's own interval
+                    # convention: the lifetime fold is `(start, end]`
+                    # (inclusive end — a row AT the watermark is folded), the
+                    # hourly fold is `[start, end)`.
+                    folded_through, hourly_folded_through = watermarks
+                    stmt = stmt.where(
+                        RequestLog.requested_at > folded_through,
+                        RequestLog.requested_at >= hourly_folded_through,
+                    )
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())
                 if not logs:

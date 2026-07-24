@@ -120,7 +120,7 @@ Every code path that mutates request-log rows below the hourly watermark MUST ta
 
 - **GIVEN** a request-log row below a fold watermark whose request id collides with a new inbound request id
 - **WHEN** the post-hoc model/cost rewrite (`update_model_for_request`) runs for that request id
-- **THEN** it MUST take the fold-state lock and rewrite only rows at or above every fold watermark (the un-folded live tail)
+- **THEN** it MUST take the fold-state lock and rewrite only rows no fold has captured yet (strictly above the lifetime watermark, whose fold interval is `(start, end]`, and at or above the hourly watermark, whose fold interval is `[start, end)`)
 - **AND** the pre-watermark row and its folded rollup contribution MUST remain unchanged
 
 #### Scenario: Lifecycle mirror serializes with the fold

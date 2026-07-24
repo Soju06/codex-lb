@@ -696,8 +696,13 @@ async def test_model_rewrite_skips_folded_rows(db_setup):
         )
         await session.commit()
     between_at = hourly_watermark + timedelta(minutes=30)
+    # Exactly AT the lifetime watermark: the lifetime fold interval is
+    # `(start, end]`, so this row is already folded and must be skipped too.
+    at_lifetime = hourly_watermark + timedelta(hours=2)
     async with SessionLocal() as session:
-        await _add_log(RequestLogsRepository(session), account_id="acc_rw", request_id="r_rw", requested_at=between_at)
+        logs = RequestLogsRepository(session)
+        await _add_log(logs, account_id="acc_rw", request_id="r_rw", requested_at=between_at)
+        await _add_log(logs, account_id="acc_rw", request_id="r_rw", requested_at=at_lifetime)
 
     async with SessionLocal() as session:
         updated = await RequestLogsRepository(session).update_model_for_request("r_rw", "gpt-image-1")
@@ -707,6 +712,7 @@ async def test_model_rewrite_skips_folded_rows(db_setup):
         models_by_age = dict((await session.execute(select(RequestLog.requested_at, RequestLog.model))).all())
     assert models_by_age[old_at] == "gpt-5.1-codex"  # below both watermarks
     assert models_by_age[between_at] == "gpt-5.1-codex"  # below the lifetime watermark
+    assert models_by_age[at_lifetime] == "gpt-5.1-codex"  # AT the inclusive lifetime watermark
     assert models_by_age[now] == "gpt-image-1"
 
     # The folded hourly bucket still carries the original model dimension.

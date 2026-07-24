@@ -443,6 +443,13 @@ def _supported_optional_kwargs(
     return kwargs
 
 
+def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings: Any) -> tuple[str, bool]:
+    configured = getattr(dashboard_settings, "upstream_stream_transport", "default")
+    if configured == "default":
+        configured = getattr(base_settings, "upstream_stream_transport", "auto")
+    return configured, configured in ("http", "websocket")
+
+
 _CONVERSATION_HEADERS_BY_USERAGENT_PREFIX = (
     ("opencode", ("x-parent-session-id", "x-opencode-session", "x-session-id", "x-session-affinity")),
     ("codex", ("thread-id",)),

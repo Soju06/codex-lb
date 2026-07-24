@@ -40,6 +40,7 @@ from app.modules.proxy._service.support import (
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
     _request_log_client_fields,
+    _resolved_configured_stream_transport,
     _RetryableStreamError,
     _signal_propagated_capacity_startup_wait,
     _stream_settlement_error_payload,
@@ -163,13 +164,6 @@ def _effective_http_downstream_transport_policy(
         return dashboard_policy, False
     base_policy = getattr(base_settings, "http_downstream_transport_policy", _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT)
     return base_policy, False
-
-
-def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings: Any) -> tuple[str, bool]:
-    configured = getattr(dashboard_settings, "upstream_stream_transport", "default")
-    if configured == "default":
-        configured = getattr(base_settings, "upstream_stream_transport", "auto")
-    return configured, configured in ("http", "websocket")
 
 
 async def _iter_account_capacity_recovery_wait(

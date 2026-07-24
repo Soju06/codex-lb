@@ -139,7 +139,6 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
-from app.modules.proxy._service.streaming.retry import _resolved_configured_stream_transport
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -151,6 +150,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
+    _resolved_configured_stream_transport,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _ttft_event_visible_at,

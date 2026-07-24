@@ -165,6 +165,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
     _request_allows_bare_session_cap_spillover,
+    _session_identity_is_client_declared,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
@@ -935,17 +936,18 @@ def _http_bridge_request_is_unanchored_one_shot(
     ``tools: []``, while every real agent turn carries its tool list (Codex
     CLI attaches tools to every turn). Such one-shots gain nothing from a
     persistent bridge WebSocket and would otherwise fork an independent
-    bridge lane per overlap. The request must carry a client session
+    bridge lane per overlap. The identity must come from a client-declared
     identity header — that is what routes side calls into the agent
-    session's bridge in the first place; anonymous requests keep their
-    existing bridge behavior. Native Codex clients are excluded so their
-    websocket-mode behavior stays codex-faithful.
+    session's bridge in the first place; anonymous requests and Codex-name
+    session headers keep their existing bridge behavior. Native Codex
+    clients are excluded so their websocket-mode behavior stays
+    codex-faithful.
     """
     if forwarded_request:
         return False
     if payload.tools:
         return False
-    if _sticky_key_from_session_header(headers) is None:
+    if not _session_identity_is_client_declared(headers):
         return False
     if _sticky_key_from_turn_state_header(headers) is not None:
         return False

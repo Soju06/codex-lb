@@ -74,3 +74,14 @@ def test_forwarded_requests_are_excluded() -> None:
 def test_requests_without_session_identity_keep_bridge_behavior() -> None:
     assert not _is_one_shot(_payload(), {})
     assert not _is_one_shot(_payload(), {"user-agent": "opencode/1.18.3"})
+
+
+def test_codex_name_session_headers_keep_bridge_behavior() -> None:
+    # Codex-name identity means a bridge-centric Codex-protocol flow, even
+    # when the payload happens to be tool-less.
+    assert not _is_one_shot(_payload(), {"session_id": "sid_codex"})
+    assert not _is_one_shot(_payload(), {"thread-id": "thread_codex"})
+    assert not _is_one_shot(
+        _payload(),
+        {**_OPENCODE_HEADERS, "session_id": "sid_codex"},
+    )

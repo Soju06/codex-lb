@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.responses import StreamingResponse
@@ -716,11 +717,17 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     response = await async_client.post(
         "/backend-api/codex/alpha/search?result_count=10",
         content=payload,
-        headers={"content-type": "application/json", "session_id": "search-session"},
+        headers={
+            "content-type": "application/json",
+            "origin": "https://chatgpt.com",
+            "session_id": "search-session",
+        },
     )
 
     assert response.status_code == 200
     assert response.content == upstream_body
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
     assert response.headers["x-request-id"] == "search-request"
     assert "set-cookie" not in response.headers
     assert calls == [
@@ -737,6 +744,131 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
     ]
     assert isinstance(calls[0]["timeout_seconds"], float)
     assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_get_forwards_query_without_body(async_client, monkeypatch):
+    await _import_account(async_client, "acc_codex_search_get", "codex-search-get@example.com")
+    calls = []
+    upstream_body = b'{"results":[{"title":"OpenAI","url":"https://openai.com/"}]}'
+
+    async def fake_codex_control_request(
+        path,
+        *,
+        method,
+        payload: bytes | None,
+        query_params,
+        headers,
+        access_token,
+        account_id,
+        timeout_seconds=None,
+        **_kwargs,
+    ):
+        calls.append(
+            {
+                "path": path,
+                "method": method,
+                "payload": payload,
+                "query_params": list(query_params),
+                "session_id": headers.get("session_id"),
+                "access_token": access_token,
+                "account_id": account_id,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return core_proxy.CodexControlResponse(
+            status_code=200,
+            body=upstream_body,
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "search-get-request",
+            },
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    response = await async_client.get(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={"session_id": "search-get-session"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == upstream_body
+    assert response.headers["x-request-id"] == "search-get-request"
+    assert calls == [
+        {
+            "path": "alpha/search",
+            "method": "GET",
+            "payload": None,
+            "query_params": [("query", "OpenAI"), ("result_count", "10")],
+            "session_id": "search-get-session",
+            "access_token": "access-token",
+            "account_id": "acc_codex_search_get",
+            "timeout_seconds": calls[0]["timeout_seconds"],
+        }
+    ]
+    assert isinstance(calls[0]["timeout_seconds"], float)
+    assert calls[0]["timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_options_returns_local_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization, session_id",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["allow"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-methods"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-headers"] == "authorization, session_id"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_options_allows_private_network_preflight(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.options(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={
+            "origin": "https://chatgpt.com",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization, content-type, session_id",
+            "access-control-request-private-network": "true",
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.headers["access-control-allow-private-network"] == "true"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    codex_control_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_alpha_search_unsupported_method_returns_full_allow_set(async_client, monkeypatch):
+    codex_control_request = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", codex_control_request)
+
+    response = await async_client.put(
+        "/backend-api/codex/alpha/search?query=OpenAI&result_count=10",
+        headers={"origin": "https://chatgpt.com"},
+    )
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, POST, OPTIONS"
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    codex_control_request.assert_not_called()
 
 
 @pytest.mark.asyncio

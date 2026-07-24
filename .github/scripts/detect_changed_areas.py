@@ -98,6 +98,9 @@ def _pull_request_files(event: dict[str, Any]) -> list[str]:
         for item in payload:
             if isinstance(item, dict) and isinstance(item.get("filename"), str):
                 files.append(item["filename"])
+                previous_filename = item.get("previous_filename")
+                if isinstance(previous_filename, str):
+                    files.append(previous_filename)
         url = next_link(link)
     return files
 

@@ -582,6 +582,62 @@ async def test_conversation_details_exact_rows_elapsed_order_and_404(async_clien
 
 
 @pytest.mark.asyncio
+async def test_conversation_cached_tokens_remain_null_when_all_values_are_unknown(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        await logs.add_log(
+            account_id=None,
+            request_id="unknown-cache",
+            model="unknown-cache-model",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            requested_at=base,
+            conversation_id="unknown-cache-conversation",
+            cached_input_tokens=None,
+        )
+
+    listing = await async_client.get("/api/conversations")
+    assert listing.status_code == 200
+    assert listing.json()["conversations"][0]["cachedInputTokens"] is None
+
+    details = await async_client.get("/api/conversations/unknown-cache-conversation")
+    assert details.status_code == 200
+    assert details.json()["modelStats"][0]["cachedInputTokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_details_accepts_slash_containing_ids(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    conversation_id = "workspace/thread-1"
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        await logs.add_log(
+            account_id=None,
+            request_id="slash-conversation",
+            model="slash-model",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            requested_at=base,
+            conversation_id=conversation_id,
+        )
+
+    listing = await async_client.get("/api/conversations")
+    assert listing.status_code == 200
+    assert listing.json()["conversations"][0]["conversationId"] == conversation_id
+
+    details = await async_client.get(f"/api/conversations/{quote(conversation_id, safe='')}")
+    assert details.status_code == 200
+    assert details.json()["conversationId"] == conversation_id
+
+
+@pytest.mark.asyncio
 async def test_conversation_identity_preserves_non_sql_whitespace_for_list_and_detail(async_client, db_setup):
     base = utcnow().replace(microsecond=0)
     nbsp_identity = "\u00a0nbsp-conversation\u00a0"
@@ -695,7 +751,7 @@ async def test_conversation_details_excludes_warmups_and_soft_deleted_rows(async
             "reqs": 2,
             "totalElapsedTime": 30,
             "totalInputTokens": 30,
-            "cachedInputTokens": 0,
+            "cachedInputTokens": None,
             "totalOutputTokens": 15,
             "totalCostUsd": pytest.approx(3.0),
         }

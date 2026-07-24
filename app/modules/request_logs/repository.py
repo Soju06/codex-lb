@@ -96,7 +96,7 @@ class ConversationListSummary:
     last_requested_at: datetime
     account_count: int
     total_tokens: int
-    cached_input_tokens: int
+    cached_input_tokens: int | None
     cost_usd: float
 
 
@@ -123,7 +123,7 @@ class ConversationModelStatRow:
     request_count: int
     total_elapsed_ms: int
     input_tokens: int
-    cached_input_tokens: int
+    cached_input_tokens: int | None
     output_tokens: int
     cost_usd: float
 
@@ -163,7 +163,7 @@ class RequestLogsRepository:
         least = func.least if dialect == "postgresql" else func.min
         greatest = func.greatest if dialect == "postgresql" else func.max
         return case(
-            (RequestLog.cached_input_tokens.is_(None), 0),
+            (RequestLog.cached_input_tokens.is_(None), None),
             (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
             else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
         )
@@ -216,7 +216,7 @@ class RequestLogsRepository:
                 func.max(RequestLog.requested_at).label("last_requested_at"),
                 func.count(func.distinct(RequestLog.account_id)).label("account_count"),
                 func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0) + output), 0).label("total_tokens"),
-                func.coalesce(func.sum(cached), 0).label("cached_input_tokens"),
+                func.sum(cached).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
             .where(*conditions)
@@ -238,7 +238,7 @@ class RequestLogsRepository:
                 last_requested_at=row.last_requested_at,
                 account_count=int(row.account_count),
                 total_tokens=int(row.total_tokens),
-                cached_input_tokens=int(row.cached_input_tokens),
+                cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),
                 cost_usd=float(row.cost_usd or 0.0),
             )
             for row in page_rows
@@ -338,7 +338,7 @@ class RequestLogsRepository:
                     func.count().label("request_count"),
                     func.coalesce(func.sum(func.coalesce(RequestLog.latency_ms, 0)), 0).label("total_elapsed_ms"),
                     func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0)), 0).label("input_tokens"),
-                    func.coalesce(func.sum(cached), 0).label("cached_input_tokens"),
+                    func.sum(cached).label("cached_input_tokens"),
                     func.coalesce(func.sum(output), 0).label("output_tokens"),
                     func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
                 )
@@ -366,7 +366,7 @@ class RequestLogsRepository:
                     request_count=int(row.request_count),
                     total_elapsed_ms=int(row.total_elapsed_ms),
                     input_tokens=int(row.input_tokens),
-                    cached_input_tokens=int(row.cached_input_tokens),
+                    cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),
                     output_tokens=int(row.output_tokens),
                     cost_usd=float(row.cost_usd or 0.0),
                 )

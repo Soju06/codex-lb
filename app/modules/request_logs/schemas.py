@@ -99,7 +99,7 @@ class ConversationModelStat(DashboardModel):
     reqs: int
     total_elapsed_time: int
     total_input_tokens: int
-    cached_input_tokens: int
+    cached_input_tokens: int | None
     total_output_tokens: int
     total_cost_usd: float
 
@@ -114,7 +114,7 @@ class ConversationEntry(DashboardModel):
     representative_model: str | None = None
     remaining_model_count: int
     total_tokens: int
-    cached_input_tokens: int
+    cached_input_tokens: int | None
     total_cost_usd: float
 
 

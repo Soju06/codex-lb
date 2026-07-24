@@ -142,7 +142,7 @@ async def list_conversations(
     )
 
 
-@conversations_router.get("/{conversation_id}", response_model=ConversationDetailsResponse)
+@conversations_router.get("/{conversation_id:path}", response_model=ConversationDetailsResponse)
 async def get_conversation_details(
     conversation_id: str,
     context: RequestLogsContext = Depends(get_request_logs_context),

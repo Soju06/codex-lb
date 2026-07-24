@@ -1354,6 +1354,28 @@ def test_filter_inbound_headers_strips_client_session_identity_only_at_egress() 
     assert preserved == headers
 
 
+def test_build_upstream_headers_strips_preserved_client_session_identity() -> None:
+    # Service-layer filters preserve client session identity headers so
+    # request logging and sticky affinity keep seeing them; the upstream
+    # egress builder must still strip them.
+    preserved = filter_inbound_headers(
+        {
+            "X-Session-Affinity": "affinity",
+            "X-Session-Id": "session",
+            "X-OpenCode-Session": "opencode",
+            "User-Agent": "opencode/1.18.3",
+        },
+        preserve_client_session_identity=True,
+    )
+
+    headers = _build_upstream_headers(preserved, "token", "acc_2")
+
+    lower_keys = {key.lower() for key in headers}
+    assert "x-session-affinity" not in lower_keys
+    assert "x-session-id" not in lower_keys
+    assert "x-opencode-session" not in lower_keys
+
+
 def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
     assert proxy_service._request_log_useragent_fields(
         {

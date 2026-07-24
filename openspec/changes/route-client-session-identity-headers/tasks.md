@@ -8,6 +8,7 @@
 ## 2. Replay hygiene
 
 - [x] 2.1 Strip the new headers in the account-neutral replay header filter.
+- [x] 2.2 Strip client session identity at upstream egress only; internal filters preserve the headers so request-log conversation metadata and session affinity still observe them.
 
 ## 3. One-shot side-call bypass
 

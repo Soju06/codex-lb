@@ -473,6 +473,56 @@ async def test_backend_responses_accepts_opencode_empty_tool_map(async_client, m
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_direct_stream_persists_opencode_conversation_id(async_client, monkeypatch):
+    # With the HTTP bridge disabled (autouse fixture), /responses streams
+    # through ``stream_responses`` -> ``_stream_with_retry``. The internal
+    # header filter must preserve client session identity headers so the
+    # request log still records the OpenCode conversation id; upstream egress
+    # strips them in ``_build_upstream_headers``.
+    raw_account_id = "acc_responses_opencode_conv_log"
+    auth_json = _make_auth_json(raw_account_id, "responses-opencode-conv-log@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_opencode_conv_log",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6",
+        "instructions": "t",
+        "input": "Generate a title for this conversation:",
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+        headers={
+            "user-agent": "opencode/1.18.3 (darwin arm64)",
+            "x-opencode-session": "ses_conv_log",
+            "x-session-id": "ses_conv_log",
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "resp_opencode_conv_log"))
+        log = result.scalar_one()
+    assert log.conversation_id == "ses_conv_log"
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
     raw_account_id = "acc_future_directive"
     auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")

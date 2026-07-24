@@ -450,7 +450,11 @@ class _StreamingMixin(_StreamingRetryMixin):
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         _maybe_log_proxy_request_payload("stream", payload, headers)
-        filtered = _facade().filter_inbound_headers(headers)
+        # Client session identity headers must survive this internal filter:
+        # ``_stream_with_retry`` derives request-log conversation metadata and
+        # session sticky affinity from them. They are stripped at upstream
+        # egress by ``_build_upstream_headers`` / the websocket header builders.
+        filtered = _facade().filter_inbound_headers(headers, preserve_client_session_identity=True)
         return proxy._stream_with_retry(
             payload,
             filtered,

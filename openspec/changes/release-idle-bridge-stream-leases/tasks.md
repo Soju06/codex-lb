@@ -12,6 +12,7 @@
 - [x] 2.2 Raise the standard HTTP 429 `account_stream_cap` envelope on denial so the recoverable capacity wait applies.
 - [x] 2.3 Re-check session closure after the acquire await; release the fresh lease and fail with the closed-bridge envelope instead of installing it on a closed session.
 - [x] 2.4 Register the submit as an admission waiter atomically with the first reacquire so stale finalizers cannot idle-release the fresh lease before queue admission; unregister on prewarm failure and queue-full rejection.
+- [x] 2.5 Pass the turn's usage-budget token estimate into the reacquired lease, matching initial selection and reconnect, so capacity-weighted routing pressure sees reused-session turns.
 
 ## 3. Tests
 
@@ -19,3 +20,4 @@
 - [x] 3.2 Grouped terminal-error settlement of detached requests releases the abandoned session's lease.
 - [x] 3.3 Close racing an in-flight reacquisition releases the fresh lease and fails with the closed-bridge envelope.
 - [x] 3.4 Stale finalizer during prewarm cannot release the reacquired lease; queue-full rejection unregisters the admission waiter and retains the busy session's lease.
+- [x] 3.5 Reacquisition passes the turn's usage-budget token estimate to the lease.

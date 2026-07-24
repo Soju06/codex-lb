@@ -17,6 +17,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.core.errors import openai_error
 from app.db.models import AccountStatus
+from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 
@@ -95,7 +96,47 @@ async def test_next_turn_reacquires_stream_lease() -> None:
         await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
 
     assert session.account_lease is lease
-    fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream")
+    fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge", kind="stream", estimated_tokens=0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
+    """Reacquisition passes the turn's usage-budget token estimate to the lease.
+
+    Initial selection and reconnect feed the lease's estimated tokens into
+    capacity-weighted routing pressure; the idle-reacquire path must do the
+    same so large turns on reused warm sessions stay visible to it.
+    """
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    lease = _make_lease("l10")
+    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=lease)))
+    budget = ApiKeyRequestUsageBudget(input_tokens=1200, output_tokens=300)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-budget-estimate",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        skip_request_log=True,
+        request_usage_budget=budget,
+    )
+    expected_tokens = proxy_service._estimated_lease_tokens_from_request_usage_budget(budget)
+    assert expected_tokens > 0.0
+
+    async with session.pending_lock:
+        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session, request_state=request_state)
+
+    assert session.account_lease is lease
+    fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=expected_tokens,
+    )
 
 
 @pytest.mark.asyncio
@@ -223,7 +264,7 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
         )
 
     assert exc_info.value.payload["error"]["code"] == "account_response_create_cap"
-    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream")
+    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
     prewarm.assert_awaited_once()
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
@@ -303,7 +344,7 @@ async def test_stale_finalizer_cannot_release_lease_reacquired_for_new_turn(
 
     # One acquisition only: the stale finalizer never released the lease, so
     # the ensure at queue admission did not have to acquire a second time.
-    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream")
+    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
     # The admission-failure cleanup settles the lease exactly once.
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None

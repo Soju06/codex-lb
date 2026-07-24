@@ -84,6 +84,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
     _count_external_image_urls,
     _enforce_response_create_size_limit,
+    _estimated_lease_tokens_from_request_usage_budget,
     _fingerprint_input_items,
     _inline_top_level_input_image_urls,
     _normalize_service_tier_value,
@@ -664,7 +665,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_enqueued = False
         admission_waiter_registered = False
         async with session.pending_lock:
-            await self._ensure_http_bridge_session_stream_lease_locked(session)
+            await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
             # Register the submit as an admission waiter atomically with the
             # reacquire so a previous turn's finalizer unwinding concurrently
             # cannot see an apparently idle session and release this lease
@@ -708,7 +709,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         error_type="rate_limit_error",
                     ),
                 )
-            await self._ensure_http_bridge_session_stream_lease_locked(session)
+            await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
             session.queued_request_count += 1
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
@@ -1257,6 +1258,8 @@ class _HTTPBridgeRequestSubmitMixin:
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,
         session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState | None = None,
     ) -> None:
         """Reacquire the account stream lease for a session idled between turns.
 
@@ -1280,6 +1283,12 @@ class _HTTPBridgeRequestSubmitMixin:
         lease = await load_balancer.acquire_account_lease(
             session.account.id,
             kind="stream",
+            # Carry the turn's usage-budget estimate like initial selection
+            # and reconnect do, so capacity-weighted routing pressure still
+            # sees large turns on reused warm sessions.
+            estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                request_state.request_usage_budget if request_state is not None else None
+            ),
         )
         if lease is None:
             raise ProxyResponseError(

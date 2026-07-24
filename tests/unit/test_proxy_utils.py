@@ -25,6 +25,7 @@ import pytest
 from aiohttp.client_exceptions import ClientConnectorCertificateError
 from aiohttp.client_reqrep import ConnectionKey, RequestInfo
 from fastapi import WebSocket
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 from websockets.exceptions import ConnectionClosedError
@@ -2026,6 +2027,41 @@ def test_normalize_responses_request_payload_without_codex_compat_preserves_imag
     )
 
     assert request.tools == [{"type": "image_generation", "output_format": "png"}]
+
+
+def test_normalize_responses_request_payload_accepts_empty_tool_map():
+    # OpenCode's title/compaction side calls send ``tools: {}`` on the wire;
+    # both the codex-native and openai-compat validation paths must treat the
+    # empty tool map as ``tools: []`` instead of rejecting the payload.
+    for openai_compat in (False, True):
+        payload: dict[str, JsonValue] = {
+            "model": "gpt-5.4",
+            "instructions": "t",
+            "input": "Generate a title for this conversation:",
+            "tools": {},
+        }
+
+        request = proxy_request_policy.normalize_responses_request_payload(
+            payload,
+            openai_compat=openai_compat,
+        )
+
+        assert request.tools == []
+
+
+def test_normalize_responses_request_payload_rejects_non_empty_tool_map():
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.4",
+        "instructions": "t",
+        "input": "hi",
+        "tools": {"bash": {"type": "function"}},
+    }
+
+    with pytest.raises(ValidationError):
+        proxy_request_policy.normalize_responses_request_payload(
+            payload,
+            openai_compat=False,
+        )
 
 
 def test_normalize_responses_request_payload_preserves_explicit_image_generation_choice():

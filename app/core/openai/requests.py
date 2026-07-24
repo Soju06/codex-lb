@@ -79,6 +79,19 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     return choice
 
 
+def normalize_empty_tool_map(value: JsonValue) -> JsonValue:
+    """Normalize the ``tools: {}`` wire shape to an empty tool list.
+
+    OpenCode's title/compaction side calls declare tool-lessness with an
+    empty JSON object (``tools: {}``) instead of an empty array. Treat that
+    shape as equivalent to ``tools: []`` so such payloads validate and reach
+    the tool-less request paths; non-empty tool maps stay rejected.
+    """
+    if is_json_mapping(value) and not value:
+        return []
+    return value
+
+
 def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = False) -> list[JsonValue]:
     normalized_tools: list[JsonValue] = []
     for tool in tools:
@@ -675,6 +688,11 @@ class ResponsesRequest(BaseModel):
             return value
         stripped = value.strip()
         return stripped or None
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _normalize_tools_wire_shape(cls, value: JsonValue) -> JsonValue:
+        return normalize_empty_tool_map(value)
 
     @field_validator("tools")
     @classmethod

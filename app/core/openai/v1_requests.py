@@ -9,6 +9,7 @@ from app.core.openai.requests import (
     ResponsesReasoning,
     ResponsesRequest,
     ResponsesTextControls,
+    normalize_empty_tool_map,
     validate_tool_types,
 )
 from app.core.types import JsonValue
@@ -48,6 +49,11 @@ class V1ResponsesRequest(BaseModel):
     @classmethod
     def _ensure_store_false(cls, value: bool | None) -> bool | None:
         return False
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _normalize_tools_wire_shape(cls, value: JsonValue) -> JsonValue:
+        return normalize_empty_tool_map(value)
 
     @field_validator("tools")
     @classmethod

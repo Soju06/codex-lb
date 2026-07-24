@@ -41,6 +41,13 @@ def test_tool_less_side_call_is_one_shot() -> None:
     assert _is_one_shot(_payload(tools=[]), _OPENCODE_HEADERS)
 
 
+def test_empty_tool_map_side_call_is_one_shot() -> None:
+    # OpenCode's title/compaction side calls declare tool-lessness with an
+    # empty tool map (``tools: {}``) on the wire; request validation
+    # normalizes that shape to ``[]`` so these payloads reach the bypass.
+    assert _is_one_shot(_payload(tools={}), _OPENCODE_HEADERS)
+
+
 def test_agent_turns_with_tools_are_not_one_shot() -> None:
     payload = _payload(tools=[{"type": "function", "name": "bash", "parameters": {"type": "object"}}])
     assert not _is_one_shot(payload, _OPENCODE_HEADERS)

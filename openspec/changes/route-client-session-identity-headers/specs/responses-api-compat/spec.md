@@ -41,3 +41,20 @@ When the HTTP responses bridge is enabled, a request whose session identity come
 - **GIVEN** a tool-less self-contained request carrying a `session_id` or `thread-id` header
 - **WHEN** the request is routed
 - **THEN** the bridge is not bypassed for that request
+
+### Requirement: Empty tool map normalizes to an empty tool list
+
+`/responses` request validation MUST treat a `tools` field sent as an empty JSON object (`tools: {}`) as equivalent to `tools: []` on both the codex-native and OpenAI-compat validation paths, so such requests validate and count as tool-less (including for the one-shot bypass predicate). OpenCode's title and compaction side calls declare tool-lessness with this empty-map wire shape. Non-empty tool maps MUST continue to be rejected as invalid payloads.
+
+#### Scenario: OpenCode empty tool map side call validates as tool-less
+
+- **GIVEN** an OpenCode title or compaction side call whose body carries `tools: {}` and client-declared session identity headers
+- **WHEN** the request is validated at `/responses`
+- **THEN** validation succeeds and the request's tool list is empty
+- **AND** the request is treated as tool-less by the one-shot bypass predicate
+
+#### Scenario: Non-empty tool maps stay rejected
+
+- **GIVEN** a `/responses` request whose `tools` field is a non-empty JSON object
+- **WHEN** the request is validated
+- **THEN** the request is rejected as an invalid payload

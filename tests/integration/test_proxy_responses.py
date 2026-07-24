@@ -428,6 +428,51 @@ async def test_backend_responses_forwards_explicit_empty_tools(async_client, mon
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_accepts_opencode_empty_tool_map(async_client, monkeypatch):
+    # OpenCode's title/compaction side calls declare tool-lessness with an
+    # empty tool map (``tools: {}``) on the wire. The route must normalize
+    # that shape to ``tools: []`` instead of rejecting the payload as
+    # invalid, so these side calls reach the tool-less one-shot bypass
+    # (see tests/unit/test_http_bridge_one_shot_bypass.py).
+    raw_account_id = "acc_responses_empty_tool_map"
+    auth_json = _make_auth_json(raw_account_id, "responses-empty-tool-map@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_empty_tool_map",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6",
+        "instructions": "t",
+        "input": "Generate a title for this conversation:",
+        "tools": {},
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_payload["tools"] == []
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
     raw_account_id = "acc_future_directive"
     auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")

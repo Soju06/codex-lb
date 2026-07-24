@@ -5,7 +5,7 @@ import base64
 import json
 from collections import Counter
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi.responses import StreamingResponse
@@ -22,6 +22,7 @@ from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME
 from app.db.models import Account, AccountStatus, RequestLog, StickySession, StickySessionKind
 from app.db.session import SessionLocal
 from app.dependencies import ProxyContext
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.realtime_live import realtime_call_affinity_key
 from app.modules.proxy._service.support import _signal_propagated_capacity_startup_ready
 
@@ -90,6 +91,16 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
     return generate_unique_account_id(account_id, email)
+
+
+async def _create_realtime_api_key(async_client, name: str) -> tuple[dict[str, str], ApiKeyData]:
+    response = await async_client.post("/api/api-keys/", json={"name": name})
+    assert response.status_code == 200
+    payload: dict[str, Any] = response.json()
+    return (
+        {"authorization": f"Bearer {payload['key']}"},
+        cast(ApiKeyData, SimpleNamespace(id=payload["id"])),
+    )
 
 
 def _sse_data_events(lines: list[str]) -> list[dict]:
@@ -772,8 +783,34 @@ async def test_codex_alpha_search_preserves_normalized_control_error_contract(as
 
 
 @pytest.mark.asyncio
+async def test_codex_realtime_call_requires_api_key_even_when_global_auth_is_disabled(
+    async_client,
+    monkeypatch,
+):
+    upstream_called = False
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        raise AssertionError("unauthenticated realtime call must not reach upstream")
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    response = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"v=offer\r\n",
+        headers={"content-type": "application/sdp"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert upstream_called is False
+
+
+@pytest.mark.asyncio
 async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, monkeypatch):
     account_id = await _import_account(async_client, "acc_codex_realtime", "codex-realtime@example.com")
+    auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-forward")
     calls = []
 
     async def fake_codex_control_request(
@@ -800,7 +837,7 @@ async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, m
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp"},
+        headers={"content-type": "application/sdp", **auth_headers},
     )
 
     assert response.status_code == 201
@@ -820,7 +857,7 @@ async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, m
     assert isinstance(calls[0][6], float)
     assert calls[0][6] > 0
 
-    affinity_key = realtime_call_affinity_key("rtc_123", None)
+    affinity_key = realtime_call_affinity_key("rtc_123", api_key)
     async with SessionLocal() as session:
         binding = (
             await session.execute(
@@ -841,6 +878,7 @@ async def test_codex_realtime_call_binds_account_after_forced_refresh_success(as
         "acc_codex_realtime_refresh",
         "codex-realtime-refresh@example.com",
     )
+    auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-refresh")
     calls = 0
     refresh_forces: list[bool] = []
 
@@ -870,13 +908,13 @@ async def test_codex_realtime_call_binds_account_after_forced_refresh_success(as
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp"},
+        headers={"content-type": "application/sdp", **auth_headers},
     )
 
     assert response.status_code == 201
     assert calls == 2
     assert refresh_forces == [False, True]
-    affinity_key = realtime_call_affinity_key("rtc_refreshed", None)
+    affinity_key = realtime_call_affinity_key("rtc_refreshed", api_key)
     async with SessionLocal() as session:
         binding = (
             await session.execute(
@@ -892,6 +930,7 @@ async def test_codex_realtime_call_binds_account_after_forced_refresh_success(as
 @pytest.mark.asyncio
 async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(async_client, monkeypatch):
     await _import_account(async_client, "acc_codex_realtime_binding", "codex-realtime-binding@example.com")
+    auth_headers, _api_key = await _create_realtime_api_key(async_client, "realtime-binding")
     upstream_calls = 0
 
     async def fake_codex_control_request(*_args, **_kwargs):
@@ -912,7 +951,7 @@ async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(a
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp"},
+        headers={"content-type": "application/sdp", **auth_headers},
     )
 
     assert response.status_code == 503
@@ -924,6 +963,7 @@ async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(a
 async def test_codex_realtime_call_binds_final_failover_account(async_client, monkeypatch):
     await _import_account(async_client, "acc_codex_realtime_a", "codex-realtime-a@example.com")
     await _import_account(async_client, "acc_codex_realtime_b", "codex-realtime-b@example.com")
+    auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-failover")
     captured_account_ids: list[str | None] = []
     rejected_account_id: str | None = None
 
@@ -954,7 +994,7 @@ async def test_codex_realtime_call_binds_final_failover_account(async_client, mo
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp"},
+        headers={"content-type": "application/sdp", **auth_headers},
     )
 
     assert response.status_code == 201
@@ -962,7 +1002,7 @@ async def test_codex_realtime_call_binds_final_failover_account(async_client, mo
     assert captured_account_ids[0] == captured_account_ids[1]
     assert captured_account_ids[2] != captured_account_ids[0]
 
-    affinity_key = realtime_call_affinity_key("rtc_failover", None)
+    affinity_key = realtime_call_affinity_key("rtc_failover", api_key)
     async with SessionLocal() as session:
         binding = (
             await session.execute(

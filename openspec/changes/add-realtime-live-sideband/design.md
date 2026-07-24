@@ -37,27 +37,29 @@ A synchronous observer avoids changing the established response type and cannot 
 
 The stored key is:
 
-`codex_live_call:` + SHA-256(`api_key_id-or-anonymous`, NUL, normalized call id)
+`\ncodex_live_call:` + SHA-256(`api_key_id`, NUL, normalized call id)
 
-Only the digest and selected account id enter `sticky_sessions`; raw call ids, API keys, access tokens, SDP, and attestation values do not. The existing `CODEX_SESSION` kind is used as storage only, under a reserved prefix that is never passed through generic Codex-session account selection.
+Every realtime call and live-WebSocket request requires a valid proxy API key, even when ordinary proxy routes run in trusted auth-disabled mode. There is no shared anonymous namespace.
 
-Mappings expire two hours after call creation. Resolution supplies the fixed maximum age, and each binding write opportunistically purges expired rows in the reserved prefix. This covers normal call setup and reconnect while bounding abandoned mappings without a new scheduler or schema migration.
+Only the reserved-prefix digest and selected account id enter `sticky_sessions`; raw call ids, API keys, access tokens, SDP, and attestation values do not. The existing `CODEX_SESSION` kind is used as storage only, under a newline-prefixed namespace that normal user-derived sticky keys cannot forge. Owner insertion is immutable: an existing different owner is an integrity failure rather than an upsert.
+
+Mappings expire two hours after call creation. Resolution supplies the fixed maximum age, and successful binding opportunistically purges no more than 250 expired reserved rows at most once per five minutes per process. This covers normal call setup and reconnect while bounding abandoned mappings without a new scheduler or schema migration.
 
 ### Treat the call id as hard account ownership
 
-The WebSocket route first authenticates the Codex-LB API key and validates the `rtc_` path shape. It derives the API-key-scoped key, resolves the persisted owner, and asks the existing selector for that exact preferred account with stream leasing, assignment-scope enforcement, continuity-owner treatment, and fallback disabled.
+The WebSocket route first requires a valid Codex-LB API key and validates a bounded ASCII `rtc_...` or canonical UUID path value. The call-creation binding accepts only documented `.../realtime/calls/{id}` or `.../live/{id}` `Location` shapes. It derives the API-key-scoped key, resolves the persisted owner, and asks the existing selector for that exact preferred account with stream leasing, `reattach` request-stage policy, assignment-scope enforcement, continuity-owner treatment, and fallback disabled.
 
 A missing, stale, unauthorized, paused, deleted, capped, or otherwise unavailable owner fails closed. The route never selects a replacement account because another account cannot attach to the existing upstream call.
 
 ### Do not refresh on sideband attach
 
-Successful call creation already used a valid credential. Sideband attach decrypts the bound account's currently persisted access token but does not call the refresh manager. A handshake `401`, `403`, transport error, or timeout is returned to the caller without refreshing, failing over, or changing global account health. This preserves the account-bound contract and prevents an experimental capability failure from disrupting ordinary production traffic.
+Successful call creation already used a valid credential. Sideband attach decrypts the bound account's currently persisted access token but does not call the refresh manager. A definitive HTTP handshake response is not replayed through route fallbacks; its status is returned without exposing endpoint details. A handshake `401`, `403`, transport error, or timeout is returned to the caller without refreshing, selecting another account, or changing global account health. Transport-native ping/pong liveness closes dead silent sockets without imposing an application-frame idle timeout. This preserves the account-bound contract and prevents an experimental capability failure from disrupting ordinary production traffic.
 
 ### Use a dedicated upstream live connector
 
-A shared internal WebSocket connector will retain existing direct/proxied egress, timeout, error normalization, response-header, and network-rotation behavior. The Responses connector continues to build `/codex/responses`, inject its beta header, and use its existing opt-in archive behavior. The live connector instead targets `wss://api.openai.com/v1/live/{call_id}`, preserves the downstream Frameless parser/architecture query parameters and filtered Codex handshake headers, replaces Authorization and ChatGPT account identity, never injects the Responses beta header, and explicitly disables frame-body archiving.
+A shared internal WebSocket connector will retain existing direct/proxied egress, timeout, error normalization, response-header, and network-rotation behavior. The Responses connector continues to build `/codex/responses`, inject its beta header, and use its existing opt-in archive behavior. The live connector instead targets `wss://api.openai.com/v1/live/{call_id}`, preserves the downstream Frameless parser/architecture query parameters and filtered Codex handshake headers, replaces Authorization, ChatGPT account identity, and Codex installation identity with bound-account values, never injects the Responses beta header, and explicitly disables frame-body archiving.
 
-The live route forwards text and binary frames verbatim without invoking the debug archive, even when Responses archiving is enabled. This change adds no frame, SDP, token, attestation, transcript, or audio logging.
+The live route forwards text and binary frames verbatim and propagates valid bounded close codes/reasons in both directions. It never invokes the debug archive, even when Responses archiving is enabled. Realtime-call SDP is suppressed from opt-in upstream payload tracing, transport errors use credential-safe summaries, and the ASGI scope is redacted before Uvicorn emits live handshake logs. This change adds no frame, SDP, token, attestation, transcript, or audio logging inside Codex-LB.
 
 ### Keep WebRTC media outside Codex-LB
 
@@ -67,7 +69,7 @@ The HTTP call-creation response remains unchanged, including SDP body and `Locat
 
 - **Private upstream protocol changes** → Keep the adapter transparent, scoped to exact routes, and covered by fixture-based handshake/relay tests; do not advertise a public model.
 - **Call id is created but binding persistence fails** → Fail the downstream HTTP request before exposing the call; no cross-account recovery is attempted.
-- **Abandoned bindings accumulate** → Fixed two-hour resolution expiry plus opportunistic prefix cleanup bounds active rows; a later dedicated store is possible if volume warrants it.
+- **Abandoned bindings accumulate** → Fixed two-hour resolution expiry plus throttled, bounded-batch prefix cleanup limits hot-path work and eventually removes stale reserved rows; a later dedicated store is possible if volume warrants it.
 - **A long call reconnects after two hours** → It fails closed and must create a new call. The TTL is deliberately longer than ordinary realtime session lifetime while remaining bounded.
 - **Sideband denial reflects entitlement or attestation rather than account health** → Do not penalize, refresh, or fail over the account on sideband failure.
 - **API-key deletion or changed assignment after call creation** → WebSocket authentication and exact-account selection re-evaluate current policy; the stale mapping alone grants no access.

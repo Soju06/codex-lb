@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from starlette.websockets import WebSocketState
 
+import app.core.clients.proxy as core_proxy_module
 import app.core.clients.proxy_websocket as proxy_websocket_module
+import app.modules.proxy._service.realtime_live as realtime_live_module
 import app.modules.proxy.service as proxy_service_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
@@ -32,8 +35,8 @@ from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 class _FakeStickySessions:
     def __init__(self) -> None:
         self.purges: list[dict[str, Any]] = []
-        self.key_purges: list[dict[str, Any]] = []
-        self.upserts: list[tuple[str, str, Any]] = []
+        self.insertions: list[tuple[str, str, Any]] = []
+        self.persisted_owner_id: str | None = None
         self.account_id: str | None = None
         self.get_call: dict[str, Any] | None = None
 
@@ -41,17 +44,13 @@ class _FakeStickySessions:
         self.get_call = {"key": key, **kwargs}
         return self.account_id
 
-    async def purge_key_before(self, key: str, cutoff: Any, **kwargs: Any) -> int:
-        self.key_purges.append({"key": key, "cutoff": cutoff, **kwargs})
-        return 1
-
     async def purge_before_for_key_prefix(self, cutoff: Any, **kwargs: Any) -> int:
         self.purges.append({"cutoff": cutoff, **kwargs})
         return 0
 
-    async def upsert(self, key: str, account_id: str, *, kind: Any):
-        self.upserts.append((key, account_id, kind))
-        return SimpleNamespace(key=key, account_id=account_id, kind=kind)
+    async def insert_if_absent(self, key: str, account_id: str, *, kind: Any) -> str:
+        self.insertions.append((key, account_id, kind))
+        return self.persisted_owner_id or account_id
 
 
 class _FakeRepoContext:
@@ -93,7 +92,8 @@ class _FakeDownstreamWebSocket:
     async def send_bytes(self, _data: bytes) -> None:
         raise AssertionError("no upstream frame expected")
 
-    async def close(self, *, code: int) -> None:
+    async def close(self, *, code: int, reason: str = "") -> None:
+        del reason
         self.close_codes.append(code)
         self.application_state = WebSocketState.DISCONNECTED
 
@@ -113,7 +113,8 @@ class _FakeUpstreamWebSocket:
         await self._wait_forever.wait()
         raise AssertionError("unreachable")
 
-    async def close(self) -> None:
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        del code, reason
         self.closed = True
 
     def response_header(self, _name: str) -> str | None:
@@ -145,7 +146,7 @@ class _ProxyService(_RealtimeLiveMixin):
 
     async def _resolve_realtime_call_owner(self, call_id: str, *, api_key):
         assert call_id == "rtc_example"
-        assert api_key is None
+        assert api_key is not None
         return self.owner_account_id
 
     async def _select_account_with_budget_compatible(self, _deadline: float, **kwargs):
@@ -166,6 +167,7 @@ class _ProxyService(_RealtimeLiveMixin):
     [
         ("rtc_example", "rtc_example"),
         (" rtc_example-2 ", "rtc_example-2"),
+        ("123e4567-e89b-12d3-a456-426614174000", "123e4567-e89b-12d3-a456-426614174000"),
         ("call_example", None),
         ("rtc_", None),
         ("rtc_bad/value", None),
@@ -182,6 +184,57 @@ def test_realtime_call_id_from_relative_or_absolute_location() -> None:
         == "rtc_absolute"
     )
     assert realtime_call_id_from_location({"location": "/v1/realtime/calls/call_not_live"}) is None
+    assert realtime_call_id_from_location({"location": "/unrelated/rtc_not_a_live_location"}) is None
+    assert (
+        realtime_call_id_from_location({"location": "/v1/realtime/calls/123e4567-e89b-12d3-a456-426614174000"})
+        == "123e4567-e89b-12d3-a456-426614174000"
+    )
+
+
+@pytest.mark.asyncio
+async def test_realtime_sdp_is_never_emitted_by_opt_in_payload_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_sdp = b"v=0\r\na=ice-ufrag:secret-ice-credential\r\n"
+
+    class Response:
+        status = 201
+        status_code = 201
+        headers = {"content-type": "application/sdp", "location": "/v1/live/rtc_trace"}
+
+        async def read(self) -> bytes:
+            return b"v=answer\r\n"
+
+    class RequestContext:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def request(self, *_args, **_kwargs):
+            return RequestContext()
+
+    settings = core_proxy_module.get_settings().model_copy(update={"trace_channels": {"upstream_payload"}})
+    monkeypatch.setattr(core_proxy_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.DEBUG, logger="app.core.clients.proxy"):
+        response = await core_proxy_module.codex_control_request(
+            "realtime/calls",
+            method="POST",
+            payload=secret_sdp,
+            query_params=[],
+            headers={"content-type": "application/sdp"},
+            access_token="account-token",
+            account_id="account-a",
+            session=cast(Any, Session()),
+        )
+
+    assert response.status_code == 201
+    assert "secret-ice-credential" not in caplog.text
+    assert all(getattr(record, "event", None) != "upstream_request_payload" for record in caplog.records)
 
 
 def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
@@ -198,7 +251,10 @@ def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bind_realtime_call_owner_purges_and_persists_only_digest() -> None:
+async def test_bind_realtime_call_owner_is_immutable_and_persists_only_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(realtime_live_module, "_realtime_call_cleanup_last_monotonic", 0.0)
     sticky_sessions = _FakeStickySessions()
     service = _BindingService(sticky_sessions)
     api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
@@ -212,15 +268,24 @@ async def test_bind_realtime_call_owner_purges_and_persists_only_digest() -> Non
     assert call_id == "rtc_secret"
     assert len(sticky_sessions.purges) == 1
     assert sticky_sessions.purges[0]["key_prefix"] == _REALTIME_CALL_AFFINITY_PREFIX
-    assert len(sticky_sessions.upserts) == 1
-    stored_key, stored_account_id, _kind = sticky_sessions.upserts[0]
+    assert sticky_sessions.purges[0]["limit"] == 250
+    assert len(sticky_sessions.insertions) == 1
+    stored_key, stored_account_id, _kind = sticky_sessions.insertions[0]
     assert stored_account_id == "account-a"
     assert stored_key == realtime_call_affinity_key("rtc_secret", api_key)
     assert "rtc_secret" not in stored_key
 
+    sticky_sessions.persisted_owner_id = "account-b"
+    with pytest.raises(RuntimeError, match="already bound"):
+        await service.bind_realtime_call_owner(
+            response_headers={"Location": "/v1/live/rtc_secret"},
+            account_id="account-a",
+            api_key=api_key,
+        )
+
 
 @pytest.mark.asyncio
-async def test_resolve_missing_realtime_call_purges_only_that_expired_digest() -> None:
+async def test_resolve_missing_realtime_call_is_read_only() -> None:
     sticky_sessions = _FakeStickySessions()
     service = _BindingService(sticky_sessions)
     api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
@@ -234,9 +299,7 @@ async def test_resolve_missing_realtime_call_purges_only_that_expired_digest() -
         "kind": StickySessionKind.CODEX_SESSION,
         "max_age_seconds": _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
     }
-    assert len(sticky_sessions.key_purges) == 1
-    assert sticky_sessions.key_purges[0]["key"] == affinity_key
-    assert sticky_sessions.key_purges[0]["kind"] == StickySessionKind.CODEX_SESSION
+    assert sticky_sessions.purges == []
 
 
 @pytest.mark.asyncio
@@ -267,6 +330,7 @@ async def test_live_connector_uses_frameless_url_and_omits_responses_beta(monkey
     assert captured["kwargs"]["url"] == "wss://api.openai.com/v1/live/rtc_example?intent=quicksilver&architecture=avas"
     assert captured["kwargs"]["include_responses_beta"] is False
     assert captured["kwargs"]["archive_payloads"] is False
+    assert captured["kwargs"]["live_sideband"] is True
     assert captured["kwargs"]["operation"] == "live websocket"
 
 
@@ -287,7 +351,8 @@ async def test_live_websocket_wrapper_never_archives_frames(monkeypatch: pytest.
         async def receive(self) -> UpstreamWebSocketMessage:
             return UpstreamWebSocketMessage(kind="close", close_code=1000)
 
-        async def close(self) -> None:
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
             return None
 
         def response_header(self, _name: str) -> str | None:
@@ -322,7 +387,7 @@ async def test_live_relay_forwards_downstream_text_and_binary_verbatim() -> None
             self.messages = [
                 {"type": "websocket.receive", "text": "event"},
                 {"type": "websocket.receive", "bytes": b"audio"},
-                {"type": "websocket.disconnect", "code": 1000},
+                {"type": "websocket.disconnect", "code": 1001, "reason": "client done"},
             ]
 
         async def receive(self) -> dict[str, Any]:
@@ -334,13 +399,14 @@ async def test_live_relay_forwards_downstream_text_and_binary_verbatim() -> None
         async def send_bytes(self, _data: bytes) -> None:
             raise AssertionError("no upstream frame expected")
 
-        async def close(self, *, code: int) -> None:
-            del code
+        async def close(self, *, code: int, reason: str = "") -> None:
+            del code, reason
 
     class Upstream:
         def __init__(self) -> None:
             self.text: list[str] = []
             self.binary: list[bytes] = []
+            self.close_frames: list[tuple[int, str]] = []
             self.wait = asyncio.Event()
 
         async def send_text(self, text: str) -> None:
@@ -353,6 +419,9 @@ async def test_live_relay_forwards_downstream_text_and_binary_verbatim() -> None
             await self.wait.wait()
             raise AssertionError("unreachable")
 
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.close_frames.append((code, reason))
+
     upstream = Upstream()
     await _relay_live_websocket(
         cast(Any, Downstream()),
@@ -362,6 +431,7 @@ async def test_live_relay_forwards_downstream_text_and_binary_verbatim() -> None
 
     assert upstream.text == ["event"]
     assert upstream.binary == [b"audio"]
+    assert upstream.close_frames == [(1001, "client done")]
 
 
 @pytest.mark.asyncio
@@ -371,6 +441,7 @@ async def test_live_relay_forwards_upstream_frames_and_close_code() -> None:
             self.text: list[str] = []
             self.binary: list[bytes] = []
             self.close_codes: list[int] = []
+            self.close_reasons: list[str] = []
             self.wait = asyncio.Event()
             self.application_state = WebSocketState.CONNECTED
 
@@ -384,15 +455,16 @@ async def test_live_relay_forwards_upstream_frames_and_close_code() -> None:
         async def send_bytes(self, data: bytes) -> None:
             self.binary.append(data)
 
-        async def close(self, *, code: int) -> None:
+        async def close(self, *, code: int, reason: str = "") -> None:
             self.close_codes.append(code)
+            self.close_reasons.append(reason)
 
     class Upstream:
         def __init__(self) -> None:
             self.messages = [
                 UpstreamWebSocketMessage(kind="text", text="event"),
                 UpstreamWebSocketMessage(kind="binary", data=b"audio"),
-                UpstreamWebSocketMessage(kind="close", close_code=1001),
+                UpstreamWebSocketMessage(kind="close", close_code=1001, close_reason="server done"),
             ]
             self.archived: list[UpstreamWebSocketMessage] = []
 
@@ -419,6 +491,7 @@ async def test_live_relay_forwards_upstream_frames_and_close_code() -> None:
     assert downstream.text == ["event"]
     assert downstream.binary == [b"audio"]
     assert downstream.close_codes == [1001]
+    assert downstream.close_reasons == ["server done"]
     assert [message.kind for message in upstream.archived] == ["text", "binary", "close"]
 
 
@@ -446,8 +519,8 @@ async def test_live_relay_cancellation_stops_both_direction_tasks() -> None:
         async def send_bytes(self, _data: bytes) -> None:
             raise AssertionError("unexpected bytes")
 
-        async def close(self, *, code: int) -> None:
-            del code
+        async def close(self, *, code: int, reason: str = "") -> None:
+            del code, reason
 
     class Upstream:
         async def send_text(self, _text: str) -> None:
@@ -464,7 +537,8 @@ async def test_live_relay_cancellation_stops_both_direction_tasks() -> None:
                 upstream_stopped.set()
             raise AssertionError("unreachable")
 
-        async def close(self) -> None:
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
             return None
 
         def archive_received(self, _message: UpstreamWebSocketMessage) -> None:
@@ -536,6 +610,7 @@ async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(
         codex_installation_id="installation-a",
     )
     service = _ProxyService(account, lease)
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
     downstream = _FakeDownstreamWebSocket()
     upstream = _FakeUpstreamWebSocket()
     connector_calls: list[dict[str, Any]] = []
@@ -560,9 +635,10 @@ async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(
         {
             "OpenAI-Alpha": "quicksilver=v2",
             "x-oai-attestation": "attestation",
+            "X-Codex-Installation-Id": "client-controlled-installation",
         },
         [("intent", "quicksilver"), ("architecture", "avas")],
-        api_key=None,
+        api_key=api_key,
     )
 
     assert downstream.accepted is True
@@ -572,6 +648,7 @@ async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(
     assert service.selection_kwargs["preferred_account_is_continuity_owner"] is True
     assert service.selection_kwargs["fallback_on_preferred_account_unavailable"] is False
     assert service.selection_kwargs["lease_kind"] == "stream"
+    assert service.selection_kwargs["request_stage"] == "reattach"
     assert connector_calls == [
         {
             "call_id": "rtc_example",
@@ -600,6 +677,7 @@ async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(
 @pytest.mark.asyncio
 async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypts() -> None:
     service = _ProxyService(None, None)
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
     downstream = _FakeDownstreamWebSocket()
 
     with pytest.raises(ProxyResponseError) as raised:
@@ -607,7 +685,7 @@ async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypt
             cast(Any, downstream),
             "rtc_example",
             {},
-            api_key=None,
+            api_key=api_key,
         )
 
     assert raised.value.status_code == 503

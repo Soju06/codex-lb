@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -34,11 +35,19 @@ from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 
 logger = logging.getLogger("app.modules.proxy.service")
 
-_REALTIME_CALL_AFFINITY_PREFIX = "codex_live_call:"
+_REALTIME_CALL_AFFINITY_PREFIX = "\ncodex_live_call:"
 _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS = 2 * 60 * 60
+_REALTIME_CALL_CLEANUP_INTERVAL_SECONDS = 5 * 60
+_REALTIME_CALL_CLEANUP_BATCH_SIZE = 250
 _REALTIME_CALL_ID_MAX_LENGTH = 256
 _REALTIME_CALL_ID_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-")
+_REALTIME_CALL_UUID_PATTERN = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+
+_realtime_call_cleanup_lock = asyncio.Lock()
+_realtime_call_cleanup_last_monotonic = 0.0
 
 
 class _RealtimeLiveServiceProtocol(Protocol):
@@ -70,12 +79,14 @@ def _service_connect_live_websocket() -> Callable[..., Awaitable[UpstreamRespons
 
 def normalize_realtime_call_id(value: str) -> str | None:
     normalized = value.strip()
-    if (
-        not normalized.startswith("rtc_")
-        or len(normalized) <= len("rtc_")
-        or len(normalized) > _REALTIME_CALL_ID_MAX_LENGTH
-        or any(character not in _REALTIME_CALL_ID_CHARACTERS for character in normalized)
-    ):
+    if not normalized or len(normalized) > _REALTIME_CALL_ID_MAX_LENGTH:
+        return None
+    rtc_shaped = (
+        normalized.startswith("rtc_")
+        and len(normalized) > len("rtc_")
+        and all(character in _REALTIME_CALL_ID_CHARACTERS for character in normalized)
+    )
+    if not rtc_shaped and _REALTIME_CALL_UUID_PATTERN.fullmatch(normalized) is None:
         return None
     return normalized
 
@@ -84,18 +95,19 @@ def realtime_call_id_from_location(headers: Mapping[str, str]) -> str | None:
     location = next((value for key, value in headers.items() if key.lower() == "location"), None)
     if not location:
         return None
-    path = urlparse(location).path.rstrip("/")
-    if not path:
-        return None
-    return normalize_realtime_call_id(path.rsplit("/", 1)[-1])
+    segments = [segment for segment in urlparse(location).path.split("/") if segment]
+    if len(segments) >= 2 and segments[-2] == "live":
+        return normalize_realtime_call_id(segments[-1])
+    if len(segments) >= 3 and segments[-3:-1] == ["realtime", "calls"]:
+        return normalize_realtime_call_id(segments[-1])
+    return None
 
 
-def realtime_call_affinity_key(call_id: str, api_key: ApiKeyData | None) -> str:
+def realtime_call_affinity_key(call_id: str, api_key: ApiKeyData) -> str:
     normalized = normalize_realtime_call_id(call_id)
     if normalized is None:
         raise ValueError("Invalid realtime call id")
-    scope = api_key.id if api_key is not None else "anonymous"
-    digest = hashlib.sha256(f"{scope}\0{normalized}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{api_key.id}\0{normalized}".encode()).hexdigest()
     return f"{_REALTIME_CALL_AFFINITY_PREFIX}{digest}"
 
 
@@ -109,11 +121,18 @@ def _valid_close_code(value: int | None, *, default: int) -> int:
     return default
 
 
-async def _safe_close_downstream(websocket: WebSocket, *, code: int) -> None:
+def _bounded_close_reason(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    encoded = value.encode("utf-8")[:123]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+async def _safe_close_downstream(websocket: WebSocket, *, code: int, reason: str = "") -> None:
     if websocket.application_state != WebSocketState.CONNECTED:
         return
     try:
-        await websocket.close(code=code)
+        await websocket.close(code=code, reason=_bounded_close_reason(reason))
     except (RuntimeError, WebSocketDisconnect):
         return
 
@@ -128,10 +147,15 @@ async def _relay_downstream_to_upstream(
         message = await websocket.receive()
         message_type = message.get("type")
         if message_type == "websocket.disconnect":
+            await upstream.close(
+                code=_valid_close_code(message.get("code"), default=1000),
+                reason=_bounded_close_reason(message.get("reason")),
+            )
             return
         text = message.get("text")
         if isinstance(text, str):
             if len(text.encode("utf-8")) > max_message_bytes:
+                await upstream.close(code=1009)
                 await _safe_close_downstream(websocket, code=1009)
                 return
             await upstream.send_text(text)
@@ -139,6 +163,7 @@ async def _relay_downstream_to_upstream(
         data = message.get("bytes")
         if isinstance(data, bytes):
             if len(data) > max_message_bytes:
+                await upstream.close(code=1009)
                 await _safe_close_downstream(websocket, code=1009)
                 return
             await upstream.send_bytes(data)
@@ -168,6 +193,7 @@ async def _relay_upstream_to_downstream(
             await _safe_close_downstream(
                 websocket,
                 code=_valid_close_code(message.close_code, default=1000),
+                reason=message.close_reason or "",
             )
             return
         if message.kind == "error":
@@ -215,13 +241,38 @@ async def _relay_live_websocket(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _maybe_purge_realtime_call_affinity(proxy: _RealtimeLiveServiceProtocol) -> None:
+    """Throttle cleanup and delete at most one bounded batch per process."""
+
+    global _realtime_call_cleanup_last_monotonic
+    now = time.monotonic()
+    if now - _realtime_call_cleanup_last_monotonic < _REALTIME_CALL_CLEANUP_INTERVAL_SECONDS:
+        return
+    async with _realtime_call_cleanup_lock:
+        now = time.monotonic()
+        if now - _realtime_call_cleanup_last_monotonic < _REALTIME_CALL_CLEANUP_INTERVAL_SECONDS:
+            return
+        _realtime_call_cleanup_last_monotonic = now
+        cutoff = utcnow() - timedelta(seconds=_REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS)
+        try:
+            async with proxy._repo_factory() as repos:
+                await repos.sticky_sessions.purge_before_for_key_prefix(
+                    cutoff,
+                    kind=StickySessionKind.CODEX_SESSION,
+                    key_prefix=_REALTIME_CALL_AFFINITY_PREFIX,
+                    limit=_REALTIME_CALL_CLEANUP_BATCH_SIZE,
+                )
+        except Exception:
+            logger.warning("Failed to purge expired realtime call affinity rows")
+
+
 class _RealtimeLiveMixin:
     async def bind_realtime_call_owner(
         self,
         *,
         response_headers: Mapping[str, str],
         account_id: str,
-        api_key: ApiKeyData | None,
+        api_key: ApiKeyData,
     ) -> str | None:
         call_id = realtime_call_id_from_location(response_headers)
         if call_id is None:
@@ -230,41 +281,38 @@ class _RealtimeLiveMixin:
 
         proxy = cast(_RealtimeLiveServiceProtocol, self)
         affinity_key = realtime_call_affinity_key(call_id, api_key)
-        cutoff = utcnow() - timedelta(seconds=_REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS)
         async with proxy._repo_factory() as repos:
-            await repos.sticky_sessions.purge_before_for_key_prefix(
-                cutoff,
-                kind=StickySessionKind.CODEX_SESSION,
-                key_prefix=_REALTIME_CALL_AFFINITY_PREFIX,
-            )
-            await repos.sticky_sessions.upsert(
+            persisted_owner_id = await repos.sticky_sessions.get_account_id(
                 affinity_key,
-                account_id,
                 kind=StickySessionKind.CODEX_SESSION,
+                max_age_seconds=_REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
             )
+            if persisted_owner_id is None:
+                persisted_owner_id = await repos.sticky_sessions.insert_if_absent(
+                    affinity_key,
+                    account_id,
+                    kind=StickySessionKind.CODEX_SESSION,
+                )
+        if persisted_owner_id != account_id:
+            logger.error("Realtime call ownership conflict rejected")
+            raise RuntimeError("Realtime call is already bound to another account")
+        await _maybe_purge_realtime_call_affinity(proxy)
         return call_id
 
     async def _resolve_realtime_call_owner(
         self,
         call_id: str,
         *,
-        api_key: ApiKeyData | None,
+        api_key: ApiKeyData,
     ) -> str | None:
         proxy = cast(_RealtimeLiveServiceProtocol, self)
         affinity_key = realtime_call_affinity_key(call_id, api_key)
         async with proxy._repo_factory() as repos:
-            account_id = await repos.sticky_sessions.get_account_id(
+            return await repos.sticky_sessions.get_account_id(
                 affinity_key,
                 kind=StickySessionKind.CODEX_SESSION,
                 max_age_seconds=_REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
             )
-            if account_id is None:
-                await repos.sticky_sessions.purge_key_before(
-                    affinity_key,
-                    utcnow() - timedelta(seconds=_REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS),
-                    kind=StickySessionKind.CODEX_SESSION,
-                )
-            return account_id
 
     async def proxy_realtime_live_websocket(
         self,
@@ -273,7 +321,7 @@ class _RealtimeLiveMixin:
         headers: Mapping[str, str],
         query_params: Mapping[str, str] | Sequence[tuple[str, str]] = (),
         *,
-        api_key: ApiKeyData | None,
+        api_key: ApiKeyData,
         client_ip: str | None = None,
     ) -> None:
         normalized_call_id = normalize_realtime_call_id(call_id)
@@ -304,6 +352,7 @@ class _RealtimeLiveMixin:
             preferred_account_is_continuity_owner=True,
             fallback_on_preferred_account_unavailable=False,
             lease_kind="stream",
+            request_stage="reattach",
         )
         account = selection.account
         account_lease: AccountLease | None = selection.lease
@@ -337,7 +386,7 @@ class _RealtimeLiveMixin:
                 )
             access_token = proxy._encryptor.decrypt(encrypted_access_token)
             forwarded_headers = apply_codex_installation_headers(
-                headers,
+                {key: value for key, value in headers.items() if key.lower() != "x-codex-installation-id"},
                 getattr(account, "codex_installation_id", None),
             )
             route = await proxy._resolve_upstream_route_for_account(
@@ -375,7 +424,7 @@ class _RealtimeLiveMixin:
             raise
         except UpstreamWebSocketTransportError as exc:
             log_error_code = exc.error_code
-            log_error_message = str(exc)
+            log_error_message = "Realtime live websocket transport failed"
             await _safe_close_downstream(websocket, code=1011)
         except Exception as exc:
             log_error_code = "realtime_live_unavailable"
@@ -395,7 +444,10 @@ class _RealtimeLiveMixin:
             try:
                 if upstream is not None:
                     try:
-                        await upstream.close()
+                        await asyncio.wait_for(
+                            upstream.close(),
+                            timeout=max(1.0, settings.upstream_connect_timeout_seconds),
+                        )
                     except Exception:
                         logger.warning("Failed to close realtime live upstream websocket")
                         log_status = "error"

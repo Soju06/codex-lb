@@ -75,6 +75,7 @@ class UpstreamWebSocketMessage:
     text: str | None = None
     data: bytes | None = None
     close_code: int | None = None
+    close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
 
@@ -137,15 +138,22 @@ class UpstreamResponsesWebSocket(Protocol):
 
     async def receive(self) -> UpstreamWebSocketMessage: ...
 
-    async def close(self) -> None: ...
+    async def close(self, code: int = 1000, reason: str = "") -> None: ...
 
     def response_header(self, name: str) -> str | None: ...
 
 
 class WebsocketsResponsesWebSocket:
-    def __init__(self, connection: ClientConnection, *, uses_proxy: bool = False) -> None:
+    def __init__(
+        self,
+        connection: ClientConnection,
+        *,
+        uses_proxy: bool = False,
+        preserve_close_semantics: bool = False,
+    ) -> None:
         self._connection = connection
         self._uses_proxy = uses_proxy
+        self._preserve_close_semantics = preserve_close_semantics
 
     async def send_text(self, text: str) -> None:
         try:
@@ -163,17 +171,31 @@ class WebsocketsResponsesWebSocket:
         try:
             message = await self._connection.recv()
         except ConnectionClosedOK as exc:
-            return UpstreamWebSocketMessage(kind="close", close_code=_close_code_from_exception(exc))
+            return UpstreamWebSocketMessage(
+                kind="close",
+                close_code=_close_code_from_exception(exc),
+                close_reason=_close_reason_from_exception(exc),
+            )
         except ConnectionClosedError as exc:
+            if self._preserve_close_semantics and exc.rcvd is not None:
+                return UpstreamWebSocketMessage(
+                    kind="close",
+                    close_code=_close_code_from_exception(exc),
+                    close_reason=_close_reason_from_exception(exc),
+                )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
             # ConnectionClosedError describes an incomplete close handshake,
-            # not generic transport provenance. Let relay owners map ordinary
-            # closes to stream_incomplete while preserving classified network failures.
+            # not generic transport provenance. Let Responses relay owners map
+            # it to stream_incomplete while live relays preserve received closes.
             return UpstreamWebSocketMessage(
                 kind="error",
                 close_code=_close_code_from_exception(exc),
-                error=str(exc),
+                error=(
+                    "Upstream websocket closed without a complete handshake"
+                    if self._preserve_close_semantics
+                    else str(exc)
+                ),
                 error_code=_relay_receive_error_code(error_code),
             )
         except Exception as exc:
@@ -191,8 +213,8 @@ class WebsocketsResponsesWebSocket:
             return UpstreamWebSocketMessage(kind="binary", data=message)
         return UpstreamWebSocketMessage(kind="error", error=f"Unexpected websocket message type: {type(message)!r}")
 
-    async def close(self) -> None:
-        await self._connection.close()
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._connection.close(code=code, reason=reason)
 
     def response_header(self, name: str) -> str | None:
         response = getattr(self._connection, "response", None)
@@ -254,6 +276,7 @@ class CodexResponsesWebSocket:
             return UpstreamWebSocketMessage(
                 kind="close",
                 close_code=_aiohttp_ws_close_code(self._websocket, msg),
+                close_reason=_aiohttp_ws_close_reason(msg),
             )
         if msg.type == aiohttp.WSMsgType.ERROR:
             exception = msg.data if isinstance(msg.data, BaseException) else None
@@ -279,9 +302,9 @@ class CodexResponsesWebSocket:
             return UpstreamWebSocketMessage(kind="binary", data=bytes(msg.data) if isinstance(msg.data, bytes) else b"")
         return UpstreamWebSocketMessage(kind="error", error=f"Unexpected ws type: {msg.type!r}")
 
-    async def close(self) -> None:
+    async def close(self, code: int = 1000, reason: str = "") -> None:
         try:
-            result = self._websocket.close()
+            result = self._websocket.close(code=code, message=reason.encode("utf-8"))
             if asyncio.iscoroutine(result):
                 await result
         finally:
@@ -395,8 +418,8 @@ class ArchivingResponsesWebSocket:
                 extra={"frame_type": message.kind, "close_code": message.close_code},
             )
 
-    async def close(self) -> None:
-        await self._wrapped.close()
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._wrapped.close(code=code, reason=reason)
 
     def response_header(self, name: str) -> str | None:
         return self._wrapped.response_header(name)
@@ -550,6 +573,11 @@ def _aiohttp_ws_close_code(websocket: Any, message: aiohttp.WSMessage) -> int | 
     return close_code if isinstance(close_code, int) else None
 
 
+def _aiohttp_ws_close_reason(message: aiohttp.WSMessage) -> str | None:
+    reason = message.extra
+    return reason if isinstance(reason, str) and reason else None
+
+
 def _responses_websocket_url(base_url: str) -> str:
     parsed = urlparse(f"{base_url.rstrip('/')}/codex/responses")
     if parsed.scheme == "https":
@@ -572,6 +600,7 @@ async def _connect_upstream_websocket(
     allow_direct_egress: bool = False,
     include_responses_beta: bool,
     archive_payloads: bool,
+    live_sideband: bool = False,
     operation: str,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
@@ -590,15 +619,21 @@ async def _connect_upstream_websocket(
         endpoint_id = route.endpoint_id
         active_route = route
         fallback_used = False
+        route_connect_kwargs: dict[str, Any] = {
+            "headers": upstream_headers,
+            "timeout": settings.upstream_connect_timeout_seconds,
+            "max_msg_size": settings.max_sse_event_bytes,
+        }
+        if live_sideband:
+            route_connect_kwargs["heartbeat"] = settings.proxy_downstream_websocket_idle_timeout_seconds
         try:
             opener = getattr(active_codex_client, "open_ws_with_route_metadata", None)
             if callable(opener):
                 result = await opener(
                     url,
                     route=route,
-                    headers=upstream_headers,
-                    timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    retry_handshake_status=not live_sideband,
+                    **route_connect_kwargs,
                 )
                 context = result.context
                 websocket = result.websocket
@@ -609,9 +644,7 @@ async def _connect_upstream_websocket(
                 context = await active_codex_client.ws_connect(
                     url,
                     route=route,
-                    headers=upstream_headers,
-                    timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=settings.max_sse_event_bytes,
+                    **route_connect_kwargs,
                 )
                 websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
                 if not hasattr(context, "__aenter__"):
@@ -621,11 +654,20 @@ async def _connect_upstream_websocket(
             if owns_codex_client:
                 await active_codex_client.close()
             error_code = exc.error_code or "upstream_unavailable"
+            status_code = exc.status_code if exc.status_code is not None and 400 <= exc.status_code <= 599 else 502
+            if live_sideband:
+                message = (
+                    f"Upstream websocket handshake failed with HTTP {status_code}"
+                    if exc.status_code is not None
+                    else "Upstream websocket connection failed"
+                )
+            else:
+                message = str(exc)
             raise ProxyResponseError(
-                502,
-                openai_error(error_code, str(exc), error_type="server_error"),
+                status_code if live_sideband else 502,
+                openai_error(error_code, message, error_type="server_error"),
                 failure_phase="connect",
-                retryable_same_contract=error_code == PROCESS_NETWORK_UNAVAILABLE_CODE,
+                retryable_same_contract=(not live_sideband and error_code == PROCESS_NETWORK_UNAVAILABLE_CODE),
             ) from exc
         except Exception:
             if owns_codex_client:
@@ -658,12 +700,12 @@ async def _connect_upstream_websocket(
         "additional_headers": upstream_headers or None,
         "user_agent_header": user_agent,
         "open_timeout": settings.upstream_connect_timeout_seconds,
-        # Long Codex turns can spend minutes in upstream reasoning without
-        # sending application frames. Keep transport pings enabled so
-        # intermediaries still see liveness, but disable the library's pong
-        # watchdog so codex-lb's own request/idle budgets decide when a
-        # healthy long turn has stalled.
-        "ping_timeout": None,
+        # Long Responses turns can spend minutes without application frames,
+        # so that existing transport keeps its own watchdog disabled. Live
+        # sideband traffic uses ping/pong liveness rather than an application-
+        # frame idle timeout because WebRTC media may remain healthy while the
+        # sideband itself is silent.
+        "ping_timeout": (settings.proxy_downstream_websocket_idle_timeout_seconds if live_sideband else None),
         "max_size": settings.max_sse_event_bytes,
     }
     connect_kwargs["proxy"] = proxy_url
@@ -707,7 +749,11 @@ async def _connect_upstream_websocket(
         ) from exc
 
     return ArchivingResponsesWebSocket(
-        WebsocketsResponsesWebSocket(response, uses_proxy=proxy_url is not None),
+        WebsocketsResponsesWebSocket(
+            response,
+            uses_proxy=proxy_url is not None,
+            preserve_close_semantics=live_sideband,
+        ),
         url=url,
         headers=upstream_headers,
         account_id=account_id,
@@ -766,6 +812,7 @@ async def connect_live_websocket(
         allow_direct_egress=allow_direct_egress,
         include_responses_beta=False,
         archive_payloads=False,
+        live_sideband=True,
         operation="live websocket",
     )
 
@@ -776,6 +823,13 @@ def _close_code_from_exception(exc: ConnectionClosedOK | ConnectionClosedError) 
     if exc.sent is not None:
         return int(exc.sent.code)
     return None
+
+
+def _close_reason_from_exception(exc: ConnectionClosedOK | ConnectionClosedError) -> str | None:
+    frame = exc.rcvd if exc.rcvd is not None else exc.sent
+    if frame is None:
+        return None
+    return frame.reason or None
 
 
 def _codex_websocket_response_headers(websocket: object, context: object | None) -> Mapping[str, str]:

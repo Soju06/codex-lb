@@ -404,10 +404,6 @@ metrics:
     enabled: true                  # Alerting rules
   grafanaDashboard:
     enabled: true                  # Pre-built dashboards
-    folder: Applications/Codex LB  # Nested folder path (when supported by the sidecar)
-    titles:
-      codex-lb.json: Overview
-      ttft-breakdown.json: TTFT Breakdown
 externalSecrets:
   enabled: true                    # Use External Secrets Operator
 ```
@@ -418,6 +414,18 @@ Install with:
 helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
   -f deploy/helm/codex-lb/values-prod.yaml \
   --set externalDatabase.url='postgresql+asyncpg://user:pass@db.example.com:5432/codexlb'
+```
+
+**Optional Grafana hierarchy:** sidecars that map annotation paths to nested
+folders can render concise dashboard names under an installation-specific path:
+
+```yaml
+metrics:
+  grafanaDashboard:
+    folder: Applications/Codex LB
+    titles:
+      codex-lb.json: Overview
+      ttft-breakdown.json: TTFT Breakdown
 ```
 
 ### Graceful Shutdown Tuning

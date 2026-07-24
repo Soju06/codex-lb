@@ -18,8 +18,10 @@ Covers:
 - backend and frontend regression coverage.
 
 Does not cover conversation inference/backfill for historical rows or any change
-to proxy routing, request-log capture, or conversation-ID detection. Date and
-timeframe controls are intentionally not part of the Conversations view.
+to proxy routing, request-log capture, or conversation-ID detection. A bounded
+day-range selector (`1d`/`7d`/`30d`, default `7d`, no unbounded "all") drives the
+list `since` parameter; it is intentionally bounded to keep the 30-second
+dashboard poll off the full-history scan path.
 
 Capability ownership for this change is `frontend-architecture`; no
 `proxy-runtime-observability` change-level delta is retained.
@@ -32,11 +34,22 @@ Capability ownership for this change is `frontend-architecture`; no
   non-empty conversation identity, exclude `warmup` and `limit_warmup` request
   kinds, and exclude soft-deleted rows (`deleted_at IS NULL`). This keeps list
   and detail totals consistent.
-- **Search selects conversations before aggregation.** The list accepts only
-  `limit`, `offset`, and `search`. Search is case-insensitive and checks the
+- **Search selects conversations before aggregation.** The list accepts `limit`,
+  `offset`, `search`, and `since`. Search is case-insensitive and checks the
   normalized conversation ID and every eligible row's user-agent family. Once a
   conversation matches, all eligible rows in that conversation are aggregated;
   rows that did not contain the matching text remain included.
+- **`since` filters by the conversation's first message, not by every row.** The
+  filter is applied as a post-grouping predicate (`HAVING MIN(requested_at) >=
+  since`) on the conversation summary, so a conversation is selected only when
+  its earliest eligible row falls in the window. This is the operator-requested
+  "first message in range" semantic. Because a selected conversation has
+  `MIN(requested_at) >= since`, all of its eligible rows are necessarily within
+  or after the window, so per-conversation aggregates are never clipped. The
+  grouped total is display-only pagination metadata and is served from the same
+  short-TTL per-signature cache as the request-log listing total (issue #1340),
+  keyed by `search` and `since`, so the 30-second dashboard poll does not
+  re-scan the full eligible history on every request.
 - **List order is stable.** Groups are ordered by `lastRequest DESC`, then
   normalized conversation ID ASC; pagination is applied after this order.
 - **Representative selection is deterministic.** Representatives use
@@ -88,7 +101,17 @@ Request Logs remains the default and `view=conversations` remains the URL-backed
 alternative. The separate selector to the title's right is removed. Each view's
 pagination and remaining filters retain separate URL-backed query state;
 switching views does not reinterpret, overwrite, or clear inactive state. The
-Conversations view does not render a filter input above its list.
+Conversations view does not render a free-text filter input above its list.
+
+A day-range selector with exactly `1d`, `7d`, and `30d` options (default `7d`, no
+unbounded "all") is rendered at the top-right of the dashboard page, alongside
+the refresh action, shown only while the Conversations view is active. It
+mirrors the existing dashboard overview timeframe selector's values and default.
+The selected value is persisted in the URL as `conversationTimeframe`, resets
+pagination to offset 0 on change, and is converted client-side to a
+`now − Nd` ISO timestamp sent to the list endpoint as `since`. This bounds the
+working set the 30-second poll scans, and the short-TTL grouped-count cache
+(pre-grouping `total`) keeps the repeated poll off the full-history scan path.
 
 The detail dialog puts conversation ID/start/latest on row one and account
 count/total elapsed/dominant user-agent on row two. Its displayed model/effort
@@ -107,14 +130,19 @@ does not render a copy action.
   representatives and remaining counts, nullable/multiple API keys, cumulative
   elapsed time at both levels, token/cost semantics, exact detail columns,
   default `reqs DESC`, no API sort parameter, encoded blank detail path, and
-  unknown-ID 404 behavior.
+  unknown-ID 404 behavior. The `since` first-message-in-window filter is covered
+  by a conversation that spans the boundary (excluded) and one started in window
+  (included), plus search/pagination composition and the short-TTL grouped-count
+  cache behavior under a positive TTL.
 - Frontend coverage asserts the Request Logs default, title-styled selector URL
-  state with no duplicate right-side selector, no conversation filter input,
-  independent retained URL query state, exact reordered list columns, shared
-  request-log time presentation, human-readable account labels, subordinate
-  cached tokens, absence of the conversation-ID copy action, detail
-  loading/error/retry behavior, nullable aggregate fallbacks, empty state,
-  detail layout, and client-side-only sorting.
+  state with no duplicate right-side selector, no conversation free-text filter
+  input, the day-range selector (options, default, URL-backed
+  `conversationTimeframe`, `since` param derivation, pagination reset, and
+  per-view state independence), independent retained URL query state, exact
+  reordered list columns, shared request-log time presentation, human-readable
+  account labels, subordinate cached tokens, absence of the conversation-ID copy
+  action, detail loading/error/retry behavior, nullable aggregate fallbacks,
+  empty state, detail layout, and client-side-only sorting.
 - OpenSpec validation and whitespace validation must pass before this change is
   considered ready. Main capability specs are not synchronized by this change.
 

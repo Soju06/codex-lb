@@ -165,6 +165,33 @@ async def _seed_conversations(base):
         assert raw_conversation_id == "  Conv-A  "
 
 
+async def _seed_conversation_rows(rows: list[_ConversationSeed]) -> None:
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        logs = RequestLogsRepository(session)
+        for account_id in {row.account_id for row in rows}:
+            await accounts.upsert(_account(account_id))
+        for row in rows:
+            await logs.add_log(
+                account_id=row.account_id,
+                request_id=row.request_id,
+                model=row.model,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                latency_ms=row.latency_ms,
+                status="success",
+                error_code=None,
+                requested_at=row.requested_at,
+                cached_input_tokens=row.cached_input_tokens,
+                reasoning_tokens=row.reasoning_tokens,
+                reasoning_effort=row.reasoning_effort,
+                api_key_id=row.api_key_id,
+                useragent_group=row.useragent_group,
+                conversation_id=row.conversation_id,
+                cost_usd=row.cost_usd,
+            )
+
+
 @pytest.mark.asyncio
 async def test_conversation_list_contract_search_and_aggregate(async_client, db_setup):
     base = utcnow().replace(microsecond=0)
@@ -791,3 +818,209 @@ async def test_conversation_details_reasoning_effort_tie_uses_explicit_rank(asyn
         {"model": "same-model", "reasoningEffort": ""},
         {"model": "same-model", "reasoningEffort": "high"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_since_filter_excludes_conversation_started_before_window(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="since-old-1",
+                account_id="since-old-account-a",
+                model="since-old-model-a",
+                reasoning_effort=None,
+                input_tokens=100,
+                output_tokens=10,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=1.0,
+                requested_at=base - timedelta(days=10),
+                conversation_id="conv-old",
+            ),
+            _ConversationSeed(
+                request_id="since-old-2",
+                account_id="since-old-account-b",
+                model="since-old-model-b",
+                reasoning_effort=None,
+                input_tokens=200,
+                output_tokens=20,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=2.0,
+                requested_at=base - timedelta(days=1),
+                conversation_id="conv-old",
+            ),
+            _ConversationSeed(
+                request_id="since-new-1",
+                account_id="since-new-account-a",
+                model="since-new-model-a",
+                reasoning_effort=None,
+                input_tokens=30,
+                output_tokens=7,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=30,
+                cost_usd=0.3,
+                requested_at=base - timedelta(days=1),
+                conversation_id="conv-new",
+            ),
+            _ConversationSeed(
+                request_id="since-new-2",
+                account_id="since-new-account-b",
+                model="since-new-model-b",
+                reasoning_effort=None,
+                input_tokens=40,
+                output_tokens=8,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=40,
+                cost_usd=0.4,
+                requested_at=base - timedelta(hours=12),
+                conversation_id="conv-new",
+            ),
+        ]
+    )
+
+    since = base - timedelta(days=7)
+    response = await async_client.get(f"/api/conversations?since={since.isoformat()}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["conversationId"] for row in body["conversations"]] == ["conv-new"]
+    assert body["total"] == 1
+    entry = body["conversations"][0]
+    assert entry["totalTokens"] == 85
+    assert entry["totalCostUsd"] == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_since_filter_composes_with_search(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="since-search-match",
+                account_id="since-search-account-a",
+                model="since-search-model-a",
+                reasoning_effort=None,
+                input_tokens=10,
+                output_tokens=5,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=0.1,
+                requested_at=base - timedelta(days=2),
+                conversation_id="conv-search-match",
+                useragent_group="known-since-search-term",
+            ),
+            _ConversationSeed(
+                request_id="since-search-other",
+                account_id="since-search-account-b",
+                model="since-search-model-b",
+                reasoning_effort=None,
+                input_tokens=20,
+                output_tokens=5,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=0.2,
+                requested_at=base - timedelta(days=1),
+                conversation_id="conv-search-other",
+                useragent_group="unrelated-agent",
+            ),
+        ]
+    )
+
+    since = base - timedelta(days=7)
+    response = await async_client.get(
+        "/api/conversations",
+        params={"since": since.isoformat(), "search": "known-since-search-term"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["conversationId"] for row in body["conversations"]] == ["conv-search-match"]
+    assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_conversation_listing_total_cached_across_identical_signatures(
+    async_client, db_setup, monkeypatch
+):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+
+    base = utcnow().replace(microsecond=0)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="cache-old",
+                account_id="cache-account-old",
+                model="cache-model-old",
+                reasoning_effort=None,
+                input_tokens=10,
+                output_tokens=1,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=0.1,
+                requested_at=base - timedelta(days=6),
+                conversation_id="cache-old-conversation",
+            ),
+            _ConversationSeed(
+                request_id="cache-new",
+                account_id="cache-account-new",
+                model="cache-model-new",
+                reasoning_effort=None,
+                input_tokens=20,
+                output_tokens=2,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=0.2,
+                requested_at=base - timedelta(hours=12),
+                conversation_id="cache-new-conversation",
+            ),
+        ]
+    )
+
+    wide_since = base - timedelta(days=7)
+    wide_url = f"/api/conversations?since={wide_since.isoformat()}"
+    first = await async_client.get(wide_url)
+    second = await async_client.get(wide_url)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    t1 = first.json()["total"]
+    t2 = second.json()["total"]
+    assert t1 == 2
+    assert t2 == t1
+    assert (None, wide_since) in logs_repository_module._recent_count_cache
+
+    logs_repository_module._clear_recent_count_cache()
+    narrow_since = base - timedelta(days=1)
+    narrow = await async_client.get(f"/api/conversations?since={narrow_since.isoformat()}")
+    assert narrow.status_code == 200
+    assert narrow.json()["total"] == 1
+    assert (None, narrow_since) in logs_repository_module._recent_count_cache
+
+    matching_old = await async_client.get(
+        "/api/conversations",
+        params={"since": wide_since.isoformat(), "search": "cache-old"},
+    )
+    matching_new = await async_client.get(
+        "/api/conversations",
+        params={"since": wide_since.isoformat(), "search": "cache-new"},
+    )
+    assert matching_old.status_code == 200
+    assert matching_new.status_code == 200
+    assert matching_old.json()["total"] == 1
+    assert matching_new.json()["total"] == 1
+    assert ("cache-old", wide_since) in logs_repository_module._recent_count_cache
+    assert ("cache-new", wide_since) in logs_repository_module._recent_count_cache
+
+    logs_repository_module._clear_recent_count_cache()

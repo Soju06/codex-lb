@@ -638,6 +638,7 @@
   "dashboard.filters.noOptions": "无选项",
   "dashboard.filters.overview": "概览",
   "dashboard.filters.overviewTimeframe": "概览时间范围",
+  "dashboard.filters.conversationTimeframe": "对话时间范围",
   "dashboard.filters.removeStale": "移除失效的 {{label}}",
   "dashboard.filters.searchPlaceholder": "搜索请求 ID、账户、API Key、Model、错误...",
   "dashboard.filters.stale": "已失效",

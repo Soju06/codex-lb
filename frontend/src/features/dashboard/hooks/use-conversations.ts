@@ -4,7 +4,9 @@ import { useSearchParams } from "react-router-dom";
 
 import { getConversations, type ConversationListFilters } from "@/features/dashboard/api";
 import {
+  DEFAULT_CONVERSATION_TIMEFRAME,
   ConversationFilterStateSchema,
+  parseConversationTimeframe,
   type ConversationFilterState,
 } from "@/features/dashboard/schemas";
 
@@ -12,12 +14,14 @@ const DEFAULT_CONVERSATION_FILTER_STATE: ConversationFilterState = {
   search: "",
   limit: 25,
   offset: 0,
+  timeframe: DEFAULT_CONVERSATION_TIMEFRAME,
 };
 
 const CONVERSATION_PARAM_KEYS = [
   "conversationSearch",
   "conversationLimit",
   "conversationOffset",
+  "conversationTimeframe",
 ] as const;
 
 function parseNumber(value: string | null, fallback: number): number {
@@ -39,6 +43,7 @@ function parseConversationFilterState(params: URLSearchParams): ConversationFilt
       params.get("conversationOffset"),
       DEFAULT_CONVERSATION_FILTER_STATE.offset,
     ),
+    timeframe: parseConversationTimeframe(params.get("conversationTimeframe")),
   };
   const parsed = ConversationFilterStateSchema.safeParse(candidate);
   if (parsed.success) {
@@ -60,7 +65,22 @@ function writeConversationFilterState(
   }
   params.set("conversationLimit", String(state.limit));
   params.set("conversationOffset", String(state.offset));
+  if (state.timeframe === DEFAULT_CONVERSATION_TIMEFRAME) {
+    params.delete("conversationTimeframe");
+  } else {
+    params.set("conversationTimeframe", state.timeframe);
+  }
   return params;
+}
+
+function timeframeToSinceIso(timeframe: ConversationFilterState["timeframe"]): string {
+  const now = Date.now();
+  const lookup: Record<ConversationFilterState["timeframe"], number> = {
+    "1d": 86400000,
+    "7d": 604800000,
+    "30d": 2592000000,
+  };
+  return new Date(now - lookup[timeframe]).toISOString();
 }
 
 export type UseConversationsOptions = {
@@ -81,6 +101,7 @@ export function useConversations(options: UseConversationsOptions = {}) {
       search: filters.search || undefined,
       limit: filters.limit,
       offset: filters.offset,
+      since: timeframeToSinceIso(filters.timeframe),
     }),
     [filters],
   );

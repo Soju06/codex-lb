@@ -29,22 +29,37 @@ jobs:
       # release-please bumps pyproject.toml but cannot regenerate uv.lock, so the
       # stable/beta release guards fail until the lockfile records the new project
       # version. Sync it here so release PRs are mergeable without a manual commit.
+      # The branch is resolved from the canonical open release PR (not the action's
+      # update-only `pr` output) so a rerun after a failed sync still repairs it.
+      - name: Find open release PR branch
+        id: release-branch
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          branch=$(gh pr list --repo "${{ github.repository }}" --state open \
+            --label "autorelease: pending" --json headRefName,headRepositoryOwner \
+            --jq '[.[]
+                   | select(.headRefName | startswith("release-please--"))
+                   | select(.headRepositoryOwner.login == "${{ github.repository_owner }}")
+                  ][0].headRefName // empty')
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
       - name: Checkout release branch
-        if: ${{ steps.release-please.outputs.pr }}
+        if: ${{ steps.release-branch.outputs.branch != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ fromJSON(steps.release-please.outputs.pr).headBranchName }}
+          ref: ${{ steps.release-branch.outputs.branch }}
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
 
       - name: Set up uv
-        if: ${{ steps.release-please.outputs.pr }}
+        if: ${{ steps.release-branch.outputs.branch != '' }}
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
           python-version: "3.13"
           enable-cache: true
 
       - name: Sync uv.lock with the release version
-        if: ${{ steps.release-please.outputs.pr }}
+        if: ${{ steps.release-branch.outputs.branch != '' }}
         run: |
           uv lock
           if git diff --quiet -- uv.lock; then

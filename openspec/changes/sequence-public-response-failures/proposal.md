@@ -12,6 +12,8 @@ error.
 - Track the next public Responses sequence while normalizing SSE events.
 - Assign the next numeric sequence to terminal `response.failed` events that
   omit it or carry a non-numeric value.
+- Give a synthesized leading `response.created` and its following failure
+  distinct consecutive sequences.
 - Preserve valid upstream sequence numbers and Codex-private stream behavior.
 - Cover bridge failures after reasoning output and reused bridge sessions.
 

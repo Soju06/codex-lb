@@ -7,8 +7,11 @@ Public streaming `POST /v1/responses` MUST emit every terminal
 strict OpenAI SDK Responses parsers recognize the terminal failure. If the
 upstream or proxy-generated event omits a finite integer sequence, the public
 normalizer MUST assign the next sequence after all finite integer sequences it
-has observed in the same downstream stream. If no finite integer sequence has
-been observed, numbering MUST begin at zero.
+has observed in the same downstream stream. If it also synthesizes a leading
+`response.created` from that failure, the created event MUST consume the next
+sequence and the failure MUST use the following sequence so both events have
+distinct values. Otherwise, if no finite integer sequence has been observed,
+failure numbering MUST begin at zero.
 
 The public normalizer MUST preserve an existing finite integer
 `sequence_number` and advance its next-sequence watermark accordingly. This
@@ -22,10 +25,19 @@ repair MUST NOT change Codex-private backend stream shapes.
   `sequence_number`
 - **AND** a strict OpenAI SDK parser recognizes it as a terminal failure
 
-#### Scenario: Failure without prior sequence starts at zero
+#### Scenario: Leading failure follows synthesized created sequence
 
 - **GIVEN** public `/v1/responses` has not emitted a finite integer sequence
-- **WHEN** the proxy emits a terminal `response.failed` without one
+- **WHEN** an unsequenced leading `response.failed` requires a synthesized
+  `response.created`
+- **THEN** the created event carries `sequence_number = 0`
+- **AND** the terminal failure carries `sequence_number = 1`
+
+#### Scenario: Failure after an unsequenced created event starts at zero
+
+- **GIVEN** public `/v1/responses` has emitted an unsequenced
+  `response.created` and no finite integer sequence
+- **WHEN** the proxy synthesizes a terminal `response.failed`
 - **THEN** the terminal event carries `sequence_number = 0`
 
 #### Scenario: Valid upstream failure sequence remains unchanged

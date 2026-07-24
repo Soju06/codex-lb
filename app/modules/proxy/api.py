@@ -6498,18 +6498,26 @@ async def _normalize_public_responses_stream(
         finally:
             pre_created_buffer.clear()
 
-    def normalize_public_failure_sequence(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    def normalize_public_failure_sequence(
+        payload: dict[str, JsonValue],
+        *,
+        reserve_created_sequence: bool,
+    ) -> tuple[dict[str, JsonValue], int | None]:
         nonlocal next_sequence_number
         sequence_number = payload.get("sequence_number")
         if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
             next_sequence_number = max(next_sequence_number, sequence_number + 1)
-            return payload
+            return payload, None
         if enforce_openai_sdk_contract and payload.get("type") == "response.failed":
+            created_sequence_number: int | None = None
+            if reserve_created_sequence:
+                created_sequence_number = next_sequence_number
+                next_sequence_number += 1
             normalized_payload = dict(payload)
             normalized_payload["sequence_number"] = next_sequence_number
             next_sequence_number += 1
-            return normalized_payload
-        return payload
+            return normalized_payload, created_sequence_number
+        return payload, None
 
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
@@ -6552,8 +6560,21 @@ async def _normalize_public_responses_stream(
             contract_violation_kind = contract_violation_kind or violation_kind
         if normalized_payload is None:
             continue
-        normalized_payload = normalize_public_failure_sequence(normalized_payload)
         event_type = normalized_payload.get("type")
+        synthetic_created = None
+        if (
+            enforce_openai_sdk_contract
+            and not created_emitted
+            and isinstance(event_type, str)
+            and event_type != "response.created"
+        ):
+            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
+        normalized_payload, synthetic_created_sequence = normalize_public_failure_sequence(
+            normalized_payload,
+            reserve_created_sequence=synthetic_created is not None,
+        )
+        if synthetic_created is not None and synthetic_created_sequence is not None:
+            synthetic_created["sequence_number"] = synthetic_created_sequence
         if not enforce_openai_sdk_contract and (
             event_type == "error" or is_json_mapping(normalized_payload.get("error"))
         ):
@@ -6570,7 +6591,6 @@ async def _normalize_public_responses_stream(
                     yield formatted_payload
                 continue
 
-            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
             if synthetic_created is not None:
                 yield format_sse_event(synthetic_created)
                 created_emitted = True

@@ -874,7 +874,7 @@ async def test_normalize_public_responses_stream_synthesizes_response_created_on
 
 
 @pytest.mark.asyncio
-async def test_normalize_public_responses_stream_sequences_unsequenced_leading_failure() -> None:
+async def test_normalize_public_responses_stream_sequences_created_before_unsequenced_leading_failure() -> None:
     blocks = [
         block
         async for block in proxy_api_module._normalize_public_responses_stream(
@@ -886,8 +886,10 @@ async def test_normalize_public_responses_stream_sequences_unsequenced_leading_f
     ]
 
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    created = next(payload for payload in payloads if payload and payload.get("type") == "response.created")
     failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
-    assert failed["sequence_number"] == 0
+    assert created["sequence_number"] == 0
+    assert failed["sequence_number"] == 1
 
 
 @pytest.mark.asyncio

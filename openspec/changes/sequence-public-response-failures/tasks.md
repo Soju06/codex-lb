@@ -6,7 +6,8 @@
 
 ## 2. Validation
 
-- [x] 2.1 Add focused public normalizer sequence regressions.
+- [x] 2.1 Add focused public normalizer sequence regressions, including unique
+      synthesized created/failure sequences.
 - [x] 2.2 Cover bridge failure after reasoning on fresh and reused sessions.
 - [x] 2.3 Verify compatibility with OpenCode's pinned OpenAI AI SDK parser.
 - [x] 2.4 Run focused tests, lint, type checking, bridge checks, and OpenSpec validation.

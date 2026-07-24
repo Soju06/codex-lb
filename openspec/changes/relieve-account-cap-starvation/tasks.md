@@ -3,6 +3,7 @@
 ## 1. Ring heartbeat inflight publication
 
 - [x] 1.1 Publish per-account in-flight stream-lease counts in bridge-ring heartbeat metadata alongside the advertised endpoint.
+- [x] 1.4 Publish counts without an advertised endpoint; endpoint-requiring reads parse the endpoint field instead of metadata presence.
 - [x] 1.2 Add a ring reader returning fresh peers' published counts keyed by instance id.
 - [x] 1.3 Refresh a process-wide peer-count snapshot on the same heartbeat tick that refreshes the cap partition.
 
@@ -11,6 +12,7 @@
 - [x] 2.1 Compute a per-account borrow allowance (`floor((cap − observed cluster in-flight) / R)`, floored at 0) gated on fresh counts from every other active member.
 - [x] 2.2 Apply the allowance in the sticky-selection cap filter and the lease admission check for stream leases only.
 - [x] 2.3 Record borrowed-lease admissions in a metric.
+- [x] 2.4 Clamp static-share admission by fresh cluster headroom so peer borrows are not re-admitted locally.
 
 ## 3. Bounded account-capacity wait
 

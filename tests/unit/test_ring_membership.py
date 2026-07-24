@@ -271,6 +271,28 @@ async def test_stream_inflight_reader_publishes_empty_counts_as_idle(
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_publishes_counts_without_advertised_endpoint(
+    ring_service: RingMembershipService,
+) -> None:
+    # Default deployments advertise no bridge endpoint; stream counts must
+    # still publish so peer-headroom borrowing stays available.
+    await ring_service.register("pod-a", endpoint_base_url=None)
+    await ring_service.register("pod-b", endpoint_base_url=None)
+    await ring_service.heartbeat(
+        "pod-b",
+        endpoint_base_url=None,
+        account_stream_inflight={"acct-1": 2},
+    )
+
+    snapshot = await ring_service.list_active_stream_inflight("pod-a")
+
+    assert snapshot.counts_by_instance == {"pod-b": {"acct-1": 2}}
+    # Counts-only metadata must not make the member endpoint-bearing.
+    assert await ring_service.list_active(require_endpoint=True) == []
+    assert await ring_service.resolve_endpoint("pod-b") is None
+
+
+@pytest.mark.asyncio
 async def test_stream_inflight_reader_excludes_self_and_stale_members(
     ring_service: RingMembershipService,
     async_session_factory,

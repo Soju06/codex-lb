@@ -199,12 +199,22 @@ class RingMembershipService:
         from datetime import timedelta
 
         cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
-        statement = select(BridgeRingMember.instance_id).where(BridgeRingMember.last_heartbeat_at >= cutoff)
-        if require_endpoint:
-            statement = statement.where(BridgeRingMember.metadata_json.is_not(None))
+        statement = select(BridgeRingMember.instance_id, BridgeRingMember.metadata_json).where(
+            BridgeRingMember.last_heartbeat_at >= cutoff
+        )
         async with self._session() as session:
             result = await session.execute(statement.order_by(BridgeRingMember.instance_id))
-            return list(result.scalars().all())
+            rows = result.all()
+        if not require_endpoint:
+            return [instance_id for instance_id, _metadata_json in rows]
+        # Metadata may now carry stream counts without an advertised endpoint,
+        # so endpoint-bearing membership must parse the endpoint field rather
+        # than test metadata non-nullness.
+        return [
+            instance_id
+            for instance_id, metadata_json in rows
+            if _bridge_ring_endpoint_from_metadata(metadata_json) is not None
+        ]
 
     async def resolve_endpoint(
         self,
@@ -293,12 +303,15 @@ def _bridge_ring_metadata_json(
     endpoint_base_url: str | None,
     account_stream_inflight: dict[str, int] | None = None,
 ) -> str | None:
-    # ``list_active(require_endpoint=True)`` treats a non-null metadata row as
-    # endpoint-bearing, so metadata is only written alongside an advertised
-    # endpoint; stream-inflight counts ride along on the same upsert.
-    if endpoint_base_url is None:
+    # Stream-inflight counts publish independently of an advertised endpoint
+    # (deployments without an advertise URL still partition caps), so metadata
+    # is written whenever either field is present; endpoint-bearing membership
+    # is decided from the endpoint field, never from metadata non-nullness.
+    if endpoint_base_url is None and account_stream_inflight is None:
         return None
-    payload: dict[str, object] = {"endpoint_base_url": endpoint_base_url}
+    payload: dict[str, object] = {}
+    if endpoint_base_url is not None:
+        payload["endpoint_base_url"] = endpoint_base_url
     if account_stream_inflight is not None:
         payload["account_stream_inflight"] = {
             account_id: int(count) for account_id, count in account_stream_inflight.items() if count > 0

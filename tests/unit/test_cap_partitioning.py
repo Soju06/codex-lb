@@ -731,6 +731,61 @@ class TestEffectiveStreamAdmissionCap:
             == 5
         )
 
+    def test_fresh_peer_borrow_clamps_static_share(self) -> None:
+        # Cap 8 across two replicas (share 4): the peer borrowed to 5, so
+        # fresh counts show 8 in flight at local 3 — admitting the 4th local
+        # stream would sustain 9; the static path must deny it.
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {"acct": 5}})
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=3,
+                caps=caps,
+            )
+            == 3
+        )
+
+    def test_static_share_admits_while_cluster_headroom_remains(self) -> None:
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {"acct": 4}})
+        # Fresh counts show 4 + 3 = 7 < 8: the full static share stays usable.
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=3,
+                caps=caps,
+            )
+            == 4
+        )
+
+    def test_cluster_clamp_subtracts_stream_reserve(self) -> None:
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {"acct": 5}})
+        # Reserve-adjusted share 4 - 1 = 3; cluster allowance 8 - 5 - 1 = 2.
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=1,
+                caps=caps,
+                stream_reserve_slots=1,
+            )
+            == 2
+        )
+
+    def test_static_share_kept_when_peer_counts_missing(self) -> None:
+        # Missing peer counts must not shrink the fail-safe static share.
+        caps = self._partitioned_caps()
+        cap_partitioning_module.observe_peer_stream_inflight({"peer-1": None})
+        assert (
+            cap_partitioning_module.effective_stream_admission_cap(
+                "acct",
+                local_inflight=3,
+                caps=caps,
+            )
+            == 4
+        )
+
     def test_exhausted_share_without_peer_data_keeps_static_ceiling(self) -> None:
         caps = self._partitioned_caps()
         assert (

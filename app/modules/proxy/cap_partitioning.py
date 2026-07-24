@@ -256,14 +256,30 @@ def effective_stream_admission_cap(
     """Stream admission ceiling for ``account_id`` on this replica.
 
     Returns the reserve-adjusted static share while it still admits the next
-    lease; once the share is exhausted, adds the peer-headroom borrow
-    allowance. Callers treat a nonpositive ``caps.stream_limit`` as unlimited
-    before consulting this ceiling.
+    lease — clamped by the observed cluster headroom when fresh complete peer
+    counts show capacity already borrowed by peers, so the sustained aggregate
+    stays at the configured cap once published counts reflect actual usage.
+    Once the share is exhausted, adds the peer-headroom borrow allowance.
+    Without fresh complete peer counts the static share applies unchanged.
+    Callers treat a nonpositive ``caps.stream_limit`` as unlimited before
+    consulting this ceiling.
     """
     cap = caps.stream_limit
-    effective = max(1, cap - max(0, stream_reserve_slots))
+    reserve = max(0, stream_reserve_slots)
+    effective = max(1, cap - reserve)
     if local_inflight < effective:
-        return effective
+        configured = caps.configured_stream_limit
+        if configured is None or configured <= 0:
+            return effective
+        peer_inflight = _fresh_complete_peer_inflight(account_id, replica_count=caps.replica_count)
+        if peer_inflight is None:
+            return effective
+        # Peers stop borrowing while cluster headroom is below the member
+        # count, so under organic growth this clamp still leaves the replica
+        # at least one slot; it only denies admission that would push the
+        # freshly observed aggregate past the configured cap.
+        cluster_allowance = max(0, configured - peer_inflight - reserve)
+        return min(effective, cluster_allowance)
     borrow = stream_share_borrow_allowance(
         account_id,
         local_inflight=local_inflight,
@@ -272,7 +288,25 @@ def effective_stream_admission_cap(
     )
     if borrow <= 0:
         return effective
-    return max(1, cap + borrow - max(0, stream_reserve_slots))
+    return max(1, cap + borrow - reserve)
+
+
+def _fresh_complete_peer_inflight(account_id: str, *, replica_count: int) -> int | None:
+    """Peers' summed fresh published stream counts; None unless every other member published.
+
+    Returns None when the partition has a single member, when no fresh
+    snapshot exists, when the snapshot does not cover every other active
+    member, or when any covered member published no counts — missing data is
+    never treated as zero.
+    """
+    if replica_count <= 1:
+        return None
+    snapshot = _peer_inflight_holder.fresh_snapshot(max_age_seconds=PEER_INFLIGHT_MAX_AGE_SECONDS)
+    if snapshot is None:
+        return None
+    if len(snapshot.counts_by_instance) < replica_count - 1:
+        return None
+    return snapshot.peer_inflight(account_id)
 
 
 def stream_share_borrow_allowance(
@@ -295,12 +329,7 @@ def stream_share_borrow_allowance(
     """
     if configured_stream_limit is None or configured_stream_limit <= 0 or replica_count <= 1:
         return 0
-    snapshot = _peer_inflight_holder.fresh_snapshot(max_age_seconds=PEER_INFLIGHT_MAX_AGE_SECONDS)
-    if snapshot is None:
-        return 0
-    if len(snapshot.counts_by_instance) < replica_count - 1:
-        return 0
-    peer_inflight = snapshot.peer_inflight(account_id)
+    peer_inflight = _fresh_complete_peer_inflight(account_id, replica_count=replica_count)
     if peer_inflight is None:
         return 0
     headroom = configured_stream_limit - (max(0, local_inflight) + peer_inflight)

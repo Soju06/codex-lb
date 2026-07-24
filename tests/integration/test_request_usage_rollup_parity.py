@@ -154,6 +154,17 @@ def _corpus() -> list[RequestLog]:
     rows.append(
         _log(BASE + timedelta(days=3, minutes=1), request_id_suffix="c", input_tokens=10, cached_input_tokens=99)
     )
+    # NULL input with cached tokens: the folded clamp keeps the cached value
+    # (cached_input_tokens_from_log only clamps when input is present).
+    rows.append(
+        _log(
+            BASE + timedelta(days=3, minutes=7),
+            request_id_suffix="ci",
+            input_tokens=None,
+            output_tokens=12,
+            cached_input_tokens=44,
+        )
+    )
     rows.append(
         _log(
             BASE + timedelta(days=3, hours=1),
@@ -236,13 +247,22 @@ async def _snapshot(*, lead_since: datetime = SINCE_UNALIGNED) -> dict:
 
 
 def _project_demand(bins) -> dict:
-    """Planner-consumption projection: the rollup serves folded demand at
-    (slot, account, kind) grain while the raw tail keeps the legacy fine
-    grain, so parity is asserted on the additive measures per consumed key
-    (DemandBinLike reads slot/kind/measures only)."""
-    projected: dict[tuple[int, str], list[float]] = {}
+    """Exact-grain projection: the rollup preserves the legacy demand grain
+    (slot, account, api_key, model, reasoning_effort, kind, status) because
+    `_bin_demand_units` applies max() per bin before summing — so folded and
+    raw bins must agree bin-for-bin, not merely in additive totals."""
+    projected: dict[tuple, list[float]] = {}
     for bin_row in bins:
-        entry = projected.setdefault((bin_row.slot_epoch, bin_row.request_kind), [0, 0, 0, 0, 0.0])
+        key = (
+            bin_row.slot_epoch,
+            bin_row.account_id,
+            bin_row.api_key_id,
+            bin_row.model,
+            bin_row.reasoning_effort,
+            bin_row.request_kind,
+            bin_row.status,
+        )
+        entry = projected.setdefault(key, [0, 0, 0, 0, 0.0])
         entry[0] += bin_row.request_count
         entry[1] += bin_row.input_tokens
         entry[2] += bin_row.cached_input_tokens

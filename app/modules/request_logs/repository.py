@@ -21,8 +21,9 @@ from app.core.usage.types import (
 )
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestKind, RequestLog, RequestUsageHourlyRollup
+from app.db.models import Account, AccountUsageRollupState, ApiKey, RequestKind, RequestLog, RequestUsageHourlyRollup
 from app.db.session import sqlite_writer_section
+from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, from_dimension
 from app.modules.accounts.usage_time_rollup_read import (
     RawWindow,
@@ -658,20 +659,44 @@ class RequestLogsRepository:
         and we rewrite it here once the public effective model is known so
         the dashboard and usage views surface the user-visible model.
 
+        Only rows in the un-folded live tail (at or above every rollup
+        watermark) are rewritten: ``model`` is a rollup dimension and
+        ``cost_usd`` a folded measure, so mutating a row below a watermark
+        would silently diverge the permanent rollups from raw (and the
+        divergence becomes unrepairable once retention prunes the raw row).
+        A matching row below the watermarks can only be a client-reused
+        request id colliding with unrelated old traffic — the rewrite's
+        target is the row the caller inserted moments ago. The fold-state
+        lock serializes this against an in-flight fold slice.
+
         Returns the number of rows that were updated.
         """
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
             try:
+                await lock_fold_state(self._session)
+                watermarks = (
+                    await self._session.execute(
+                        select(
+                            AccountUsageRollupState.folded_through,
+                            AccountUsageRollupState.hourly_folded_through,
+                        ).where(AccountUsageRollupState.id == 1)
+                    )
+                ).first()
                 # Fetch the affected rows so we can recompute ``cost_usd``
                 # from the new model. ``add_log`` derives the cost at insert
                 # time from the original (host) model; without recomputing
                 # here, dashboards would mix the public ``gpt-image-*`` model
                 # label with host-model pricing and report inaccurate cost.
                 stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
+                if watermarks is not None:
+                    stmt = stmt.where(RequestLog.requested_at >= min(watermarks))
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())
                 if not logs:
+                    # End the transaction: the fold-state row lock (and the
+                    # bootstrap insert behind it) must not outlive this call.
+                    await _safe_rollback(self._session)
                     return 0
                 for log in logs:
                     log.model = model

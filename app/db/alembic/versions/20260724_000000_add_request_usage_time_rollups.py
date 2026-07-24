@@ -81,19 +81,44 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("bucket_epoch", "account_id", "error_code"),
         )
 
-    if not inspector.has_table(_QUARTER_TABLE):
+    # Pre-merge revisions of this (never released) migration created the
+    # quarter table without the fine-grain planner dimensions. Rebuild it
+    # empty and reset the hourly watermark so the fold repopulates all three
+    # rollup tables from raw (re-folds converge via the fold pass's
+    # defensive DELETE); such databases predate any release, so raw history
+    # is still intact.
+    quarter_columns = _columns(bind, _QUARTER_TABLE)
+    if quarter_columns and "status" not in quarter_columns:
+        op.drop_table(_QUARTER_TABLE)
+        if _WATERMARK_COLUMN in _columns(bind, _STATE_TABLE):
+            op.execute(sa.text(f"UPDATE {_STATE_TABLE} SET {_WATERMARK_COLUMN} = '1970-01-01 00:00:00'"))
+
+    if not sa.inspect(bind).has_table(_QUARTER_TABLE):
         op.create_table(
             _QUARTER_TABLE,
             sa.Column("slot_epoch", sa.BigInteger(), nullable=False),
             sa.Column("account_id", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("api_key_id", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("model", sa.String(), nullable=False),
+            sa.Column("reasoning_effort", sa.String(), server_default=sa.text("''"), nullable=False),
             sa.Column("request_kind", sa.String(), nullable=False),
+            sa.Column("status", sa.String(), nullable=False),
             sa.Column("is_deleted", sa.Boolean(), server_default=sa.false(), nullable=False),
             sa.Column("request_count", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
             sa.Column("input_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
             sa.Column("output_or_reasoning_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
             sa.Column("cached_input_tokens", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
             sa.Column("cost_usd", sa.Float(), server_default=sa.text("0"), nullable=False),
-            sa.PrimaryKeyConstraint("slot_epoch", "account_id", "request_kind", "is_deleted"),
+            sa.PrimaryKeyConstraint(
+                "slot_epoch",
+                "account_id",
+                "api_key_id",
+                "model",
+                "reasoning_effort",
+                "request_kind",
+                "status",
+                "is_deleted",
+            ),
         )
 
     state_columns = _columns(bind, _STATE_TABLE)

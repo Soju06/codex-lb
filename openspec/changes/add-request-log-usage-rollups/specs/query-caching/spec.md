@@ -2,7 +2,7 @@
 
 ### Requirement: Time-axis usage rollups persist hourly statistics permanently
 
-The system SHALL maintain three permanent time-axis rollup tables folded from `request_logs`: an hourly UTC-bucketed usage rollup dimensioned by `(bucket_epoch, account_id, api_key_id, model, service_tier, request_kind, is_deleted)` with additive measures (request count, error count, input/output/reasoning tokens, output-or-reasoning tokens, cached input tokens, per-row-clamped cached input tokens, cost, non-NULL-cost row count); an hourly error-code rollup dimensioned by `(bucket_epoch, account_id, error_code)`; and a quarter-hour demand rollup dimensioned by `(slot_epoch, account_id, request_kind, is_deleted)` with the demand measures the quota planner consumes. Bucket keys MUST be integer epoch seconds aligned to the bucket size. Nullable raw dimensions (`account_id`, `api_key_id`, `service_tier`) MUST be stored as the empty-string sentinel so they can participate in the primary key identically on SQLite and PostgreSQL. The hourly rollup MUST fold all request-log rows, including warmup kinds and soft-deleted rows, as dimension values rather than fold-time filters, and MUST NOT apply the lifetime rollup's duplicate collapsing. Rollup rows MUST NOT be deleted by data retention.
+The system SHALL maintain three permanent time-axis rollup tables folded from `request_logs`: an hourly UTC-bucketed usage rollup dimensioned by `(bucket_epoch, account_id, api_key_id, model, service_tier, request_kind, is_deleted)` with additive measures (request count, error count, input/output/reasoning tokens, output-or-reasoning tokens, cached input tokens, per-row-clamped cached input tokens, cost, non-NULL-cost row count); an hourly error-code rollup dimensioned by `(bucket_epoch, account_id, error_code)`; and a quarter-hour demand rollup dimensioned by `(slot_epoch, account_id, api_key_id, model, reasoning_effort, request_kind, status, is_deleted)` — the FULL legacy demand grain, because the planner applies a nonlinear `max()` per bin before summing — with the demand measures the quota planner consumes. Bucket keys MUST be integer epoch seconds aligned to the bucket size. Nullable raw dimensions (`account_id`, `api_key_id`, `service_tier`, `reasoning_effort`) MUST be stored as the empty-string sentinel so they can participate in the primary key identically on SQLite and PostgreSQL. The hourly rollup MUST fold all request-log rows, including warmup kinds and soft-deleted rows, as dimension values rather than fold-time filters, and MUST NOT apply the lifetime rollup's duplicate collapsing. Rollup rows MUST NOT be deleted by data retention.
 
 #### Scenario: Statistics survive raw pruning
 
@@ -13,9 +13,10 @@ The system SHALL maintain three permanent time-axis rollup tables folded from `r
 
 #### Scenario: Clamped and fallback measures are folded at write time
 
-- **GIVEN** request-log rows with reasoning-only output, NULL cost, and cached input tokens exceeding input tokens
+- **GIVEN** request-log rows with reasoning-only output, NULL cost, cached input tokens exceeding input tokens, and cached input tokens alongside NULL input tokens
 - **WHEN** the rows are folded
-- **THEN** the hourly rollup MUST carry `sum(coalesce(output, reasoning, 0))`, the per-row `max(0, min(cached, input))` clamp sum, and the count of non-NULL-cost rows as distinct columns, because none of them can be derived from the plain sums after raw rows are pruned
+- **THEN** the hourly rollup MUST carry `sum(coalesce(output, reasoning, 0))`, the per-row clamped-cached sum, and the count of non-NULL-cost rows as distinct columns, because none of them can be derived from the plain sums after raw rows are pruned
+- **AND** the per-row clamp MUST match the usage-summary reader (`cached_input_tokens_from_log`) exactly: NULL cached counts zero, a NULL input keeps the non-negative cached value unclamped, otherwise the value is `max(0, min(cached, input))`
 
 #### Scenario: Warmup and soft-deleted rows are dimensions, not fold filters
 
@@ -85,6 +86,12 @@ The dashboard bucket aggregation, activity aggregates, top-error, earliest-activ
 - **THEN** the folded segment MUST filter `is_deleted = false`, reproducing the raw `deleted_at IS NULL` filter
 - **AND** the returned bin shape and the planner call sites MUST be unchanged
 
+#### Scenario: Planner demand bins preserve the legacy grain
+
+- **GIVEN** a quarter-hour slot whose raw rows span multiple `(account, api_key, model, reasoning_effort, request_kind, status)` groups with different dominant demand components
+- **WHEN** demand bins for that slot are served from the rollup
+- **THEN** the bins MUST partition exactly as the legacy raw `GROUP BY` partitioned them, so `_bin_demand_units`'s per-bin `max(token, cost, request units)` — and therefore the forecast — is unchanged
+
 #### Scenario: Empty rollup degrades to legacy behavior
 
 - **GIVEN** `hourly_folded_through` at epoch (before the first fold or after an escape-hatch reset)
@@ -93,7 +100,7 @@ The dashboard bucket aggregation, activity aggregates, top-error, earliest-activ
 
 ### Requirement: Time-axis rollups mirror request-log history rewrites transactionally
 
-Every code path that mutates request-log rows below the hourly watermark MUST take the fold-state row lock and mirror the mutation into the three time-axis rollup tables in the same transaction. Account soft deletion (which reattributes the account's request logs to NULL/deleted) MUST merge the account's rollup rows into the corresponding `(account_id = '', is_deleted = true)` keys and delete the source rows; account hard deletion (`delete_history`) MUST delete the account's rollup rows; duplicate-account consolidation MUST merge the duplicate's rollup rows into the canonical account bucket-wise and delete the duplicate's rows. This discipline SHALL be documented as a standing constraint for future history-rewriting code.
+Every code path that mutates request-log rows below the hourly watermark MUST take the fold-state row lock and, in the same transaction, either mirror the mutation into the three time-axis rollup tables or exclude the pre-watermark rows from the mutation. Account soft deletion (which reattributes the account's request logs to NULL/deleted) MUST merge the account's rollup rows into the corresponding `(account_id = '', is_deleted = true)` keys and delete the source rows; account hard deletion (`delete_history`) MUST delete the account's rollup rows; duplicate-account consolidation MUST merge the duplicate's rollup rows into the canonical account bucket-wise and delete the duplicate's rows. This discipline SHALL be documented as a standing constraint for future history-rewriting code.
 
 #### Scenario: Soft deletion moves folded usage under the deleted dimension
 
@@ -108,6 +115,13 @@ Every code path that mutates request-log rows below the hourly watermark MUST ta
 - **GIVEN** an account with folded usage
 - **WHEN** the account is deleted with `delete_history`
 - **THEN** its rows in all three rollup tables MUST be deleted in the same transaction
+
+#### Scenario: Post-hoc model rewrites cannot touch folded history
+
+- **GIVEN** a request-log row below a fold watermark whose request id collides with a new inbound request id
+- **WHEN** the post-hoc model/cost rewrite (`update_model_for_request`) runs for that request id
+- **THEN** it MUST take the fold-state lock and rewrite only rows at or above every fold watermark (the un-folded live tail)
+- **AND** the pre-watermark row and its folded rollup contribution MUST remain unchanged
 
 #### Scenario: Lifecycle mirror serializes with the fold
 

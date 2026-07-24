@@ -42,19 +42,19 @@ def _to_db_naive_utc(value: datetime | None) -> datetime | None:
 
 @dataclass(frozen=True, slots=True)
 class DemandBin:
-    """One demand slot's aggregate. Folded history is served from the quarter
-    rollup at its (slot, account, kind) grain, so api_key_id / model /
-    reasoning_effort / status are ``None`` for folded bins; the un-folded raw
-    tail keeps the legacy fine grain. ``DemandBinLike`` (the only consumer
-    contract) never reads those fields."""
+    """One demand slot's aggregate at the full legacy grain. Folded history
+    (served from the quarter rollup) and the un-folded raw tail carry the
+    same dimensions: the grain is load-bearing even though ``DemandBinLike``
+    never reads most fields, because ``_bin_demand_units`` applies ``max()``
+    per bin before summing."""
 
     slot_epoch: int
     account_id: str | None
     api_key_id: str | None
-    model: str | None
+    model: str
     reasoning_effort: str | None
     request_kind: str
-    status: str | None
+    status: str
     input_tokens: int
     cached_input_tokens: int
     output_tokens: int
@@ -422,11 +422,11 @@ class QuotaPlannerRepository:
                 DemandBin(
                     slot_epoch=row.slot_epoch,
                     account_id=from_dimension(row.account_id),
-                    api_key_id=None,
-                    model=None,
-                    reasoning_effort=None,
+                    api_key_id=from_dimension(row.api_key_id),
+                    model=row.model,
+                    reasoning_effort=from_dimension(row.reasoning_effort),
                     request_kind=row.request_kind,
-                    status=None,
+                    status=row.status,
                     input_tokens=row.input_tokens,
                     cached_input_tokens=row.cached_input_tokens,
                     output_tokens=row.output_or_reasoning_tokens,

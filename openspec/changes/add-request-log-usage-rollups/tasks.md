@@ -27,7 +27,7 @@
 
 - [x] 5.1 Implement the shared merge helper (single-statement watermark+rollup read, hour-aligned tail partition, three-segment non-aligned `since`, Python dict-add merge) in a new module.
 - [x] 5.2 Switch `request_logs.aggregate_by_bucket`, `aggregate_activity_since/_between` (conversation distinct counts stay raw in a separate statement), `top_error_since/_between`, and `earliest_activity_at` (raw first, hour-precision rollup fallback).
-- [x] 5.3 Switch `quota_planner.aggregate_demand_bins` (quarter satellite, `is_deleted = false`, raw tail; `DemandBinLike` shape preserved with None for unused fields, call sites untouched).
+- [x] 5.3 Switch `quota_planner.aggregate_demand_bins` (quarter satellite, `is_deleted = false`, raw tail; folded bins reconstruct the full legacy grain from the satellite dimensions — see D5; call sites untouched).
 - [x] 5.4 Switch `api_keys.trends_by_key` (hourly native granularity, `output_or_reasoning_tokens`).
 - [x] 5.5 Parity harness: synthetic 10-day corpus covering every task-3.3 edge, watermark ∈ {epoch, mid-history hour, target} × all six paths, exact dataclass equality vs the legacy raw readers (cost via approx), one API-level JSON equivalence case; retention simulation (physically prune below min watermark − lag) with switched outputs unchanged and conversation metrics asserted as expectedly raw-bound.
 - [x] 5.6 Concurrency tests: fold commit injected between the reader's two statements leaves totals invariant; two concurrent fold passes serialize without double counting.
@@ -39,3 +39,9 @@
 - [x] 6.2 Capture performance evidence (PR body, not a gate): EXPLAIN (ANALYZE, BUFFERS) and timings for overview 30 d and demand 28 d, rollup vs raw, on a ~1M-row PostgreSQL fixture; backfill duration and per-slice memory. (Measured on postgres:18, 1M rows/60 d, adversarially high per-hour cardinality: overview 30 d raw 15.5 s w/ temp spill → rollup 2.2 s no spill; demand 28 d raw 21.5 s → quarter rollup 0.7 s; one 48 h fold slice ≈ 90 ms, so a 60 d backfill is ~30 slices of DB work. Per-slice RSS not separately profiled — the slice aggregate is a bounded PostgreSQL HashAggregate.)
 - [x] 6.3 Run Ruff format/check, `ty`, `scripts/check_proxy_architecture.py`, simplicity gates, and strict OpenSpec validation.
 - [ ] 6.4 Verify every scenario in the spec deltas against implementation evidence; adversarial review of the standalone diff. (Scenario-to-test mapping done for the read-path requirements; the adversarial diff review runs with the PR's local codex review.)
+
+## 7. Review-round fixes (local codex, 2026-07-24)
+
+- [x] 7.1 [P1] Quarter demand rollup regains the full legacy grain (`api_key_id`, `model`, `reasoning_effort`, `status` dimensions): `_bin_demand_units` applies `max()` per bin before summing, so the coarser `(slot, account, kind)` fold shrank folded-history forecasts. Schema, migration (with pre-merge-shape rebuild guard), fold, read path, and exact-grain parity updated.
+- [x] 7.2 [P2] `update_model_for_request` now takes the fold-state lock and rewrites only rows at/above `min(folded_through, hourly_folded_through)` — a client-reused request id can no longer mutate folded history unmirrored.
+- [x] 7.3 [P2] `cached_input_tokens_clamped` fold now matches `cached_input_tokens_from_log` exactly: a NULL input keeps the non-negative cached value instead of clamping it to zero (permanent-column undercount).

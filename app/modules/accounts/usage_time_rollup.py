@@ -7,8 +7,11 @@ without scanning raw ``request_logs``:
   api_key_id, model, service_tier, request_kind, is_deleted).
 - ``request_usage_hourly_error_rollups`` — UTC hour buckets x (account_id,
   error_code); the top-error satellite (unbounded cardinality isolated).
-- ``request_demand_quarter_rollups`` — 900s slots x (account_id,
-  request_kind, is_deleted) for the quota planner.
+- ``request_demand_quarter_rollups`` — 900s slots x (account_id, api_key_id,
+  model, reasoning_effort, request_kind, status, is_deleted) for the quota
+  planner. The full legacy demand grain is preserved on purpose: the
+  planner's ``_bin_demand_units`` applies ``max()`` PER BIN before summing
+  (nonlinear), so folding to a coarser grain would change forecasts.
 
 Watermark contract: ``account_usage_rollup_state.hourly_folded_through`` (the
 same single state row as the lifetime fold, so one ``FOR UPDATE`` row lock
@@ -22,12 +25,15 @@ key on both dialects (UNIQUE/PK treat NULLs as distinct rows on PostgreSQL
 and SQLite). Use :func:`to_dimension` / :func:`from_dimension` at the write
 and read boundaries — a missed mapping silently diverges rollups from raw.
 
-History-rewrite discipline (MUST): any code path that mutates
-``requested_at``, ``deleted_at``, ``account_id``, ``api_key_id``, or an
-aggregated measure column of ``request_logs`` rows BELOW the hourly
-watermark must take ``lock_fold_state()`` in the same transaction and mirror
-the mutation into all three rollup tables (folded buckets are never
-recomputed from raw — raw may already be pruned by retention).
+History-rewrite discipline (MUST): any code path that mutates a folded
+dimension (``requested_at``, ``deleted_at``, ``account_id``, ``api_key_id``,
+``model``, ``service_tier``, ``reasoning_effort``, ``request_kind``,
+``status``, ``error_code``) or an aggregated measure column of
+``request_logs`` rows BELOW the hourly watermark must take
+``lock_fold_state()`` in the same transaction and either mirror the mutation
+into all three rollup tables or skip the pre-watermark rows (folded buckets
+are never recomputed from raw — raw may already be pruned by retention).
+``RequestLogsRepository.update_model_for_request`` takes the skip route.
 """
 
 from __future__ import annotations
@@ -126,7 +132,11 @@ class HourlyErrorRollupRow:
 class QuarterDemandRollupRow:
     slot_epoch: int
     account_id: str
+    api_key_id: str
+    model: str
+    reasoning_effort: str
     request_kind: str
+    status: str
     is_deleted: bool
     request_count: int = 0
     input_tokens: int = 0
@@ -158,7 +168,16 @@ _HOURLY_MEASURE_COLUMNS = (
 )
 _ERROR_KEY_COLUMNS = ("bucket_epoch", "account_id", "error_code")
 _ERROR_MEASURE_COLUMNS = ("error_count",)
-_QUARTER_KEY_COLUMNS = ("slot_epoch", "account_id", "request_kind", "is_deleted")
+_QUARTER_KEY_COLUMNS = (
+    "slot_epoch",
+    "account_id",
+    "api_key_id",
+    "model",
+    "reasoning_effort",
+    "request_kind",
+    "status",
+    "is_deleted",
+)
 _QUARTER_MEASURE_COLUMNS = (
     "request_count",
     "input_tokens",
@@ -366,11 +385,19 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
     service_tier = func.coalesce(RequestLog.service_tier, DIMENSION_SENTINEL).label("service_tier")
     is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
     output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-    cached = func.coalesce(RequestLog.cached_input_tokens, 0)
-    input_tokens = func.coalesce(RequestLog.input_tokens, 0)
-    # max(0, min(cached, input)) without GREATEST/LEAST (absent on SQLite).
-    lesser = case((cached < input_tokens, cached), else_=input_tokens)
-    cached_clamped = case((lesser < 0, 0), else_=lesser)
+    # Exact mirror of the usage-summary reader's per-row clamp
+    # (`aggregate_usage_metrics_since` / `cached_input_tokens_from_log`):
+    # NULL cached counts 0, a NULL input keeps the (non-negative) cached
+    # value UNclamped, otherwise clamp to [0, input]. SQLite's two-argument
+    # min()/max() scalar functions are its least()/greatest().
+    dialect = session.get_bind().dialect.name
+    least = func.least if dialect == "postgresql" else func.min
+    greatest = func.greatest if dialect == "postgresql" else func.max
+    cached_clamped = case(
+        (RequestLog.cached_input_tokens.is_(None), 0),
+        (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
+        else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
+    )
     stmt = (
         select(
             bucket,
@@ -416,15 +443,26 @@ def _error_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...])
 
 
 def _demand_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
+    # Full legacy demand grain (slot, account, api_key, model,
+    # reasoning_effort, kind, status): the planner's `_bin_demand_units`
+    # takes max(token, cost, request units) PER BIN before summing, so
+    # folding to a coarser grain would shrink forecasts wherever one slot
+    # mixes groups with different dominant components.
     slot = _requested_at_epoch_bucket_expr(session, QUARTER_SLOT_SECONDS).label("slot_epoch")
     account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
+    api_key_id = func.coalesce(RequestLog.api_key_id, DIMENSION_SENTINEL).label("api_key_id")
+    reasoning_effort = func.coalesce(RequestLog.reasoning_effort, DIMENSION_SENTINEL).label("reasoning_effort")
     is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
     output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
     stmt = (
         select(
             slot,
             account_id,
+            api_key_id,
+            RequestLog.model,
+            reasoning_effort,
             RequestLog.request_kind,
+            RequestLog.status,
             is_deleted,
             func.count(RequestLog.id),
             func.coalesce(func.sum(RequestLog.input_tokens), 0),
@@ -433,7 +471,16 @@ def _demand_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
         )
         .where(*window)
-        .group_by(slot, account_id, RequestLog.request_kind, is_deleted)
+        .group_by(
+            slot,
+            account_id,
+            api_key_id,
+            RequestLog.model,
+            reasoning_effort,
+            RequestLog.request_kind,
+            RequestLog.status,
+            is_deleted,
+        )
     )
     return insert(RequestDemandQuarterRollup).from_select(list(_QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS), stmt)
 

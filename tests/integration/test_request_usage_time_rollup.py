@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import app.modules.accounts.usage_time_rollup as time_rollup_module
 from app.core.crypto import TokenEncryptor
@@ -265,7 +265,11 @@ async def test_quarter_demand_upsert_and_range_read(db_setup):
                 QuarterDemandRollupRow(
                     slot_epoch=slot,
                     account_id="acc_a",
+                    api_key_id="key_1",
+                    model="gpt-5.1-codex",
+                    reasoning_effort="",
                     request_kind="normal",
+                    status="success",
                     is_deleted=False,
                     request_count=2,
                     input_tokens=100,
@@ -276,14 +280,22 @@ async def test_quarter_demand_upsert_and_range_read(db_setup):
                 QuarterDemandRollupRow(
                     slot_epoch=slot,
                     account_id="acc_a",
+                    api_key_id="key_1",
+                    model="gpt-5.1-codex",
+                    reasoning_effort="",
                     request_kind="normal",
+                    status="success",
                     is_deleted=True,
                     request_count=7,
                 ),
                 QuarterDemandRollupRow(
                     slot_epoch=slot + QUARTER_SLOT_SECONDS,
                     account_id="acc_a",
+                    api_key_id="",
+                    model="gpt-5.1-codex",
+                    reasoning_effort="medium",
                     request_kind="warmup",
+                    status="success",
                     is_deleted=False,
                     request_count=1,
                 ),
@@ -415,7 +427,19 @@ async def _dump_all_rollups():
                 ),
             ),
             sorted(errors, key=lambda r: (r.bucket_epoch, r.account_id, r.error_code)),
-            sorted(demand, key=lambda r: (r.slot_epoch, r.account_id, r.request_kind, str(r.is_deleted))),
+            sorted(
+                demand,
+                key=lambda r: (
+                    r.slot_epoch,
+                    r.account_id,
+                    r.api_key_id,
+                    r.model,
+                    r.reasoning_effort,
+                    r.request_kind,
+                    r.status,
+                    str(r.is_deleted),
+                ),
+            ),
             watermark,
         )
 
@@ -485,6 +509,20 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
             cached_input_tokens=50,
             cost_usd=0.02,
         )
+        # hour1, distinct model bucket: NULL input with cached tokens — the
+        # clamp keeps the cached value (`cached_input_tokens_from_log` only
+        # clamps to input when input is present), it must not zero it.
+        await _add_log(
+            logs,
+            account_id="acc_f",
+            request_id="r_null_input",
+            requested_at=hour1 + timedelta(seconds=180),
+            model="gpt-5.3-mini",
+            input_tokens=None,
+            output_tokens=8,
+            cached_input_tokens=30,
+            cost_usd=0.001,
+        )
         # hour2: service_tier and api_key_id dimensions.
         await _add_log(
             logs,
@@ -544,6 +582,11 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     assert clamp.cached_input_tokens == 50
     assert clamp.cached_input_tokens_clamped == 10  # min(50, 10)
 
+    null_input = by_key[(epoch_seconds(hour1), "acc_f", "", "gpt-5.3-mini", "", "normal", False)]
+    assert null_input.input_tokens == 0
+    assert null_input.cached_input_tokens == 30
+    assert null_input.cached_input_tokens_clamped == 30  # NULL input keeps cached
+
     tier = by_key[(epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", "flex", "normal", False)]
     assert tier.request_count == 1
 
@@ -565,18 +608,38 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
         (epoch_seconds(hour4), "", "timeout"): 1,
     }
 
-    demand_keys = {(r.slot_epoch, r.account_id, r.request_kind, r.is_deleted): r for r in demand}
-    slot_a = demand_keys[(epoch_seconds(hour0), "acc_f", "normal", False)]
+    # Demand keeps the FULL legacy grain (slot, account, api_key, model,
+    # reasoning_effort, kind, status, is_deleted): `_bin_demand_units` takes
+    # max() per bin, so a coarser fold would change forecasts.
+    demand_keys = {
+        (
+            r.slot_epoch,
+            r.account_id,
+            r.api_key_id,
+            r.model,
+            r.reasoning_effort,
+            r.request_kind,
+            r.status,
+            r.is_deleted,
+        ): r
+        for r in demand
+    }
+    slot_a = demand_keys[(epoch_seconds(hour0), "acc_f", "", "gpt-5.1-codex", "", "normal", "success", False)]
     assert slot_a.request_count == 1
     assert slot_a.input_tokens == 100
     assert slot_a.output_or_reasoning_tokens == 50
     assert slot_a.cached_input_tokens == 120
     assert slot_a.cost_usd == pytest.approx(0.01)
-    slot_b = demand_keys[(epoch_seconds(hour0) + QUARTER_SLOT_SECONDS, "acc_f", "normal", False)]
+    # Same slot arithmetic, but the error row lands in its own bin (status
+    # is a demand dimension).
+    slot_b = demand_keys[
+        (epoch_seconds(hour0) + QUARTER_SLOT_SECONDS, "acc_f", "", "gpt-5.1-codex", "", "normal", "error", False)
+    ]
     assert slot_b.request_count == 1
     assert slot_b.output_or_reasoning_tokens == 30
-    assert (epoch_seconds(hour1), "acc_f", "warmup", False) in demand_keys
-    assert (epoch_seconds(hour4), "", "normal", True) in demand_keys
+    assert (epoch_seconds(hour1), "acc_f", "", "gpt-5.1-codex", "", "warmup", "success", False) in demand_keys
+    assert (epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", "", "normal", "success", False) in demand_keys
+    assert (epoch_seconds(hour4), "", "", "gpt-5.1-codex", "", "normal", "error", True) in demand_keys
 
 
 @pytest.mark.asyncio
@@ -600,6 +663,54 @@ async def test_hourly_fold_is_idempotent(db_setup):
     first = await _dump_all_rollups()
     assert await run_hourly_fold_pass(now=now) == 0
     assert await _dump_all_rollups() == first
+
+
+@pytest.mark.asyncio
+async def test_model_rewrite_skips_folded_rows(db_setup):
+    """`update_model_for_request` must never rewrite rows below a rollup
+    watermark: model is a folded dimension and cost a folded measure, so a
+    pre-watermark rewrite (a client-reused request id colliding with old
+    traffic) would silently diverge the permanent rollups from raw."""
+    now = utcnow()
+    old_at = floor_to_hour(now - timedelta(days=3)) + timedelta(seconds=30)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_rw", "rewrite-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        await _add_log(logs, account_id="acc_rw", request_id="r_rw", requested_at=old_at)
+        await _add_log(logs, account_id="acc_rw", request_id="r_rw", requested_at=now)
+
+    assert await run_hourly_fold_pass(now=now) >= 1
+    # The bound is min(lifetime, hourly) watermark; advance the lifetime one
+    # to match so the hourly watermark is what gates the rewrite.
+    async with SessionLocal() as session:
+        state = (
+            await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
+        ).scalar_one()
+        await session.execute(
+            update(AccountUsageRollupState)
+            .where(AccountUsageRollupState.id == 1)
+            .values(folded_through=state.hourly_folded_through)
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        updated = await RequestLogsRepository(session).update_model_for_request("r_rw", "gpt-image-1")
+    assert updated == 1  # the live-tail row only
+
+    async with SessionLocal() as session:
+        models_by_age = dict((await session.execute(select(RequestLog.requested_at, RequestLog.model))).all())
+    assert models_by_age[old_at] == "gpt-5.1-codex"
+    assert models_by_age[now] == "gpt-image-1"
+
+    # The folded hourly bucket still carries the original model dimension.
+    hourly, _, _, _ = await _dump_all_rollups()
+    assert {r.model for r in hourly} == {"gpt-5.1-codex"}
+
+    # A rewrite matching nothing must release the fold-state lock cleanly
+    # (regression guard for the early-return path).
+    async with SessionLocal() as session:
+        assert await RequestLogsRepository(session).update_model_for_request("r_missing", "gpt-image-1") == 0
+    assert await run_hourly_fold_pass(now=now) == 0
 
 
 @pytest.mark.asyncio

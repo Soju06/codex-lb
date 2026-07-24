@@ -305,6 +305,13 @@ class RequestDemandQuarterRollup(Base):
     """Quarter-hour demand sums for the quota planner (the only sub-hour
     consumer, ``DEFAULT_SLOT_SECONDS = 900``).
 
+    The FULL legacy demand grain (account, api_key, model, reasoning_effort,
+    request_kind, status) is preserved as dimensions: the planner's
+    ``_bin_demand_units`` applies ``max(token, cost, request units)`` per bin
+    BEFORE summing (nonlinear), so a coarser fold would change forecasts
+    wherever a slot mixes groups with different dominant components. The row
+    count equals what the legacy runtime ``GROUP BY`` returned per query.
+
     ``is_deleted`` is a dimension (not a fold-time filter) and ``account_id``
     a carried key so account soft/hard deletion — which retroactively detaches
     or removes the account's entire raw history — can be mirrored here instead
@@ -315,7 +322,11 @@ class RequestDemandQuarterRollup(Base):
 
     slot_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    reasoning_effort: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
     request_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)

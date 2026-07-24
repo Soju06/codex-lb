@@ -48,14 +48,16 @@ Measured consumers of the switched read paths: bucket aggregation uses model+ser
 - `error_code` has unbounded cardinality → excluded from the main table; a minimal `(bucket_epoch, account_id, error_code)` satellite serves the top-error overview hot path. `account_id` is on the satellite solely so hard-delete can mirror.
 - `account_id` is kept on the main table even though no switched path filters by it: it is required for lifecycle mirroring, and dimensions are a one-way door once raw is pruned (co-occurring dimension, negligible cardinality cost).
 - `request_kind` is `NOT NULL server_default 'normal'` on `request_logs` (verified `models.py:263`) — stored as-is, no sentinel needed. Only `account_id`/`api_key_id`/`service_tier` are nullable → `''` sentinel so they can join the PK on both dialects (UNIQUE/PK NULL-distinctness differs across backends).
-- `source`, `reasoning_effort`, `useragent_group`: zero switched-path consumers → not folded (recorded here as an explicit rejection; reports are a non-goal).
+- `source`, `useragent_group`: zero switched-path consumers → not folded (recorded here as an explicit rejection; reports are a non-goal). `reasoning_effort` is likewise absent from the hourly table, but IS a quarter-demand dimension (see D5: the planner grain is load-bearing).
 - No dedupe (#904 duplicates counted): every switched path is no-dedupe today; dedupe remains a lifetime-rollup-only semantic.
 
 Estimated main-table growth: tens to low hundreds of realized combinations per hour → 50k–200k rows / 60 d (2–6% of raw), fine to keep forever. Pre-implementation gate: measure production distinct hourly combinations once; if >1,000/hour, demote `service_tier` to a satellite (tracked in tasks).
 
-### D5: Planner demand satellite carries `account_id` + `is_deleted`
+### D5: Planner demand satellite carries the FULL legacy grain + `is_deleted`
 
-`AccountsRepository.delete()` soft delete retroactively rewrites the account's entire `request_logs` history (`account_id=NULL, deleted_at=now`), and the planner filters `deleted_at IS NULL`. If the fold dropped deleted rows at fold time, an account deletion could never be corrected in folded slots and the planner would diverge from raw permanently. With `account_id` and `is_deleted` as dimensions, deletion mirrors as a bucket-wise move to `(account_id='', is_deleted=true)`. Cardinality stays trivial (active accounts per 900 s slot).
+`AccountsRepository.delete()` soft delete retroactively rewrites the account's entire `request_logs` history (`account_id=NULL, deleted_at=now`), and the planner filters `deleted_at IS NULL`. If the fold dropped deleted rows at fold time, an account deletion could never be corrected in folded slots and the planner would diverge from raw permanently. With `account_id` and `is_deleted` as dimensions, deletion mirrors as a bucket-wise move to `(account_id='', is_deleted=true)`.
+
+The satellite additionally keeps every legacy `GROUP BY` dimension (`api_key_id`, `model`, `reasoning_effort`, `status`) even though `DemandBinLike` consumers never read those fields: the grain itself is load-bearing. `_bin_demand_units` computes `max(token_units, cost_units, request_units)` PER BIN before summing, a nonlinear step — folding to a coarser grain merges bins with different dominant components and systematically shrinks folded-history forecasts relative to raw (caught in review). Row count equals what the legacy runtime `GROUP BY` materialized per query, so cardinality is bounded by realized traffic combinations per 900 s slot.
 
 ### D6: `BIGINT` epoch bucket keys
 
@@ -70,7 +72,7 @@ One merge primitive implemented once (a new small module, not inline per reposit
 3. Python dict-add merge; non-aligned `since` uses three segments (raw head `[since, ceil_hour(since))`, rollup `[ceil_hour(since), W)`, raw tail `[W, until)`). The raw head over already-pruned ancient history is a documented, deterministic ≤1 h undercount outside parity scope.
 4. W = epoch (pre-backfill or after reset) → the folded segment is empty and every read equals the legacy query. This is the kill switch: none is needed (D9).
 
-Switched functions (all repository-internal; dataclass shapes, services, API schemas, frontend unchanged): `request_logs.aggregate_by_bucket`, `aggregate_activity_since/_between` (conversation distinct counts split into a separate raw statement — documented statement-count change), `top_error_since/_between` (satellite + tail, tie-break count desc then error_code asc reproduced in Python), `earliest_activity_at` (raw first, `min(bucket_epoch)` hour-precision fallback when raw is pruned — no dedicated columns; sole consumer is a boolean comparison), `quota_planner.aggregate_demand_bins` (quarter satellite `is_deleted = false` + tail; unused `DemandBinLike` fields filled with None — verified `logic.py` consumes only slot/kind/tokens/cost/count), `api_keys.trends_by_key` (hourly granularity native, output from `output_or_reasoning_tokens`).
+Switched functions (all repository-internal; dataclass shapes, services, API schemas, frontend unchanged): `request_logs.aggregate_by_bucket`, `aggregate_activity_since/_between` (conversation distinct counts split into a separate raw statement — documented statement-count change), `top_error_since/_between` (satellite + tail, tie-break count desc then error_code asc reproduced in Python), `earliest_activity_at` (raw first, `min(bucket_epoch)` hour-precision fallback when raw is pruned — no dedicated columns; sole consumer is a boolean comparison), `quota_planner.aggregate_demand_bins` (quarter satellite `is_deleted = false` + tail; folded bins reconstruct the full legacy grain from the satellite dimensions — see D5), `api_keys.trends_by_key` (hourly granularity native, output from `output_or_reasoning_tokens`).
 
 ### D8: Measures include forward-looking columns now (one-way door)
 
@@ -86,9 +88,9 @@ The only code paths that legally rewrite raw below the watermark (verified exhau
 
 - `AccountsRepository.delete()` — **must acquire `lock_fold_state()` first** (it does not today; without it a fold slice could snapshot pre-reattribution rows and commit after the delete). Soft path: merge-add account A's rows into `(account_id='', is_deleted=true)` keys across all three tables, then delete A's rows — the exact mirror of the raw UPDATE. Hard path (`delete_history=True`): delete A's rollup rows.
 - Duplicate-account consolidation (`merge_rollups_into` transaction): bucket-wise merge-add dup→canonical, delete dup rows, same transaction.
-- `rewrite_request_log_model`: settles within seconds of the request → absorbed by the 24 h `FOLD_LAG`; no action.
+- `update_model_for_request` (post-hoc model/cost rewrite): the intended target — the row the caller inserted moments earlier — is always absorbed by the 24 h `FOLD_LAG`. But the rewrite matches by client-controlled `request_id`, so a reused id can collide with unrelated pre-watermark history (caught in review). It therefore takes the fold-state lock and bounds the rewrite to `requested_at >= min(lifetime, hourly watermark)`: folded rows are skipped rather than mirrored, which is also the correct semantic (an old collision row was never this request).
 
-Discipline (spec MUST + module docstring): any new code that mutates `requested_at`/`deleted_at`/`account_id`/`api_key_id`/aggregated columns of request-log rows below the hourly watermark must take the fold-state lock and mirror the rollups.
+Discipline (spec MUST + module docstring): any new code that mutates a folded dimension or aggregated column of request-log rows below the hourly watermark must take the fold-state lock and either mirror the rollups or exclude the pre-watermark rows from the mutation.
 
 ### D11: Backfill pacing
 

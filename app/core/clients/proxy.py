@@ -3165,8 +3165,8 @@ async def _stream_responses_with_session(
         failure_phase = exc.failure_phase or "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        retryable_same_contract = exc.retryable_same_contract
-        if routed_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and exc.retryable_same_contract:
+        retryable_same_contract = exc.retryable_same_contract and not exc.is_tls_verification_failure
+        if routed_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and retryable_same_contract:
             # Routed Codex sessions are private to this attempt, so recovery
             # legitimately has no shared HTTP generation for compare-and-swap.
             raise _process_network_failure_error(
@@ -3174,6 +3174,17 @@ async def _stream_responses_with_session(
                 exc,
                 retryable_same_contract=True,
                 failed_session=None,
+            ) from exc
+        if raise_for_status and retryable_same_contract:
+            raise ProxyResponseError(
+                exc.status_code or 502,
+                openai_error(routed_error_code, response_error_message),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                upstream_status_code=exc.status_code,
+                upstream_error_code=routed_error_code,
             ) from exc
         yield format_sse_event(
             response_failed_event(routed_error_code, response_error_message, response_id=get_request_id()),
@@ -3192,8 +3203,13 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        retryable_same_contract = transport == "http" and is_pre_dispatch_connection_failure(exc)
-        failure_phase = "connect" if retryable_same_contract else "upstream"
+        pre_dispatch_connection_failure = is_pre_dispatch_connection_failure(exc)
+        # Typed connector failures prove that neither the HTTP request nor the
+        # websocket response.create frame was dispatched. TLS verification is
+        # also pre-dispatch, but it is a stable configuration failure rather
+        # than a transient condition worth retrying on another account.
+        retryable_same_contract = pre_dispatch_connection_failure and not isinstance(exc, aiohttp.ClientSSLError)
+        failure_phase = "connect" if pre_dispatch_connection_failure else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
         # Direct HTTP streams and direct upstream WebSockets both use this
@@ -3204,6 +3220,16 @@ async def _stream_responses_with_session(
                 response_error_message,
                 exc,
                 retryable_same_contract=retryable_same_contract,
+                failed_session=client_session,
+            ) from exc
+        if raise_for_status and retryable_same_contract:
+            raise ProxyResponseError(
+                502,
+                openai_error(error_code or "upstream_unavailable", response_error_message),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
                 failed_session=client_session,
             ) from exc
         yield format_sse_event(

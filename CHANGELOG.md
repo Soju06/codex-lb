@@ -1,5 +1,100 @@
 # Changelog
 
+## [1.22.0](https://github.com/Soju06/codex-lb/compare/v1.21.0...v1.22.0) (2026-07-24)
+
+
+### Features
+
+* **accounts:** add reset-credit controls and auto redeem ([#1358](https://github.com/Soju06/codex-lb/issues/1358)) ([1c985d0](https://github.com/Soju06/codex-lb/commit/1c985d0ff734d4b00c25624f3d98fc9575769266))
+* **conversation:** implementation on conversation grouping on Opencode + Codex ([#1453](https://github.com/Soju06/codex-lb/issues/1453)) ([be363d3](https://github.com/Soju06/codex-lb/commit/be363d3a46af245c973d07b33f777852f368ad07))
+* **dashboard:** group advanced navigation and settings behind progressive disclosure ([#1339](https://github.com/Soju06/codex-lb/issues/1339)) ([0c2283e](https://github.com/Soju06/codex-lb/commit/0c2283eee0d732350d0704c2f91f33d082849b3b))
+* **helm:** make ExternalSecret remote refs configurable ([#1455](https://github.com/Soju06/codex-lb/issues/1455)) ([1c91cb7](https://github.com/Soju06/codex-lb/commit/1c91cb7c2c6f009e59212a3a7aeefaf5002ce380))
+* **helm:** support Gateway API rule filters ([#1459](https://github.com/Soju06/codex-lb/issues/1459)) ([acd50d1](https://github.com/Soju06/codex-lb/commit/acd50d1dd97fc459415f4588d7f5c5abc739b925))
+* **model-sources:** report upstream generation timings ([#1319](https://github.com/Soju06/codex-lb/issues/1319)) ([1ebd195](https://github.com/Soju06/codex-lb/commit/1ebd195daed487959cb1d23cec04dbce081e2a89))
+* **proxy:** add stale-anchor diagnostics ([#1225](https://github.com/Soju06/codex-lb/issues/1225)) ([4720e0e](https://github.com/Soju06/codex-lb/commit/4720e0ecf1800237539fa7b9113873544e8898e2))
+* **settings:** manage data retention from the dashboard ([#1364](https://github.com/Soju06/codex-lb/issues/1364)) ([cacc6c3](https://github.com/Soju06/codex-lb/commit/cacc6c367cda9ee91bf9eba71fb04cd9907e6400))
+* **ui:** add Korean dashboard locale ([#1375](https://github.com/Soju06/codex-lb/issues/1375)) ([ccaa4aa](https://github.com/Soju06/codex-lb/commit/ccaa4aa35aa46e2eb7fe439ae5e96fb3e3fdacff))
+* **ui:** header brand back to /dashboard on click ([#1452](https://github.com/Soju06/codex-lb/issues/1452)) ([dca802d](https://github.com/Soju06/codex-lb/commit/dca802dcca724d753cd46849883bccb99105af79))
+
+
+### Bug Fixes
+
+* **api-keys:** reject duplicate limit rules on create ([#1312](https://github.com/Soju06/codex-lb/issues/1312)) ([31f7aac](https://github.com/Soju06/codex-lb/commit/31f7aac61bc55768bbb3ab1bbf819b21b7f5d368))
+* **api:** give thread-goal GET/POST distinct operationIds ([#1398](https://github.com/Soju06/codex-lb/issues/1398)) ([3b97766](https://github.com/Soju06/codex-lb/commit/3b97766972ef48e70eedf1a61db6fd4477d22502))
+* **auth:** require trusted-proxy identity consensus ([#1380](https://github.com/Soju06/codex-lb/issues/1380)) ([b3a5c2a](https://github.com/Soju06/codex-lb/commit/b3a5c2a911447e6d8207189f67269d9452f8b5d9))
+* **balancer:** decorrelate round-robin tie-breaking across replicas ([#1327](https://github.com/Soju06/codex-lb/issues/1327)) ([fd529b2](https://github.com/Soju06/codex-lb/commit/fd529b21269328c88a3e8291858cccb1c27d93ff))
+* **balancer:** recover probing accounts ([#1376](https://github.com/Soju06/codex-lb/issues/1376)) ([fe93776](https://github.com/Soju06/codex-lb/commit/fe93776c39efb63a6f0901937198ed2896f9677d))
+* **balancer:** reject implausible rate-limit resets ([#1374](https://github.com/Soju06/codex-lb/issues/1374)) ([aea1e6f](https://github.com/Soju06/codex-lb/commit/aea1e6f58e3961dbca6c2380d5473cf2a965dbb6))
+* **ci:** run ruff from the locked environment ([#1465](https://github.com/Soju06/codex-lb/issues/1465)) ([d52521a](https://github.com/Soju06/codex-lb/commit/d52521a98480a0e203243563a516576714113738))
+* **cli:** reject out-of-range server port before startup ([#1400](https://github.com/Soju06/codex-lb/issues/1400)) ([ec7aadb](https://github.com/Soju06/codex-lb/commit/ec7aadb3867aacee1927b096f04c49213624b307))
+* **compact:** preserve historical side-effect anchors ([f76469f](https://github.com/Soju06/codex-lb/commit/f76469f1d64b13cafea3f825f2ece605defcd120))
+* **config:** reject empty trusted proxy CIDRs ([#1379](https://github.com/Soju06/codex-lb/issues/1379)) ([e5b101f](https://github.com/Soju06/codex-lb/commit/e5b101f20299d02637b9a66866c2e5bfc61edb03))
+* **dashboard:** keep overview visible when request logs fail ([#1397](https://github.com/Soju06/codex-lb/issues/1397)) ([603d181](https://github.com/Soju06/codex-lb/commit/603d1813a45e28bbeadc0247b033df8fe563173e))
+* **db:** pin asyncpg sessions to UTC ([#1352](https://github.com/Soju06/codex-lb/issues/1352)) ([977b991](https://github.com/Soju06/codex-lb/commit/977b991b69f7e21ae2768e5be30e1bd127b0f6a2))
+* **db:** reject empty migration database URL ([#1399](https://github.com/Soju06/codex-lb/issues/1399)) ([f527dee](https://github.com/Soju06/codex-lb/commit/f527dee729cc66513009a515f1ed387d95c382c8))
+* **docker:** preserve runtime readability for owner-only build files ([#1373](https://github.com/Soju06/codex-lb/issues/1373)) ([cf5db08](https://github.com/Soju06/codex-lb/commit/cf5db08042ed66724593dfcf5be66740b2c43e79))
+* **models:** complete required Codex catalog fields ([#1299](https://github.com/Soju06/codex-lb/issues/1299)) ([a97bcc2](https://github.com/Soju06/codex-lb/commit/a97bcc26bc7a0a34a331f2f9bb9ae13d5602fd08))
+* **oauth:** persist dashboard OAuth flow state for multi-replica ([#1329](https://github.com/Soju06/codex-lb/issues/1329)) ([8e2ee2d](https://github.com/Soju06/codex-lb/commit/8e2ee2d390dae4b4afd5dd61775fd7c8d29cc795))
+* **observability:** anchor TTFT to the attempt, expose queue wait as a dashboard trend ([#1333](https://github.com/Soju06/codex-lb/issues/1333)) ([f79f093](https://github.com/Soju06/codex-lb/commit/f79f0935b6224b892467d26fea2705d737315724))
+* **observability:** improve TTFT and TPS accuracy ([#1325](https://github.com/Soju06/codex-lb/issues/1325)) ([bc8d0fa](https://github.com/Soju06/codex-lb/commit/bc8d0fa335d9c8fea4c611b932c2677ce1146236))
+* **proxy-responses:** normalize Lite reasoning context ([#1431](https://github.com/Soju06/codex-lb/issues/1431)) ([c93e803](https://github.com/Soju06/codex-lb/commit/c93e803dc390b7aa29e606785e73f03c4b52de2c))
+* **proxy:** bound raw HTTP request ingress ([#1440](https://github.com/Soju06/codex-lb/issues/1440)) ([453c1e6](https://github.com/Soju06/codex-lb/commit/453c1e6d83f1e94bcdcff4c6014721b3632c89bd))
+* **proxy:** dedup and cap oversized response.create dumps ([#1366](https://github.com/Soju06/codex-lb/issues/1366)) ([d0f5b08](https://github.com/Soju06/codex-lb/commit/d0f5b084c4a40eb8fddf838730fa43c4bbad245e))
+* **proxy:** forward Codex standalone web search ([#1232](https://github.com/Soju06/codex-lb/issues/1232)) ([667cdab](https://github.com/Soju06/codex-lb/commit/667cdab568aa684279dca031171ffb291680ea50))
+* **proxy:** harden compact continuity recovery ([c1c3f31](https://github.com/Soju06/codex-lb/commit/c1c3f31d47ff7241d226efbea88ed8d6550a8fe1))
+* **proxy:** ignore API-key-enforced service tier a model never advertises ([#1438](https://github.com/Soju06/codex-lb/issues/1438)) ([e04226b](https://github.com/Soju06/codex-lb/commit/e04226b4324fed4bf3f78514977292071356f51f))
+* **proxy:** preserve encrypted compaction item ids ([#1316](https://github.com/Soju06/codex-lb/issues/1316)) ([9b79dba](https://github.com/Soju06/codex-lb/commit/9b79dba596c559319fb67fd06f640e52b9fc5149))
+* **proxy:** preserve HTTP bridge model-transition forks ([#1356](https://github.com/Soju06/codex-lb/issues/1356)) ([153bbc5](https://github.com/Soju06/codex-lb/commit/153bbc50504632b44986d3a47c73acd3ee7a9062))
+* **proxy:** purge stale durable bridge rows on startup ([#1310](https://github.com/Soju06/codex-lb/issues/1310)) ([9b40f74](https://github.com/Soju06/codex-lb/commit/9b40f746262b895c7f2b94d3afc17266f75b76ce))
+* **proxy:** record early downstream cancellations ([#1324](https://github.com/Soju06/codex-lb/issues/1324)) ([1089ab5](https://github.com/Soju06/codex-lb/commit/1089ab5dae24a507b1c512301180997b37cc280e))
+* **proxy:** recover from host network changes ([#1234](https://github.com/Soju06/codex-lb/issues/1234)) ([c2814b6](https://github.com/Soju06/codex-lb/commit/c2814b673a0ac742038775d3f91a3c4f9ab99bf6))
+* **proxy:** recover idle Codex Desktop bridge ([#1439](https://github.com/Soju06/codex-lb/issues/1439)) ([b49f25a](https://github.com/Soju06/codex-lb/commit/b49f25a76f7b15823eddceb1b18a51df61d0c7fc))
+* **proxy:** recover sequenced Codex prewarms ([#1359](https://github.com/Soju06/codex-lb/issues/1359)) ([c9dac81](https://github.com/Soju06/codex-lb/commit/c9dac811665a1eabc4c286f02c140f89a645f72a))
+* **proxy:** recover stale response-create gates ([#1296](https://github.com/Soju06/codex-lb/issues/1296)) ([fb5a573](https://github.com/Soju06/codex-lb/commit/fb5a573ccad0cd364a53e2c5c6ef52558a618d45))
+* **proxy:** recover verified responses after owner loss ([#1437](https://github.com/Soju06/codex-lb/issues/1437)) ([e6270f3](https://github.com/Soju06/codex-lb/commit/e6270f3ff6140d1f2c09bbd7820487f398de6fd2))
+* **proxy:** reject unsupported multi-worker-per-instance for shared per-account caps ([#1328](https://github.com/Soju06/codex-lb/issues/1328)) ([2e10405](https://github.com/Soju06/codex-lb/commit/2e10405acb31ee67f6da73b6f0b8ec4d86e1a1d2))
+* **proxy:** release pending websocket stream leases on disconnect ([#1282](https://github.com/Soju06/codex-lb/issues/1282)) ([f06173e](https://github.com/Soju06/codex-lb/commit/f06173e779b17a7e1fed5b14a24db867fd059caf)), closes [#1281](https://github.com/Soju06/codex-lb/issues/1281)
+* **proxy:** retry server_is_overloaded responses ([#1315](https://github.com/Soju06/codex-lb/issues/1315)) ([93383a7](https://github.com/Soju06/codex-lb/commit/93383a725a14cab21aae414963763b8ab6e18cb0))
+* **proxy:** retry stale per-account model rejections ([#1321](https://github.com/Soju06/codex-lb/issues/1321)) ([edc486a](https://github.com/Soju06/codex-lb/commit/edc486ab2b6b4cf1938eb0dba5f176c86df9eaa6))
+* **proxy:** retry upstream model capacity errors ([#1385](https://github.com/Soju06/codex-lb/issues/1385)) ([63bfcdc](https://github.com/Soju06/codex-lb/commit/63bfcdc8c04c90d18f497062960bb4349173b957))
+* **proxy:** route Spark using fresh per-account quota evidence ([#1248](https://github.com/Soju06/codex-lb/issues/1248)) ([1471475](https://github.com/Soju06/codex-lb/commit/14714750092f2d73158f3ba533c446d20885aa88))
+* **proxy:** serialize shared-session rate-limit reads ([#1432](https://github.com/Soju06/codex-lb/issues/1432)) ([539c4a2](https://github.com/Soju06/codex-lb/commit/539c4a2a37e77aa57ce9d2d3348cd030acfca140))
+* **proxy:** settle API-key reservation before budget-exhausted compact preflight raises ([#1332](https://github.com/Soju06/codex-lb/issues/1332)) ([fe625bf](https://github.com/Soju06/codex-lb/commit/fe625bfb78d8040c664ba2153e1e48275f327be3))
+* **proxy:** slim inline images nested in historical tool-call outputs ([#1344](https://github.com/Soju06/codex-lb/issues/1344)) ([a8578d7](https://github.com/Soju06/codex-lb/commit/a8578d780e67b8ce115e8eb1893176a05c67ea79))
+* **proxy:** spill bare session affinity under account caps ([#1382](https://github.com/Soju06/codex-lb/issues/1382)) ([5d55191](https://github.com/Soju06/codex-lb/commit/5d5519105362447b40fa529c2ae8131d52720214))
+* **reports:** reject inverted date ranges ([#1396](https://github.com/Soju06/codex-lb/issues/1396)) ([f3c6ff9](https://github.com/Soju06/codex-lb/commit/f3c6ff97d5f81bac4813f91e63f298fd0c859395))
+* **security:** enforce trusted proxy locality ([#1381](https://github.com/Soju06/codex-lb/issues/1381)) ([d9709cc](https://github.com/Soju06/codex-lb/commit/d9709cc64063f0488f53cfa8ad71801bca82d8b0))
+* **security:** harden trusted Forwarded chain resolution ([#1377](https://github.com/Soju06/codex-lb/issues/1377)) ([21313b7](https://github.com/Soju06/codex-lb/commit/21313b74dc6bbb2d711cc4f9ca1a30aec0a5267e))
+* **security:** inspect repeated session proxy headers ([#1378](https://github.com/Soju06/codex-lb/issues/1378)) ([dae97cd](https://github.com/Soju06/codex-lb/commit/dae97cde9eb09d8798574cf92b295f23ca9b5eb2))
+* **shutdown:** drain audit and fleet tasks ([#1443](https://github.com/Soju06/codex-lb/issues/1443)) ([ec36ef6](https://github.com/Soju06/codex-lb/commit/ec36ef60a617684bc78f68b7f462877557fa8e9f))
+* **streaming:** preserve terminal no-replay boundaries ([#1389](https://github.com/Soju06/codex-lb/issues/1389)) ([a4a2215](https://github.com/Soju06/codex-lb/commit/a4a22154c2eba756fb5d4c1426a84f71f81aa95e))
+* **uploads:** bound multipart request resources ([#1447](https://github.com/Soju06/codex-lb/issues/1447)) ([6ff5af6](https://github.com/Soju06/codex-lb/commit/6ff5af654af6a43a38ab40a79c7d4568e53003ac))
+* **usage:** make weekly-primary remap tiebreak data-aware ([#1391](https://github.com/Soju06/codex-lb/issues/1391)) ([71f31e6](https://github.com/Soju06/codex-lb/commit/71f31e67a09129b0b581a4e2bf829d3b6c165014))
+* **usage:** price gpt-5.6 personality models ([#1275](https://github.com/Soju06/codex-lb/issues/1275)) ([bcdc384](https://github.com/Soju06/codex-lb/commit/bcdc3842edfae7931c874e03663c5eab0649ddeb))
+* **useragent:** fixing the unexpected category on useragent group ([#1458](https://github.com/Soju06/codex-lb/issues/1458)) ([69b397f](https://github.com/Soju06/codex-lb/commit/69b397f77ecded9a721e9dfd6dc0630fefffc602))
+
+
+### Performance Improvements
+
+* **automations:** bound run-history query work ([#1451](https://github.com/Soju06/codex-lb/issues/1451)) ([4fbe591](https://github.com/Soju06/codex-lb/commit/4fbe59182ce050b98691ca69fa8d25b16239e829))
+* **db:** optimize dashboard hot-path indexes ([#1386](https://github.com/Soju06/codex-lb/issues/1386)) ([1422be6](https://github.com/Soju06/codex-lb/commit/1422be6717987721619bece793e309b95cffd709))
+* **proxy:** cache upstream-route resolution per account ([#1283](https://github.com/Soju06/codex-lb/issues/1283)) ([a52c458](https://github.com/Soju06/codex-lb/commit/a52c458b5d8a0f7e33cff4e7b422ae25436331a7))
+* **usage:** persist account snapshots transactionally ([#1448](https://github.com/Soju06/codex-lb/issues/1448)) ([10f5357](https://github.com/Soju06/codex-lb/commit/10f5357d1ba2e994825b33e21fe030948012d12e))
+* **usage:** scope refresh work to selected account ([#1446](https://github.com/Soju06/codex-lb/issues/1446)) ([eebb757](https://github.com/Soju06/codex-lb/commit/eebb7578beba462f25ef787e703d0b1291c959ec))
+
+
+### Documentation
+
+* add yshishenya and alchemistkiv as contributors ([#1387](https://github.com/Soju06/codex-lb/issues/1387)) ([3e6ca6e](https://github.com/Soju06/codex-lb/commit/3e6ca6e40e7c3acca6ce19196c7b678d65fe58cc))
+* **contributing:** codify simplicity principles and merge gates ([#1336](https://github.com/Soju06/codex-lb/issues/1336)) ([8374f4f](https://github.com/Soju06/codex-lb/commit/8374f4fc3fe2678fceb0dea5686e897764eae044))
+* **openspec:** archive accurate-stream-speed-metrics ([#1334](https://github.com/Soju06/codex-lb/issues/1334)) ([43aa394](https://github.com/Soju06/codex-lb/commit/43aa39425c6b9b72978d471f8aea47c46ce070a4))
+* **openspec:** archive the settings-reduction changes ([#1368](https://github.com/Soju06/codex-lb/issues/1368)) ([a619afc](https://github.com/Soju06/codex-lb/commit/a619afcb7b998e5a1fc772808593ca4c8e7c7ba4))
+* **openspec:** archive the simplicity-effort changes ([#1347](https://github.com/Soju06/codex-lb/issues/1347)) ([8fe0848](https://github.com/Soju06/codex-lb/commit/8fe0848e23368bc58f4dc7be0e3347bac64beb99))
+* **readme:** restore the features grid and client logo table ([#1346](https://github.com/Soju06/codex-lb/issues/1346)) ([e47deea](https://github.com/Soju06/codex-lb/commit/e47deeac1c0eff6f73602ff241713885d7ae6fe7))
+* **reference:** add generated settings reference with drift guards ([#1369](https://github.com/Soju06/codex-lb/issues/1369)) ([fdf267e](https://github.com/Soju06/codex-lb/commit/fdf267e78f630271ab8d2fe74345832a3ddc06c2))
+* **replica:** refresh operations context ([#1445](https://github.com/Soju06/codex-lb/issues/1445)) ([4a1df0a](https://github.com/Soju06/codex-lb/commit/4a1df0a9b3cb2be0d7c7a994a4647352b601108a))
+* **site:** add mkdocs documentation site and slim README to quick-start scope ([#1337](https://github.com/Soju06/codex-lb/issues/1337)) ([0705f9f](https://github.com/Soju06/codex-lb/commit/0705f9fd8c747ef3cf4777651d6c2ed29b0f9b45))
+
 ## [1.21.0](https://github.com/Soju06/codex-lb/compare/v1.20.1...v1.21.0) (2026-07-15)
 
 

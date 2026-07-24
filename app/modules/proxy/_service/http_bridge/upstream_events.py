@@ -111,11 +111,15 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _event_type_from_payload,
     _HTTPBridgeSession,
+    _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
+    _websocket_request_can_replay_before_visible_output,
+    _websocket_should_defer_reasoning_prelude,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
 )
@@ -170,6 +174,19 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
@@ -582,6 +599,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             matched_request_state = None
             created_request_state = None
             suppress_downstream_event = False
+            deferred_reasoning_prelude_event = False
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             anonymous_event_prefers_draining = event_type not in {"response.failed", "response.incomplete", "error"}
@@ -647,6 +665,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if payload is not None:
                     payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
                     event_block = format_sse_event(payload)
+                if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
+                    matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
+                    matched_request_state.upstream_model_output_seen = True
+                    suppress_downstream_event = True
+                    deferred_reasoning_prelude_event = True
+                elif event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    matched_request_state.upstream_model_output_seen = True
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -775,11 +800,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:
             terminal_request_state = grouped_previous_response_request_states[0]
 
-        if matched_request_state is terminal_request_state:
-            _record_response_event(matched_request_state, event_type)
-        else:
-            _record_response_event(matched_request_state, event_type)
-            _record_response_event(terminal_request_state, event_type)
+        if not deferred_reasoning_prelude_event:
+            if matched_request_state is terminal_request_state:
+                _record_response_event(matched_request_state, event_type)
+            else:
+                _record_response_event(matched_request_state, event_type)
+                _record_response_event(terminal_request_state, event_type)
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
@@ -1193,7 +1219,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and bool(terminal_request_state.request_text)
                     and terminal_request_state.preferred_account_id != session.account.id
                     and _websocket_auth_request_can_switch_account(terminal_request_state)
+                    and _websocket_request_can_replay_before_visible_output(terminal_request_state)
                 )
+                _clear_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
                 if terminal_request_state.event_queue is not None:
                     await terminal_request_state.event_queue.put(
                         format_sse_event(
@@ -1226,12 +1254,16 @@ class _HTTPBridgeUpstreamEventsMixin:
             and matched_request_state.event_queue is not None
             and not suppress_downstream_event
         ):
+            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state):
+                await matched_request_state.event_queue.put(deferred_text)
             await matched_request_state.event_queue.put(event_block)
 
         if terminal_request_state is None:
             return
 
         if terminal_request_state is not matched_request_state and terminal_request_state.event_queue is not None:
+            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state):
+                await terminal_request_state.event_queue.put(deferred_text)
             await terminal_request_state.event_queue.put(event_block)
         if terminal_request_state.event_queue is not None:
             await terminal_request_state.event_queue.put(None)

@@ -34,12 +34,14 @@ class CodexTransportError(RuntimeError):
         error_code: str | None = None,
         retryable_same_contract: bool = False,
         failure_phase: str | None = None,
+        is_tls_verification_failure: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.retryable_same_contract = retryable_same_contract
         self.failure_phase = failure_phase
+        self.is_tls_verification_failure = is_tls_verification_failure
 
 
 def require_route_or_direct_egress_opt_in(
@@ -272,10 +274,7 @@ class CodexClient:
                         failure_phase="connect",
                         # No response.create frame can be delivered before the
                         # websocket open returns to its caller.
-                        retryable_same_contract=is_process_network_failure(
-                            exc,
-                            include_permanent_dns=False,
-                        ),
+                        retryable_same_contract=is_pre_dispatch_connection_failure(exc),
                     ) from None
         raise RuntimeError("unreachable Codex client websocket fallback state")
 
@@ -474,6 +473,7 @@ def _transport_error(
         error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if process_network_failure else None,
         retryable_same_contract=retryable_same_contract,
         failure_phase=failure_phase,
+        is_tls_verification_failure=isinstance(exc, aiohttp.ClientSSLError),
     )
 
 

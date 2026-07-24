@@ -8,6 +8,7 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
@@ -919,10 +920,38 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         return
 
     head_count = _compact_trim_prefix_count(token_counts)
-    preserved_indices = _compact_state_anchor_indices(input_value)
-    required_indices = set(preserved_indices)
+    state_anchor_indices = _compact_state_anchor_indices(input_value)
+    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
+    wire_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens)
+
+    side_effect_indices = _compact_side_effect_anchor_indices(input_value)
+    unusable_side_effect_indices = {
+        index
+        for index, item in enumerate(input_value)
+        if is_json_mapping(item)
+        and _compact_item_is_side_effect_anchor(item)
+        and (not isinstance(item.get("call_id"), str) or not item["call_id"])
+    }
+    # Keep priority side effects as complete call/output units before spending
+    # the remaining budget on ordinary head/tail context.  Otherwise a large
+    # recent message can leave room for a call but not its output, causing
+    # reconciliation to drop the historical side effect that would fit after
+    # trimming that ordinary message.
+    side_effect_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        side_effect_indices,
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+    )
+    required_indices = set(state_anchor_indices)
     if input_value:
         required_indices.add(len(input_value) - 1)
+    if required_indices & unusable_side_effect_indices:
+        raise ClientPayloadError(
+            "Compact input cannot retain a required side-effect call without a usable call_id.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
         required_indices,
@@ -939,9 +968,16 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             param="input",
             code="responses_compact_input_too_large",
         )
-    selected_indices = set(preserved_indices)
+    side_effect_indices &= _compact_reconciled_tool_call_indices(
+        input_value,
+        required_indices | side_effect_indices,
+        token_counts=token_counts,
+        token_budget=wire_budget,
+        required_indices=required_indices,
+    )
+    selected_indices = set(state_anchor_indices)
+    selected_indices.update(side_effect_indices)
     selected_indices.update(range(head_count))
-    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
     selected_indices.update(
@@ -953,18 +989,20 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         )
     )
     selected_indices.update(required_indices)
+    selected_indices.difference_update(unusable_side_effect_indices)
     selected_indices = _compact_reconciled_tool_call_indices(
         input_value,
         selected_indices,
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
-        required_indices=required_indices,
+        required_indices=required_indices | side_effect_indices,
     )
     selected_indices = _compact_fit_selected_indices_to_wire_budget(
         input_value,
         token_counts,
         selected_indices=selected_indices,
         required_indices=required_indices,
+        priority_indices=side_effect_indices,
     )
     trimmed_input = (
         input_value
@@ -989,13 +1027,21 @@ def _compact_fit_selected_indices_to_wire_budget(
     *,
     selected_indices: set[int],
     required_indices: set[int],
+    priority_indices: set[int] | None = None,
 ) -> set[int]:
     """Drop best-effort middle context until the exact serialized input fits."""
 
     selected = set(selected_indices)
+    prioritized = priority_indices or set()
+
+    def optional_drop_key(index: int) -> tuple[int, int, int]:
+        if index in prioritized:
+            return (0, 0, -index)
+        return (1, min(index, len(input_value) - 1 - index), index)
+
     optional_indices = sorted(
         selected - required_indices,
-        key=lambda index: (min(index, len(input_value) - 1 - index), index),
+        key=optional_drop_key,
         reverse=True,
     )
     marker_budget = max(
@@ -1058,6 +1104,19 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
         if _is_preserved_non_message_directive(item_mapping):
             preserved_indices.add(index)
         if _compact_item_is_state_anchor(item_mapping):
+            preserved_indices.add(index)
+    return preserved_indices
+
+
+def _compact_side_effect_anchor_indices(input_value: list[JsonValue]) -> set[int]:
+    preserved_indices: set[int] = set()
+    for index, item in enumerate(input_value):
+        if (
+            is_json_mapping(item)
+            and _compact_item_is_side_effect_anchor(item)
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"]
+        ):
             preserved_indices.add(index)
     return preserved_indices
 
@@ -1175,6 +1234,10 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
             return True
     return False
+
+
+def _compact_item_is_side_effect_anchor(item: Mapping[str, JsonValue]) -> bool:
+    return is_downstream_side_effect_tool_call_item(item)
 
 
 def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:

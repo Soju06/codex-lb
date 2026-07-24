@@ -1992,6 +1992,8 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        owner_rebind_affinity: _AffinityPolicy | None = None,
+        selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
         # A replacement reader can start before its caller resends the request.
         # Clear the prior attempt first so an expired send timestamp cannot
@@ -2100,7 +2102,7 @@ class _HTTPBridgeMixin(
                 kind="http_bridge",
                 request_stage="reattach",
                 api_key=session.api_key,
-                affinity_policy=session.affinity,
+                affinity_policy=selection_affinity or session.affinity,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=_routing_strategy(settings),
@@ -2207,7 +2209,8 @@ class _HTTPBridgeMixin(
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
                 connect_headers = _websocket_safe_headers_with_turn_state(
-                    session.headers, _preferred_http_bridge_reconnect_turn_state(session)
+                    session.headers,
+                    None if owner_rebind_affinity is not None else _preferred_http_bridge_reconnect_turn_state(session),
                 )
                 upstream = await self._open_upstream_websocket_with_budget(
                     account,
@@ -2229,7 +2232,12 @@ class _HTTPBridgeMixin(
                         timeout_seconds=_remaining_budget_seconds(deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
-                        session.headers, _preferred_http_bridge_reconnect_turn_state(session)
+                        session.headers,
+                        (
+                            None
+                            if owner_rebind_affinity is not None
+                            else _preferred_http_bridge_reconnect_turn_state(session)
+                        ),
                     )
                     upstream = await self._open_upstream_websocket_with_budget(
                         account,
@@ -2274,6 +2282,27 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
+        if owner_rebind_affinity is not None:
+            await self._claim_http_bridge_replacement_before_swap(
+                session,
+                account_id=account.id,
+                upstream=upstream,
+                release_selected_account_lease=release_selected_account_lease,
+                owner_rebind_affinity=owner_rebind_affinity,
+            )
+            await self._unregister_http_bridge_turn_states(session)
+            await self._unregister_http_bridge_previous_response_ids(session)
+            session.last_completed_response_id = None
+            session.last_completed_input_count = 0
+            session.last_completed_input_prefix_fingerprint = None
+            session.last_pending_tool_calls.clear()
+            session.affinity = selection_affinity or session.affinity
+            session.codex_session = False
+            session.upstream_turn_state = None
+            session.downstream_turn_state = None
+            session.headers = {
+                key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+            }
         try:
             await old_upstream.close()
         except Exception:

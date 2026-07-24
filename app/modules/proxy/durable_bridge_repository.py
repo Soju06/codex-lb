@@ -83,6 +83,7 @@ class DurableBridgeSessionSnapshot:
     latest_response_id: str | None
     latest_input_item_count: int | None
     latest_input_full_fingerprint: str | None
+    last_seen_at: datetime
     closed_at: datetime | None
 
 
@@ -1060,6 +1061,7 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.latest_response_id,
     HttpBridgeSessionRecord.latest_input_item_count,
     HttpBridgeSessionRecord.latest_input_full_fingerprint,
+    HttpBridgeSessionRecord.last_seen_at,
     HttpBridgeSessionRecord.closed_at,
 )
 
@@ -1083,6 +1085,7 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         latest_response_id=mapping[HttpBridgeSessionRecord.latest_response_id],
         latest_input_item_count=mapping[HttpBridgeSessionRecord.latest_input_item_count],
         latest_input_full_fingerprint=mapping[HttpBridgeSessionRecord.latest_input_full_fingerprint],
+        last_seen_at=mapping[HttpBridgeSessionRecord.last_seen_at],
         closed_at=mapping[HttpBridgeSessionRecord.closed_at],
     )
 
@@ -1107,6 +1110,7 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         latest_response_id=row.latest_response_id,
         latest_input_item_count=row.latest_input_item_count,
         latest_input_full_fingerprint=row.latest_input_full_fingerprint,
+        last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
     )
 

@@ -83,7 +83,37 @@ class DurableBridgeSessionCoordinator:
                 if snapshot is not None:
                     resolved_aliases.append((alias_kind, snapshot))
             resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
+            resolved_account_ids = {
+                snapshot.account_id for _alias_kind, snapshot in resolved_aliases if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for _alias_kind, snapshot in resolved_aliases)
             if len(resolved_identities) > 1:
+                same_account_handoff = len(resolved_account_ids) == 1 and not has_ownerless_snapshot
+                if same_account_handoff:
+                    account_id = next(iter(resolved_account_ids))
+                    same_account_snapshots = [
+                        snapshot for _alias_kind, snapshot in resolved_aliases if snapshot.account_id == account_id
+                    ]
+                    requested_response_snapshot = next(
+                        (
+                            snapshot
+                            for alias_kind, snapshot in resolved_aliases
+                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and snapshot.account_id == account_id
+                        ),
+                        None,
+                    )
+                    account_snapshot = requested_response_snapshot or max(
+                        same_account_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.last_seen_at,
+                        ),
+                    )
+                    # Same-account aliases may point at different durable rows
+                    # during a handoff. Preserve an explicitly requested
+                    # response anchor; otherwise prefer the newest persisted
+                    # response anchor rather than alias-resolution order.
+                    return _to_lookup(account_snapshot)
                 specific_aliases = [
                     (alias_kind, snapshot)
                     for alias_kind, snapshot in resolved_aliases

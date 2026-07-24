@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
 from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
@@ -233,6 +234,25 @@ async def test_websocket_transport_error_preserves_handshake_status(route: Resol
         await client.open_ws_with_route_metadata("wss://upstream.test", route=route)
 
     assert getattr(exc_info.value, "status_code") == 426
+
+
+@pytest.mark.asyncio
+async def test_websocket_connector_error_preserves_pre_dispatch_retry_provenance(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    connection_key = ConnectionKey("upstream.test", 443, True, True, None, None, None)
+
+    class _ConnectorFailSession:
+        def ws_connect(self, *_args: object, **_kwargs: object) -> object:
+            raise aiohttp.ClientConnectorError(connection_key, ConnectionRefusedError("connection refused"))
+
+    client = CodexClient(_ConnectorFailSession())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.open_ws_with_route_metadata("wss://upstream.test", route=route)
+
+    assert getattr(exc_info.value, "failure_phase") == "connect"
+    assert getattr(exc_info.value, "retryable_same_contract") is True
 
 
 @pytest.mark.asyncio

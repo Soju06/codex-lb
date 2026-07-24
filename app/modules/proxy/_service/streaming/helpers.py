@@ -446,10 +446,12 @@ def _should_retry_transient_stream_error(
         # stable code keeps settlement account-neutral, but cannot prove that
         # replaying the POST is safe.
         return False
+    if response_id is not None:
+        return False
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if is_upstream_model_capacity_error(message):
-        if code in _MODEL_CAPACITY_LIMIT_CODES or response_id is not None:
+        if code in _MODEL_CAPACITY_LIMIT_CODES:
             return False
         return True
     if code != "upstream_unavailable" or not message:

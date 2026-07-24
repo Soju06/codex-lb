@@ -733,13 +733,17 @@ def test_rewrite_parallel_tool_call_payload_keeps_duplicate_read_only_connector_
     assert rewritten_payload is payload
 
 
-def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_replay():
+@pytest.mark.parametrize(
+    "recipient_name",
+    ["functions.exec_command", "functions.exec", "functions.collaboration"],
+)
+def test_mark_duplicate_tool_call_downstream_event_suppresses_parallel_wrapper_replay(recipient_name: str):
     upstream_control = proxy_service._WebSocketUpstreamControl()
     arguments = json.dumps(
         {
             "tool_uses": [
                 {
-                    "recipient_name": "functions.exec_command",
+                    "recipient_name": recipient_name,
                     "parameters": {"cmd": "gh pr create --repo Komzpa/evince"},
                 }
             ]

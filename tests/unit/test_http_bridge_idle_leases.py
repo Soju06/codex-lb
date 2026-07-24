@@ -353,6 +353,64 @@ async def test_stale_finalizer_cannot_release_lease_reacquired_for_new_turn(
 
 
 @pytest.mark.asyncio
+async def test_prewarm_failure_retires_closed_session_after_last_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    service._http_bridge_sessions[session.key] = session
+    lease = _make_lease("l-prewarm-failure")
+    acquire_account_lease = AsyncMock(return_value=lease)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+
+    async def fail_reader_during_prewarm(*_args: object, **_kwargs: object) -> None:
+        retired = await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code="stream_incomplete",
+            error_message="prewarm upstream closed",
+        )
+        assert retired is False
+        assert service._http_bridge_sessions[session.key] is session
+        raise RuntimeError("prewarm failed")
+
+    monkeypatch.setattr(
+        service,
+        "_maybe_prewarm_http_bridge_session",
+        AsyncMock(side_effect=fail_reader_during_prewarm),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-failure",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(RuntimeError, match="prewarm failed"):
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.admission_waiter_count == 0
+    assert session.account_lease is None
+    assert session.key not in service._http_bridge_sessions
+
+
+@pytest.mark.asyncio
 async def test_queue_full_submit_unregisters_admission_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

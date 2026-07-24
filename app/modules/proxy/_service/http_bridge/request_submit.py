@@ -681,10 +681,15 @@ class _HTTPBridgeRequestSubmitMixin:
         except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
-            async with session.pending_lock:
-                session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
-                admission_waiter_registered = False
-            await self._maybe_release_idle_http_bridge_session_lease(session)
+            await self._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=False,
+                counted_in_queue=False,
+                admission_waiter_registered=admission_waiter_registered,
+            )
+            admission_waiter_registered = False
             raise
         async with session.pending_lock:
             if session.queued_request_count >= queue_limit:

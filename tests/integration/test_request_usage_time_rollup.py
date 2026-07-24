@@ -789,7 +789,8 @@ async def test_model_rewrite_skips_folded_rows(db_setup):
     assert updated == 1  # the live-tail row only
 
     async with SessionLocal() as session:
-        models_by_age = dict((await session.execute(select(RequestLog.requested_at, RequestLog.model))).all())
+        model_rows = (await session.execute(select(RequestLog.requested_at, RequestLog.model))).all()
+        models_by_age = {requested_at: model for requested_at, model in model_rows}
     assert models_by_age[old_at] == "gpt-5.1-codex"  # below both watermarks
     assert models_by_age[between_at] == "gpt-5.1-codex"  # below the lifetime watermark
     assert models_by_age[at_lifetime] == "gpt-5.1-codex"  # AT the inclusive lifetime watermark

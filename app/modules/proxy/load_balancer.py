@@ -382,7 +382,14 @@ class LoadBalancer:
             caps=caps,
             stream_reserve_slots=stream_reserve_slots,
         )
-        return runtime.inflight_streams < effective_cap
+        allowed = runtime.inflight_streams < effective_cap
+        if allowed and runtime.inflight_streams >= max(1, cap - max(0, stream_reserve_slots)):
+            # Admission beyond the reserve-adjusted static share means the
+            # borrow allowance made the difference; selection acquires the
+            # lease via _acquire_account_lease_locked, which does not re-check
+            # caps, so this is the only place the borrow is visible.
+            _record_stream_share_borrow()
+        return allowed
 
     def _release_account_lease_locked(self, lease: AccountLease, *, reason: str) -> bool:
         runtime = self._runtime.get(lease.account_id)

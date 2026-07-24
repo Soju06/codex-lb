@@ -19,8 +19,40 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Run release-please
+        id: release-please
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json
+
+      # release-please bumps pyproject.toml but cannot regenerate uv.lock, so the
+      # stable/beta release guards fail until the lockfile records the new project
+      # version. Sync it here so release PRs are mergeable without a manual commit.
+      - name: Checkout release branch
+        if: ${{ steps.release-please.outputs.pr }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ fromJSON(steps.release-please.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Set up uv
+        if: ${{ steps.release-please.outputs.pr }}
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Sync uv.lock with the release version
+        if: ${{ steps.release-please.outputs.pr }}
+        run: |
+          uv lock
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already in sync"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore(release): sync uv.lock with the release version"
+          git push

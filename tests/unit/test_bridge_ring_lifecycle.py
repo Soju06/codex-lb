@@ -22,6 +22,7 @@ from app.db.models import (
     AccountStatus,
     Base,
     BridgeRingMember,
+    HttpBridgeRetryCircuit,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
@@ -30,11 +31,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
-from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
-from app.modules.proxy.durable_bridge_repository import (
-    DurableBridgeAliasRegistration,
-    DurableBridgeRepository,
-)
+from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, durable_bridge_hash
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit
@@ -302,6 +299,44 @@ async def test_get_sessions_by_ids_chunks_large_id_sets(
 
         assert len(snapshots) == len(claims)
         assert {snapshot.id for snapshot in snapshots} == {claim.id for claim in claims}
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_upsert_counts_concurrent_failure_conflicts(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+
+        for updated_at in (1000.0, 1001.0):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value="sid-retry-conflict",
+                api_key_scope="key-1",
+                consecutive_failures=1,
+                cooldown_until_epoch=0.0,
+                last_detail="clean_close",
+                updated_at_epoch=updated_at,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=2000.0,
+            )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-conflict"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 2
+        assert row.cooldown_until_epoch == 2000.0
+        assert row.last_detail == "clean_close"
+        assert row.updated_at_epoch == 1001.0
     finally:
         await session.close()
 

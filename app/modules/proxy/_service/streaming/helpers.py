@@ -464,9 +464,13 @@ def _classify_upstream_close(
     close_code: int | None,
     *,
     response_events_seen: int,
-) -> Literal["transient", "rejected"]:
+) -> Literal["clean", "transient"]:
     if close_code == 1000 and response_events_seen == 0:
-        return "rejected"
+        # A clean websocket close before response.created does not prove that
+        # the request was invalid.  The upstream can close a socket during a
+        # handoff, so the caller may safely recreate the socket and replay the
+        # still-unstarted request once.
+        return "clean"
     return "transient"
 
 

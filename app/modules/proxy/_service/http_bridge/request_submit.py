@@ -1486,6 +1486,10 @@ class _HTTPBridgeRequestSubmitMixin:
         if not await self._http_bridge_precreated_retry_allowed(session):
             return False
         clean_close_retry_max_count = self._http_bridge_clean_close_retry_max_count()
+        account_neutral_recovery = is_http_bridge_account_neutral_replay(
+            kind=session.key.affinity_kind,
+            key=session.key.affinity_key,
+        )
 
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
             if _websocket_request_can_replay_before_visible_output(request_state):

@@ -269,6 +269,8 @@ class _HTTPBridgeUpstreamEventsMixin:
         error_code: str,
         error_message: str,
         penalize_account: bool = True,
+        retire_detail: str | None = None,
+        force_retire: bool = False,
         upstream_close_code: int | None = None,
         response_events_seen: int | None = None,
         transport_classification: str | None = None,
@@ -315,6 +317,17 @@ class _HTTPBridgeUpstreamEventsMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        if force_retire and retire_detail:
+            _log_http_bridge_event(
+                retire_detail,
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                pending_count=failed_pending_count,
+                detail=retire_detail,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
         try:
             await self._fail_pending_websocket_requests(
                 account=session.account,
@@ -328,7 +341,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 penalize_account=penalize_account,
             )
         finally:
-            if session.admission_waiter_count > 0:
+            if session.admission_waiter_count > 0 and not force_retire:
                 if close_classification == "clean" and failed_pending_count > 0:
                     await self._record_http_bridge_retry_circuit_failure(
                         session,
@@ -340,7 +353,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     account_id=session.account.id,
                     model=session.request_model,
                     pending_count=session.admission_waiter_count,
-                    detail=error_code,
+                    detail=retire_detail or error_code,
                     cache_key_family=session.key.affinity_kind,
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
@@ -352,8 +365,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retry_circuit_detail="clean_close",
                     )
                 else:
-                    await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
-        return session.admission_waiter_count == 0
+                    await self._retire_stale_pending_http_bridge_session(session, detail=retire_detail or error_code)
+        return force_retire or session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(
         self: Any,

@@ -2355,6 +2355,7 @@ def _log_http_bridge_event(
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
         "owner_forward_fail",
+        "missing_response_created_timeout",
         "prompt_cache_locality_miss",
         "reallocation_orphan",
         "context_overflow_rollover",

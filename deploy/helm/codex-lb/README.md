@@ -404,6 +404,10 @@ metrics:
     enabled: true                  # Alerting rules
   grafanaDashboard:
     enabled: true                  # Pre-built dashboards
+    folder: Applications/Codex LB  # Nested folder path (when supported by the sidecar)
+    titles:
+      codex-lb.json: Overview
+      ttft-breakdown.json: TTFT Breakdown
 externalSecrets:
   enabled: true                    # Use External Secrets Operator
 ```

@@ -11,6 +11,7 @@ Covers the artifact-level defects that shipped broken multi-replica deployments:
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -123,6 +124,45 @@ def _helm_notes(*args: str) -> str:
 
 def _helm_documents(rendered: str) -> list[dict]:
     return [document for document in yaml.safe_load_all(rendered) if document]
+
+
+def test_grafana_dashboard_titles_can_be_overridden() -> None:
+    default_rendered = _helm_template(
+        "--set",
+        "metrics.grafanaDashboard.enabled=true",
+    )
+    default_config = next(
+        document
+        for document in _helm_documents(default_rendered)
+        if document["kind"] == "ConfigMap"
+        and document["metadata"]["name"] == "codex-lb-dashboard"
+    )
+    assert json.loads(default_config["data"]["codex-lb.json"])["title"] == "codex-lb"
+    assert (
+        json.loads(default_config["data"]["ttft-breakdown.json"])["title"]
+        == "codex-lb TTFT Breakdown"
+    )
+
+    rendered = _helm_template(
+        "--set",
+        "metrics.grafanaDashboard.enabled=true",
+        "--set-string",
+        r"metrics.grafanaDashboard.titles.codex-lb\.json=Overview",
+        "--set-string",
+        r"metrics.grafanaDashboard.titles.ttft-breakdown\.json=TTFT Breakdown",
+    )
+    dashboard_config = next(
+        document
+        for document in _helm_documents(rendered)
+        if document["kind"] == "ConfigMap"
+        and document["metadata"]["name"] == "codex-lb-dashboard"
+    )
+
+    assert json.loads(dashboard_config["data"]["codex-lb.json"])["title"] == "Overview"
+    assert (
+        json.loads(dashboard_config["data"]["ttft-breakdown.json"])["title"]
+        == "TTFT Breakdown"
+    )
 
 
 def _prod_overlay_args(*args: str) -> tuple[str, ...]:

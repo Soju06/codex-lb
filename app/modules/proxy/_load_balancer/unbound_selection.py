@@ -43,6 +43,7 @@ logger = logging.getLogger("app.modules.proxy.load_balancer")
 
 SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 AccountCapRejectionCallback = Callable[[AccountLeaseKind | None], None]
+StreamShareBorrowCallback = Callable[[], None]
 
 
 class UnboundSelectionOwner(StickySelectionOwner, Protocol):
@@ -69,6 +70,7 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    record_stream_share_borrow: StreamShareBorrowCallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +105,7 @@ async def run_unbound_selection_path(
     caps = request.concurrency_caps
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    _record_stream_share_borrow = request.record_stream_share_borrow
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
@@ -236,11 +239,17 @@ async def run_unbound_selection_path(
                     error_message = result.error_message
                 else:
                     selected_reset_at = selected.reset_at
+                    selected_borrows_stream_share = False
                     for state in selected_states:
                         if state.account_id == result.account.account_id:
                             state.status = result.account.status
                             state.deactivation_reason = result.account.deactivation_reason
                             selected_reset_at = int(state.reset_at) if state.reset_at else None
+                            selected_borrows_stream_share = bool(
+                                lease_kind == "stream"
+                                and caps.stream_limit > 0
+                                and state.inflight_streams >= max(1, caps.stream_limit - max(0, stream_reserve_slots))
+                            )
                             break
                     if lease_kind is not None:
                         selected_reserved_probe = bool(
@@ -257,6 +266,8 @@ async def run_unbound_selection_path(
                             # consuming the quiet interval.
                             record_selection=not selected_reserved_probe,
                         )
+                        if selected_borrows_stream_share and selected_lease is not None:
+                            _record_stream_share_borrow()
                     selected_snapshot = _clone_account(selected)
                     selected_snapshot.status = result.account.status
                     selected_snapshot.deactivation_reason = result.account.deactivation_reason

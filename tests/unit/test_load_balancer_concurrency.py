@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncIterator, Collection, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -28,6 +28,7 @@ from app.core.balancer.logic import (
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy import cap_partitioning as cap_partitioning_module
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
@@ -39,12 +40,15 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def _use_dashboard_caps_from_test_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def _use_dashboard_caps_from_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     class _SettingsCache:
         async def get(self) -> object:
             return load_balancer_module.get_settings()
 
     monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
+    cap_partitioning_module.reset_cap_partition_for_tests()
+    yield
+    cap_partitioning_module.reset_cap_partition_for_tests()
 
 
 def _make_account(account_id: str) -> Account:
@@ -330,6 +334,14 @@ class _FakeAccountInflightGauge:
 
     def labels(self, *, account_id: str, kind: str) -> _FakeGaugeChild:
         return _FakeGaugeChild(self.values, account_id, kind)
+
+
+class _FakeCounter:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def inc(self) -> None:
+        self.value += 1
 
 
 @pytest.mark.asyncio
@@ -755,6 +767,55 @@ async def test_account_stream_leases_spread_concurrent_burst_until_cap() -> None
 
     assert await balancer.account_pressure_snapshot(account_a.id) == (0, 0, 0.0)
     assert await balancer.account_pressure_snapshot(account_b.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_unbound_stream_selection_records_peer_headroom_borrow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc-unbound-stream-borrow")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([account]),
+            _StubUsageRepository({}, {}),
+        )
+    )
+    caps = load_balancer_module.AccountConcurrencyCaps(
+        response_create_limit=2,
+        stream_limit=4,
+        configured_response_create_limit=4,
+        configured_stream_limit=8,
+        replica_count=2,
+    )
+    borrow_counter = _FakeCounter()
+    monkeypatch.setattr(load_balancer_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(load_balancer_module, "account_stream_share_borrows_total", borrow_counter)
+    cap_partitioning_module.observe_peer_stream_inflight({"peer-1": {}})
+
+    leases = []
+    for _ in range(3):
+        selection = await balancer.select_account(
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+            stream_reserve_slots=1,
+            concurrency_caps=caps,
+        )
+        assert selection.lease is not None
+        leases.append(selection.lease)
+
+    borrowed = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        stream_reserve_slots=1,
+        concurrency_caps=caps,
+    )
+
+    assert borrowed.account is not None
+    assert borrowed.lease is not None
+    assert borrow_counter.value == 1
+
+    for lease in [*leases, borrowed.lease]:
+        await balancer.release_account_lease(lease)
 
 
 @pytest.mark.asyncio

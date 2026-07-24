@@ -290,6 +290,16 @@ def _http_bridge_capacity_wait_deadline(request_state: _WebSocketRequestState) -
     return request_state.account_capacity_wait_deadline
 
 
+def _http_bridge_account_capacity_wait_deadline(
+    request_state: _WebSocketRequestState,
+    exc: ProxyResponseError,
+) -> float | None:
+    code, _message = _proxy_error_code_message(exc)
+    if not _is_local_account_cap_code(code):
+        return None
+    return _http_bridge_capacity_wait_deadline(request_state)
+
+
 def _http_bridge_capacity_wait_plan(
     exc: ProxyResponseError,
     *,
@@ -1390,7 +1400,7 @@ class _HTTPBridgeStreamingMixin:
                     wait_plan = _http_bridge_capacity_wait_plan(
                         exc,
                         request_deadline=request_deadline,
-                        capacity_wait_deadline=_http_bridge_capacity_wait_deadline(request_state),
+                        capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, exc),
                     )
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -1614,7 +1624,9 @@ class _HTTPBridgeStreamingMixin:
                         wait_plan = _http_bridge_capacity_wait_plan(
                             capacity_exc,
                             request_deadline=request_deadline,
-                            capacity_wait_deadline=_http_bridge_capacity_wait_deadline(request_state),
+                            capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(
+                                request_state, capacity_exc
+                            ),
                         )
                         if wait_plan is None:
                             raise
@@ -2002,7 +2014,9 @@ class _HTTPBridgeStreamingMixin:
                         wait_plan = _http_bridge_capacity_wait_plan(
                             capacity_exc,
                             request_deadline=request_deadline,
-                            capacity_wait_deadline=_http_bridge_capacity_wait_deadline(request_state),
+                            capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(
+                                request_state, capacity_exc
+                            ),
                         )
                         if wait_plan is None:
                             raise
@@ -2109,7 +2123,9 @@ class _HTTPBridgeStreamingMixin:
                         wait_plan = _http_bridge_capacity_wait_plan(
                             capacity_exc,
                             request_deadline=request_deadline,
-                            capacity_wait_deadline=_http_bridge_capacity_wait_deadline(request_state),
+                            capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(
+                                request_state, capacity_exc
+                            ),
                         )
                         if wait_plan is None:
                             raise
@@ -2301,7 +2317,7 @@ class _HTTPBridgeStreamingMixin:
                     wait_plan = _http_bridge_capacity_wait_plan(
                         capacity_exc,
                         request_deadline=request_deadline,
-                        capacity_wait_deadline=_http_bridge_capacity_wait_deadline(request_state),
+                        capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, capacity_exc),
                     )
                     if wait_plan is None:
                         raise
@@ -2464,7 +2480,7 @@ class _HTTPBridgeStreamingMixin:
                 wait_plan = _http_bridge_capacity_wait_plan(
                     exc,
                     request_deadline=request_deadline,
-                    capacity_wait_deadline=_http_bridge_capacity_wait_deadline(request_state),
+                    capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, exc),
                 )
                 if wait_plan is None:
                     raise

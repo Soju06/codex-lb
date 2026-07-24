@@ -660,6 +660,7 @@ class LoadBalancer:
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    record_stream_share_borrow=_record_stream_share_borrow,
                 ),
             )
             selection_inputs = unbound_outcome.selection_inputs

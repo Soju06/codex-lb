@@ -558,42 +558,9 @@ custom rules, the chart preserves their order and adds the codex-lb Service as
 the backend of every rule. Referenced extension resources must be valid for the
 HTTPRoute namespace according to the selected Gateway implementation.
 
-### Application-specific Gateway
-
-By default the HTTPRoute attaches to an existing (typically shared) Gateway via
-`gatewayApi.parentRefs`. Set `gatewayApi.gateway.create=true` to instead render
-a Gateway dedicated to this release in the release namespace; the HTTPRoute
-then attaches to it automatically and `gatewayApi.parentRefs` is ignored.
-
-```yaml
-gatewayApi:
-  enabled: true
-  gateway:
-    create: true
-    gatewayClassName: envoy
-  hostnames:
-    - codex-lb.example.com
-```
-
-`gatewayApi.gateway.gatewayClassName` is required when `create=true`. Without
-`gatewayApi.gateway.listeners` the Gateway gets a single HTTP listener on port
-80; set `listeners` explicitly for TLS or non-default ports:
-
-```yaml
-gatewayApi:
-  enabled: true
-  gateway:
-    create: true
-    gatewayClassName: envoy
-    listeners:
-      - name: https
-        port: 443
-        protocol: HTTPS
-        tls:
-          mode: Terminate
-          certificateRefs:
-            - name: codex-lb-tls
-```
+For application-specific Gateway setup, see the
+[Kubernetes deployment guide](../../../docs/deployment/kubernetes.md#application-specific-gateway)
+and the [owning OpenSpec change](../../../openspec/changes/create-application-gateway/).
 
 ### nginx annotations and responses sticky routing
 

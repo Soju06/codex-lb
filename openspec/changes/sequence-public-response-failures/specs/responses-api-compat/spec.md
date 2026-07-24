@@ -46,6 +46,8 @@ repair MUST NOT change Codex-private backend stream shapes.
   `sequence_number`
 - **WHEN** the public normalizer forwards the event
 - **THEN** it preserves that sequence number unchanged
+- **AND** if it must synthesize a leading `response.created`, that event uses
+  the immediately preceding integer sequence
 
 #### Scenario: Backend Codex stream shape remains unchanged
 

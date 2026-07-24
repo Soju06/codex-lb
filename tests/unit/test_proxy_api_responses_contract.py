@@ -947,13 +947,17 @@ async def test_normalize_public_responses_stream_sequences_failure_after_reasoni
 
 
 @pytest.mark.asyncio
-async def test_normalize_public_responses_stream_preserves_failure_sequence() -> None:
+@pytest.mark.parametrize(("failure_sequence", "created_sequence"), [(12, 11), (0, -1)])
+async def test_normalize_public_responses_stream_preserves_failure_sequence(
+    failure_sequence: int,
+    created_sequence: int,
+) -> None:
     blocks = [
         block
         async for block in proxy_api_module._normalize_public_responses_stream(
             _iter_blocks(
                 (
-                    'data: {"type":"response.failed","sequence_number":12,'
+                    f'data: {{"type":"response.failed","sequence_number":{failure_sequence},'
                     '"response":{"id":"resp_err","object":"response","status":"failed",'
                     '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
                 )
@@ -962,8 +966,10 @@ async def test_normalize_public_responses_stream_preserves_failure_sequence() ->
     ]
 
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    created = next(payload for payload in payloads if payload and payload.get("type") == "response.created")
     failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
-    assert failed["sequence_number"] == 12
+    assert created["sequence_number"] == created_sequence
+    assert failed["sequence_number"] == failure_sequence
 
 
 @pytest.mark.asyncio

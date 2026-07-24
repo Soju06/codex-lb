@@ -20,10 +20,16 @@ UTC hour. Raw rows with ``requested_at < watermark`` are fully folded; rows
 at or above it are the live tail. Buckets are half-open ``[start, end)``.
 
 NULL-dimension sentinel: nullable raw dimensions (account_id, api_key_id,
-service_tier) are stored as ``''`` so they can participate in the primary
-key on both dialects (UNIQUE/PK treat NULLs as distinct rows on PostgreSQL
-and SQLite). Use :func:`to_dimension` / :func:`from_dimension` at the write
-and read boundaries — a missed mapping silently diverges rollups from raw.
+service_tier, reasoning_effort) are stored as ``'\\x1f'`` so they can
+participate in the primary key on both dialects (UNIQUE/PK treat NULLs as
+distinct rows on PostgreSQL and SQLite). The encoding is collision-free:
+raw values that themselves start with the sentinel are escaped with one
+more sentinel character, so the empty string — a legitimate value the
+request models accept for service_tier/reasoning_effort, and a GROUP BY
+group distinct from NULL in the legacy raw queries — round-trips intact.
+Use :func:`to_dimension` / :func:`from_dimension` (SQL: ``_dimension_expr``)
+at the write and read boundaries — a missed mapping silently diverges
+rollups from raw.
 
 History-rewrite discipline (MUST): any code path that mutates a folded
 dimension (``requested_at``, ``deleted_at``, ``account_id``, ``api_key_id``,
@@ -84,19 +90,41 @@ _EPOCH = datetime(1970, 1, 1)
 WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 _EXCLUDED_REQUEST_KINDS = WARMUP_REQUEST_KINDS
 
-# Stored stand-in for NULL account_id / api_key_id / service_tier (PK columns
-# cannot be NULL, and NULLs would be distinct under a unique constraint).
-DIMENSION_SENTINEL = ""
+# Stored stand-in for NULL account_id / api_key_id / service_tier /
+# reasoning_effort (PK columns cannot be NULL, and NULLs would be distinct
+# under a unique constraint). U+001F (unit separator) rather than '' because
+# '' is a legitimate raw value (the request models accept empty-string
+# service_tier/reasoning_effort) that the legacy GROUP BY treats as a group
+# distinct from NULL; raw values that start with the sentinel are escaped
+# with one more sentinel character so the mapping stays injective.
+DIMENSION_SENTINEL = "\x1f"
 
 
 def to_dimension(value: str | None) -> str:
     """Map a nullable raw dimension value to its stored PK representation."""
-    return DIMENSION_SENTINEL if value is None else value
+    if value is None:
+        return DIMENSION_SENTINEL
+    if value.startswith(DIMENSION_SENTINEL):
+        return DIMENSION_SENTINEL + value
+    return value
 
 
 def from_dimension(value: str) -> str | None:
     """Map a stored dimension value back to the raw (nullable) domain."""
-    return None if value == DIMENSION_SENTINEL else value
+    if value == DIMENSION_SENTINEL:
+        return None
+    if value.startswith(DIMENSION_SENTINEL):
+        return value[len(DIMENSION_SENTINEL) :]
+    return value
+
+
+def _dimension_expr(column) -> ColumnElement[str]:
+    """SQL mirror of :func:`to_dimension` for the fold INSERT..SELECTs."""
+    return case(
+        (column.is_(None), DIMENSION_SENTINEL),
+        (func.substr(column, 1, 1) == DIMENSION_SENTINEL, DIMENSION_SENTINEL + column),
+        else_=column,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,9 +409,9 @@ def _requested_at_epoch_bucket_expr(session: AsyncSession, bucket_seconds: int) 
 
 def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
     bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
-    account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
-    api_key_id = func.coalesce(RequestLog.api_key_id, DIMENSION_SENTINEL).label("api_key_id")
-    service_tier = func.coalesce(RequestLog.service_tier, DIMENSION_SENTINEL).label("service_tier")
+    account_id = _dimension_expr(RequestLog.account_id).label("account_id")
+    api_key_id = _dimension_expr(RequestLog.api_key_id).label("api_key_id")
+    service_tier = _dimension_expr(RequestLog.service_tier).label("service_tier")
     is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
     output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
     # Exact mirror of the usage-summary reader's per-row clamp
@@ -427,7 +455,7 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
 
 def _error_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
     bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
-    account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
+    account_id = _dimension_expr(RequestLog.account_id).label("account_id")
     # Exact reproduction of the top-error read filter:
     # warmup kinds excluded, soft-deleted rows INCLUDED.
     stmt = (
@@ -450,9 +478,9 @@ def _demand_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
     # folding to a coarser grain would shrink forecasts wherever one slot
     # mixes groups with different dominant components.
     slot = _requested_at_epoch_bucket_expr(session, QUARTER_SLOT_SECONDS).label("slot_epoch")
-    account_id = func.coalesce(RequestLog.account_id, DIMENSION_SENTINEL).label("account_id")
-    api_key_id = func.coalesce(RequestLog.api_key_id, DIMENSION_SENTINEL).label("api_key_id")
-    reasoning_effort = func.coalesce(RequestLog.reasoning_effort, DIMENSION_SENTINEL).label("reasoning_effort")
+    account_id = _dimension_expr(RequestLog.account_id).label("account_id")
+    api_key_id = _dimension_expr(RequestLog.api_key_id).label("api_key_id")
+    reasoning_effort = _dimension_expr(RequestLog.reasoning_effort).label("reasoning_effort")
     is_deleted = RequestLog.deleted_at.is_not(None).label("is_deleted")
     output_or_reasoning = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
     stmt = (
@@ -625,20 +653,22 @@ _ROLLUP_TABLES = (
 
 async def _rekey_account_rows(session: AsyncSession, account_ids: list[str], rekey) -> None:
     repo = RequestUsageTimeRollupRepository(session)
+    stored_ids = [to_dimension(account_id) for account_id in account_ids]
     for model, columns, row_type, adder in _ROLLUP_TABLES:
-        stmt = select(*(getattr(model, column) for column in columns)).where(model.account_id.in_(account_ids))
+        stmt = select(*(getattr(model, column) for column in columns)).where(model.account_id.in_(stored_ids))
         rows = [row_type(*row) for row in (await session.execute(stmt)).all()]
         if not rows:
             continue
-        await session.execute(delete(model).where(model.account_id.in_(account_ids)))
+        await session.execute(delete(model).where(model.account_id.in_(stored_ids)))
         await getattr(repo, adder)([rekey(row) for row in rows])
 
 
 async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
     """Mirror `AccountsRepository.delete()`'s soft path, which retroactively
     detaches the account's ENTIRE raw history (`account_id=NULL,
-    deleted_at=now`): folded buckets move to the `('', is_deleted=true)`
-    dimension (merge-added — an orphaned-deleted bucket may already exist).
+    deleted_at=now`): folded buckets move to the `(NULL-sentinel,
+    is_deleted=true)` dimension (merge-added — an orphaned-deleted bucket
+    may already exist).
     The error satellite has no `is_deleted` dimension (its read includes
     soft-deleted rows), so only `account_id` is re-keyed there.
     """
@@ -654,7 +684,7 @@ async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, ac
 async def mirror_account_hard_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
     """Mirror the history-deleting path (raw rows physically removed)."""
     for model, *_rest in _ROLLUP_TABLES:
-        await session.execute(delete(model).where(model.account_id == account_id))
+        await session.execute(delete(model).where(model.account_id == to_dimension(account_id)))
 
 
 async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: str, duplicate_ids: list[str]) -> None:
@@ -666,4 +696,5 @@ async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: s
     """
     if not duplicate_ids:
         return
-    await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_account_id))
+    canonical_dimension = to_dimension(canonical_account_id)
+    await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_dimension))

@@ -165,6 +165,39 @@ def _corpus() -> list[RequestLog]:
             cached_input_tokens=44,
         )
     )
+    # Empty-string dimensions: legitimate values the legacy GROUP BY keeps
+    # distinct from NULL — the fold's collision-free encoding must preserve
+    # the split (buckets by service_tier, demand bins by reasoning_effort).
+    # A sentinel-prefixed tier exercises the SQL escape branch. One cluster
+    # sits below every candidate watermark (folded), one in the live tail;
+    # each cluster shares one hour bucket AND one 900s demand slot.
+    for offset in (timedelta(days=2, hours=4), timedelta(days=9, hours=21)):
+        rows.append(
+            _log(
+                BASE + offset + timedelta(minutes=7),
+                request_id_suffix="esc",
+                service_tier="\x1fodd",
+                cost_usd=0.02,
+            )
+        )
+        rows.append(
+            _log(
+                BASE + offset + timedelta(minutes=11),
+                request_id_suffix="empty",
+                service_tier="",
+                reasoning_effort="",
+                cost_usd=0.03,
+            )
+        )
+        rows.append(
+            _log(
+                BASE + offset + timedelta(minutes=13),
+                request_id_suffix="nulldim",
+                service_tier=None,
+                reasoning_effort=None,
+                cost_usd=0.04,
+            )
+        )
     # UNaligned earliest row: while it survives, earliest_activity_at must
     # keep the exact sub-hour timestamp even though its folded bucket floors
     # it (the rollup fallback applies only once raw is pruned).
@@ -305,7 +338,9 @@ def _assert_snapshots_equal(actual: dict, expected: dict, *, skip_keys: tuple[st
 
 def _assert_bucket_lists_equal(actual, expected, context: str) -> None:
     def _key(row):
-        return (row.bucket_epoch, row.model, row.service_tier or "")
+        # NULL and '' tiers are distinct rows in the same (bucket, model);
+        # the None-first component keeps their sort order deterministic.
+        return (row.bucket_epoch, row.model, row.service_tier is not None, row.service_tier or "")
 
     actual_sorted = sorted(actual, key=_key)
     expected_sorted = sorted(expected, key=_key)

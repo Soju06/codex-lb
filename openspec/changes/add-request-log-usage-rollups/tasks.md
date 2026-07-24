@@ -5,7 +5,7 @@
 
 ## 2. Schema and migration (PR1)
 
-- [x] 2.1 Declare `RequestUsageHourlyRollup`, `RequestUsageHourlyErrorRollup`, and `RequestDemandQuarterRollup` models plus the `hourly_folded_through` state column in `app/db/models.py` (BIGINT epoch bucket keys, `''` sentinels for nullable dimensions, no secondary indexes).
+- [x] 2.1 Declare `RequestUsageHourlyRollup`, `RequestUsageHourlyErrorRollup`, and `RequestDemandQuarterRollup` models plus the `hourly_folded_through` state column in `app/db/models.py` (BIGINT epoch bucket keys, collision-free NULL-sentinel encoding for nullable dimensions, no secondary indexes).
 - [x] 2.2 Author guarded, idempotent, DDL-only revision `20260724_000000_add_request_usage_time_rollups` (inspector-checked creates, batch_alter_table on SQLite, guarded downgrade); leave `folded_through` and lifetime rollups untouched.
 - [x] 2.3 Migration round-trip test: upgrade → schema assertions → downgrade → re-upgrade idempotence on SQLite; confirm the PostgreSQL drift contract covers the new models.
 

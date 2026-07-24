@@ -245,8 +245,10 @@ class RequestUsageHourlyRollup(Base):
     from raw, so buckets survive request-log retention pruning.
 
     Nullable raw dimensions (``account_id``/``api_key_id``/``service_tier``)
-    are stored as ``''`` sentinels so they can participate in the primary key
-    on both dialects (UNIQUE treats NULLs as distinct). ``request_kind`` is
+    are stored via the collision-free NULL-sentinel encoding
+    (``usage_time_rollup.to_dimension``) so they can participate in the
+    primary key on both dialects (UNIQUE treats NULLs as distinct) without
+    conflating NULL with a legitimate empty string. ``request_kind`` is
     NOT NULL at the source and stored verbatim (warmup kinds included; reads
     filter by dimension). No FKs: rollup rows must outlive account deletion.
     """
@@ -254,10 +256,10 @@ class RequestUsageHourlyRollup(Base):
     __tablename__ = "request_usage_hourly_rollups"
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
-    api_key_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
     model: Mapped[str] = mapped_column(String, primary_key=True)
-    service_tier: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    service_tier: Mapped[str] = mapped_column(String, primary_key=True)
     request_kind: Mapped[str] = mapped_column(String, primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
@@ -296,7 +298,7 @@ class RequestUsageHourlyErrorRollup(Base):
     __tablename__ = "request_usage_hourly_error_rollups"
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
     error_code: Mapped[str] = mapped_column(String, primary_key=True)
     error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
 
@@ -321,10 +323,10 @@ class RequestDemandQuarterRollup(Base):
     __tablename__ = "request_demand_quarter_rollups"
 
     slot_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
-    api_key_id: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
     model: Mapped[str] = mapped_column(String, primary_key=True)
-    reasoning_effort: Mapped[str] = mapped_column(String, primary_key=True, default="", server_default=text("''"))
+    reasoning_effort: Mapped[str] = mapped_column(String, primary_key=True)
     request_kind: Mapped[str] = mapped_column(String, primary_key=True)
     status: Mapped[str] = mapped_column(String, primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())

@@ -39,6 +39,7 @@ from app.modules.request_logs.repository import RequestLogsRepository
 pytestmark = pytest.mark.integration
 
 _EPOCH = datetime(1970, 1, 1)
+_S = DIMENSION_SENTINEL  # stored NULL-dimension sentinel
 _HOUR = 1_753_300_800  # 2025-07-23T20:00:00Z, a whole UTC hour
 
 
@@ -76,6 +77,15 @@ def test_dimension_sentinel_round_trip():
     assert to_dimension("acc_a") == "acc_a"
     assert from_dimension(DIMENSION_SENTINEL) is None
     assert from_dimension("acc_a") == "acc_a"
+    # The encoding is injective: '' is a legitimate raw value (the request
+    # models accept empty-string service_tier/reasoning_effort) distinct
+    # from NULL, and sentinel-prefixed raw values are escaped.
+    values = (None, "", "flex", DIMENSION_SENTINEL, DIMENSION_SENTINEL + "x", DIMENSION_SENTINEL * 2)
+    encoded = [to_dimension(value) for value in values]
+    assert len(set(encoded)) == len(values)
+    assert [from_dimension(item) for item in encoded] == list(values)
+    assert to_dimension("") == ""
+    assert from_dimension("") == ""
     assert HOURLY_BUCKET_SECONDS == 3600
     assert QUARTER_SLOT_SECONDS == 900
 
@@ -563,7 +573,7 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
         (r.bucket_epoch, r.account_id, r.api_key_id, r.model, r.service_tier, r.request_kind, r.is_deleted): r
         for r in hourly
     }
-    h0 = by_key[(epoch_seconds(hour0), "acc_f", "", "gpt-5.1-codex", "", "normal", False)]
+    h0 = by_key[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.1-codex", _S, "normal", False)]
     assert h0.request_count == 2
     assert h0.error_count == 1
     assert h0.input_tokens == 300
@@ -575,15 +585,15 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     assert h0.cost_usd == pytest.approx(0.01)
     assert h0.cost_count == 1
 
-    warm = by_key[(epoch_seconds(hour1), "acc_f", "", "gpt-5.1-codex", "", "warmup", False)]
+    warm = by_key[(epoch_seconds(hour1), "acc_f", _S, "gpt-5.1-codex", _S, "warmup", False)]
     assert warm.request_count == 1
     assert warm.input_tokens == 777
 
-    clamp = by_key[(epoch_seconds(hour1), "acc_f", "", "gpt-5.1-codex", "", "normal", False)]
+    clamp = by_key[(epoch_seconds(hour1), "acc_f", _S, "gpt-5.1-codex", _S, "normal", False)]
     assert clamp.cached_input_tokens == 50
     assert clamp.cached_input_tokens_clamped == 10  # min(50, 10)
 
-    null_input = by_key[(epoch_seconds(hour1), "acc_f", "", "gpt-5.3-mini", "", "normal", False)]
+    null_input = by_key[(epoch_seconds(hour1), "acc_f", _S, "gpt-5.3-mini", _S, "normal", False)]
     assert null_input.input_tokens == 0
     assert null_input.cached_input_tokens == 30
     assert null_input.cached_input_tokens_clamped == 30  # NULL input keeps cached
@@ -591,11 +601,11 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     tier = by_key[(epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", "flex", "normal", False)]
     assert tier.request_count == 1
 
-    dup = by_key[(epoch_seconds(hour3), "acc_f", "", "gpt-5.1-codex", "", "normal", False)]
+    dup = by_key[(epoch_seconds(hour3), "acc_f", _S, "gpt-5.1-codex", _S, "normal", False)]
     assert dup.request_count == 2
     assert dup.input_tokens == 12
 
-    orphan = by_key[(epoch_seconds(hour4), "", "", "gpt-5.1-codex", "", "normal", True)]
+    orphan = by_key[(epoch_seconds(hour4), _S, _S, "gpt-5.1-codex", _S, "normal", True)]
     assert orphan.request_count == 1
     assert orphan.error_count == 1
 
@@ -606,7 +616,7 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     error_keys = {(r.bucket_epoch, r.account_id, r.error_code): r.error_count for r in errors}
     assert error_keys == {
         (epoch_seconds(hour0), "acc_f", "upstream_500"): 1,
-        (epoch_seconds(hour4), "", "timeout"): 1,
+        (epoch_seconds(hour4), _S, "timeout"): 1,
     }
 
     # Demand keeps the FULL legacy grain (slot, account, api_key, model,
@@ -625,7 +635,7 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
         ): r
         for r in demand
     }
-    slot_a = demand_keys[(epoch_seconds(hour0), "acc_f", "", "gpt-5.1-codex", "", "normal", "success", False)]
+    slot_a = demand_keys[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.1-codex", _S, "normal", "success", False)]
     assert slot_a.request_count == 1
     assert slot_a.input_tokens == 100
     assert slot_a.output_or_reasoning_tokens == 50
@@ -634,13 +644,13 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     # Same slot arithmetic, but the error row lands in its own bin (status
     # is a demand dimension).
     slot_b = demand_keys[
-        (epoch_seconds(hour0) + QUARTER_SLOT_SECONDS, "acc_f", "", "gpt-5.1-codex", "", "normal", "error", False)
+        (epoch_seconds(hour0) + QUARTER_SLOT_SECONDS, "acc_f", _S, "gpt-5.1-codex", _S, "normal", "error", False)
     ]
     assert slot_b.request_count == 1
     assert slot_b.output_or_reasoning_tokens == 30
-    assert (epoch_seconds(hour1), "acc_f", "", "gpt-5.1-codex", "", "warmup", "success", False) in demand_keys
-    assert (epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", "", "normal", "success", False) in demand_keys
-    assert (epoch_seconds(hour4), "", "", "gpt-5.1-codex", "", "normal", "error", True) in demand_keys
+    assert (epoch_seconds(hour1), "acc_f", _S, "gpt-5.1-codex", _S, "warmup", "success", False) in demand_keys
+    assert (epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", _S, "normal", "success", False) in demand_keys
+    assert (epoch_seconds(hour4), _S, _S, "gpt-5.1-codex", _S, "normal", "error", True) in demand_keys
 
 
 @pytest.mark.asyncio
@@ -1025,16 +1035,16 @@ async def test_account_soft_delete_mirrors_folded_buckets(db_setup):
     hourly, errors, demand, _ = await _dump_all_rollups()
     # Totals preserved, no account-attributed rows left.
     assert sum(r.request_count for r in hourly) == total_before
-    assert all(r.account_id == "" and r.is_deleted for r in hourly)
+    assert all(r.account_id == _S and r.is_deleted for r in hourly)
     merged = {r.api_key_id: r for r in hourly}
-    assert merged[""].request_count == 2  # orphan(1) + folded acc row(1)
-    assert merged[""].input_tokens == 100 + 7
+    assert merged[_S].request_count == 2  # orphan(1) + folded acc row(1)
+    assert merged[_S].input_tokens == 100 + 7
     assert merged["key_life"].request_count == 1
 
     assert sum(r.error_count for r in errors) == error_total_before
-    assert all(r.account_id == "" for r in errors)
+    assert all(r.account_id == _S for r in errors)
 
-    assert all(r.account_id == "" and r.is_deleted for r in demand)
+    assert all(r.account_id == _S and r.is_deleted for r in demand)
     assert sum(r.request_count for r in demand) == total_before
 
 
@@ -1108,7 +1118,7 @@ async def test_soft_delete_racing_hourly_fold_loses_no_usage(db_setup):
     hourly, _, demand, _ = await _dump_all_rollups()
     assert sum(r.request_count for r in hourly) == 4
     assert sum(r.input_tokens for r in hourly) == 1000
-    assert all(r.account_id == "" and r.is_deleted for r in hourly)
+    assert all(r.account_id == _S and r.is_deleted for r in hourly)
     assert sum(r.request_count for r in demand) == 4
 
 

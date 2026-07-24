@@ -36,18 +36,46 @@ def _columns(connection: Connection, table_name: str) -> set[str]:
     return {str(column["name"]) for column in inspector.get_columns(table_name) if column.get("name") is not None}
 
 
+def _has_pre_merge_dimension_encoding(connection: Connection, table_name: str) -> bool:
+    """Pre-merge revisions of this (never released) migration encoded NULL
+    dimensions as ``''`` — colliding with legitimate empty-string values —
+    and declared a matching ``server_default ''`` on the sentinel columns.
+    The current collision-free encoding declares no column default, so a
+    lingering default on ``account_id`` identifies a pre-fix build."""
+    inspector = sa.inspect(connection)
+    if not inspector.has_table(table_name):
+        return False
+    for column in inspector.get_columns(table_name):
+        if column.get("name") == "account_id":
+            return column.get("default") is not None
+    return False
+
+
 def upgrade() -> None:
     bind = op.get_bind()
+
+    # Rebuild pre-merge rollup tables whose stored NULL sentinel was '': the
+    # tables are dropped empty and the hourly watermark reset so the fold
+    # re-encodes everything from raw (re-folds converge via the fold pass's
+    # defensive DELETE); such databases predate any release, so raw history
+    # is still intact.
+    if any(_has_pre_merge_dimension_encoding(bind, table) for table in (_HOURLY_TABLE, _ERROR_TABLE, _QUARTER_TABLE)):
+        for table in (_HOURLY_TABLE, _ERROR_TABLE, _QUARTER_TABLE):
+            if sa.inspect(bind).has_table(table):
+                op.drop_table(table)
+        if _WATERMARK_COLUMN in _columns(bind, _STATE_TABLE):
+            op.execute(sa.text(f"UPDATE {_STATE_TABLE} SET {_WATERMARK_COLUMN} = '1970-01-01 00:00:00'"))
+
     inspector = sa.inspect(bind)
 
     if not inspector.has_table(_HOURLY_TABLE):
         op.create_table(
             _HOURLY_TABLE,
             sa.Column("bucket_epoch", sa.BigInteger(), nullable=False),
-            sa.Column("account_id", sa.String(), server_default=sa.text("''"), nullable=False),
-            sa.Column("api_key_id", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("account_id", sa.String(), nullable=False),
+            sa.Column("api_key_id", sa.String(), nullable=False),
             sa.Column("model", sa.String(), nullable=False),
-            sa.Column("service_tier", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("service_tier", sa.String(), nullable=False),
             sa.Column("request_kind", sa.String(), nullable=False),
             sa.Column("is_deleted", sa.Boolean(), server_default=sa.false(), nullable=False),
             sa.Column("request_count", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
@@ -75,7 +103,7 @@ def upgrade() -> None:
         op.create_table(
             _ERROR_TABLE,
             sa.Column("bucket_epoch", sa.BigInteger(), nullable=False),
-            sa.Column("account_id", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("account_id", sa.String(), nullable=False),
             sa.Column("error_code", sa.String(), nullable=False),
             sa.Column("error_count", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
             sa.PrimaryKeyConstraint("bucket_epoch", "account_id", "error_code"),
@@ -97,10 +125,10 @@ def upgrade() -> None:
         op.create_table(
             _QUARTER_TABLE,
             sa.Column("slot_epoch", sa.BigInteger(), nullable=False),
-            sa.Column("account_id", sa.String(), server_default=sa.text("''"), nullable=False),
-            sa.Column("api_key_id", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("account_id", sa.String(), nullable=False),
+            sa.Column("api_key_id", sa.String(), nullable=False),
             sa.Column("model", sa.String(), nullable=False),
-            sa.Column("reasoning_effort", sa.String(), server_default=sa.text("''"), nullable=False),
+            sa.Column("reasoning_effort", sa.String(), nullable=False),
             sa.Column("request_kind", sa.String(), nullable=False),
             sa.Column("status", sa.String(), nullable=False),
             sa.Column("is_deleted", sa.Boolean(), server_default=sa.false(), nullable=False),

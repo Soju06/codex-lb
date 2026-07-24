@@ -520,6 +520,71 @@ class _CreatedThenCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
 
 
+class _ReasoningThenAbruptCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        response_id = f"resp_reasoning_then_close_{len(self.sent_text)}"
+        reasoning_id = f"rs_reasoning_then_close_{len(self.sent_text)}"
+        events = [
+            {
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            },
+            {
+                "type": "response.output_item.added",
+                "sequence_number": 1,
+                "response_id": response_id,
+                "output_index": 0,
+                "item": {
+                    "id": reasoning_id,
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": None,
+                },
+            },
+            {
+                "type": "response.reasoning_summary_part.added",
+                "sequence_number": 2,
+                "response_id": response_id,
+                "item_id": reasoning_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""},
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "sequence_number": 3,
+                "response_id": response_id,
+                "item_id": reasoning_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "Reviewing the final integration result.",
+            },
+        ]
+        for event in events:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(event, separators=(",", ":")),
+                )
+            )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "error",
+                error="no close frame received or sent",
+            )
+        )
+
+
+class _CompleteThenReasoningAbruptCloseUpstreamWebSocket(_ReasoningThenAbruptCloseUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        if not self.sent_text:
+            await _FakeBridgeUpstreamWebSocket.send_text(self, text)
+            return
+        await super().send_text(text)
+
+
 class _ErrorOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -10624,7 +10689,50 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_client, monkeypatch):
+@pytest.mark.parametrize(
+    ("upstream_type", "prime_reused_session", "expected_event_types", "expected_failure_sequence"),
+    [
+        (
+            _CreatedThenCloseUpstreamWebSocket,
+            False,
+            ["response.created", "response.failed"],
+            0,
+        ),
+        (
+            _ReasoningThenAbruptCloseUpstreamWebSocket,
+            False,
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.reasoning_summary_part.added",
+                "response.reasoning_summary_text.delta",
+                "response.failed",
+            ],
+            4,
+        ),
+        (
+            _CompleteThenReasoningAbruptCloseUpstreamWebSocket,
+            True,
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.reasoning_summary_part.added",
+                "response.reasoning_summary_text.delta",
+                "response.failed",
+            ],
+            4,
+        ),
+    ],
+    ids=["created-then-close", "reasoning-then-abrupt-close", "reused-reasoning-then-abrupt-close"],
+)
+async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
+    async_client,
+    monkeypatch,
+    upstream_type,
+    prime_reused_session,
+    expected_event_types,
+    expected_failure_sequence,
+):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -10632,7 +10740,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
         "http-bridge-sse-failure@example.com",
     )
     account = await _get_account(account_id)
-    upstream = _CreatedThenCloseUpstreamWebSocket()
+    upstream = upstream_type()
 
     async def fake_select_account_with_budget(
         self,
@@ -10691,9 +10799,24 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
+    headers = {"x-codex-turn-state": "turn-sse-failure"} if prime_reused_session else {}
+    if prime_reused_session:
+        prime = await async_client.post(
+            "/v1/responses",
+            headers=headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "prime-sse-session",
+                "prompt_cache_key": "sse-failure-key",
+            },
+        )
+        assert prime.status_code == 200
+
     async with async_client.stream(
         "POST",
         "/v1/responses",
+        headers=headers,
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
@@ -10706,8 +10829,9 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(async_c
         lines = [line async for line in response.aiter_lines() if line.startswith("data: ")]
 
     events = [json.loads(line[6:]) for line in lines if line[6:] != "[DONE]"]
-    assert [event["type"] for event in events] == ["response.created", "response.failed"]
+    assert [event["type"] for event in events] == expected_event_types
     assert events[0]["response"]["id"] == events[-1]["response"]["id"]
+    assert events[-1]["sequence_number"] == expected_failure_sequence
     assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
 
 

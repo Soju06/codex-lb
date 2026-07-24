@@ -14,6 +14,7 @@
 - [x] 2.4 Register the submit as an admission waiter atomically with the first reacquire so stale finalizers cannot idle-release the fresh lease before queue admission; unregister on prewarm failure and queue-full rejection.
 - [x] 2.5 Pass the turn's usage-budget token estimate into the reacquired lease, matching initial selection and reconnect, so capacity-weighted routing pressure sees reused-session turns.
 - [x] 2.6 Retire a session closed during prewarm when failed-submit cleanup removes its final admission waiter.
+- [x] 2.7 Defer cancellation until prewarm-failure cleanup removes the admission waiter and settles the lease.
 
 ## 3. Tests
 
@@ -23,3 +24,4 @@
 - [x] 3.4 Stale finalizer during prewarm cannot release the reacquired lease; queue-full rejection unregisters the admission waiter and retains the busy session's lease.
 - [x] 3.5 Reacquisition passes the turn's usage-budget token estimate to the lease.
 - [x] 3.6 Prewarm failure after reader-side closure retires the session and releases its stream lease.
+- [x] 3.7 Repeated cancellation during prewarm cannot interrupt waiter and lease cleanup.

@@ -411,6 +411,88 @@ async def test_prewarm_failure_retires_closed_session_after_last_waiter(
 
 
 @pytest.mark.asyncio
+async def test_prewarm_cancellation_cannot_interrupt_waiter_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    lease = _make_lease("l-prewarm-cancel")
+    acquire_account_lease = AsyncMock(return_value=lease)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+
+    prewarm_started = asyncio.Event()
+    hold_prewarm = asyncio.Event()
+
+    async def wait_in_prewarm(*_args: object, **_kwargs: object) -> None:
+        prewarm_started.set()
+        await hold_prewarm.wait()
+
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock(side_effect=wait_in_prewarm))
+    cleanup_started = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    original_cleanup = service._cleanup_http_bridge_submit_interruption
+
+    async def delayed_cleanup(
+        cleanup_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        gate_acquired: bool,
+        request_enqueued: bool,
+        counted_in_queue: bool,
+        admission_waiter_registered: bool = False,
+    ) -> None:
+        cleanup_started.set()
+        await finish_cleanup.wait()
+        await original_cleanup(
+            cleanup_session,
+            request_state=request_state,
+            gate_acquired=gate_acquired,
+            request_enqueued=request_enqueued,
+            counted_in_queue=counted_in_queue,
+            admission_waiter_registered=admission_waiter_registered,
+        )
+
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", delayed_cleanup)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-cancel",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    submit_task = asyncio.create_task(
+        service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+    )
+
+    await prewarm_started.wait()
+    submit_task.cancel()
+    await cleanup_started.wait()
+    submit_task.cancel()
+    finish_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.admission_waiter_count == 0
+    assert session.account_lease is None
+
+
+@pytest.mark.asyncio
 async def test_queue_full_submit_unregisters_admission_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -681,15 +681,17 @@ class _HTTPBridgeRequestSubmitMixin:
         except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
-            await self._cleanup_http_bridge_submit_interruption(
-                session,
-                request_state=request_state,
-                gate_acquired=False,
-                request_enqueued=False,
-                counted_in_queue=False,
-                admission_waiter_registered=admission_waiter_registered,
+            cleanup_task = asyncio.create_task(
+                self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=False,
+                    request_enqueued=False,
+                    counted_in_queue=False,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
             )
-            admission_waiter_registered = False
+            await _await_task_deferring_cancellation(cleanup_task)
             raise
         async with session.pending_lock:
             if session.queued_request_count >= queue_limit:

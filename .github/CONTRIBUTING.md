@@ -345,6 +345,40 @@ Releases are automated via [release-please](https://github.com/googleapis/releas
 Contributors **never** need to edit `CHANGELOG.md`, version strings, or tag
 manually.
 
+### Release channels: beta first
+
+Stable releases are promoted from the beta channel, not cut directly:
+
+1. A `vX.Y.Z-beta.N` release ships first (the beta release PR).
+2. The beta soaks on at least one production-scale deployment for **at least
+   48 hours** with no new regressions attributable to the release.
+3. Only then is the stable `vX.Y.Z` release PR merged.
+
+Rationale: migrations and proxy-path changes routinely behave differently at
+production data volumes than in CI. The beta soak is where migration duration,
+memory pressure, and upstream-protocol regressions surface without burning a
+stable version number.
+
+Exceptions — a maintainer may promote directly to stable, noting the reason in
+the release PR, when the **entire** unsoaked delta consists of (any
+combination of):
+
+- documentation, CI, or release-tooling changes, or
+- a security or outage hotfix where waiting out the soak is the greater risk.
+
+A train that also carries unrelated unsoaked changes must either soak as a
+beta or ship the hotfix separately.
+
+Before merging a release PR whose train includes migrations, inspect the
+Alembic revisions directly (`git diff vPREV..HEAD -- app/db/alembic/versions`)
+for data backfills and estimate their duration against a production-sized
+dataset — they run at startup and block serving until they finish. Changelog
+titles do not reveal backfills.
+
+The normative requirements live in
+[`openspec/specs/release-management/`](../openspec/specs/release-management/)
+(delta: `openspec/changes/require-beta-soak-before-stable/`).
+
 ## Security issues
 
 Please do **not** open public issues for security vulnerabilities. Report them

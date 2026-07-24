@@ -295,9 +295,28 @@ def _http_bridge_account_capacity_wait_deadline(
     exc: ProxyResponseError,
 ) -> float | None:
     code, _message = _proxy_error_code_message(exc)
-    if not _is_local_account_cap_code(code):
+    if code == "response_create_gate_timeout":
+        return None
+    if _is_local_account_cap_code(code) and request_state.account_capacity_wait_error is None:
+        request_state.account_capacity_wait_error = exc
+    if request_state.account_capacity_wait_error is None:
         return None
     return _http_bridge_capacity_wait_deadline(request_state)
+
+
+def _http_bridge_terminal_capacity_error(
+    request_state: _WebSocketRequestState,
+    exc: ProxyResponseError,
+) -> ProxyResponseError:
+    original_cap_error = request_state.account_capacity_wait_error
+    if original_cap_error is None:
+        return exc
+    code, _message = _proxy_error_code_message(exc)
+    if code == "response_create_gate_timeout":
+        return exc
+    if _is_local_account_cap_code(code) or _http_bridge_account_capacity_wait_seconds(exc) is not None:
+        return original_cap_error
+    return exc
 
 
 def _http_bridge_capacity_wait_plan(
@@ -848,6 +867,7 @@ class _HTTPBridgeStreamingMixin:
             request_state, text_data = prepared_request
             if previous_request_state is not None:
                 request_state.account_capacity_wait_deadline = previous_request_state.account_capacity_wait_deadline
+                request_state.account_capacity_wait_error = previous_request_state.account_capacity_wait_error
             return request_state, text_data
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
@@ -1458,23 +1478,25 @@ class _HTTPBridgeStreamingMixin:
                             exc,
                             request_deadline=request_deadline,
                         ):
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
                             await self._write_account_cap_overload_request_log(
                                 request_state=request_state,
-                                exc=exc,
+                                exc=terminal_exc,
                                 api_key=api_key,
                                 headers=headers,
                                 client_ip=client_ip,
                             )
-                            raise
+                            raise terminal_exc
                         continue
+                    terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
                     await self._write_account_cap_overload_request_log(
                         request_state=request_state,
-                        exc=exc,
+                        exc=terminal_exc,
                         api_key=api_key,
                         headers=headers,
                         client_ip=client_ip,
                     )
-                    raise
+                    raise terminal_exc
                 switch_to_account_neutral_replay()
                 continue
             break
@@ -1666,8 +1688,9 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
                         if wait_plan is None:
-                            await write_terminal_account_cap_overload(capacity_exc)
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before retrying HTTP bridge recovery session creation "
@@ -1693,8 +1716,9 @@ class _HTTPBridgeStreamingMixin:
                             capacity_exc,
                             request_deadline=request_deadline,
                         ):
-                            await write_terminal_account_cap_overload(capacity_exc)
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         continue
                     break
                 _record_bridge_reattach(
@@ -2069,8 +2093,9 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
                         if wait_plan is None:
-                            await write_terminal_account_cap_overload(capacity_exc)
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before replacing retired HTTP bridge gate "
@@ -2093,8 +2118,9 @@ class _HTTPBridgeStreamingMixin:
                             capacity_exc,
                             request_deadline=request_deadline,
                         ):
-                            await write_terminal_account_cap_overload(capacity_exc)
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         continue
                     break
                 if initial_handoff_scope_id is not None:
@@ -2184,8 +2210,9 @@ class _HTTPBridgeStreamingMixin:
                             ),
                         )
                         if wait_plan is None:
-                            await write_terminal_account_cap_overload(capacity_exc)
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before retrying HTTP bridge soft reroute session "
@@ -2208,8 +2235,9 @@ class _HTTPBridgeStreamingMixin:
                             capacity_exc,
                             request_deadline=request_deadline,
                         ):
-                            await write_terminal_account_cap_overload(capacity_exc)
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         continue
                     break
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
@@ -2382,8 +2410,9 @@ class _HTTPBridgeStreamingMixin:
                         capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, capacity_exc),
                     )
                     if wait_plan is None:
-                        await write_terminal_account_cap_overload(capacity_exc)
-                        raise
+                        terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                        await write_terminal_account_cap_overload(terminal_exc)
+                        raise terminal_exc
                     bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                     logger.info(
                         "Waiting for an account to recover before retrying HTTP bridge local recovery session "
@@ -2407,8 +2436,9 @@ class _HTTPBridgeStreamingMixin:
                         capacity_exc,
                         request_deadline=request_deadline,
                     ):
-                        await write_terminal_account_cap_overload(capacity_exc)
-                        raise
+                        terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                        await write_terminal_account_cap_overload(terminal_exc)
+                        raise terminal_exc
                     continue
                 break
             _record_bridge_reattach(path=recovery_path, outcome="success")
@@ -2562,8 +2592,9 @@ class _HTTPBridgeStreamingMixin:
                     capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, exc),
                 )
                 if wait_plan is None:
-                    await write_terminal_account_cap_overload(exc)
-                    raise
+                    terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
+                    await write_terminal_account_cap_overload(terminal_exc)
+                    raise terminal_exc
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                 exc_code, _exc_message = _proxy_error_code_message(exc)
                 gate_contention = exc_code == "response_create_gate_timeout"
@@ -2615,8 +2646,9 @@ class _HTTPBridgeStreamingMixin:
                     exc,
                     request_deadline=request_deadline,
                 ):
-                    await write_terminal_account_cap_overload(exc)
-                    raise
+                    terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
+                    await write_terminal_account_cap_overload(terminal_exc)
+                    raise terminal_exc
                 if gate_contention and session.closed:
                     raise
                 continue

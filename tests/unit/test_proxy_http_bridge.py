@@ -2238,6 +2238,88 @@ async def test_http_bridge_submit_capacity_wait_uses_original_request_deadline(
     assert submit.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_submit_capacity_wait_preserves_first_cap_across_later_recoverable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-submit-cap-envelope")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-cap-envelope",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.5,
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    capacity_error = ProxyResponseError(
+        429,
+        openai_error(
+            "account_response_create_cap",
+            "Account response-create concurrency limit reached",
+            error_type="rate_limit_error",
+        ),
+    )
+    later_recoverable_error = ProxyResponseError(
+        429,
+        openai_error(
+            "rate_limit_exceeded",
+            "Rate limit exceeded. Try again in 30s",
+            error_type="rate_limit_error",
+        ),
+    )
+    submit = AsyncMock(side_effect=[capacity_error, later_recoverable_error])
+    write_overload_log = AsyncMock()
+    clock = [100.0]
+    waited: list[float] = []
+
+    async def fake_capacity_wait(**kwargs: object):
+        waited.append(cast(float, kwargs["sleep_seconds"]))
+        clock[0] += waited[-1]
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_write_account_cap_overload_request_log", write_overload_log)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_CAPACITY_WAIT_MAX_SECONDS", 2.0)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_http_bridge_account_capacity_wait_seconds",
+        lambda exc: 0.5 if exc is capacity_error else 30.0,
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", fake_capacity_wait)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: clock[0]),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+            request_deadline=200.0,
+        ):
+            pass
+
+    assert exc_info.value is capacity_error
+    assert waited == pytest.approx([0.5, 1.5])
+    assert submit.await_count == 2
+    write_overload_log.assert_awaited_once_with(
+        request_state=request_state,
+        exc=capacity_error,
+        api_key=None,
+        headers=session.headers,
+        client_ip=None,
+    )
+
+
 def _make_api_key(
     *,
     key_id: str,
@@ -19188,13 +19270,13 @@ def test_gate_timeout_does_not_start_account_capacity_wait_deadline() -> None:
 
     assert http_bridge_streaming_module._http_bridge_account_capacity_wait_deadline(request_state, gate_timeout) is None
     assert request_state.account_capacity_wait_deadline is None
-    assert (
-        http_bridge_streaming_module._http_bridge_account_capacity_wait_deadline(
-            request_state,
-            _account_stream_cap_error(),
-        )
-        is not None
+    capacity_deadline = http_bridge_streaming_module._http_bridge_account_capacity_wait_deadline(
+        request_state,
+        _account_stream_cap_error(),
     )
+    assert capacity_deadline is not None
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_deadline(request_state, gate_timeout) is None
+    assert request_state.account_capacity_wait_deadline == capacity_deadline
 
 
 def test_http_bridge_capacity_wait_deadline_anchors_once(monkeypatch: pytest.MonkeyPatch) -> None:

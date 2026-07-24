@@ -203,6 +203,15 @@ def _merge_rows(rows: Iterable, key_width: int, columns: tuple[str, ...], row_ty
     return [row_type(*values) for values in merged.values()]
 
 
+# Rows per multi-VALUES upsert statement. asyncpg rejects statements with
+# more than 32,767 bind parameters; at 17 columns (the widest table) 1,000
+# rows binds 17,000 — comfortable margin on both dialects. Lifecycle mirrors
+# rekey an account's ENTIRE folded history in one call (thousands of rows
+# for a long-lived account), so unchunked upserts would abort the whole
+# lifecycle transaction.
+_UPSERT_CHUNK_ROWS = 1_000
+
+
 def _add_rows_stmt(
     session: AsyncSession, model, rows: Sequence, key_columns: tuple[str, ...], columns: tuple[str, ...]
 ):
@@ -212,6 +221,15 @@ def _add_rows_stmt(
         index_elements=[getattr(model, column) for column in key_columns],
         set_={column: getattr(model, column) + getattr(stmt.excluded, column) for column in measure_columns},
     )
+
+
+async def _merge_add(
+    session: AsyncSession, model, rows: Sequence, key_columns: tuple[str, ...], columns: tuple[str, ...], row_type
+) -> None:
+    merged = _merge_rows(rows, len(key_columns), columns, row_type)
+    for start in range(0, len(merged), _UPSERT_CHUNK_ROWS):
+        chunk = merged[start : start + _UPSERT_CHUNK_ROWS]
+        await session.execute(_add_rows_stmt(session, model, chunk, key_columns, columns))
 
 
 class RequestUsageTimeRollupRepository:
@@ -230,53 +248,36 @@ class RequestUsageTimeRollupRepository:
 
     async def add_hourly(self, rows: Sequence[HourlyUsageRollupRow]) -> None:
         """Merge-add hourly rows: inserts new (bucket, dimensions) rows and
-        adds measures onto existing ones. Used by lifecycle mirrors and
-        tests; the fold pass itself writes via DELETE-then-INSERT..SELECT."""
-        merged = _merge_rows(
-            rows, len(_HOURLY_KEY_COLUMNS), _HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS, HourlyUsageRollupRow
-        )
-        if not merged:
-            return
-        await self._session.execute(
-            _add_rows_stmt(
-                self._session,
-                RequestUsageHourlyRollup,
-                merged,
-                _HOURLY_KEY_COLUMNS,
-                _HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS,
-            )
+        adds measures onto existing ones, in bounded statement chunks. Used
+        by lifecycle mirrors and tests; the fold pass itself writes via
+        DELETE-then-INSERT..SELECT."""
+        await _merge_add(
+            self._session,
+            RequestUsageHourlyRollup,
+            rows,
+            _HOURLY_KEY_COLUMNS,
+            _HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS,
+            HourlyUsageRollupRow,
         )
 
     async def add_errors(self, rows: Sequence[HourlyErrorRollupRow]) -> None:
-        merged = _merge_rows(
-            rows, len(_ERROR_KEY_COLUMNS), _ERROR_KEY_COLUMNS + _ERROR_MEASURE_COLUMNS, HourlyErrorRollupRow
-        )
-        if not merged:
-            return
-        await self._session.execute(
-            _add_rows_stmt(
-                self._session,
-                RequestUsageHourlyErrorRollup,
-                merged,
-                _ERROR_KEY_COLUMNS,
-                _ERROR_KEY_COLUMNS + _ERROR_MEASURE_COLUMNS,
-            )
+        await _merge_add(
+            self._session,
+            RequestUsageHourlyErrorRollup,
+            rows,
+            _ERROR_KEY_COLUMNS,
+            _ERROR_KEY_COLUMNS + _ERROR_MEASURE_COLUMNS,
+            HourlyErrorRollupRow,
         )
 
     async def add_demand(self, rows: Sequence[QuarterDemandRollupRow]) -> None:
-        merged = _merge_rows(
-            rows, len(_QUARTER_KEY_COLUMNS), _QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS, QuarterDemandRollupRow
-        )
-        if not merged:
-            return
-        await self._session.execute(
-            _add_rows_stmt(
-                self._session,
-                RequestDemandQuarterRollup,
-                merged,
-                _QUARTER_KEY_COLUMNS,
-                _QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS,
-            )
+        await _merge_add(
+            self._session,
+            RequestDemandQuarterRollup,
+            rows,
+            _QUARTER_KEY_COLUMNS,
+            _QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS,
+            QuarterDemandRollupRow,
         )
 
     async def read_hourly(

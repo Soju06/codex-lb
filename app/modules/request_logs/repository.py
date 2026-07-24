@@ -500,8 +500,10 @@ class RequestLogsRepository:
         if not counts:
             return None
         # Deterministic tie-break: highest count, then code ascending — the
-        # rule the legacy single-statement ORDER BY used.
-        return min(counts, key=lambda code: (-counts[code], code))
+        # rule the legacy single-statement ORDER BY used. The legacy reader
+        # also coerced a falsy winner (an empty-string error_code, which the
+        # nullable column permits) to None; `or None` reproduces that.
+        return min(counts, key=lambda code: (-counts[code], code)) or None
 
     async def earliest_activity_at(self) -> datetime | None:
         stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())

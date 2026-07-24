@@ -30,6 +30,7 @@ from app.modules.accounts.usage_time_rollup import (
     epoch_seconds,
     floor_to_hour,
     from_dimension,
+    mirror_account_soft_delete_into_time_rollups,
     run_hourly_fold_pass,
     to_dimension,
 )
@@ -663,6 +664,75 @@ async def test_hourly_fold_is_idempotent(db_setup):
     first = await _dump_all_rollups()
     assert await run_hourly_fold_pass(now=now) == 0
     assert await _dump_all_rollups() == first
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_mirror_handles_thousands_of_folded_rows(db_setup):
+    """A long-lived account's lifecycle mirror rekeys its ENTIRE folded
+    history in one transaction. The merge-add upserts must chunk: asyncpg
+    rejects statements over 32,767 bind parameters, which the 17-column
+    hourly upsert reaches at ~1,900 unchunked rows."""
+    await _bootstrap_state()
+    rows = [
+        _hourly_row(bucket_epoch=_HOUR + 3600 * index, account_id="acc_big", request_count=1) for index in range(2500)
+    ]
+    async with SessionLocal() as session:
+        await RequestUsageTimeRollupRepository(session).add_hourly(rows)
+        await session.commit()
+
+    async with SessionLocal() as session:
+        await lock_fold_state(session)
+        await mirror_account_soft_delete_into_time_rollups(session, "acc_big")
+        await session.commit()
+
+    async with SessionLocal() as session:
+        moved, _ = await RequestUsageTimeRollupRepository(session).read_hourly()
+    assert len(moved) == 2500
+    assert all(row.account_id == DIMENSION_SENTINEL and row.is_deleted for row in moved)
+    assert sum(row.request_count for row in moved) == 2500
+
+
+@pytest.mark.asyncio
+async def test_top_error_empty_code_winner_coerces_to_none(db_setup):
+    """The nullable error_code column permits '' on non-success rows; the
+    legacy single-statement reader returned None when the top row's code was
+    falsy. Both the folded satellite and the raw tail must reproduce that."""
+    now = utcnow()
+    folded_hour = floor_to_hour(now - timedelta(days=2))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_te", "top-error-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        for index, (at, code) in enumerate(
+            [
+                (folded_hour + timedelta(seconds=10), ""),
+                (folded_hour + timedelta(seconds=20), ""),
+                (folded_hour + timedelta(seconds=30), "boom"),
+                (now - timedelta(minutes=3), ""),
+                (now - timedelta(minutes=2), ""),
+                (now - timedelta(minutes=1), "boom"),
+            ]
+        ):
+            await _add_log(
+                logs,
+                account_id="acc_te",
+                request_id=f"r_te_{index}",
+                requested_at=at,
+                status="error",
+                error_code=code,
+            )
+
+    assert await run_hourly_fold_pass(now=now) >= 1
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        # Folded-side winner is '' (2 vs 1) → None, exactly like the legacy
+        # `row[0] if row and row[0] else None`.
+        assert await logs.top_error_between(folded_hour, folded_hour + timedelta(hours=1)) is None
+        # Raw-tail winner is '' as well → None.
+        assert await logs.top_error_between(now - timedelta(minutes=10), now) is None
+        # When the empty code loses, the real code wins as before.
+        assert await logs.top_error_between(folded_hour + timedelta(seconds=25), folded_hour + timedelta(hours=1)) == (
+            "boom"
+        )
 
 
 @pytest.mark.asyncio

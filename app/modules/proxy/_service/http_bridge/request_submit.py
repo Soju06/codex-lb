@@ -1253,15 +1253,20 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
     ) -> bool:
         detached = False
+        # Publish the ownership barrier before any lock acquisition so a
+        # blocked reconnect/send cannot outlive downstream teardown silently.
+        request_state.downstream_detach_requested = True
         async with session.pending_lock:
             if request_state in session.pending_requests and not request_state.draining_until_terminal:
                 request_state.draining_until_terminal = True
                 request_state.downstream_visible = False
+                request_state.event_queue = None
                 session.queued_request_count = max(0, session.queued_request_count - 1)
                 session.upstream_control.reconnect_requested = True
                 session.upstream_control.retire_after_drain = True
                 detached = True
-        request_state.event_queue = None
+            else:
+                request_state.event_queue = None
         # event_queue is nulled unconditionally because by the time
         # _detach is called from the finally block in
         # _stream_http_bridge_session_events, the terminal event has
@@ -1299,25 +1304,30 @@ class _HTTPBridgeRequestSubmitMixin:
         await self._close_http_bridge_session_bounded(session, reason="retire_after_drain")
         return True
 
-    def _mark_completed_unanchored_http_bridge_fork_for_retirement(
+    async def _mark_completed_unanchored_http_bridge_fork_for_retirement(
         self: Any,
         session: "_HTTPBridgeSession",
         *,
-        response_id: str,
+        response_id: str | None,
     ) -> bool:
         if session.key.affinity_kind != "internal_unanchored_parallel" or is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         ):
             return False
-        if session.pending_requests or session.queued_request_count > 0:
-            return False
-        if response_id not in session.durable_previous_response_ids:
-            return False
-        if not session.previous_response_ids <= session.durable_previous_response_ids:
-            return False
-        session.upstream_control.reconnect_requested = True
-        session.upstream_control.retire_after_drain = True
+        async with session.lifecycle_lock:
+            async with session.pending_lock:
+                if response_id is not None and response_id in session.durable_previous_response_ids:
+                    session.completed_unanchored_fork_retirement_candidate = True
+                if (
+                    not session.completed_unanchored_fork_retirement_candidate
+                    or session.pending_requests
+                    or session.queued_request_count > 0
+                    or not session.previous_response_ids <= session.durable_previous_response_ids
+                ):
+                    return False
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
         _log_http_bridge_event(
             "retire_completed_unanchored_fork",
             session.key,
@@ -1367,6 +1377,7 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         send_request: bool = True,
         require_same_account: bool = False,
+        restart_reader: bool = True,
     ) -> bool:
         require_same_account = require_same_account or is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -1379,16 +1390,11 @@ class _HTTPBridgeRequestSubmitMixin:
             # upstream already accepted the continuation. Re-sending the same
             # previous_response_id request can fork continuity with duplicate
             # child responses, so only reconnect-without-resend is allowed.
-            # The single exception is proxy-injected anchors on trim-safe
-            # full-resend payloads: dropping the anchor and replaying the
-            # original unanchored request is equivalent to the client's own
-            # retry. Session-level injections do not opt in because their
-            # payload may depend on the anchor for context preservation.
-            if (
-                not request_state.proxy_injected_previous_response_id
-                or not request_state.fresh_upstream_request_text
-                or not request_state.fresh_upstream_request_is_retry_safe
-            ):
+            # The single exception is an independently verified fresh body:
+            # dropping the anchor and replaying that body is equivalent to the
+            # client's own full resend. Session-level injections do not opt in
+            # unless durable prefix and replay-safety checks prepared the body.
+            if not request_state.fresh_upstream_request_text or not request_state.fresh_upstream_request_is_retry_safe:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
@@ -1410,20 +1416,28 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(
                 session,
                 request_state=request_state,
-                restart_reader=True,
+                restart_reader=restart_reader,
                 require_same_account=require_same_account,
             )
+            async with session.pending_lock:
+                if request_state.downstream_detach_requested:
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    return False
+                if send_request:
+                    retry_text_data = self._http_bridge_text_with_account_installation_id(
+                        session,
+                        request_state,
+                        retry_text_data,
+                    )
+                    if using_fresh_replay:
+                        request_state.previous_response_id = None
+                        request_state.proxy_injected_previous_response_id = False
+                        request_state.request_text = retry_text_data
             if send_request:
-                retry_text_data = self._http_bridge_text_with_account_installation_id(
-                    session,
-                    request_state,
-                    retry_text_data,
-                )
-                if using_fresh_replay:
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
-                    request_state.request_text = retry_text_data
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
+                if request_state.downstream_detach_requested:
+                    return False
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1691,6 +1705,8 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
         if not _websocket_request_can_replay_before_visible_output(request_state):
             return False
+        if request_state.downstream_detach_requested:
+            return False
 
         owner_account_id = session.account.id
         previous_replay_count = request_state.replay_count
@@ -1754,9 +1770,16 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         reconnected = False
+
+        def require_downstream_owner() -> None:
+            if request_state.downstream_detach_requested:
+                raise RuntimeError("HTTP bridge security retry cancelled after downstream detach")
+
         try:
+            require_downstream_owner()
             request_state.precreated_replay_account_id = session.account.id
             await self._release_request_state_account_response_create_lease(request_state)
+            require_downstream_owner()
             await _call_with_supported_optional_kwargs(
                 self._reconnect_http_bridge_session,
                 session,
@@ -1768,6 +1791,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized=True,
             )
             reconnected = True
+            require_downstream_owner()
             settings = await _service_get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=session.account.id,
@@ -1788,8 +1812,10 @@ class _HTTPBridgeRequestSubmitMixin:
                             session.account.id,
                             kind=previous_session_affinity.kind,
                         )
+            require_downstream_owner()
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
+            require_downstream_owner()
             session.last_used_at = _service_time().monotonic()
             return True
         except UpstreamWebSocketTransportError:

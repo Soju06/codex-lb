@@ -1786,5 +1786,7 @@ def _websocket_input_item_type(item: JsonValue) -> str | None:
 
 
 def _websocket_connect_deadline(request_state: _WebSocketRequestState, budget_seconds: float) -> float:
+    if request_state.bridge_request_deadline is not None:
+        return request_state.bridge_request_deadline
     started_at = request_state.started_at if request_state.started_at > 0 else time.monotonic()
     return started_at + budget_seconds

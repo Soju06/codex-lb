@@ -202,7 +202,9 @@ class _HTTPBridgeOwnerForwardingMixin:
         key: "_HTTPBridgeSessionKey",
         incoming_turn_state: str | None,
         api_key: ApiKeyData | None,
+        previous_response_id: str | None = None,
         durable_lookup: DurableBridgeLookup | None = None,
+        include_retiring_with_visible_requests: bool = True,
     ) -> bool:
         api_key_id = api_key.id if api_key is not None else None
         async with self._http_bridge_lock:
@@ -227,12 +229,16 @@ class _HTTPBridgeOwnerForwardingMixin:
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
-                if not _http_bridge_session_reusable_for_request(
+                reusable = _http_bridge_session_reusable_for_request(
                     session=session,
                     key=candidate_key,
                     incoming_turn_state=incoming_turn_state,
-                    previous_response_id=None,
-                ) and not _http_bridge_session_retiring_with_visible_requests(session):
+                    previous_response_id=previous_response_id,
+                )
+                if not reusable and not (
+                    include_retiring_with_visible_requests
+                    and _http_bridge_session_retiring_with_visible_requests(session)
+                ):
                     continue
                 return True
         return False

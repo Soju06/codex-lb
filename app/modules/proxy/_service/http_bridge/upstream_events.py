@@ -55,7 +55,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
-    _await_cancelled_task,
     _build_stream_incomplete_terminal_event_for_request,
     _find_websocket_request_state_by_response_id,
     _http_error_status_from_payload,
@@ -173,6 +172,7 @@ from app.modules.proxy.tool_call_dedupe import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
+_HTTP_BRIDGE_READER_CHILD_CANCEL_TIMEOUT_SECONDS = 1.0
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _MODEL_OUTPUT_EVENT_TYPES = frozenset(
     {
@@ -259,7 +259,12 @@ async def _http_bridge_receive_timeout_with_eventless_deadline(
     return receive_timeout
 
 
-async def _cancel_http_bridge_reader_child(task: asyncio.Task[Any] | None, *, label: str) -> bool:
+async def _cancel_http_bridge_reader_child(
+    task: asyncio.Task[Any] | None,
+    *,
+    label: str,
+    background_cleanup_tasks: set[asyncio.Task[Any]] | None = None,
+) -> bool:
     if task is None:
         return True
     if task.done():
@@ -270,11 +275,38 @@ async def _cancel_http_bridge_reader_child(task: asyncio.Task[Any] | None, *, la
         except Exception:
             logger.debug("HTTP bridge reader child already failed during cleanup label=%s", label, exc_info=True)
         return True
+    task.cancel()
+    done, _pending = await asyncio.wait(
+        {task},
+        timeout=_HTTP_BRIDGE_READER_CHILD_CANCEL_TIMEOUT_SECONDS,
+    )
+    if task not in done:
+        logger.warning("Timed out waiting for %s cancellation", label)
+        if background_cleanup_tasks is not None:
+            task.set_name(f"http-bridge-reader-child-{task.get_name()}")
+            background_cleanup_tasks.add(task)
+
+            def child_done(done_task: asyncio.Task[Any]) -> None:
+                background_cleanup_tasks.discard(done_task)
+                if not done_task.cancelled():
+                    try:
+                        done_task.result()
+                    except Exception:
+                        logger.debug(
+                            "Tracked HTTP bridge reader child failed label=%s",
+                            label,
+                            exc_info=True,
+                        )
+
+            task.add_done_callback(child_done)
+        return False
     try:
-        return bool(await _await_cancelled_task(task, label=label))
+        task.result()
+    except asyncio.CancelledError:
+        pass
     except Exception:
-        logger.debug("Failed to cancel HTTP bridge reader child label=%s", label, exc_info=True)
-        return task.done()
+        logger.debug("HTTP bridge reader child failed during cleanup label=%s", label, exc_info=True)
+    return True
 
 
 class _HTTPBridgeUpstreamEventsMixin:
@@ -341,6 +373,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # clear is represented by its timestamp; a send after it leaves
                 # the event set and wakes the persistent receive wait below.
                 session.upstream_reader_wakeup.clear()
+                if await self._retire_http_bridge_after_drain_if_ready(session):
+                    break
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
@@ -392,6 +426,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         await _cancel_http_bridge_reader_child(
                             wakeup_task,
                             label="HTTP bridge reader wakeup wait",
+                            background_cleanup_tasks=self._background_cleanup_tasks,
                         )
                         wakeup_task = None
 
@@ -399,18 +434,36 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if receive_timeout is None:
                         raise RuntimeError("HTTP bridge reader timed out without a timeout contract")
                     if receive_timeout.error_code == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL:
-                        if receive_task is not None and receive_task.done():
-                            continue
                         async with session.lifecycle_lock:
-                            # Send-failure cleanup marks the session closed and
-                            # disarms the timestamp while holding this lock.
-                            # Do not race that caller's terminal settlement.
+                            # Claim the session before inspecting or replaying
+                            # the timed-out send. This serializes the retry with
+                            # the original sender and downstream detach.
                             if session.closed:
                                 continue
                             now = _service_time().monotonic()
                             async with session.pending_lock:
                                 if receive_task is not None and receive_task.done():
                                     continue
+                                expired_fresh_reattach = next(
+                                    (
+                                        request_state
+                                        for request_state in session.pending_requests
+                                        if not request_state.draining_until_terminal
+                                        and request_state.fresh_bridge_reattach_startup_timeout_seconds is not None
+                                        and request_state.fresh_upstream_request_is_retry_safe
+                                        and request_state.fresh_upstream_request_text
+                                        and request_state.request_text is not None
+                                        and (
+                                            deadline := _http_bridge_eventless_precreated_deadline(
+                                                request_state,
+                                                stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                                            )
+                                        )
+                                        is not None
+                                        and deadline <= now
+                                    ),
+                                    None,
+                                )
                                 expired_owner = any(
                                     deadline is not None and deadline <= now
                                     for request_state in session.pending_requests
@@ -424,6 +477,36 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 )
                                 if not expired_owner:
                                     continue
+
+                            if expired_fresh_reattach is not None:
+                                if receive_task is not None:
+                                    receive_stopped = await _cancel_http_bridge_reader_child(
+                                        receive_task,
+                                        label="HTTP bridge upstream receive before fresh reattach retry",
+                                        background_cleanup_tasks=self._background_cleanup_tasks,
+                                    )
+                                    if receive_stopped and not receive_task.cancelled():
+                                        raced_message = receive_task.result()
+
+                                        async def return_raced_message() -> UpstreamWebSocketMessage:
+                                            return raced_message
+
+                                        receive_task = asyncio.create_task(return_raced_message())
+                                        continue
+                                    if receive_stopped:
+                                        receive_task = None
+                                if receive_task is None:
+                                    retried = await self._retry_http_bridge_request_on_fresh_upstream(
+                                        session,
+                                        request_state=expired_fresh_reattach,
+                                        text_data=expired_fresh_reattach.request_text,
+                                        require_same_account=True,
+                                        restart_reader=False,
+                                    )
+                                    if retried:
+                                        continue
+
+                            async with session.pending_lock:
                                 pending_count = len(session.pending_requests)
                                 for request_state in session.pending_requests:
                                     if request_state.failure_phase_override is None:
@@ -439,6 +522,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 receive_cancelled = await _cancel_http_bridge_reader_child(
                                     receive_task,
                                     label="HTTP bridge upstream receive after missing response.created",
+                                    background_cleanup_tasks=self._background_cleanup_tasks,
                                 )
                                 if receive_cancelled:
                                     receive_task = None
@@ -472,6 +556,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         receive_cancelled = await _cancel_http_bridge_reader_child(
                             receive_task,
                             label="HTTP bridge upstream receive after timeout",
+                            background_cleanup_tasks=self._background_cleanup_tasks,
                         )
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
@@ -546,10 +631,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await _cancel_http_bridge_reader_child(
                 wakeup_task,
                 label="HTTP bridge reader wakeup wait",
+                background_cleanup_tasks=self._background_cleanup_tasks,
             )
             await _cancel_http_bridge_reader_child(
                 receive_task,
                 label="HTTP bridge upstream receive",
+                background_cleanup_tasks=self._background_cleanup_tasks,
             )
             if session.upstream is relay_upstream:
                 session.closed = True
@@ -795,6 +882,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                     upstream_control=session.upstream_control,
                     response_create_gate=session.response_create_gate,
                 )
+            await self._mark_completed_unanchored_http_bridge_fork_for_retirement(
+                session,
+                response_id=None,
+            )
             return
 
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:
@@ -1131,10 +1222,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 completed_usage = None
                 completed_empty_prewarm = False
 
-        if event_type == "response.completed" and response_id is not None:
-            self._mark_completed_unanchored_http_bridge_fork_for_retirement(
+        if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            await self._mark_completed_unanchored_http_bridge_fork_for_retirement(
                 session,
-                response_id=response_id,
+                response_id=response_id if event_type == "response.completed" else None,
             )
 
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:

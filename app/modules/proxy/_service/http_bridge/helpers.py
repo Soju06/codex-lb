@@ -189,6 +189,7 @@ from app.modules.proxy.ring_membership import (
 logger = logging.getLogger("app.modules.proxy.service")
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
+_HTTP_BRIDGE_FRESH_REATTACH_RESPONSE_CREATED_MAX_SECONDS = 30.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 
@@ -643,10 +644,11 @@ def _http_bridge_eventless_precreated_deadline(
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
-    return sent_at + min(
-        float(stuck_gate_retire_after_seconds),
-        _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
+    request_cap_seconds = (
+        request_state.fresh_bridge_reattach_startup_timeout_seconds
+        or _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
     )
+    return sent_at + min(float(stuck_gate_retire_after_seconds), request_cap_seconds)
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
@@ -739,6 +741,64 @@ async def _close_http_bridge_session_bounded(
             session.request_model,
             exc_info=True,
         )
+
+
+def _schedule_replaced_http_bridge_upstream_cleanup(
+    service: Any,
+    *,
+    old_upstream: Any,
+    old_account_lease: Any,
+    selected_account_lease: Any,
+    request_id: str,
+) -> None:
+    async def cleanup() -> None:
+        release_old_lease = old_account_lease is not None and selected_account_lease is not old_account_lease
+        close_task = asyncio.create_task(
+            old_upstream.close(),
+            name=f"http-bridge-close-replaced-{request_id}",
+        )
+        done, _pending = await asyncio.wait(
+            {close_task},
+            timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+        )
+        if close_task in done:
+            try:
+                close_task.result()
+            except Exception:
+                logger.debug("Failed to close replaced HTTP bridge upstream websocket", exc_info=True)
+            finally:
+                if release_old_lease:
+                    await service._load_balancer.release_account_lease(old_account_lease)
+            return
+
+        logger.warning(
+            "Timed out closing replaced HTTP bridge upstream websocket timeout_seconds=%.1f",
+            _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+        )
+        close_task.cancel()
+        service._background_cleanup_tasks.add(close_task)
+
+        def close_done(done_task: asyncio.Task[Any]) -> None:
+            service._background_cleanup_tasks.discard(done_task)
+            if not done_task.cancelled():
+                try:
+                    done_task.result()
+                except Exception:
+                    logger.debug("Failed to close replaced HTTP bridge upstream websocket", exc_info=True)
+
+        close_task.add_done_callback(close_done)
+        if release_old_lease:
+            service._schedule_cancel_safe_cleanup(
+                service._load_balancer.release_account_lease(old_account_lease),
+                action="http_bridge_session_close",
+                request_id=f"replaced-lease-{request_id}",
+            )
+
+    service._schedule_cancel_safe_cleanup(
+        cleanup(),
+        action="http_bridge_session_close",
+        request_id=f"replaced-{request_id}",
+    )
 
 
 def _http_bridge_models_compatible(existing_model: str | None, request_model: str | None) -> bool:

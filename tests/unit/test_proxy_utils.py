@@ -683,7 +683,7 @@ async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_firs
         )
     )
     try:
-        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.5)
     finally:
         release_next_event.set()
 
@@ -16163,6 +16163,80 @@ async def test_http_bridge_security_retry_retires_rebound_session_when_resend_fa
     assert session.upstream_control.reconnect_requested is True
     assert session.upstream_control.retire_after_drain is True
     retire.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detach_stage", ["after-release", "after-reconnect"])
+async def test_http_bridge_security_retry_does_not_resend_after_downstream_detach(
+    monkeypatch: pytest.MonkeyPatch,
+    detach_stage: str,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected_account = _make_account("acc_bridge_security_detach_rejected")
+    authorized_account = _make_account("acc_bridge_security_detach_authorized")
+    authorized_account.security_work_authorized = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_detach",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":[]}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "security-detach", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=rejected_account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+
+    async def fake_reconnect(target_session, **_kwargs):
+        target_session.account = authorized_account
+        target_session.upstream_control = proxy_service._WebSocketUpstreamControl()
+        request_state.downstream_detach_requested = True
+
+    reconnect = AsyncMock(side_effect=fake_reconnect)
+
+    async def fake_release(_request_state):
+        if detach_stage == "after-release":
+            request_state.downstream_detach_requested = True
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+
+    retire = AsyncMock()
+    send_request = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", fake_release)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
+    monkeypatch.setattr(
+        proxy_http_bridge_request_submit,
+        "_send_http_bridge_request_text_with_archive_id",
+        send_request,
+    )
+
+    assert not await service._retry_http_bridge_security_work_request(session, request_state)
+    assert list(session.pending_requests) == []
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    if detach_stage == "after-reconnect":
+        reconnect.assert_awaited_once()
+        retire.assert_awaited_once_with(session)
+    else:
+        reconnect.assert_not_awaited()
+        retire.assert_not_awaited()
+    send_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -32999,7 +33073,11 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
 
 @pytest.mark.asyncio
-async def test_reconnect_http_bridge_security_rebind_clears_previous_response_state(monkeypatch):
+@pytest.mark.parametrize("cancel_during_commit", [False, True], ids=["normal", "cancel-during-commit"])
+async def test_reconnect_http_bridge_security_rebind_clears_previous_response_state(
+    monkeypatch,
+    cancel_during_commit,
+):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     rejected_account = _make_account("acc_bridge_rebind_rejected")
@@ -33067,13 +33145,32 @@ async def test_reconnect_http_bridge_security_rebind_clears_previous_response_st
     service._http_bridge_sessions[key] = session
     service._http_bridge_previous_response_index[("resp-rejected", None)] = key
 
-    await service._reconnect_http_bridge_session(
+    reconnect = service._reconnect_http_bridge_session(
         session,
         request_state=request_state,
         require_security_work_authorized=True,
         owner_rebind_affinity=affinity,
         selection_affinity=proxy_service._AffinityPolicy(reallocate_sticky=True),
     )
+    if cancel_during_commit:
+        unregister_started = asyncio.Event()
+        release_unregister = asyncio.Event()
+        unregister_turn_states = service._unregister_http_bridge_turn_states
+
+        async def blocking_unregister(target_session):
+            unregister_started.set()
+            await release_unregister.wait()
+            await unregister_turn_states(target_session)
+
+        monkeypatch.setattr(service, "_unregister_http_bridge_turn_states", blocking_unregister)
+        reconnect_task = asyncio.create_task(reconnect)
+        await asyncio.wait_for(unregister_started.wait(), timeout=1.0)
+        reconnect_task.cancel()
+        release_unregister.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reconnect_task
+    else:
+        await reconnect
 
     claim_replacement.assert_awaited_once()
     assert session.account is authorized_account

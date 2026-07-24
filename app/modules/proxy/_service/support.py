@@ -795,6 +795,9 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # A verified full resend that bootstraps a fresh bridge should not wait for
+    # the general eventless watchdog before trying its one safe anchorless body.
+    fresh_bridge_reattach_startup_timeout_seconds: float | None = None
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto
@@ -852,6 +855,7 @@ class _WebSocketRequestState:
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
+    downstream_detach_requested: bool = False
     draining_until_terminal: bool = False
     account_capacity_waiting: bool = False
     account_capacity_wait_reason: str | None = None
@@ -913,6 +917,7 @@ class _HTTPBridgeSession:
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
     durable_previous_response_ids: set[str] = field(default_factory=set)
+    completed_unanchored_fork_retirement_candidate: bool = False
     alias_registration_generation: int = 0
     turn_state_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)

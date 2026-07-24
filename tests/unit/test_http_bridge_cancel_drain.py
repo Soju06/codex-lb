@@ -170,6 +170,25 @@ async def test_cancelled_http_bridge_request_retires_session_before_retry_overla
     release_reservation.assert_awaited_once_with(cancelled_request.api_key_reservation)
 
 
+@pytest.mark.asyncio
+async def test_detach_publishes_barrier_while_http_bridge_lifecycle_is_owned() -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    request_state = _make_request_state(
+        "req-detach-after-retry-arbitration",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([request_state]), queued_request_count=1)
+    await session.lifecycle_lock.acquire()
+
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+    session.lifecycle_lock.release()
+    assert request_state.downstream_detach_requested is True
+    assert request_state.draining_until_terminal is True
+    assert request_state.event_queue is None
+
+
 def test_retiring_http_bridge_session_is_not_reusable() -> None:
     session = _make_http_bridge_session(deque(), queued_request_count=0)
     session.upstream_control.retire_after_drain = True
@@ -227,6 +246,35 @@ async def test_retiring_http_bridge_session_stays_live_while_visible_request_fin
     assert await service._http_bridge_has_live_local_session(
         key=key,
         incoming_turn_state="http_turn_retiring_visible",
+        api_key=None,
+    )
+    assert not await service._http_bridge_has_live_local_session(
+        key=key,
+        incoming_turn_state="http_turn_retiring_visible",
+        api_key=None,
+        include_retiring_with_visible_requests=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_local_session_probe_uses_previous_response_for_promoted_prompt_cache() -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "promoted-codex-cache", None)
+    session = _make_http_bridge_session(deque(), queued_request_count=0, key=key)
+    session.codex_session = True
+
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions[key] = session
+
+    assert not await service._http_bridge_has_live_local_session(
+        key=key,
+        incoming_turn_state=None,
+        api_key=None,
+    )
+    assert await service._http_bridge_has_live_local_session(
+        key=key,
+        incoming_turn_state=None,
+        previous_response_id="resp-promoted-cache",
         api_key=None,
     )
 

@@ -4205,7 +4205,12 @@ class _WebSocketMixin:
         _ = proxy
         async with pending_lock:
             started_ats = [
-                request_state.started_at
+                min(
+                    request_state.started_at,
+                    request_state.bridge_request_deadline - proxy_request_budget_seconds,
+                )
+                if request_state.bridge_request_deadline is not None
+                else request_state.started_at
                 for request_state in pending_requests
                 if _http_bridge_request_counts_against_queue(request_state)
             ]

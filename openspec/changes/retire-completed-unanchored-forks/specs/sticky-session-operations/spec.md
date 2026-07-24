@@ -17,6 +17,13 @@ fork MUST remain available as the local continuity fallback. Retirement MUST
 NOT apply to canonical session-header, turn-state, prompt-cache, or
 account-neutral recovery lanes.
 
+When a durable successful completion occurs while sibling work remains, the
+service MUST retain retirement eligibility and reconsider it after every later
+terminal sibling outcome. A failed, incomplete, or cancelled sibling MUST NOT
+leave an otherwise quiescent completed fork holding its socket and stream
+lease. Retirement MUST still wait while any local continuation alias lacks
+durable persistence.
+
 #### Scenario: Completed ordinary fork returns its live resources
 
 - **GIVEN** an ordinary request-scoped unanchored fork has one active request
@@ -31,6 +38,13 @@ account-neutral recovery lanes.
 - **WHEN** one request completes
 - **THEN** the service does not retire the lane
 - **AND** it keeps the account stream lease while the upstream socket remains reusable
+
+#### Scenario: Failed sibling triggers deferred retirement
+
+- **GIVEN** one request completed durably while a sibling remained pending
+- **AND** the lane retained completed-fork retirement eligibility
+- **WHEN** the sibling later fails or becomes incomplete and the lane is quiescent
+- **THEN** the service retires the completed fork and releases its stream lease
 
 #### Scenario: Durable continuation survives live fork retirement
 

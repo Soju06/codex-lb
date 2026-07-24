@@ -5,11 +5,9 @@ import dataclasses
 import json
 import logging
 import math
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import Any, AsyncIterator, Mapping, TypeVar, cast
 from uuid import uuid4
-
-import anyio
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -65,6 +63,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_FRESH_REATTACH_RESPONSE_CREATED_MAX_SECONDS,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -213,6 +212,53 @@ from app.modules.proxy.replay_safety import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
+_HTTP_BRIDGE_CANCEL_SAFE_CLEANUP_TIMEOUT_SECONDS = 6.0
+_HTTP_BRIDGE_CANCEL_SAFE_CLEANUP_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _http_bridge_cancel_safe_cleanup_done(task: asyncio.Task[Any]) -> None:
+    _HTTP_BRIDGE_CANCEL_SAFE_CLEANUP_TASKS.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+async def _await_http_bridge_cancel_safe_cleanup(cleanup: Coroutine[Any, Any, Any]) -> None:
+    cleanup_task = asyncio.create_task(cleanup)
+    _HTTP_BRIDGE_CANCEL_SAFE_CLEANUP_TASKS.add(cleanup_task)
+    cleanup_task.add_done_callback(_http_bridge_cancel_safe_cleanup_done)
+    cancellation: asyncio.CancelledError | None = None
+    deadline = asyncio.get_running_loop().time() + _HTTP_BRIDGE_CANCEL_SAFE_CLEANUP_TIMEOUT_SECONDS
+    while True:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(cleanup_task),
+                timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+        except asyncio.CancelledError as exc:
+            if cleanup_task.cancelled():
+                if cancellation is not None:
+                    raise cancellation from exc
+                raise
+            cancellation = cancellation or exc
+            continue
+        except TimeoutError:
+            cleanup_task.cancel()
+            logger.warning("Timed out waiting for HTTP bridge cancellation cleanup")
+            done, _pending = await asyncio.wait({cleanup_task}, timeout=0.1)
+            if cleanup_task in done:
+                _http_bridge_cancel_safe_cleanup_done(cleanup_task)
+            if cancellation is not None:
+                raise cancellation
+            return
+        except BaseException as exc:
+            if cancellation is not None:
+                raise cancellation from exc
+            raise
+        if cancellation is not None:
+            raise cancellation
+        return
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
@@ -626,39 +672,44 @@ class _HTTPBridgeStreamingMixin:
             return
 
         request_scope_id = ensure_request_scope_id()
+        bridge_stream = self._stream_via_http_bridge(
+            payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            suppress_text_done_events=suppress_text_done_events,
+            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+            max_sessions=runtime_config.max_sessions,
+            queue_limit=runtime_config.queue_limit,
+            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+            downstream_turn_state=downstream_turn_state,
+            forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_legacy_signature=forwarded_legacy_signature,
+            proxy_api_authorization=proxy_api_authorization,
+            forwarded_affinity_kind=forwarded_affinity_kind,
+            forwarded_affinity_key=forwarded_affinity_key,
+            rewritten_file_account_id=rewritten_file_account_id,
+            client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
         try:
-            async for line in self._stream_via_http_bridge(
-                payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=propagate_http_errors,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                suppress_text_done_events=suppress_text_done_events,
-                idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-                codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-                max_sessions=runtime_config.max_sessions,
-                queue_limit=runtime_config.queue_limit,
-                prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-                downstream_turn_state=downstream_turn_state,
-                forwarded_request=forwarded_request,
-                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-                forwarded_legacy_signature=forwarded_legacy_signature,
-                proxy_api_authorization=proxy_api_authorization,
-                forwarded_affinity_kind=forwarded_affinity_kind,
-                forwarded_affinity_key=forwarded_affinity_key,
-                rewritten_file_account_id=rewritten_file_account_id,
-                client_ip=client_ip,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            ):
+            async for line in bridge_stream:
                 yield line
         finally:
-            with anyio.CancelScope(shield=True):
+
+            async def cleanup_bridge_stream() -> None:
+                await bridge_stream.aclose()
                 await _release_http_bridge_unanchored_handoffs_for_request(
                     self,
                     request_scope_id=request_scope_id,
                 )
+
+            await _await_http_bridge_cancel_safe_cleanup(cleanup_bridge_stream())
 
     async def _stream_via_http_bridge(
         self: Any,
@@ -867,6 +918,8 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_retains_prior_output = False
         force_local_recovery_creation = False
+        live_local_session_exists = False
+        forwards_to_active_owner = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
         durable_anchor_trimmable = durable_lookup is not None and _input_prefix_matches_stored_context(
             payload.input,
@@ -927,8 +980,10 @@ class _HTTPBridgeStreamingMixin:
             live_local_session_exists = await self._http_bridge_has_live_local_session(
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
+                previous_response_id=payload.previous_response_id,
                 api_key=api_key,
                 durable_lookup=durable_lookup,
+                include_retiring_with_visible_requests=False,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
             if (
@@ -968,6 +1023,14 @@ class _HTTPBridgeStreamingMixin:
                         cache_key_family=bridge_session_key.affinity_kind,
                         model_class=_extract_model_class(payload.model) if payload.model else None,
                     )
+                live_local_session_exists = await self._http_bridge_has_live_local_session(
+                    key=bridge_session_key,
+                    incoming_turn_state=incoming_turn_state_header,
+                    previous_response_id=effective_payload.previous_response_id,
+                    api_key=api_key,
+                    durable_lookup=durable_lookup,
+                    include_retiring_with_visible_requests=False,
+                )
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=bridge_session_key.affinity_kind,
             key=bridge_session_key.affinity_key,
@@ -1104,14 +1167,13 @@ class _HTTPBridgeStreamingMixin:
         )
         fresh_replay_excluded_account_ids: set[str] = set()
 
-        def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+        def durable_full_resend_allows_account_neutral_replay() -> bool:
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
             nonlocal durable_full_resend_retains_prior_output
 
             if (
-                not _http_bridge_is_previous_response_owner_unavailable(exc)
-                or forwarded_request
+                forwarded_request
                 or rewritten_file_account_id is not None
                 or durable_full_resend_anchor_count is None
                 or durable_full_resend_anchor_fingerprint is None
@@ -1141,7 +1203,18 @@ class _HTTPBridgeStreamingMixin:
                 )
             return durable_full_resend_is_account_neutral
 
-        def switch_to_account_neutral_replay() -> None:
+        def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+            return (
+                _http_bridge_is_previous_response_owner_unavailable(exc)
+                and durable_full_resend_allows_account_neutral_replay()
+            )
+
+        def switch_to_account_neutral_replay(
+            *,
+            event_name: str = "owner_unavailable_fresh_resend",
+            detail: str = "outcome=projected_plaintext_full_resend_without_anchor",
+            exclude_current_owner: bool = True,
+        ) -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
             nonlocal bridge_session_key
@@ -1155,10 +1228,12 @@ class _HTTPBridgeStreamingMixin:
             nonlocal force_local_recovery_creation
             nonlocal fresh_upstream_request_text
             nonlocal incoming_turn_state_header
+            nonlocal preferred_account_has_continuity_provenance
             nonlocal previous_response_trimmed_input_count
             nonlocal previous_response_trimmed_input_fingerprint
             nonlocal proxy_injected_previous_response_id
             nonlocal request_state
+            nonlocal required_continuity_owner_missing
             nonlocal session_creation_headers
             nonlocal session_header_fallback_key
             nonlocal text_data
@@ -1166,15 +1241,15 @@ class _HTTPBridgeStreamingMixin:
 
             failed_owner_id = request_state.preferred_account_id
             _log_http_bridge_event(
-                "owner_unavailable_fresh_resend",
+                event_name,
                 bridge_session_key,
                 account_id=failed_owner_id,
                 model=payload.model,
-                detail="outcome=projected_plaintext_full_resend_without_anchor",
+                detail=detail,
                 cache_key_family=bridge_session_key.affinity_kind,
                 model_class=_extract_model_class(payload.model) if payload.model else None,
             )
-            if failed_owner_id is not None:
+            if exclude_current_owner and failed_owner_id is not None:
                 fresh_replay_excluded_account_ids.add(failed_owner_id)
             session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
             incoming_turn_state_header = None
@@ -1200,6 +1275,8 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=None,
             )
             request_state.preferred_account_id = None
+            preferred_account_has_continuity_provenance = False
+            required_continuity_owner_missing = False
             effective_payload = fresh_payload
             untrimmed_effective_payload = fresh_payload
             proxy_injected_previous_response_id = False
@@ -1212,6 +1289,40 @@ class _HTTPBridgeStreamingMixin:
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
             file_required_preferred_account = False
+
+        fresh_bridge_durable_reattach = (
+            durable_lookup is not None
+            and not live_local_session_exists
+            and not forwards_to_active_owner
+            and request_state.previous_response_id is not None
+        )
+        if fresh_bridge_durable_reattach and durable_full_resend_allows_account_neutral_replay():
+            if proxy_injected_previous_response_id:
+                switch_to_account_neutral_replay(
+                    event_name="fresh_reattach_anchor_projected",
+                    detail="outcome=projected_before_first_fresh_bridge_send",
+                    exclude_current_owner=False,
+                )
+            else:
+                fresh_payload = durable_full_resend_fresh_payload
+                if fresh_payload is None:
+                    raise RuntimeError("fresh reattach projection missing after eligibility check")
+                _fresh_request_state, fresh_request_text = prepare_bridge_request(fresh_payload)
+                del _fresh_request_state
+                request_state.fresh_upstream_request_text = fresh_request_text
+                request_state.fresh_upstream_request_is_retry_safe = True
+                request_state.fresh_bridge_reattach_startup_timeout_seconds = (
+                    _HTTP_BRIDGE_FRESH_REATTACH_RESPONSE_CREATED_MAX_SECONDS
+                )
+                _log_http_bridge_event(
+                    "fresh_reattach_anchor_retry_armed",
+                    bridge_session_key,
+                    account_id=request_state.preferred_account_id,
+                    model=payload.model,
+                    detail="outcome=bounded_single_anchorless_retry",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
 
         if required_continuity_owner_missing:
             owner_unavailable = ProxyResponseError(
@@ -1588,9 +1699,10 @@ class _HTTPBridgeStreamingMixin:
                             service=self,
                         )
                     if retry_request_state is not None:
-                        with anyio.CancelScope(shield=True):
-                            await self._detach_http_bridge_request(session, request_state=retry_request_state)
-                            session.last_used_at = _service_time().monotonic()
+                        await _await_http_bridge_cancel_safe_cleanup(
+                            self._detach_http_bridge_request(session, request_state=retry_request_state)
+                        )
+                        session.last_used_at = _service_time().monotonic()
                 return
         session = session_or_forward
         if (
@@ -1742,6 +1854,13 @@ class _HTTPBridgeStreamingMixin:
             )
             request_state.preferred_account_id = previous_request_state.preferred_account_id
             request_state.excluded_account_ids.update(previous_request_state.excluded_account_ids)
+            request_state.fresh_upstream_request_text = previous_request_state.fresh_upstream_request_text
+            request_state.fresh_upstream_request_is_retry_safe = (
+                previous_request_state.fresh_upstream_request_is_retry_safe
+            )
+            request_state.fresh_bridge_reattach_startup_timeout_seconds = (
+                previous_request_state.fresh_bridge_reattach_startup_timeout_seconds
+            )
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
                 # so the client's next full resend can prefix-match it.
@@ -2523,6 +2642,7 @@ class _HTTPBridgeStreamingMixin:
                 yield event_block
                 yielded_any = True
         finally:
-            with anyio.CancelScope(shield=True):
-                await self._detach_http_bridge_request(session, request_state=request_state)
-                session.last_used_at = _service_time().monotonic()
+            await _await_http_bridge_cancel_safe_cleanup(
+                self._detach_http_bridge_request(session, request_state=request_state)
+            )
+            session.last_used_at = _service_time().monotonic()

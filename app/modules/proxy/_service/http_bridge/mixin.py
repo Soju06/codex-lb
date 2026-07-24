@@ -116,12 +116,15 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _register_http_bridge_turn_state_aliases_locked,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
+    _schedule_replaced_http_bridge_upstream_cleanup,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
-from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
+from app.modules.proxy._service.http_bridge.request_submit import (
+    _await_task_deferring_cancellation,
+    _HTTPBridgeRequestSubmitMixin,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
-    _await_cancelled_task,
     _call_with_supported_optional_kwargs,
     _estimated_lease_tokens_from_request_usage_budget,
     _is_local_account_cap_code,
@@ -141,7 +144,10 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 )
 from app.modules.proxy._service.http_bridge.session_registry import _HTTPBridgeSessionRegistryMixin
 from app.modules.proxy._service.http_bridge.streaming import _HTTPBridgeStreamingMixin
-from app.modules.proxy._service.http_bridge.upstream_events import _HTTPBridgeUpstreamEventsMixin
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _cancel_http_bridge_reader_child,
+    _HTTPBridgeUpstreamEventsMixin,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -272,6 +278,7 @@ class _HTTPBridgeMixin(
             and (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
+                or task.get_name().startswith("http-bridge-reader-child-")
             )
         ]
         if not tasks:
@@ -1670,7 +1677,11 @@ class _HTTPBridgeMixin(
             if upstream_reader is asyncio.current_task():
                 session.upstream_reader = None
             else:
-                await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
+                await _cancel_http_bridge_reader_child(
+                    upstream_reader,
+                    label="http bridge upstream reader",
+                    background_cleanup_tasks=self._background_cleanup_tasks,
+                )
                 if session.upstream_reader is upstream_reader:
                     session.upstream_reader = None
         try:
@@ -1995,10 +2006,6 @@ class _HTTPBridgeMixin(
         owner_rebind_affinity: _AffinityPolicy | None = None,
         selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
-        # A replacement reader can start before its caller resends the request.
-        # Clear the prior attempt first so an expired send timestamp cannot
-        # retire the fresh socket before the next real send re-arms it.
-        request_state.response_create_sent_at = None
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -2006,10 +2013,15 @@ class _HTTPBridgeMixin(
         require_same_account = require_same_account or account_neutral_recovery
         old_account_id = session.account.id
         old_upstream = session.upstream
+        old_account_lease = session.account_lease
         old_reader = session.upstream_reader if restart_reader else None
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
-                cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
+                cancelled = await _cancel_http_bridge_reader_child(
+                    old_reader,
+                    label="http bridge upstream reader",
+                    background_cleanup_tasks=self._background_cleanup_tasks,
+                )
                 if not cancelled:
                     session.closed = True
                     raise ProxyResponseError(
@@ -2028,7 +2040,11 @@ class _HTTPBridgeMixin(
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         requested_preferred_account_id = (
-            request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
+            session.account.id
+            if require_same_account
+            else request_state.preferred_account_id
+            if require_preferred_account or account_neutral_recovery
+            else None
         )
         required_preferred_account_id = resolve_required_account_id(
             ("requested reconnect owner", requested_preferred_account_id),
@@ -2038,7 +2054,7 @@ class _HTTPBridgeMixin(
             ),
         )
         close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
+        hard_close_account_bound = require_same_account or (session.key.strength == "hard" and close_skips_account)
         skip_same_account = (
             session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
         )
@@ -2110,7 +2126,7 @@ class _HTTPBridgeMixin(
                 service_tier=session.request_service_tier,
                 exclude_account_ids=excluded_account_ids,
                 preferred_account_id=preferred_candidate_id,
-                preferred_account_is_continuity_owner=account_neutral_recovery,
+                preferred_account_is_continuity_owner=account_neutral_recovery or require_same_account,
                 require_security_work_authorized=require_security_work_authorized,
                 lease_kind=None if reuse_current_account_lease else "stream",
                 estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
@@ -2282,40 +2298,57 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
-        if owner_rebind_affinity is not None:
-            await self._claim_http_bridge_replacement_before_swap(
-                session,
-                account_id=account.id,
-                upstream=upstream,
-                release_selected_account_lease=release_selected_account_lease,
-                owner_rebind_affinity=owner_rebind_affinity,
+
+        async def commit_replacement() -> None:
+            if owner_rebind_affinity is not None:
+                await self._claim_http_bridge_replacement_before_swap(
+                    session,
+                    account_id=account.id,
+                    upstream=upstream,
+                    release_selected_account_lease=release_selected_account_lease,
+                    owner_rebind_affinity=owner_rebind_affinity,
+                )
+                await self._unregister_http_bridge_turn_states(session)
+                await self._unregister_http_bridge_previous_response_ids(session)
+                session.last_completed_response_id = None
+                session.last_completed_input_count = 0
+                session.last_completed_input_prefix_fingerprint = None
+                session.last_pending_tool_calls.clear()
+                session.affinity = selection_affinity or session.affinity
+                session.codex_session = False
+                session.upstream_turn_state = None
+                session.downstream_turn_state = None
+                session.headers = {
+                    key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+                }
+            session.account_lease = selected_account_lease
+            # A replacement reader can start before its caller resends the request.
+            # Clear the prior attempt only after reconnect succeeds so a failed
+            # reconnect cannot disarm the bounded eventless watchdog.
+            request_state.response_create_sent_at = None
+            session.account, session.headers, session.upstream = account, connect_headers, upstream
+            session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
+            session.upstream_control = _WebSocketUpstreamControl()
+            session.closed = False
+            session.last_upstream_close_code = None
+            session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+
+            _schedule_replaced_http_bridge_upstream_cleanup(
+                self,
+                old_upstream=old_upstream,
+                old_account_lease=old_account_lease,
+                selected_account_lease=selected_account_lease,
+                request_id=request_state.request_log_id or request_state.request_id,
             )
-            await self._unregister_http_bridge_turn_states(session)
-            await self._unregister_http_bridge_previous_response_ids(session)
-            session.last_completed_response_id = None
-            session.last_completed_input_count = 0
-            session.last_completed_input_prefix_fingerprint = None
-            session.last_pending_tool_calls.clear()
-            session.affinity = selection_affinity or session.affinity
-            session.codex_session = False
-            session.upstream_turn_state = None
-            session.downstream_turn_state = None
-            session.headers = {
-                key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
-            }
-        try:
-            await old_upstream.close()
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-        if selected_account_lease is not session.account_lease:
-            await self._load_balancer.release_account_lease(session.account_lease)
-        session.account_lease = selected_account_lease
-        session.account, session.headers, session.upstream = account, connect_headers, upstream
-        session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
-        session.upstream_control = _WebSocketUpstreamControl()
-        session.closed = False
-        session.last_upstream_close_code = None
-        session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+            if request_state.downstream_detach_requested:
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                session.upstream_reader_wakeup.set()
+
+        commit_task = asyncio.create_task(commit_replacement())
+        _, cancellation = await _await_task_deferring_cancellation(commit_task)
+        if cancellation is not None:
+            raise cancellation
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(

@@ -12,6 +12,7 @@ from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
 from uuid import uuid4
 
+import anyio
 from fastapi import (
     APIRouter,
     Body,
@@ -4736,6 +4737,7 @@ async def _stream_responses(
             startup_error,
             headers=rate_limit_headers,
         )
+    stream_owner = stream
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,
@@ -4753,13 +4755,14 @@ async def _stream_responses(
             request_id=get_request_id(),
             route_family="responses",
         )
-    return StreamingResponse(
+    return _SourceClosingStreamingResponse(
         inject_sse_keepalives(
             stream,
             get_settings().sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
         ),
         media_type="text/event-stream",
+        source_owner=stream_owner,
         headers={
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
@@ -5296,6 +5299,99 @@ def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[
     return task
 
 
+class _FirstStreamHandoff(AsyncIterator[str]):
+    def __init__(self, stream: AsyncIterator[str]) -> None:
+        self._stream = stream
+        self._first_task = _create_first_stream_probe_task(stream)
+        self._first_pending = True
+        self._closed = False
+        self._close_lock = asyncio.Lock()
+
+    @property
+    def first_task(self) -> asyncio.Task[str]:
+        return self._first_task
+
+    def __aiter__(self) -> _FirstStreamHandoff:
+        return self
+
+    async def __anext__(self) -> str:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._first_pending:
+            self._first_pending = False
+            return await self._first_task
+        return await anext(self._stream)
+
+    async def aclose(self) -> None:
+        async with self._close_lock:
+            if self._closed:
+                return
+            if not self._first_task.done():
+                self._first_task.cancel()
+            await asyncio.gather(self._first_task, return_exceptions=True)
+            close_source = getattr(self._stream, "aclose", None)
+            if callable(close_source):
+                await close_source()
+            self._closed = True
+
+
+_STREAM_SOURCE_CLOSE_TIMEOUT_SECONDS = 7.0
+_STREAM_SOURCE_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _retrieve_stream_cleanup_task_exception(task: asyncio.Task[None]) -> None:
+    _STREAM_SOURCE_CLEANUP_TASKS.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+async def _close_stream_source_bounded(source_owner: AsyncIterator[str]) -> None:
+    close_source = getattr(source_owner, "aclose", None)
+    if not callable(close_source):
+        return
+    close_task = asyncio.create_task(close_source())
+    _STREAM_SOURCE_CLEANUP_TASKS.add(close_task)
+    close_task.add_done_callback(_retrieve_stream_cleanup_task_exception)
+    try:
+        done, _pending = await asyncio.wait(
+            {close_task},
+            timeout=_STREAM_SOURCE_CLOSE_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        close_task.cancel()
+        raise
+    if close_task in done:
+        close_task.result()
+        return
+    close_task.cancel()
+    logger.warning("Timed out closing streaming response source")
+    done, _pending = await asyncio.wait({close_task}, timeout=0.1)
+    if close_task in done:
+        _retrieve_stream_cleanup_task_exception(close_task)
+
+
+class _SourceClosingStreamingResponse(StreamingResponse):
+    def __init__(self, *args: Any, source_owner: AsyncIterator[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._source_owner = source_owner
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        response_error: BaseException | None = None
+        try:
+            await super().__call__(scope, receive, send)
+        except BaseException as exc:
+            response_error = exc
+        try:
+            with anyio.CancelScope(shield=True):
+                await _close_stream_source_bounded(self._source_owner)
+        except BaseException as cleanup_error:
+            if response_error is not None:
+                raise response_error from cleanup_error
+            raise
+        if response_error is not None:
+            raise response_error
+
+
 async def _wait_for_first_stream_probe(
     first_task: asyncio.Task[str],
     *,
@@ -5417,7 +5513,8 @@ async def _probe_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = _create_first_stream_probe_task(stream)
+    handoff = _FirstStreamHandoff(stream)
+    first_task = handoff.first_task
     probe_done = await _wait_for_first_stream_probe(
         first_task,
         timeout_seconds=timeout_seconds,
@@ -5430,21 +5527,21 @@ async def _probe_stream_startup_error(
         # (rather than wait_for + shield) never cancels the task on timeout,
         # avoiding the Python 3.14 "exception in shielded future" log when the
         # upstream later returns an error such as a 429 from the admission gate.
-        return _prepend_first_task(first_task, stream), None
+        return handoff, None
     try:
         first = first_task.result()
     except StopAsyncIteration:
-        return _prepend_first(None, stream), None
+        await _close_stream_source_bounded(handoff)
+        return handoff, None
     except ProxyResponseError as exc:
-        return _prepend_first(None, stream), exc
+        await _close_stream_source_bounded(handoff)
+        return handoff, exc
     if convert_event_errors:
         first_error = _stream_event_error_envelope(first)
         if first_error is not None:
-            aclose = getattr(stream, "aclose", None)
-            if callable(aclose):
-                await aclose()
-            return _prepend_first(None, stream), first_error
-    return _prepend_first(first, stream), None
+            await _close_stream_source_bounded(handoff)
+            return handoff, first_error
+    return handoff, None
 
 
 _CHAT_COMPLETIONS_STARTUP_EVENT_TYPES: Final[set[str]] = {

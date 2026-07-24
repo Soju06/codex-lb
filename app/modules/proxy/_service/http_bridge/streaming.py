@@ -224,6 +224,10 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
+def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
+    return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
+
+
 def _apply_http_bridge_downstream_turn_state(
     request_state: _WebSocketRequestState,
     *,
@@ -1419,32 +1423,7 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-                request_state, text_data = prepare_bridge_request(payload)
-                request_state.affinity_policy = affinity
-                _apply_http_bridge_downstream_turn_state(
-                    request_state,
-                    downstream_turn_state=downstream_turn_state,
-                    incoming_turn_state_header=incoming_turn_state_header,
-                )
-                request_state.transport = _REQUEST_TRANSPORT_HTTP
-                request_state.request_stage = _http_bridge_request_stage(
-                    headers=headers,
-                    payload=payload,
-                    durable_lookup=None,
-                )
-                request_state.preferred_account_id = resolve_required_account_id(
-                    ("replay owner", request_state.preferred_account_id),
-                    ("input file", rewritten_file_account_id),
-                )
-                file_required_preferred_account = rewritten_file_account_id is not None
-                effective_payload = payload
-                untrimmed_effective_payload = payload
-                proxy_injected_previous_response_id = False
-                previous_response_trimmed_input_count = None
-                previous_response_trimmed_input_fingerprint = None
-                durable_full_resend_anchor_count = None
-                durable_full_resend_anchor_fingerprint = None
-                durable_lookup = None
+                switch_to_account_neutral_replay()
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):

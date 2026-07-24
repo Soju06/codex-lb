@@ -824,9 +824,10 @@ class _HTTPBridgeStreamingMixin:
             request_payload: ResponsesRequest,
             *,
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
+            previous_request_state: _WebSocketRequestState | None = None,
         ) -> tuple[_WebSocketRequestState, str]:
             if bridge_uses_responses_lite:
-                return self._prepare_http_bridge_request(
+                prepared_request = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -835,14 +836,19 @@ class _HTTPBridgeStreamingMixin:
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
                 )
-            return self._prepare_http_bridge_request(
-                request_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                request_id=request_id,
-                client_ip=client_ip,
-            )
+            else:
+                prepared_request = self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                )
+            request_state, text_data = prepared_request
+            if previous_request_state is not None:
+                request_state.account_capacity_wait_deadline = previous_request_state.account_capacity_wait_deadline
+            return request_state, text_data
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -1315,7 +1321,10 @@ class _HTTPBridgeStreamingMixin:
             fresh_payload = durable_full_resend_fresh_payload
             if fresh_payload is None:
                 raise RuntimeError("account-neutral replay projection missing after eligibility check")
-            request_state, text_data = prepare_bridge_request(fresh_payload)
+            request_state, text_data = prepare_bridge_request(
+                fresh_payload,
+                previous_request_state=request_state,
+            )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
@@ -1742,6 +1751,7 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
                         reservation=retry_api_key_reservation,
+                        previous_request_state=request_state,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
@@ -1836,7 +1846,10 @@ class _HTTPBridgeStreamingMixin:
                 update={"previous_response_id": session.last_completed_response_id}
             )
             proxy_injected_previous_response_id = True
-            request_state, text_data = prepare_bridge_request(effective_payload)
+            request_state, text_data = prepare_bridge_request(
+                effective_payload,
+                previous_request_state=request_state,
+            )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1916,7 +1929,10 @@ class _HTTPBridgeStreamingMixin:
             # guard, the stored input context, and the usage budget all
             # observe the input actually sent upstream.
             previous_request_state = request_state
-            request_state, text_data = prepare_bridge_request(submit_payload)
+            request_state, text_data = prepare_bridge_request(
+                submit_payload,
+                previous_request_state=previous_request_state,
+            )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             if downstream_turn_state is not None:
@@ -2420,6 +2436,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state, retry_text_data = prepare_bridge_request(
                     retry_payload,
                     reservation=retry_api_key_reservation,
+                    previous_request_state=request_state,
                 )
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:

@@ -9532,6 +9532,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     )
 
     submitted_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
+    submitted_capacity_wait_deadlines: list[float | None] = []
 
     async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
         del kwargs
@@ -9547,6 +9548,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     ) -> None:
         del _session, text_data, queue_limit
         submitted_reservations.append(request_state.api_key_reservation)
+        submitted_capacity_wait_deadlines.append(request_state.account_capacity_wait_deadline)
         event_queue = request_state.event_queue
         assert event_queue is not None
 
@@ -9559,10 +9561,10 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
     reserve_retry = AsyncMock(return_value=retried_reservation)
     capacity_unavailable = ProxyResponseError(
-        429 if terminal_capacity else 503,
+        429,
         proxy_service.openai_error(
-            "account_stream_cap" if terminal_capacity else "no_accounts",
-            "Account stream capacity is exhausted" if terminal_capacity else "Rate limit exceeded. Try again in 120s",
+            "account_stream_cap",
+            "Account stream capacity is exhausted",
         ),
     )
     get_or_create = AsyncMock(side_effect=[owner_forward, capacity_unavailable, session_retry])
@@ -9638,6 +9640,8 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     assert get_or_create.await_count == 3
     assert prepare_reservations == [initial_reservation, retried_reservation]
     assert submitted_reservations == [retried_reservation]
+    assert submitted_capacity_wait_deadlines == [request_state_initial.account_capacity_wait_deadline]
+    assert submitted_capacity_wait_deadlines[0] is not None
     reserve_retry.assert_awaited_once()
     write_overload_log.assert_not_awaited()
 

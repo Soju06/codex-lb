@@ -87,6 +87,22 @@ from app.core.metrics.prometheus import (
     bridge_public_contract_error_total,
     stream_keepalive_sent_total,
 )
+from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
+from app.core.multipart import (
+    IMAGE_EDITS_MULTIPART_POLICY,
+    TRANSCRIPTION_MULTIPART_POLICY,
+    bounded_multipart_form,
+    read_bounded_upload,
+)
+from app.core.multipart_fields import (
+    optional_text,
+    optional_upload,
+    ordered_text_items,
+    ordered_uploads,
+    required_text,
+    required_upload,
+    uploaded_file_items,
+)
 from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.openai.chat_responses import (
     ChatCompletion,

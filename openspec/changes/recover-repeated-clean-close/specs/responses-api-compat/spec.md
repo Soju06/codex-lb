@@ -80,3 +80,56 @@ before a 120-second client deadline.
 - **WHEN** six silent intervals elapse
 - **THEN** the proxy initiates eligible pre-response recovery
 - **AND** at least sixty seconds remain before a 120-second client request timeout
+
+### Requirement: Durable retry-circuit state protects repeated hard-affinity failures
+
+For a hard-affinity bridge key, the proxy MUST scope retry-circuit state by
+affinity kind, affinity key, and API-key scope (using a stable anonymous scope
+when no API key is present). The proxy MUST record only the documented
+pre-response failure classes (`stream_incomplete`, `clean_close`, and
+`stream_idle_timeout`).
+
+The default circuit MUST open after two consecutive recorded failures. Once
+open, it MUST suppress pre-created replay until the persisted cooldown expires,
+using exponential backoff from sixty seconds up to ten minutes. Clean-close
+failures MUST cap their cooldown at thirty seconds. The proxy MUST persist
+failure count, cooldown deadline, last failure detail, and update time in the
+`http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
+replicas cannot shorten an existing cooldown.
+
+Before every hard-affinity retry decision, the proxy MUST refresh the durable
+row so a cooldown opened by another replica is observed even when this process
+has already loaded the key. A durable lookup or persistence failure MUST NOT
+crash the request; the proxy MUST continue using available local state and
+record the failure for observability. Rows older than one hour MUST be treated
+as expired and removed. A successful terminal response MUST clear the local
+and durable circuit state.
+
+#### Scenario: the second hard-key failure opens a durable circuit
+
+- **GIVEN** a hard-affinity key has one recorded pre-response failure
+- **WHEN** a second eligible failure is recorded
+- **THEN** the proxy opens the retry circuit
+- **AND** persists at least two consecutive failures and a cooldown deadline
+- **AND** subsequent pre-created replay is suppressed until that deadline
+
+#### Scenario: retry decisions observe a cooldown opened by another replica
+
+- **GIVEN** this replica previously looked up a hard-affinity key with no row
+- **AND** another replica persists an open cooldown for that same key and API-key scope
+- **WHEN** this replica evaluates the next pre-created retry
+- **THEN** it refreshes durable state before deciding
+- **AND** suppresses the retry for the persisted cooldown
+
+#### Scenario: circuit state remains isolated by key and API-key scope
+
+- **GIVEN** one hard-affinity key has an open circuit
+- **WHEN** a different affinity key or API-key scope evaluates a retry
+- **THEN** that request is not suppressed by the first key's circuit
+
+#### Scenario: durable circuit lookup failure does not fail the request
+
+- **GIVEN** durable retry-circuit lookup or persistence is unavailable
+- **WHEN** the proxy evaluates or records a retry-circuit event
+- **THEN** the request continues using any available local circuit state
+- **AND** the failure is logged and exposed through retry-circuit observability

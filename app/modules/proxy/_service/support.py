@@ -799,6 +799,7 @@ class _WebSocketRequestState:
     # producing any response event.
     clean_close_replay_count: int = 0
     clean_close_retry_in_progress: bool = False
+    clean_close_retry_result: bool | None = None
     clean_close_retry_close_generation: int | None = None
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)

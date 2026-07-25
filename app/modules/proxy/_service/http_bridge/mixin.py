@@ -2000,6 +2000,10 @@ class _HTTPBridgeMixin(
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
+        # Keep the registry from reusing a half-handoff session if this task is
+        # cancelled while the old reader is stopped or the replacement socket
+        # is being opened. A successful handoff marks it live again below.
+        session.closed = True
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
@@ -2284,6 +2288,11 @@ class _HTTPBridgeMixin(
                         continue
                     await abandon_selected_account_retry(account)
                     continue
+                await release_selected_account_lease()
+                _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
+                raise
+            except asyncio.CancelledError:
+                session.closed = True
                 await release_selected_account_lease()
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise

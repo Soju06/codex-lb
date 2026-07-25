@@ -1767,6 +1767,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 if not clean_close_retry_for_current_close:
                     return False
                 request_state.clean_close_retry_in_progress = True
+                request_state.clean_close_retry_result = None
                 request_state.clean_close_retry_close_generation = close_generation
             if additional_clean_close_retry:
                 request_state.clean_close_replay_count += 1
@@ -1874,10 +1875,13 @@ class _HTTPBridgeRequestSubmitMixin:
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
+            request_state.clean_close_retry_result = True
             return True
         except UpstreamWebSocketTransportError:
+            request_state.clean_close_retry_result = False
             raise
         except Exception as exc:
+            request_state.clean_close_retry_result = False
             (
                 request_state.error_http_status_override,
                 request_state.error_code_override,

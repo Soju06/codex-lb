@@ -768,12 +768,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
-                # Let the bounded retry helper decide whether replay is safe.
-                # It rejects ambiguous continuations, but can recover a
-                # pre-created request whose fresh payload is explicitly
-                # replay-safe. This also covers process-network receive
-                # failures before surfacing a 502 to the client.
-                retried = await self._retry_http_bridge_precreated_request(session)
+                # A process-network receive failure does not prove that the
+                # upstream rejected response.create. Do not replay ordinary
+                # requests in that ambiguous case: the first request may
+                # still be executing and replay could duplicate work, billing,
+                # or tool side effects. Clean websocket closes remain eligible
+                # for the bounded pre-created retry path below.
+                if message.error_code != "proxy_network_unavailable":
+                    retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 close_classification = (

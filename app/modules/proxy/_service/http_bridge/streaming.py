@@ -2522,6 +2522,29 @@ class _HTTPBridgeStreamingMixin:
             downstream_response_id: str,
             after_circuit_cooldown: bool = False,
         ) -> tuple[bool, str | None]:
+            # The reader may already be performing the bounded additional
+            # clean-close replay (including its jitter). Wait for that result
+            # instead of interpreting the in-progress flag as a terminal idle
+            # failure and detaching the request underneath the replay.
+            if request_state.clean_close_retry_in_progress:
+                while request_state.clean_close_retry_in_progress:
+                    if _service_time().monotonic() >= request_deadline:
+                        return (
+                            False,
+                            format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    response_failed_event(
+                                        "stream_idle_timeout",
+                                        "Clean-close recovery exceeded the request budget",
+                                        response_id=downstream_response_id,
+                                    ),
+                                )
+                            ),
+                        )
+                    await asyncio.sleep(0.01)
+                if request_state.clean_close_retry_result is True:
+                    return True, None
             try:
                 return (
                     await self._retry_http_bridge_precreated_request(

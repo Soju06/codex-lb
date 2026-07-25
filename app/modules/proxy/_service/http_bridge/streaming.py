@@ -2643,6 +2643,7 @@ class _HTTPBridgeStreamingMixin:
             keepalive_sent = False
             keepalive_count = 0
             circuit_keepalive_waiting = False
+            circuit_keepalive_until: float | None = None
             while True:
                 keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
@@ -2668,6 +2669,16 @@ class _HTTPBridgeStreamingMixin:
                         else stream_keepalive_max_count
                     )
                     wait_timeout = keepalive_interval
+                    if circuit_keepalive_waiting:
+                        # Once the circuit is cooling down, wake at the actual
+                        # expiry instead of waiting through another full
+                        # keepalive interval before checking it again.
+                        max_keepalive_count = 1
+                        if circuit_keepalive_until is not None:
+                            wait_timeout = min(
+                                wait_timeout,
+                                max(0.001, circuit_keepalive_until - _service_time().monotonic()),
+                            )
                     if not yielded_any and not keepalive_sent:
                         wait_timeout = max(wait_timeout, _http_bridge_startup_keepalive_grace_seconds())
                     try:
@@ -2757,6 +2768,9 @@ class _HTTPBridgeStreamingMixin:
                                         break
                                     circuit_keepalive_waiting = True
                                     keepalive_count = 0
+                                    circuit_keepalive_until = (
+                                        _service_time().monotonic() + retry_cooldown_seconds
+                                    )
                                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                                         http_bridge_retry_circuit_total.labels(outcome="keepalive").inc()
                                     logger.info(
@@ -2768,6 +2782,7 @@ class _HTTPBridgeStreamingMixin:
                                 else:
                                     was_circuit_keepalive_waiting = circuit_keepalive_waiting
                                     circuit_keepalive_waiting = False
+                                    circuit_keepalive_until = None
                                     if was_circuit_keepalive_waiting and not retried:
                                         retried, terminal_event = await retry_precreated_for_idle_recovery(
                                             downstream_response_id=downstream_response_id,

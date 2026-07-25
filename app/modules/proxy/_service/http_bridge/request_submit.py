@@ -1737,7 +1737,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     if not hard_owner_bound:
                         request_state.excluded_account_ids.add(session.account.id)
             else:
-                require_preferred_reconnect = account_neutral_recovery
+                # Account-scoped uploaded files cannot be replayed on a
+                # different owner. Keep the preferred account mandatory for
+                # both silent recovery and clean-close recovery.
+                require_preferred_reconnect = (
+                    account_neutral_recovery or request_state.file_required_preferred_account
+                )
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False

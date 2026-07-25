@@ -37437,11 +37437,19 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
 
     assert await service._retry_http_bridge_precreated_request(session) is True
 
-    reconnect.assert_awaited_once_with(
-        session,
-        request_state=request_state,
-        require_same_account=False,
-    )
+    if file_owner_bound:
+        reconnect.assert_awaited_once_with(
+            session,
+            request_state=request_state,
+            require_same_account=False,
+            require_preferred_account=True,
+        )
+    else:
+        reconnect.assert_awaited_once_with(
+            session,
+            request_state=request_state,
+            require_same_account=False,
+        )
     assert request_state.preferred_account_id == expected_preferred_account_id
     assert request_state.excluded_account_ids == expected_excluded_account_ids
     assert session.upstream_turn_state == expected_turn_state

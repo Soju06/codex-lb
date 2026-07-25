@@ -2319,6 +2319,27 @@ class _HTTPBridgeMixin(
             }
         try:
             await old_upstream.close()
+        except asyncio.CancelledError:
+            # The replacement socket and its lease are still local until the
+            # handoff below commits them to the session. Clean both sides up
+            # before propagating cancellation so repeated client disconnects
+            # cannot leak sockets or account capacity.
+            try:
+                await asyncio.shield(upstream.close())
+            except BaseException:
+                logger.debug("Failed to close cancelled HTTP bridge replacement websocket", exc_info=True)
+            selected_lease = selected_account_lease
+            old_lease = session.account_lease
+            await release_selected_account_lease()
+            if old_lease is not None and old_lease is not selected_lease:
+                session.account_lease = None
+                try:
+                    await self._load_balancer.release_account_lease(old_lease)
+                except Exception:
+                    logger.debug("Failed to release cancelled HTTP bridge old account lease", exc_info=True)
+            session.closed = True
+            _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
+            raise
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
         async with session.pending_lock:

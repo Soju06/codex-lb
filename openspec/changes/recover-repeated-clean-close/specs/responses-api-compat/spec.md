@@ -97,6 +97,10 @@ failure count, cooldown deadline, last failure detail, and update time in the
 `http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
 replicas cannot shorten an existing cooldown.
 
+The clean-close retry jitter maximum MUST be read from the
+`http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
+setting and MUST be bounded to the inclusive range 0–30 seconds.
+
 Before every hard-affinity retry decision, the proxy MUST refresh the durable
 row so a cooldown opened by another replica is observed even when this process
 has already loaded the key. A durable lookup or persistence failure MUST NOT

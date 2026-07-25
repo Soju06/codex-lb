@@ -55,10 +55,21 @@ class _HTTPBridgeRetryCircuitMixin:
                 )
                 return
             if persisted is None:
+                # A successful lookup with no row is authoritative. Drop a
+                # state that was persisted earlier (and may have been cleared
+                # by another replica) so its failure count/cooldown cannot
+                # leak into a fresh circuit.
+                if session.key in self._http_bridge_retry_circuit_persisted_keys:
+                    self._http_bridge_retry_circuits.pop(session.key, None)
+                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
                 return
 
             now_epoch = time.time()
             if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
+                self._http_bridge_retry_circuits.pop(session.key, None)
+                self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
                 try:
                     await self._durable_bridge.clear_retry_circuit(
                         session_key_kind=session.key.affinity_kind,

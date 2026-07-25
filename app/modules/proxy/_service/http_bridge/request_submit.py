@@ -288,9 +288,19 @@ class _HTTPBridgeRequestSubmitMixin:
 
     @staticmethod
     def _http_bridge_clean_close_retry_jitter_seconds() -> float:
+        settings = _service_get_settings()
         maximum = max(
             0.0,
-            float(_HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS),
+            min(
+                30.0,
+                float(
+                    getattr(
+                        settings,
+                        "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
+                        _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS,
+                    )
+                ),
+            ),
         )
         return random.uniform(0.0, maximum) if maximum > 0 else 0.0
 

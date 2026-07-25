@@ -118,6 +118,13 @@ handling, and existing account-neutral replay eligibility remain unchanged.
 - **WHEN** the cumulative input cannot prefix-match that refreshed row
 - **THEN** the service fails closed instead of pairing the refreshed response ID with stale prefix metadata
 
+#### Scenario: Refreshed takeover account replaces stale routing
+
+- **GIVEN** owner forwarding fails and the refreshed durable takeover row names a different account
+- **WHEN** the service performs local takeover
+- **THEN** the recovery session requires the refreshed account rather than the initial stale account
+- **AND** a refreshed account that conflicts with another required owner fails closed
+
 #### Scenario: Live bridge trimming remains unchanged
 
 - **GIVEN** the durable conversation still has a reusable live bridge

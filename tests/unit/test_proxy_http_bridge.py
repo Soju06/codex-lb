@@ -8127,12 +8127,18 @@ async def test_stream_via_http_bridge_proves_fallback_owner_key_before_legacy_fo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("forward_to_active_owner", "retains_prior_output", "takeover_context_matches"),
+    (
+        "forward_to_active_owner",
+        "retains_prior_output",
+        "takeover_context_matches",
+        "takeover_account_id",
+    ),
     [
-        pytest.param(False, True, True, id="local-create-safe-resend"),
-        pytest.param(True, True, True, id="owner-forward-safe-resend"),
-        pytest.param(True, False, True, id="owner-forward-unsafe-resend"),
-        pytest.param(True, False, False, id="owner-forward-refreshed-prefix-mismatch"),
+        pytest.param(False, True, True, "acc-1", id="local-create-safe-resend"),
+        pytest.param(True, True, True, "acc-1", id="owner-forward-safe-resend"),
+        pytest.param(True, False, True, "acc-1", id="owner-forward-unsafe-resend"),
+        pytest.param(True, False, True, "acc-2", id="owner-forward-refreshed-account"),
+        pytest.param(True, False, False, "acc-1", id="owner-forward-refreshed-prefix-mismatch"),
     ],
 )
 async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
@@ -8140,6 +8146,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
     forward_to_active_owner: bool,
     retains_prior_output: bool,
     takeover_context_matches: bool,
+    takeover_account_id: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     prefix_items = [{"role": "user", "content": "one"}]
@@ -8274,6 +8281,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
     )
     takeover_lookup = replace(
         durable_lookup,
+        account_id=takeover_account_id,
         owner_instance_id=None,
         lease_expires_at=None,
         latest_input_full_fingerprint=(
@@ -8347,6 +8355,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
         assert forwarded_payloads == []
     assert get_or_create_kwargs[-1]["allow_forward_to_owner"] is False
     assert get_or_create_kwargs[-1]["exclude_account_ids"] == ({"acc-1"} if retains_prior_output else None)
+    assert get_or_create_kwargs[-1]["preferred_account_id"] == (None if retains_prior_output else takeover_account_id)
     assert get_or_create_kwargs[-1]["headers"] == (
         {}
         if retains_prior_output

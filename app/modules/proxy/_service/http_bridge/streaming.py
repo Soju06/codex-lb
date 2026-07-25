@@ -1434,12 +1434,33 @@ class _HTTPBridgeStreamingMixin:
                                         durable_full_resend_anchor_fingerprint,
                                         durable_full_resend_has_safe_fresh_context,
                                     ) = classify_durable_full_resend(fresh_turn_state_lookup)
-                                should_attempt_turn_state_takeover = not payload_looks_like_full_resend or (
-                                    fresh_turn_state_lookup is not None
-                                    and durable_full_resend_anchor_count is not None
-                                    and (
-                                        durable_full_resend_has_safe_fresh_context
-                                        or fresh_turn_state_lookup.latest_response_id is not None
+                                    continuity_preferred_account_id = fresh_turn_state_lookup.account_id
+                                    request_state.preferred_account_id = resolve_required_account_id(
+                                        (
+                                            "refreshed previous response or bridge",
+                                            continuity_preferred_account_id,
+                                        ),
+                                        ("input file", rewritten_file_account_id),
+                                    )
+                                    preferred_account_has_continuity_provenance = (
+                                        continuity_preferred_account_id is not None
+                                        and request_state.preferred_account_id == continuity_preferred_account_id
+                                    )
+                                refreshed_continuity_routable = (
+                                    fresh_turn_state_lookup is None
+                                    or fresh_turn_state_lookup.latest_response_id is None
+                                    or fresh_turn_state_lookup.account_id is not None
+                                )
+                                should_attempt_turn_state_takeover = refreshed_continuity_routable and (
+                                    not payload_looks_like_full_resend
+                                    or (
+                                        fresh_turn_state_lookup is not None
+                                        and fresh_turn_state_lookup.account_id is not None
+                                        and durable_full_resend_anchor_count is not None
+                                        and (
+                                            durable_full_resend_has_safe_fresh_context
+                                            or fresh_turn_state_lookup.latest_response_id is not None
+                                        )
                                     )
                                 )
                 if (

@@ -113,9 +113,10 @@
 ## 8. Conversation Day Selector And Count Cache
 
 - [x] 8.1 Add a `since` parameter to `GET /api/conversations` that filters
-  conversations by their first eligible message: a conversation is selected only
-  when `MIN(requested_at) >= since` (a `HAVING` predicate on the existing
-  conversation summary grouping). Aggregates MUST NOT be clipped by `since`.
+  conversations by their first eligible message: the grouped summary is bounded
+  to rows with `requested_at >= since` before grouping and a separate eligible
+  pre-window-ID query rejects conversations with rows before `since`. Aggregates
+  MUST include every eligible row of a selected conversation.
 - [x] 8.2 Serve the conversation listing `total` from the same short-TTL
   per-signature cache as the request-log listing total (`_recent_count_cache`),
   keyed by `search` and `since` (excluding `limit`/`offset`); the 30 s TTL

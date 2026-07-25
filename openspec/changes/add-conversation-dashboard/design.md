@@ -40,16 +40,16 @@ Capability ownership for this change is `frontend-architecture`; no
   conversation matches, all eligible rows in that conversation are aggregated;
   rows that did not contain the matching text remain included.
 - **`since` filters by the conversation's first message, not by every row.** The
-  filter is applied as a post-grouping predicate (`HAVING MIN(requested_at) >=
-  since`) on the conversation summary, so a conversation is selected only when
-  its earliest eligible row falls in the window. This is the operator-requested
-  "first message in range" semantic. Because a selected conversation has
-  `MIN(requested_at) >= since`, all of its eligible rows are necessarily within
-  or after the window, so per-conversation aggregates are never clipped. The
-  grouped total is display-only pagination metadata and is served from the same
-  short-TTL per-signature cache as the request-log listing total (issue #1340),
-  keyed by `search` and `since`, so the 30-second dashboard poll does not
-  re-scan the full eligible history on every request.
+  conversation summary bounds its grouped input to rows at or after `since`
+  before grouping, while a separate distinct-ID subquery rejects conversations
+  with eligible rows before `since`. This preserves the operator-requested
+  "first message in range" semantic without forcing the database to group old
+  history before discarding it. A selected conversation has no eligible
+  pre-window rows, so the bounded input still includes every row contributing to
+  its aggregate. The grouped total is display-only pagination metadata and is
+  served from the same short-TTL per-signature cache as the request-log listing
+  total (issue #1340), keyed by `search` and `since`, so the 30-second dashboard
+  poll does not re-scan the full eligible history on every request.
 - **List order is stable.** Groups are ordered by `lastRequest DESC`, then
   normalized conversation ID ASC; pagination is applied after this order.
 - **Representative selection is deterministic.** Representatives use

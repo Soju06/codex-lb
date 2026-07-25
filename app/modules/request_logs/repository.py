@@ -227,6 +227,20 @@ class RequestLogsRepository:
 
         output = self._conversation_output_expr()
         cached = self._conversation_cached_expr()
+        summary_conditions = [*conditions]
+        if since is not None:
+            pre_window_ids = (
+                select(conversation_id.label("conversation_id"))
+                .where(*conditions, RequestLog.requested_at < since)
+                .distinct()
+                .subquery()
+            )
+            summary_conditions.extend(
+                [
+                    RequestLog.requested_at >= since,
+                    conversation_id.not_in(select(pre_window_ids.c.conversation_id)),
+                ]
+            )
         summary_stmt = (
             select(
                 conversation_id.label("conversation_id"),
@@ -238,11 +252,9 @@ class RequestLogsRepository:
                 func.sum(cached).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
-            .where(*conditions)
+            .where(*summary_conditions)
             .group_by(conversation_id)
         )
-        if since is not None:
-            summary_stmt = summary_stmt.having(func.min(RequestLog.requested_at) >= since)
         summary_subquery = summary_stmt.subquery()
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:

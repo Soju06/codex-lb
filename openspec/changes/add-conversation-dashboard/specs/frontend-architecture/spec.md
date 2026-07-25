@@ -16,14 +16,14 @@ search text. The endpoint MUST derive aggregates from `request_logs` only.
 
 When `since` is provided, a conversation MUST be selected only when its earliest
 eligible row's `requested_at` — the first message of the conversation — is at or
-after `since`. The filter MUST be applied as a post-grouping predicate
-(`HAVING MIN(requested_at) >= since`) so that a conversation spanning the
-`since` boundary (rows both before and after) is excluded because its first
-message predates the window. Aggregates MUST NOT be clipped by `since`: all
-eligible rows of a selected conversation MUST contribute to its totals. Because
-a conversation selected by this filter has `MIN(requested_at) >= since`, every
-row of a selected conversation necessarily falls within or after `since`, so the
-first-message criterion and the per-row totals are consistent.
+after `since`. The grouped summary MUST restrict its input rows to
+`requested_at >= since` before grouping and MUST separately exclude conversation
+IDs that have an eligible row with `requested_at < since`. This pre-group bound
+MUST preserve the first-message semantics: a conversation spanning the `since`
+boundary (rows both before and after) is excluded because its first message
+predates the window. Aggregates MUST include every eligible row of a selected
+conversation; because selected conversations have no eligible pre-window rows,
+restricting the grouped input to the window MUST NOT clip their totals.
 
 The response MUST contain `conversations`, `total`, and `hasMore` pagination
 fields. Each row in `conversations` MUST contain exactly these fields and no

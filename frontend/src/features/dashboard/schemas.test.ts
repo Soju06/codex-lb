@@ -303,6 +303,62 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.requestKind).toBe("limit_warmup");
   });
 
+  it("accepts realtime live websocket request rows", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-live",
+          planType: "plus",
+          apiKeyName: "Voice Key",
+          apiKeyId: "key-live",
+          requestId: "req-live",
+          archiveRequestId: null,
+          requestKind: "realtime_live",
+          model: "gpt-5.1-codex",
+          source: "codex",
+          modelSourceId: null,
+          modelSourceKind: null,
+          transport: "websocket",
+          upstreamTransport: "websocket",
+          useragent: "Codex Desktop",
+          useragentGroup: "Codex",
+          clientIp: "203.0.113.8",
+          conversationId: null,
+          serviceTier: null,
+          requestedServiceTier: null,
+          actualServiceTier: null,
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          failurePhase: null,
+          failureDetail: null,
+          failureExceptionType: null,
+          upstreamStatusCode: 101,
+          upstreamErrorCode: null,
+          bridgeStage: "realtime_live",
+          tokens: null,
+          inputTokens: null,
+          outputTokens: null,
+          outputTokensRaw: null,
+          reasoningTokens: null,
+          cachedInputTokens: null,
+          reasoningEffort: null,
+          costUsd: null,
+          costBreakdown: null,
+          latencyMs: 12,
+          latencyFirstTokenMs: null,
+          latencyQueueMs: null,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.requestKind).toBe("realtime_live");
+    expect(parsed.requests[0]?.transport).toBe("websocket");
+  });
+
   it("defaults omitted cost fields to null for backward compatibility", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [

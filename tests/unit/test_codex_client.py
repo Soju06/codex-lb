@@ -228,12 +228,32 @@ async def test_transport_errors_do_not_expose_proxy_credentials(route: ResolvedU
 
 @pytest.mark.asyncio
 async def test_websocket_transport_error_preserves_handshake_status(route: ResolvedUpstreamRoute) -> None:
-    client = CodexClient(_WsFailSession())
+    session = _WsFailSession()
+    client = CodexClient(session)
 
     with pytest.raises(RuntimeError) as exc_info:
         await client.open_ws_with_route_metadata("wss://upstream.test", route=route)
 
     assert getattr(exc_info.value, "status_code") == 426
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_websocket_definitive_handshake_status_can_disable_route_replay(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    session = _WsFailSession()
+    client = CodexClient(session)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.open_ws_with_route_metadata(
+            "wss://upstream.test",
+            route=route,
+            retry_handshake_status=False,
+        )
+
+    assert getattr(exc_info.value, "status_code") == 426
+    assert len(session.calls) == 1
 
 
 @pytest.mark.asyncio

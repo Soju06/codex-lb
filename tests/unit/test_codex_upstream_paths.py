@@ -169,7 +169,8 @@ class _FakeCodexWebSocket:
             raise OSError("proxy http://user:***@proxy.test:8080 websocket failed")
         return aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, '{"type":"response.completed"}', None)
 
-    def close(self) -> None:
+    def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        del code, message
         self.closed = True
 
 

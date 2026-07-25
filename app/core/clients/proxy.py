@@ -4289,7 +4289,8 @@ async def codex_control_request(
     error_code: str | None = None
     error_message: str | None = None
     payload_summary: dict[str, JsonValue] | None = None
-    if payload and content_type and "json" in content_type.lower():
+    sensitive_realtime_payload = normalized_path == "realtime/calls"
+    if not sensitive_realtime_payload and payload and content_type and "json" in content_type.lower():
         with contextlib.suppress(Exception):
             decoded = json.loads(payload)
             if isinstance(decoded, dict):
@@ -4299,10 +4300,16 @@ async def codex_control_request(
         url=url,
         headers=upstream_headers,
         method=request_method,
-        payload_summary=_summarize_json_payload(payload_summary or {}),
-        payload_json=payload.decode("utf-8", errors="replace")
-        if payload is not None and "upstream_payload" in settings.trace_channels
-        else None,
+        payload_summary=(
+            "sensitive realtime payload redacted"
+            if sensitive_realtime_payload
+            else _summarize_json_payload(payload_summary or {})
+        ),
+        payload_json=(
+            payload.decode("utf-8", errors="replace")
+            if not sensitive_realtime_payload and payload is not None and "upstream_payload" in settings.trace_channels
+            else None
+        ),
     )
     try:
         if route is not None:

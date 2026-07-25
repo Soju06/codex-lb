@@ -155,6 +155,7 @@ class _CodexControlMixin:
         headers: Mapping[str, str],
         codex_session_affinity: bool = True,
         api_key: ApiKeyData | None = None,
+        success_account_callback: Callable[[str], None] | None = None,
     ) -> CodexControlResponse:
         proxy = cast(_CodexControlServiceProtocol, self)
         filtered = filter_inbound_headers(headers)
@@ -284,6 +285,8 @@ class _CodexControlMixin:
                 response = await _call_control(account)
                 await proxy._load_balancer.record_success(account)
                 log_status = "success"
+                if success_account_callback is not None:
+                    success_account_callback(account.id)
                 return response
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
@@ -311,6 +314,8 @@ class _CodexControlMixin:
                         account, response = failover
                         account_id_value = account.id
                         log_status = "success"
+                        if success_account_callback is not None:
+                            success_account_callback(account.id)
                         return response
                 if exc.status_code == 401:
                     try:
@@ -343,6 +348,8 @@ class _CodexControlMixin:
                             response = await _call_control(account)
                             await proxy._load_balancer.record_success(account)
                             log_status = "success"
+                            if success_account_callback is not None:
+                                success_account_callback(account.id)
                             return response
                         except ProxyResponseError as retry_exc:
                             await proxy._handle_proxy_error(account, retry_exc)
@@ -375,6 +382,8 @@ class _CodexControlMixin:
                                         response = await _call_control(account)
                                         await proxy._load_balancer.record_success(account)
                                         log_status = "success"
+                                        if success_account_callback is not None:
+                                            success_account_callback(account.id)
                                         return response
                                     except ProxyResponseError as failover_exc:
                                         await proxy._handle_proxy_error(account, failover_exc)

@@ -1550,3 +1550,108 @@ async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup)
         # stale in-memory account_id.
         second = await repo.upsert("key_rebind", "acc_rebind_b", kind=StickySessionKind.PROMPT_CACHE)
         assert second.account_id == "acc_rebind_b"
+
+
+@pytest.mark.asyncio
+async def test_sticky_prefix_purge_is_bounded_and_reserved_namespace_only(db_setup):
+    from sqlalchemy import select, update
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id="acc_live_prefix",
+                email="live-prefix@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    prefix = "\ncodex_live_call:"
+    old_keys = {f"{prefix}old-a", f"{prefix}old-b"}
+    new_key = f"{prefix}new"
+    wildcard_lookalike_key = "codexXliveXcall:old"
+    unrelated_key = "other_namespace:expired"
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for key in (*old_keys, new_key, wildcard_lookalike_key, unrelated_key):
+            await repo.upsert(key, "acc_live_prefix", kind=StickySessionKind.CODEX_SESSION)
+        old_time = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key.in_((*old_keys, wildcard_lookalike_key, unrelated_key)))
+            .values(updated_at=old_time)
+        )
+        await session.commit()
+
+        deleted = await repo.purge_before_for_key_prefix(
+            utcnow() - timedelta(hours=2),
+            kind=StickySessionKind.CODEX_SESSION,
+            key_prefix=prefix,
+            limit=1,
+        )
+        remaining = set(
+            (
+                await session.execute(
+                    select(StickySession.key).where(StickySession.kind == StickySessionKind.CODEX_SESSION)
+                )
+            ).scalars()
+        )
+
+    assert deleted == 1
+    assert len(old_keys.intersection(remaining)) == 1
+    assert unrelated_key in remaining
+    assert new_key in remaining
+    assert wildcard_lookalike_key in remaining
+
+
+@pytest.mark.asyncio
+async def test_sticky_insert_if_absent_never_rebinds_existing_owner(db_setup):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        for account_id in ("acc_live_immutable_a", "acc_live_immutable_b"):
+            await accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        first_owner = await repo.insert_if_absent(
+            "\ncodex_live_call:immutable",
+            "acc_live_immutable_a",
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        second_owner = await repo.insert_if_absent(
+            "\ncodex_live_call:immutable",
+            "acc_live_immutable_b",
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        persisted_owner = await repo.get_account_id(
+            "\ncodex_live_call:immutable",
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    assert first_owner == "acc_live_immutable_a"
+    assert second_owner == "acc_live_immutable_a"
+    assert persisted_owner == "acc_live_immutable_a"

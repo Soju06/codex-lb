@@ -22,9 +22,13 @@ just as much as it does for HTTP requests. See
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import FastAPI
+from starlette.types import Receive, Scope, Send
+
+from app.core.clients.proxy_websocket import REALTIME_LIVE_CALL_ID_ROUTE_REGEX
 
 # The middleware is intentionally scoped to the duplicated Codex prefix
 # only. The top-level ``/v1/`` namespace is the canonical OpenAI-style
@@ -50,6 +54,11 @@ def _canonicalize_backend_api_codex_path(path: str) -> str:
     return _CODEX_CANONICAL_PREFIX + path[len(_CODEX_V1_PREFIX) :]
 
 
+def _is_unsupported_realtime_live_alias(path: str) -> bool:
+    call_id = path.removeprefix(_CODEX_V1_PREFIX)
+    return call_id != path and re.fullmatch(REALTIME_LIVE_CALL_ID_ROUTE_REGEX, call_id) is not None
+
+
 def _canonicalize_raw_path(raw_path: bytes) -> bytes:
     if not raw_path.startswith(_CODEX_V1_PREFIX_BYTES):
         return raw_path
@@ -72,18 +81,25 @@ class BackendApiCodexV1AliasMiddleware:
     def __init__(self, app: Any) -> None:
         self.app = app
 
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope.get("type") in ("http", "websocket"):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        scope_type = scope.get("type")
+        if scope_type in {"http", "websocket"}:
             path = scope.get("path")
             if isinstance(path, str) and path.startswith(_CODEX_V1_PREFIX):
+                # The duplicated prefix is not a supported Live ingress. Leaving it
+                # untouched lets the router reject it before an accepted handshake can
+                # expose the server-owned path and query in access logs.
+                if scope_type == "websocket" and _is_unsupported_realtime_live_alias(path):
+                    await self.app(scope, receive, send)
+                    return
+
                 rewritten = _canonicalize_backend_api_codex_path(path)
                 if rewritten != path:
-                    # Copy the scope so we don't mutate the caller's dict;
-                    # ASGI servers may reuse scope instances across calls.
+                    # Copy the scope so we don't mutate the caller's dict; some ASGI servers
+                    # reuse scope instances across calls.
                     scope = dict(scope)
                     scope["path"] = rewritten
-                    raw_path = scope.get("raw_path")
-                    if isinstance(raw_path, bytes):
+                    if isinstance(raw_path := scope.get("raw_path"), bytes):
                         scope["raw_path"] = _canonicalize_raw_path(raw_path)
         await self.app(scope, receive, send)
 

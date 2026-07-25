@@ -30,7 +30,7 @@ import anyio
 import pytest
 
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
@@ -59,7 +59,7 @@ def _make_session(*, closed: bool = False) -> proxy_service._HTTPBridgeSession:
         ),
         request_model="gpt-5.4",
         account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
-        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),

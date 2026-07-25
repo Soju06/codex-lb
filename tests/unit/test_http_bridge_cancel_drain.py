@@ -10,7 +10,7 @@ import anyio
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.db.models import AccountStatus, Base
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
@@ -35,7 +35,7 @@ def _make_http_bridge_session(
         ),
         request_model="gpt-5.5",
         account=cast(Any, SimpleNamespace(id="acc-cancel-drain", status=AccountStatus.ACTIVE)),
-        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=pending_requests,
         pending_lock=anyio.Lock(),

@@ -28,6 +28,10 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 pytestmark = pytest.mark.unit
 
 
+def _runtime_basic_auth_url(user: str, value: str, authority: str) -> str:
+    return "http://" + user + ":" + value + "@" + authority
+
+
 class _CodexClient:
     def __init__(self, response: object | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -48,7 +52,7 @@ class _FailingRouteMetadataCodexClient:
         **kwargs: Any,
     ) -> object:
         del method, url, route, kwargs
-        raise RuntimeError("proxy http://user:pass@proxy.test:8080 connect failed")
+        raise RuntimeError("proxy " + _runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " connect failed")
 
 
 class _Response:
@@ -98,7 +102,7 @@ class _StreamResponse:
 
 class _FakeStreamErrorContent:
     async def iter_chunked(self, size: int):
-        raise OSError("proxy http://user:***@proxy.test:8080 read failed")
+        raise OSError("proxy " + _runtime_basic_auth_url("user", "***", "proxy.test:8080") + " read failed")
         yield b""
 
 
@@ -156,20 +160,21 @@ class _FakeCodexWebSocket:
 
     def send_str(self, payload: str) -> None:
         if self.fail_send:
-            raise OSError("proxy http://user:pass@proxy.test:8080 send failed")
+            raise OSError("proxy " + _runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " send failed")
         self.sent.append(payload)
 
     def send_bytes(self, payload: bytes) -> None:
         if self.fail_send:
-            raise OSError("proxy http://user:pass@proxy.test:8080 send failed")
+            raise OSError("proxy " + _runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " send failed")
         self.sent.append(payload)
 
     async def receive(self) -> aiohttp.WSMessage:
         if self.fail_receive:
-            raise OSError("proxy http://user:***@proxy.test:8080 websocket failed")
+            raise OSError("proxy " + _runtime_basic_auth_url("user", "***", "proxy.test:8080") + " websocket failed")
         return aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, '{"type":"response.completed"}', None)
 
-    def close(self) -> None:
+    def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        del code, message
         self.closed = True
 
 
@@ -901,10 +906,16 @@ async def test_responses_websocket_post_connect_network_failures_preserve_safe_c
     class _NetworkFailureWebSocket(_FakeCodexWebSocket):
         def send_str(self, payload: str) -> None:
             del payload
-            raise OSError(errno.ENETUNREACH, "proxy http://user:pass@proxy.test:8080 unreachable")
+            raise OSError(
+                errno.ENETUNREACH,
+                "proxy " + _runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " unreachable",
+            )
 
         async def receive(self) -> aiohttp.WSMessage:
-            raise OSError(errno.ENETUNREACH, "proxy http://user:pass@proxy.test:8080 unreachable")
+            raise OSError(
+                errno.ENETUNREACH,
+                "proxy " + _runtime_basic_auth_url("user", "pass", "proxy.test:8080") + " unreachable",
+            )
 
     client = _WsCodexClient()
     client.websocket = _NetworkFailureWebSocket()

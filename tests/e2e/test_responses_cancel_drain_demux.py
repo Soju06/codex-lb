@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import anyio
 import pytest
 
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
@@ -170,7 +170,7 @@ def _make_session(upstream: _CancelThenRetryUpstreamWebSocket) -> proxy_service.
         ),
         request_model="gpt-5.5",
         account=cast(Any, SimpleNamespace(id="acc-cancel-retry-e2e", status=AccountStatus.ACTIVE)),
-        upstream=cast(UpstreamResponsesWebSocket, upstream),
+        upstream=cast(UpstreamWebSocket, upstream),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),

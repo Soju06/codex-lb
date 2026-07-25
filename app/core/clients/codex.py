@@ -236,7 +236,13 @@ class CodexClient:
         return result
 
     async def open_ws_with_route_metadata(
-        self, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any
+        self,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        retry_handshake_status: bool = True,
+        retry_network_errors: bool = True,
+        **kwargs: Any,
     ) -> CodexWebSocketResult:
         if route is None:
             raise ValueError("Codex upstream calls require a resolved upstream proxy route")
@@ -266,6 +272,23 @@ class CodexClient:
             except Exception as exc:
                 if context is not None and hasattr(context, "__aexit__"):
                     await context.__aexit__(None, None, None)
+                handshake_status = _transport_error_status_code(exc)
+                if handshake_status is not None and not retry_handshake_status:
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        retryable_same_contract=False,
+                    ) from None
+                if handshake_status is None and not retry_network_errors:
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        retryable_same_contract=False,
+                    ) from None
                 if index == len(endpoints) - 1:
                     raise _transport_error(
                         "websocket",
@@ -354,7 +377,7 @@ async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **
             context = await context
         websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
         return websocket, _SessionOwnedWebSocketContext(context, session)
-    except Exception:
+    except BaseException:
         await session.close()
         raise
 

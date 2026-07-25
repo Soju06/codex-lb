@@ -17,7 +17,7 @@ import anyio
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
@@ -887,7 +887,7 @@ class _HTTPBridgeSession:
     affinity: _AffinityPolicy
     request_model: str | None
     account: Account
-    upstream: UpstreamResponsesWebSocket
+    upstream: UpstreamWebSocket
     upstream_control: _WebSocketUpstreamControl
     pending_requests: deque[_WebSocketRequestState]
     pending_lock: anyio.Lock
@@ -1171,7 +1171,7 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
 def _record_websocket_route_metadata(
     request_state: _WebSocketRequestState,
     *,
-    upstream: UpstreamResponsesWebSocket | None = None,
+    upstream: UpstreamWebSocket | None = None,
     route: ResolvedUpstreamRoute | None = None,
     fallback_used: bool | None = None,
 ) -> None:

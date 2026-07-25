@@ -33,7 +33,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
-    UpstreamResponsesWebSocket,
+    UpstreamWebSocket,
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_STALE_CODE as PREVIOUS_RESPONSE_STALE_CODE,
@@ -827,7 +827,7 @@ def _should_retry_stream_error(code: str) -> bool:
     return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
 
 
-def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None) -> str | None:
+def _upstream_turn_state_from_socket(upstream: UpstreamWebSocket | None) -> str | None:
     if upstream is None:
         return None
     getter = getattr(upstream, "response_header", None)

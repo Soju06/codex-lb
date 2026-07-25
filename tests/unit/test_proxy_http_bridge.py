@@ -2356,6 +2356,21 @@ def test_durable_tool_call_manifest_requires_complete_added_and_done_lifecycle()
         },
     )
     assert malformed_state.tool_call_manifest_invalid is True
+
+    missing_item_state = proxy_service._WebSocketRequestState(
+        request_id="req-missing-item-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        missing_item_state,
+        event_type="response.output_item.done",
+        payload={"type": "response.output_item.done"},
+    )
+    assert missing_item_state.tool_call_manifest_invalid is True
     assert (
         http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
             malformed_state,
@@ -2448,6 +2463,69 @@ def test_durable_tool_call_manifest_rejects_unobserved_terminal_call() -> None:
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_malformed_tool_lifecycle_persists_unknown_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    register_previous = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-malformed-lifecycle",
+        response_id="resp_malformed_lifecycle",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-malformed-lifecycle",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    valid_item = {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+
+    for event in (
+        {
+            "type": "response.output_item.added",
+            "response_id": "resp_malformed_lifecycle",
+            "item": valid_item,
+        },
+        {
+            "type": "response.output_item.done",
+            "response_id": "resp_malformed_lifecycle",
+            "item": valid_item,
+        },
+        {
+            "type": "response.output_item.added",
+            "response_id": "resp_malformed_lifecycle",
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_malformed_lifecycle",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+            },
+        },
+    ):
+        await service._process_http_bridge_upstream_text(session, json.dumps(event, separators=(",", ":")))
+
+    registration = register_previous.await_args
+    assert registration is not None
+    assert registration.kwargs["pending_tool_calls"] is None
 
 
 @pytest.mark.asyncio

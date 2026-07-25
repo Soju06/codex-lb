@@ -200,6 +200,7 @@ def _record_http_bridge_tool_call_lifecycle(
         return
     item = payload.get("item") if isinstance(payload, dict) else None
     if not isinstance(item, dict):
+        request_state.tool_call_manifest_invalid = True
         return
     item_type = item.get("type")
     if not isinstance(item_type, str):

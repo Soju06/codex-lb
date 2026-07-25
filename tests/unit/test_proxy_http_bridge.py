@@ -19498,7 +19498,28 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
     )
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
     assert await service._http_bridge_precreated_retry_cooldown_seconds(hard_session) > 0
-    service._durable_bridge.lookup_retry_circuit.assert_awaited_once()
+    service._durable_bridge.lookup_retry_circuit.assert_awaited_count(2)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_refreshes_persisted_state_after_initial_miss() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-replica-refresh-circuit")
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=[None, persisted]),
+        clear_retry_circuit=AsyncMock(),
+        persist_retry_circuit=AsyncMock(),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert service._durable_bridge.lookup_retry_circuit.await_count == 2
 
 
 @pytest.mark.asyncio

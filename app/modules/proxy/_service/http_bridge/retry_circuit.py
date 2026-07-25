@@ -40,8 +40,6 @@ class _HTTPBridgeRetryCircuitMixin:
             return
 
         async with self._http_bridge_retry_circuit_lock:
-            if session.key in self._http_bridge_retry_circuit_loaded_keys:
-                return
             try:
                 persisted = await self._durable_bridge.lookup_retry_circuit(
                     session_key_kind=session.key.affinity_kind,
@@ -76,14 +74,23 @@ class _HTTPBridgeRetryCircuitMixin:
                     )
                 return
 
-            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
             cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
-            self._http_bridge_retry_circuits[session.key] = _HTTPBridgeRetryCircuitState(
-                consecutive_failures=max(0, persisted.consecutive_failures),
-                cooldown_until=time.monotonic() + cooldown_remaining,
-                last_detail=persisted.last_detail,
+            persisted_cooldown_until = time.monotonic() + cooldown_remaining
+            state = self._http_bridge_retry_circuits.get(session.key)
+            if state is None:
+                state = _HTTPBridgeRetryCircuitState()
+                self._http_bridge_retry_circuits[session.key] = state
+            # Durable state may have been opened by another replica since the
+            # previous decision. Merge it into the local state instead of
+            # trusting the old loaded-key shortcut.
+            state.consecutive_failures = max(
+                state.consecutive_failures,
+                max(0, persisted.consecutive_failures),
             )
+            state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+            state.last_detail = persisted.last_detail or state.last_detail
+            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
 
     async def _persist_http_bridge_retry_circuit(
         self: Any,

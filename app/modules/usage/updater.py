@@ -997,14 +997,21 @@ def _free_plan_downgrade_is_confirmed(
 ) -> bool:
     """Record a workspace-less paid -> free observation and report confirmation.
 
-    Only a recognized ``free`` payload against a recognized paid stored plan is
-    confirmable. Unrecognized plan values never accumulate, so a degraded
-    response reporting garbage can never downgrade an account no matter how
-    often it repeats.
+    Only a recognized ``free`` payload against a recognized paid stored plan on a
+    workspace-less account is confirmable. Unrecognized plan values never
+    accumulate, so a degraded response reporting garbage can never downgrade an
+    account no matter how often it repeats.
     """
     if normalized_payload_plan_type != "free":
         return False
     if stored_plan_type not in (ACCOUNT_PLAN_TYPES - {"free"}):
+        return False
+    if account.workspace_id:
+        # The account is bound to a workspace, so a payload that omits
+        # ``workspace_id`` cannot establish that it describes this slot. A
+        # workspace-bound seat (Team/Business/Enterprise) must not be demoted to
+        # free on the strength of a payload that never names its workspace,
+        # however many times it repeats.
         return False
     observations = _workspace_less_free_plan_observations.get(account.id, 0) + 1
     if observations < _FREE_PLAN_DOWNGRADE_CONFIRMATIONS:

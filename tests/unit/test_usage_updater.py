@@ -2336,6 +2336,39 @@ async def test_force_refresh_confirms_free_downgrade_with_access_token_override(
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_never_confirms_free_downgrade_for_workspace_bound_account(monkeypatch) -> None:
+    """Confirmation is scoped to workspace-less accounts. A workspace-bound seat
+    must not be demoted to free by a payload that never names its workspace,
+    however many times that payload repeats: the payload cannot establish that it
+    describes this account's slot."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "free", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_workspace_bound_free", "upstream_user", email="same@example.com")
+    account.workspace_id = "ws_team"
+    account.plan_type = "business"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    for _ in range(3):
+        await updater.force_refresh(account)
+
+    assert account.plan_type == "business"
+    assert account.workspace_id == "ws_team"
+    assert usage_repo.entries == []
+    assert accounts_repo.metadata_updates == []
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_never_confirms_conflicting_workspace_identity(monkeypatch) -> None:
     """A payload reporting another workspace's slot stays rejected regardless of
     repetition; confirmation must not weaken the workspace-conflict guard."""

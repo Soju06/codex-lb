@@ -14,3 +14,5 @@
   and taken-slot guard tests still pass.
 - [x] Document the confirmation rule under the `usage-refresh-policy`
   capability.
+- [x] Restrict confirmation to workspace-less accounts so a workspace-bound
+  seat is never downgraded by a payload that omits `workspace_id`.

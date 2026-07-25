@@ -77,6 +77,11 @@ Confirmation applies only to `free`. An unrecognized plan value MUST NOT be
 confirmable, and a payload whose `workspace_id` conflicts with the account's
 bound workspace MUST remain rejected regardless of repetition.
 
+Confirmation applies only to accounts that are not bound to a workspace. When
+the stored account has a `workspace_id`, a usage payload that omits
+`workspace_id` cannot establish that it describes that account's slot, so such a
+payload MUST NOT downgrade the account's plan regardless of repetition.
+
 This requirement applies to scheduled usage refresh and to the forced refresh
 performed after an operator's Force probe. The confirmation threshold MUST work
 with zero configuration and MUST NOT require an operator setting.
@@ -101,6 +106,12 @@ with zero configuration and MUST NOT require an operator setting.
 - **GIVEN** an active account with stored `plan_type` `pro` and no `workspace_id`
 - **WHEN** an operator runs Force probe twice and both refreshes report `plan_type` `free` with no `workspace_id`
 - **THEN** the account's stored `plan_type` becomes `free` without reauthentication
+
+#### Scenario: Workspace-bound account is never downgraded by a workspace-less payload
+
+- **GIVEN** an active account bound to `workspace_id` `ws_team` with stored `plan_type` `business`
+- **WHEN** repeated usage refreshes return payloads with `plan_type` `free` and no `workspace_id`
+- **THEN** the account's stored `plan_type` stays `business` for every observation and no usage mutation is applied
 
 #### Scenario: Confirmation is tracked per account
 

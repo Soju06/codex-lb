@@ -22,6 +22,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -964,6 +965,171 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
         account = await session.get(Account, expected_account_id)
         assert account is not None
         assert account.status == AccountStatus.RATE_LIMITED
+
+
+_NEUTRAL_FULL_RESEND_INPUT: list[dict[str, object]] = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+    {"role": "user", "content": "please compact"},
+]
+
+
+async def _import_account(async_client, *, email: str, raw_account_id: str) -> str:
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+    return generate_unique_account_id(raw_account_id, email)
+
+
+async def _mark_account_rate_limited(account_id: str) -> None:
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.RATE_LIMITED
+        account.reset_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600
+        await session.commit()
+    get_account_selection_cache().invalidate()
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neutral_full_resend(
+    async_client, monkeypatch
+):
+    owner_account_id = await _import_account(
+        async_client, email="compact-replay-owner@example.com", raw_account_id="acc_replay_owner"
+    )
+    await _import_account(async_client, email="compact-replay-alt@example.com", raw_account_id="acc_replay_alt")
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del access_token
+        calls.append((account_id, cast(dict[str, object], payload.to_payload()), dict(headers)))
+        if account_id == "acc_replay_owner":
+            raise ProxyResponseError(
+                429,
+                {
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "message": "limit reached",
+                        "plan_type": "plus",
+                        "resets_at": int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600,
+                    }
+                },
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_replay_anchor",
+    }
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"session_id": "sid-compact-replay"},
+    )
+
+    assert response.status_code == 200
+    assert [account_id for account_id, _payload, _headers in calls] == ["acc_replay_owner", "acc_replay_alt"]
+    owner_payload, replay_payload = calls[0][1], calls[1][1]
+    assert owner_payload["previous_response_id"] == "resp_replay_anchor"
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == owner_payload["input"]
+    owner_headers, replay_headers = calls[0][2], calls[1][2]
+    assert "session_id" in owner_headers
+    assert "session_id" not in replay_headers
+
+    async with SessionLocal() as session:
+        owner = await session.get(Account, owner_account_id)
+        assert owner is not None
+        assert owner.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_rate_limited_at_selection_fails_over_with_account_neutral_full_resend(
+    async_client, monkeypatch
+):
+    owner_account_id = await _import_account(
+        async_client, email="compact-wedged-owner@example.com", raw_account_id="acc_wedged_owner"
+    )
+    await _import_account(async_client, email="compact-wedged-alt@example.com", raw_account_id="acc_wedged_alt")
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    calls: list[tuple[str | None, dict[str, object]]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token
+        calls.append((account_id, cast(dict[str, object], payload.to_payload())))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_wedged_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert [account_id for account_id, _payload in calls] == ["acc_wedged_alt"]
+    assert "previous_response_id" not in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_non_neutral_payload_stays_fail_closed(async_client, monkeypatch):
+    owner_account_id = await _import_account(
+        async_client, email="compact-scoped-owner@example.com", raw_account_id="acc_scoped_owner"
+    )
+    await _import_account(async_client, email="compact-scoped-alt@example.com", raw_account_id="acc_scoped_alt")
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {"type": "compaction", "encrypted_content": "enc_prior_summary"},
+            {"role": "user", "content": "continue"},
+        ],
+        "previous_response_id": "resp_scoped_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
 
 
 @pytest.mark.asyncio

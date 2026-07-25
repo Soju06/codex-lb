@@ -69,6 +69,7 @@ before a 120-second client deadline.
 - **WHEN** the bridge replaces the upstream socket
 - **THEN** the old reader is cancelled and awaited before its socket is closed
 - **AND** the shared session remains live while the replacement socket opens
+- **AND** idle pruning retains the registered session while the handoff is in progress
 - **AND** exactly one reader owns the replacement socket
 - **AND** the local close does not open or increment the retry circuit
 - **AND** pending work remains attached to the replacement session

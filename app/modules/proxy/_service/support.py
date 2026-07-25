@@ -966,6 +966,10 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # Set while a reader handoff is replacing the socket. Idle pruning must
+    # retain the registered session during this short transition even though
+    # ``closed`` is fail-closed for normal request reuse.
+    handoff_in_progress: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)

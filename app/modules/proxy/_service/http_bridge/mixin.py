@@ -1599,6 +1599,8 @@ class _HTTPBridgeMixin(
         for key, session in self._http_bridge_sessions.items():
             if _http_bridge_session_has_admission_waiter(session):
                 continue
+            if session.handoff_in_progress:
+                continue
             if session.closed:
                 stale_keys.append(key)
                 continue
@@ -2000,6 +2002,7 @@ class _HTTPBridgeMixin(
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
+        session.handoff_in_progress = restart_reader
         # Keep the registry from reusing a half-handoff session if this task is
         # cancelled while the old reader is stopped or the replacement socket
         # is being opened. A successful handoff marks it live again below.
@@ -2009,6 +2012,7 @@ class _HTTPBridgeMixin(
                 cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
                 if not cancelled:
                     session.closed = True
+                    session.handoff_in_progress = False
                     raise ProxyResponseError(
                         502,
                         openai_error(
@@ -2041,6 +2045,7 @@ class _HTTPBridgeMixin(
         )
         if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
             session.closed = True
+            session.handoff_in_progress = False
             raise _http_bridge_previous_response_owner_unavailable_error()
         _require_http_bridge_bound_account_not_excluded(
             hard_close_account_bound, session.account.id, excluded_account_ids
@@ -2088,6 +2093,7 @@ class _HTTPBridgeMixin(
             nonlocal preferred_candidate_id
             if hard_close_account_bound or selected_account_model_replacement:
                 await release_selected_account_lease()
+                session.handoff_in_progress = False
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise
             excluded_account_ids.add(selected_account.id)
@@ -2139,12 +2145,14 @@ class _HTTPBridgeMixin(
                 )
             except BaseException:
                 session.closed = True
+                session.handoff_in_progress = False
                 raise
             account = selection.account
             if account is None:
                 await release_selected_account_lease()
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
                     session.closed = True
+                    session.handoff_in_progress = False
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
                     reuse_current_account_lease
@@ -2166,11 +2174,13 @@ class _HTTPBridgeMixin(
                     )
                 except BaseException:
                     session.closed = True
+                    session.handoff_in_progress = False
                     raise
                 if should_retry_selection:
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if required_preferred_account_id in excluded_account_ids:
                         session.closed = True
+                        session.handoff_in_progress = False
                         raise _http_bridge_previous_response_owner_unavailable_error()
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
@@ -2197,6 +2207,7 @@ class _HTTPBridgeMixin(
                 status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 session.closed = True
+                session.handoff_in_progress = False
                 raise ProxyResponseError(
                     status_code,
                     openai_error(
@@ -2211,6 +2222,7 @@ class _HTTPBridgeMixin(
                 record_selected_account_takeover(account.id, required_preferred_account_id)
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 session.closed = True
+                session.handoff_in_progress = False
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease
@@ -2307,6 +2319,7 @@ class _HTTPBridgeMixin(
                 raise
             except asyncio.CancelledError:
                 session.closed = True
+                session.handoff_in_progress = False
                 await release_selected_account_lease()
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 raise
@@ -2352,6 +2365,7 @@ class _HTTPBridgeMixin(
                 except Exception:
                     logger.debug("Failed to release cancelled HTTP bridge old account lease", exc_info=True)
             session.closed = True
+            session.handoff_in_progress = False
             _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
             raise
         except Exception:
@@ -2359,6 +2373,7 @@ class _HTTPBridgeMixin(
         # Keep the session fail-closed until old-resource cleanup and the
         # replacement lease transfer have committed successfully.
         session.closed = True
+<<<<<<< HEAD
         async with session.pending_lock:
             replaced_account_lease = session.account_lease
             session.account_lease = selected_account_lease
@@ -2366,6 +2381,7 @@ class _HTTPBridgeMixin(
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
             session.upstream_control = _WebSocketUpstreamControl()
             session.closed = False
+            session.handoff_in_progress = False
             session.last_upstream_close_code = None
             session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         if replaced_account_lease is not None and (

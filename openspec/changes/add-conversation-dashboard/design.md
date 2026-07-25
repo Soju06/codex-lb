@@ -112,6 +112,10 @@ pagination to offset 0 on change, and is converted client-side to a
 `now − Nd` ISO timestamp sent to the list endpoint as `since`. This bounds the
 working set the 30-second poll scans, and the short-TTL grouped-count cache
 (pre-grouping `total`) keeps the repeated poll off the full-history scan path.
+The timestamp is captured with the current filter state and reused by polling,
+focus, and manual refetches until that state changes, keeping the cache
+signature stable for the short TTL while preserving the selected rolling
+window.
 
 The detail dialog puts conversation ID/start/latest on row one and account
 count/total elapsed/dominant user-agent on row two. Its displayed model/effort

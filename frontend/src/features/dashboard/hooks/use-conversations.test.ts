@@ -267,7 +267,7 @@ describe("useConversations", () => {
     })).toBe(true);
   });
 
-  it("recomputes the conversation timeframe when refetching", async () => {
+  it("keeps the conversation timeframe stable when refetching", async () => {
     const initialNow = Date.parse("2026-07-26T00:00:00.000Z");
     const refreshedNow = initialNow + 2 * 60 * 60 * 1000;
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(initialNow);
@@ -300,7 +300,7 @@ describe("useConversations", () => {
 
       expect(apiSince).toEqual([
         new Date(initialNow - 30 * dayMs).toISOString(),
-        new Date(refreshedNow - 30 * dayMs).toISOString(),
+        new Date(initialNow - 30 * dayMs).toISOString(),
       ]);
     } finally {
       nowSpy.mockRestore();

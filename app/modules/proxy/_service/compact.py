@@ -50,7 +50,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import resolve_required_account_id, without_http_bridge_session_affinity_headers
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountConcurrencyCaps,
@@ -58,6 +58,7 @@ from app.modules.proxy.load_balancer import (
     AccountSelection,
     effective_account_concurrency_caps,
 )
+from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -454,6 +455,30 @@ def _sticky_key_for_compact_request(
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
     normalize = cast(Callable[[JsonValue], str | None], _service_global("_normalize_service_tier_value"))
     return normalize(payload.service_tier)
+
+
+def _compact_account_neutral_replay_payload(
+    payload: ResponsesCompactRequest,
+) -> ResponsesCompactRequest | None:
+    """Return the anchor-free replay payload for a verified full resend.
+
+    A compact request pinned only by ``previous_response_id`` may move off an
+    unselectable owner account when the history it carries is provably
+    account-neutral: the upstream-bound payload without the anchor must pass
+    the shared fresh-replay validation, so no encrypted, compaction, file, or
+    other account-scoped state can reach the replacement account.
+    """
+    previous_response_id = getattr(payload, "previous_response_id", None)
+    if not isinstance(previous_response_id, str) or not previous_response_id.strip():
+        return None
+    if not isinstance(payload.input, list) or len(payload.input) <= 1:
+        return None
+    replay_source = payload.model_dump(mode="json", exclude_none=True)
+    replay_source.pop("previous_response_id", None)
+    replay_payload = ResponsesCompactRequest.model_validate(replay_source)
+    if not responses_payload_is_account_neutral_fresh_replay(replay_payload.to_payload()):
+        return None
+    return replay_payload
 
 
 class _CompactMixin:
@@ -890,6 +915,65 @@ class _CompactMixin:
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
                         )
                         account = selection.account
+                    if (
+                        account is None
+                        and preferred_account_id is not None
+                        and previous_response_preferred_account_id is not None
+                        and turn_state_owner_account_id is None
+                        and rewritten_file_account_id is None
+                    ):
+                        # The pinned previous-response owner cannot be selected
+                        # (e.g. quota-exhausted, or excluded after an in-request
+                        # failover). A locally verified account-neutral full
+                        # resend carries the complete history client-side, so
+                        # the stale anchor can be dropped and the compact can
+                        # move to a fresh account instead of wedging the
+                        # session until the owner's quota window resets.
+                        # Turn-state and file pins never reach this branch and
+                        # stay owner-bound.
+                        replay_payload = _compact_account_neutral_replay_payload(payload)
+                        if replay_payload is None:
+                            _record_continuity_fail_closed(
+                                surface="compact",
+                                reason="owner_account_unavailable",
+                                previous_response_id=previous_response_id,
+                                session_id=previous_response_lookup_session_id,
+                                upstream_error_code=selection.error_code,
+                            )
+                        else:
+                            logger.warning(
+                                "Compact previous-response owner unavailable; replaying verified "
+                                "account-neutral full resend request_id=%s owner_account_id=%s "
+                                "selection_error_code=%s",
+                                request_id,
+                                preferred_account_id,
+                                selection.error_code,
+                            )
+                            excluded_account_ids.add(preferred_account_id)
+                            payload = replay_payload
+                            filtered = without_http_bridge_session_affinity_headers(filtered)
+                            preferred_account_id = None
+                            previous_response_preferred_account_id = None
+                            affinity = _AffinityPolicy()
+                            selection = await proxy._select_account_with_budget_compatible(
+                                deadline,
+                                request_id=request_id,
+                                kind="compact",
+                                api_key=api_key,
+                                affinity_policy=affinity,
+                                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
+                                routing_strategy=routing_strategy,
+                                model=payload.model,
+                                service_tier=payload.service_tier,
+                                exclude_account_ids=excluded_account_ids,
+                                preferred_account_id=None,
+                                require_security_work_authorized=require_security_work_authorized,
+                                lease_kind="response_create",
+                                estimated_lease_tokens=estimated_lease_tokens,
+                                fallback_on_preferred_account_unavailable=True,
+                            )
+                            account = selection.account
                     if account is not None:
                         pass
                     elif last_exc is not None:

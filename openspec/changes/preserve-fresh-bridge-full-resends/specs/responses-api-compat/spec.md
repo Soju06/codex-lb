@@ -102,6 +102,21 @@ handling, and existing account-neutral replay eligibility remain unchanged.
 - **WHEN** no reusable bridge exists for its hard durable conversation
 - **THEN** the service retains the durable `previous_response_id`
 - **AND** it trims the verified stored prefix through the existing anchored path
+- **AND** it does not classify the original unanchored cumulative input as a safe fresh-upstream retry
+
+#### Scenario: Failed owner forwarding preserves omitted response context
+
+- **GIVEN** a matching cumulative input omits prior assistant output and initially resolves to a forwardable durable owner
+- **WHEN** owner forwarding fails before any downstream output and the service performs local takeover
+- **THEN** the local recovery request retains the durable `previous_response_id`
+- **AND** it trims the verified stored prefix instead of submitting the cumulative input unanchored
+- **AND** the injected anchor is not eligible for an unanchored fresh-upstream retry
+
+#### Scenario: Refreshed takeover context no longer matches the resend
+
+- **GIVEN** owner forwarding fails and the refreshed durable takeover row has different stored-input metadata
+- **WHEN** the cumulative input cannot prefix-match that refreshed row
+- **THEN** the service fails closed instead of pairing the refreshed response ID with stale prefix metadata
 
 #### Scenario: Live bridge trimming remains unchanged
 

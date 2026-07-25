@@ -14,7 +14,7 @@
 
 - [x] 3.1 Update focused unit coverage to assert one unanchored full-resend preparation on the durable owner.
 - [x] 3.2 Add public `/v1/responses` coverage for a completed bridge followed by a full resend on a fresh upstream WebSocket.
-- [x] 3.3 Cover exact manifest settlement, omitted parallel calls, unsupported mixed client-settled calls, stored-prefix call-ID reuse, lifecycle duplicates, response-ID mismatch, persistence round-trip, and account-change clearing.
+- [x] 3.3 Cover exact manifest settlement, omitted parallel calls, unsupported mixed client-settled calls, stored-prefix call-ID reuse, lifecycle duplicates, response-ID mismatch, persistence round-trip, account-change clearing, and unsafe owner-forward fallback.
 
 ## 4. Verification and handoff
 

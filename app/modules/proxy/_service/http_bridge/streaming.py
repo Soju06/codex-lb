@@ -207,6 +207,7 @@ from app.modules.proxy.helpers import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -865,6 +866,7 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_anchor_fingerprint: str | None = None
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
+        durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_prior_output = False
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
@@ -876,6 +878,23 @@ class _HTTPBridgeStreamingMixin:
         if durable_lookup is not None and payload_looks_like_full_resend and durable_anchor_trimmable:
             durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
             durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
+            if isinstance(payload.input, list) and durable_full_resend_anchor_count is not None:
+                replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=durable_full_resend_anchor_count,
+                )
+                if replay_projection is not None:
+                    durable_full_resend_has_safe_fresh_context = responses_input_suffix_retains_prior_output(
+                        replay_projection.input_items,
+                        stored_count=replay_projection.stored_prefix_count,
+                    ) or (
+                        durable_lookup.latest_pending_tool_calls is not None
+                        and responses_input_suffix_matches_pending_tool_calls(
+                            replay_projection.input_items,
+                            stored_count=replay_projection.stored_prefix_count,
+                            pending_tool_calls=durable_lookup.latest_pending_tool_calls,
+                        )
+                    )
         durable_model_transition_lookup = (
             durable_lookup
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
@@ -940,7 +959,11 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
-            if fresh_reattach_can_use_durable_anchor and payload_looks_like_full_resend:
+            if (
+                fresh_reattach_can_use_durable_anchor
+                and payload_looks_like_full_resend
+                and durable_full_resend_has_safe_fresh_context
+            ):
                 # The client already supplied a complete fresh request. Adding
                 # a durable anchor here can strand it on the new WebSocket.
                 _log_http_bridge_event(

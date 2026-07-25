@@ -1547,6 +1547,7 @@ async def _persist_http_bridge_previous_response_alias(
     registration_generation: int,
     input_item_count: int | None,
     input_full_fingerprint: str | None,
+    pending_tool_calls: Mapping[str, str] | None,
     instance_id: str,
     lease_ttl_seconds: float,
     local_alias_was_published: bool = True,
@@ -1562,6 +1563,7 @@ async def _persist_http_bridge_previous_response_alias(
             lease_ttl_seconds=lease_ttl_seconds,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            pending_tool_calls=pending_tool_calls,
         )
     except Exception:
         logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)

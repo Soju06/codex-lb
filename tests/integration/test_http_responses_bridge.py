@@ -371,6 +371,10 @@ class _FakeBridgeUpstreamWebSocket:
 class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     """First response completes with an unresolved ``custom_tool_call``."""
 
+    def __init__(self, response_id_prefix: str = "resp_bridge", *, emit_added: bool = False) -> None:
+        super().__init__(response_id_prefix)
+        self._emit_added = emit_added
+
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
         response_id = f"resp_bridge_custom_{len(self.sent_text)}"
@@ -387,6 +391,28 @@ class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
             )
         )
         if len(self.sent_text) == 1:
+            if self._emit_added:
+                await self._messages.put(
+                    _FakeUpstreamMessage(
+                        "text",
+                        text=json.dumps(
+                            {
+                                "type": "response.output_item.added",
+                                "response_id": response_id,
+                                "item": {
+                                    "id": "ctc_shell",
+                                    "type": "custom_tool_call",
+                                    "status": "in_progress",
+                                    "call_id": "call_custom_shell",
+                                    "name": "shell",
+                                    "input": "",
+                                },
+                                "output_index": 0,
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                )
             await self._messages.put(
                 _FakeUpstreamMessage(
                     "text",
@@ -438,6 +464,15 @@ class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                 ),
             )
         )
+
+
+class _ClosingInterruptedCustomToolUpstreamWebSocket(_InterruptedCustomToolUpstreamWebSocket):
+    def __init__(self, response_id_prefix: str = "resp_bridge") -> None:
+        super().__init__(response_id_prefix, emit_added=True)
+
+    async def send_text(self, text: str) -> None:
+        await super().send_text(text)
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=1000))
 
 
 class _ClosingBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -7025,7 +7060,7 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
         "http-bridge-preserve-fresh-reattach@example.com",
     )
     account = await _get_account(account_id)
-    first_upstream = _ClosingBridgeUpstreamWebSocket("resp_preserve_source")
+    first_upstream = _ClosingInterruptedCustomToolUpstreamWebSocket("resp_preserve_source")
     replay_upstream = _FakeBridgeUpstreamWebSocket("resp_preserve_replay")
     upstreams = [first_upstream, replay_upstream]
     connect_headers: list[dict[str, str]] = []
@@ -7078,15 +7113,15 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
     full_resend = [
         *historical_input,
         {
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "lookup",
-            "arguments": "{}",
+            "type": "custom_tool_call",
+            "call_id": "call_custom_shell",
+            "name": "shell",
+            "input": "pwd",
         },
         {
-            "type": "function_call_output",
-            "call_id": "call_1",
-            "output": "first result",
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom_shell",
+            "output": "/workspace",
         },
     ]
     second = await asyncio.wait_for(

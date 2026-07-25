@@ -39,6 +39,7 @@ from app.modules.proxy._service.http_bridge import helpers as http_bridge_helper
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
+from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
@@ -2299,6 +2300,154 @@ def test_http_error_status_from_payload_accepts_official_status_code_alias() -> 
     }
 
     assert proxy_service._http_error_status_from_payload(payload) == 400
+
+
+def test_durable_tool_call_manifest_requires_complete_added_and_done_lifecycle() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    def record(event_type: str, call_id: str) -> None:
+        http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+            state,
+            event_type=event_type,
+            payload={
+                "type": event_type,
+                "item": {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            },
+        )
+
+    record("response.output_item.added", "call_1")
+    record("response.output_item.added", "call_2")
+    record("response.output_item.done", "call_1")
+
+    assert (
+        http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
+            state,
+            {"type": "response.completed", "response": {"output": []}},
+        )
+        is None
+    )
+
+    malformed_state = proxy_service._WebSocketRequestState(
+        request_id="req-malformed-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        malformed_state,
+        event_type="response.output_item.added",
+        payload={
+            "type": "response.output_item.added",
+            "item": {"type": [], "call_id": "call_malformed"},
+        },
+    )
+    assert malformed_state.tool_call_manifest_invalid is True
+    assert (
+        http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
+            malformed_state,
+            {"type": "response.completed", "response": {"output": [{"type": []}]}},
+        )
+        is None
+    )
+
+    record("response.output_item.done", "call_2")
+    assert http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
+        state,
+        {"type": "response.completed", "response": {"output": []}},
+    ) == {"call_1": "function_call", "call_2": "function_call"}
+
+    duplicate_state = proxy_service._WebSocketRequestState(
+        request_id="req-duplicate-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    duplicate_event: dict[str, proxy_service.JsonValue] = {
+        "type": "response.output_item.added",
+        "item": {
+            "type": "function_call",
+            "call_id": "call_duplicate",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    }
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        duplicate_state,
+        event_type="response.output_item.added",
+        payload=duplicate_event,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        duplicate_state,
+        event_type="response.output_item.added",
+        payload=duplicate_event,
+    )
+    assert duplicate_state.tool_call_manifest_invalid is True
+
+
+def test_durable_tool_call_manifest_rejects_unobserved_terminal_call() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+
+    assert (
+        http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
+            state,
+            {
+                "type": "response.completed",
+                "response": {
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_unobserved",
+                            "name": "lookup",
+                            "arguments": "{}",
+                        }
+                    ]
+                },
+            },
+        )
+        is None
+    )
+
+    state.added_tool_call_types = {"call_duplicate": "function_call"}
+    state.pending_tool_call_types = {"call_duplicate": "function_call"}
+    duplicate_terminal_call: dict[str, proxy_service.JsonValue] = {
+        "type": "function_call",
+        "call_id": "call_duplicate",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+    assert (
+        http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
+            state,
+            {
+                "type": "response.completed",
+                "response": {"output": [duplicate_terminal_call, duplicate_terminal_call]},
+            },
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -6355,19 +6504,60 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_preserves_trimmable_full_resend_on_fresh_bridge(
+@pytest.mark.parametrize(
+    ("suffix_items", "pending_tool_calls", "preserves_full_resend"),
+    [
+        pytest.param(
+            [
+                {"role": "assistant", "content": "hello back"},
+                {"role": "user", "content": "follow up"},
+            ],
+            None,
+            True,
+            id="retained-assistant-output",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "result",
+                },
+            ],
+            {"call-1": "function_call"},
+            True,
+            id="self-contained-tool-loop",
+        ),
+        pytest.param(
+            [{"role": "user", "content": "revise that answer"}],
+            None,
+            False,
+            id="missing-prior-output",
+        ),
+    ],
+)
+async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_on_fresh_bridge(
     monkeypatch: pytest.MonkeyPatch,
+    suffix_items: list[proxy_service.JsonValue],
+    pending_tool_calls: dict[str, str] | None,
+    preserves_full_resend: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    input_items = [
+    stored_input_items: list[proxy_service.JsonValue] = [
         {
             "type": "additional_tools",
             "role": "developer",
             "tools": [{"type": "custom", "name": "shell"}],
         },
         {"role": "user", "content": "hello"},
-        {"role": "user", "content": "follow up"},
     ]
+    input_items = [*stored_input_items, *suffix_items]
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
@@ -6422,6 +6612,7 @@ async def test_stream_via_http_bridge_preserves_trimmable_full_resend_on_fresh_b
             **kwargs,
         )
         prepared_frames.append(json.loads(text_data))
+        request_state.previous_response_id = prepared_payload.previous_response_id
         return request_state, text_data
 
     session = proxy_service._HTTPBridgeSession(
@@ -6477,10 +6668,9 @@ async def test_stream_via_http_bridge_preserves_trimmable_full_resend_on_fresh_b
                 state=HttpBridgeSessionState.ACTIVE,
                 latest_turn_state="http_turn_1",
                 latest_response_id="resp_latest",
-                latest_input_item_count=2,
-                latest_input_full_fingerprint=proxy_service._fingerprint_input_items(
-                    cast(list[Any], payload.input)[:2]
-                ),
+                latest_input_item_count=len(stored_input_items),
+                latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
+                latest_pending_tool_calls=pending_tool_calls,
             )
         ),
     )
@@ -6491,6 +6681,7 @@ async def test_stream_via_http_bridge_preserves_trimmable_full_resend_on_fresh_b
         account_neutral_classifier,
     )
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     get_or_create = AsyncMock(return_value=session)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
@@ -6515,13 +6706,19 @@ async def test_stream_via_http_bridge_preserves_trimmable_full_resend_on_fresh_b
     ]
 
     assert chunks == []
-    assert prepared_previous_response_ids == [None]
-    assert prepared_input_lengths == [3]
+    assert prepared_previous_response_ids == ([None] if preserves_full_resend else [None, "resp_latest", "resp_latest"])
+    assert prepared_input_lengths == (
+        [len(input_items)] if preserves_full_resend else [len(input_items), len(input_items), len(suffix_items)]
+    )
     assert all("tools" not in frame for frame in prepared_frames)
-    assert prepared_frames[-1]["input"] == input_items
+    normalized_input_items = cast(list[proxy_service.JsonValue], payload.input)
+    expected_input_items = (
+        normalized_input_items if preserves_full_resend else normalized_input_items[-len(suffix_items) :]
+    )
+    assert prepared_frames[-1]["input"] == expected_input_items
     assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
         "true",
-    ]
+    ] * len(prepared_frames)
     assert all(
         frame["reasoning"]
         == {
@@ -6535,9 +6732,9 @@ async def test_stream_via_http_bridge_preserves_trimmable_full_resend_on_fresh_b
     assert cast(dict[str, Any], payload.to_payload()["reasoning"])["context"] == "last_turn"
     creation = get_or_create.await_args
     assert creation is not None
-    assert creation.kwargs["previous_response_id"] is None
+    assert creation.kwargs["previous_response_id"] == (None if preserves_full_resend else "resp_latest")
     assert creation.kwargs["preferred_account_id"] == "acc-1"
-    assert session.last_completed_response_id is None
+    assert session.last_completed_response_id == (None if preserves_full_resend else "resp_latest")
     account_neutral_classifier.assert_not_called()
 
 

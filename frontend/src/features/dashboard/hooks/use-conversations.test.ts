@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren, useEffect } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { server } from "@/test/mocks/server";
@@ -265,6 +265,46 @@ describe("useConversations", () => {
       const since = Date.parse(value);
       return Number.isFinite(since) && since < Date.now() - 29 * 24 * 60 * 60 * 1000;
     })).toBe(true);
+  });
+
+  it("recomputes the conversation timeframe when refetching", async () => {
+    const initialNow = Date.parse("2026-07-26T00:00:00.000Z");
+    const refreshedNow = initialNow + 2 * 60 * 60 * 1000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(initialNow);
+    const apiSince: string[] = [];
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    try {
+      server.use(
+        http.get("/api/conversations", ({ request }) => {
+          apiSince.push(new URL(request.url).searchParams.get("since") ?? "-missing-");
+          return HttpResponse.json({ conversations: [], total: 0, hasMore: false });
+        }),
+      );
+
+      const queryClient = createTestQueryClient();
+      const wrapper = createWrapper(
+        queryClient,
+        "/dashboard?view=conversations&conversationTimeframe=30d",
+      );
+      const { result } = renderHook(() => useConversations({ enabled: true }), {
+        wrapper,
+      });
+
+      await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
+      nowSpy.mockReturnValue(refreshedNow);
+
+      await act(async () => {
+        await result.current.conversationsQuery.refetch();
+      });
+
+      expect(apiSince).toEqual([
+        new Date(initialNow - 30 * dayMs).toISOString(),
+        new Date(refreshedNow - 30 * dayMs).toISOString(),
+      ]);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("writes the timeframe and resets conversation offset", async () => {

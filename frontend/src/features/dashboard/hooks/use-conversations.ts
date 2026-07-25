@@ -116,7 +116,11 @@ export function useConversations(options: UseConversationsOptions = {}) {
     refetch,
   } = useQuery({
     queryKey: ["dashboard", "conversations", listFilters],
-    queryFn: () => getConversations(listFilters),
+    queryFn: () =>
+      getConversations({
+        ...listFilters,
+        since: timeframeToSinceIso(filters.timeframe),
+      }),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

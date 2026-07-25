@@ -70,3 +70,17 @@
   passed.
 - `openspec validate --specs`: passed (`47 passed, 0 failed`).
 - `git diff --check`: passed.
+
+### Rolling timeframe review follow-up
+
+- `cd frontend && bun x vitest run src/features/dashboard/hooks/use-conversations.test.ts`:
+  passed (`11 tests`), including a regression proving `since` advances on
+  refetch.
+- `cd frontend && bun x vitest run src/features/dashboard src/__integration__/dashboard-flow.test.tsx`:
+  passed (`23 files, 268 tests`).
+- `.venv/bin/python -m pytest tests/integration/test_conversations_api.py
+  tests/integration/test_request_logs_filters.py
+  tests/unit/test_request_logs_service.py`: passed (`48 tests`).
+- `cd frontend && bun run typecheck && bun run lint`: passed.
+- `openspec validate --specs`, strict change validation, and `git diff --check`:
+  passed.

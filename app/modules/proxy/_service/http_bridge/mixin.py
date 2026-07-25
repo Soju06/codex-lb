@@ -2040,6 +2040,7 @@ class _HTTPBridgeMixin(
             session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
         )
         if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
+            session.closed = True
             raise _http_bridge_previous_response_owner_unavailable_error()
         _require_http_bridge_bound_account_not_excluded(
             hard_close_account_bound, session.account.id, excluded_account_ids
@@ -2109,36 +2110,41 @@ class _HTTPBridgeMixin(
         session.closed = False if old_reader is not None else session.closed
         while True:
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
-            selection = await self._select_account_with_budget_for_stream(
-                deadline,
-                request_id=request_state.request_log_id or request_state.request_id,
-                kind="http_bridge",
-                request_stage="reattach",
-                api_key=session.api_key,
-                affinity_policy=selection_affinity or session.affinity,
-                prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
-                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
-                routing_strategy=_routing_strategy(settings),
-                model=session.request_model,
-                service_tier=session.request_service_tier,
-                exclude_account_ids=excluded_account_ids,
-                preferred_account_id=preferred_candidate_id,
-                preferred_account_is_continuity_owner=account_neutral_recovery,
-                require_security_work_authorized=require_security_work_authorized,
-                lease_kind=None if reuse_current_account_lease else "stream",
-                estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
-                    request_state.request_usage_budget
-                ),
-                fallback_on_preferred_account_unavailable=(
-                    not reuse_current_account_lease
-                    and not hard_close_account_bound
-                    and required_preferred_account_id is None
-                ),
-            )
+            try:
+                selection = await self._select_account_with_budget_for_stream(
+                    deadline,
+                    request_id=request_state.request_log_id or request_state.request_id,
+                    kind="http_bridge",
+                    request_stage="reattach",
+                    api_key=session.api_key,
+                    affinity_policy=selection_affinity or session.affinity,
+                    prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                    prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
+                    routing_strategy=_routing_strategy(settings),
+                    model=session.request_model,
+                    service_tier=session.request_service_tier,
+                    exclude_account_ids=excluded_account_ids,
+                    preferred_account_id=preferred_candidate_id,
+                    preferred_account_is_continuity_owner=account_neutral_recovery,
+                    require_security_work_authorized=require_security_work_authorized,
+                    lease_kind=None if reuse_current_account_lease else "stream",
+                    estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                        request_state.request_usage_budget
+                    ),
+                    fallback_on_preferred_account_unavailable=(
+                        not reuse_current_account_lease
+                        and not hard_close_account_bound
+                        and required_preferred_account_id is None
+                    ),
+                )
+            except BaseException:
+                session.closed = True
+                raise
             account = selection.account
             if account is None:
                 await release_selected_account_lease()
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
+                    session.closed = True
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
                     reuse_current_account_lease
@@ -2148,17 +2154,23 @@ class _HTTPBridgeMixin(
                 ):
                     preferred_candidate_id = None
                     continue
-                if await _sleep_for_account_selection_recovery(
-                    selection,
-                    request_id=request_state.request_log_id or request_state.request_id,
-                    kind="http_bridge",
-                    request_stage="reattach",
-                    model=session.request_model,
-                    max_sleep_seconds=_remaining_budget_seconds(deadline),
-                    request_state=request_state,
-                ):
+                try:
+                    should_retry_selection = await _sleep_for_account_selection_recovery(
+                        selection,
+                        request_id=request_state.request_log_id or request_state.request_id,
+                        kind="http_bridge",
+                        request_stage="reattach",
+                        model=session.request_model,
+                        max_sleep_seconds=_remaining_budget_seconds(deadline),
+                        request_state=request_state,
+                    )
+                except BaseException:
+                    session.closed = True
+                    raise
+                if should_retry_selection:
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if required_preferred_account_id in excluded_account_ids:
+                        session.closed = True
                         raise _http_bridge_previous_response_owner_unavailable_error()
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
@@ -2184,6 +2196,7 @@ class _HTTPBridgeMixin(
                 record_selected_account_takeover(None)
                 status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
+                session.closed = True
                 raise ProxyResponseError(
                     status_code,
                     openai_error(
@@ -2197,6 +2210,7 @@ class _HTTPBridgeMixin(
                     await self._load_balancer.release_account_lease(selection.lease)
                 record_selected_account_takeover(account.id, required_preferred_account_id)
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
+                session.closed = True
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease
@@ -2342,6 +2356,9 @@ class _HTTPBridgeMixin(
             raise
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
+        # Keep the session fail-closed until old-resource cleanup and the
+        # replacement lease transfer have committed successfully.
+        session.closed = True
         async with session.pending_lock:
             replaced_account_lease = session.account_lease
             session.account_lease = selected_account_lease

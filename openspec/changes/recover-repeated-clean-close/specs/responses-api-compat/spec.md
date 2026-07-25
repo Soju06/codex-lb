@@ -101,6 +101,10 @@ The clean-close retry jitter maximum MUST be read from the
 `http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
 setting and MUST be bounded to the inclusive range 0–30 seconds.
 
+The proxy MUST evict process-local circuit entries and their loaded/persisted
+markers after one hour without use, independently of durable-row cleanup, so
+one-shot hard-affinity keys cannot grow the worker's memory without bound.
+
 Before every hard-affinity retry decision, the proxy MUST refresh the durable
 row so a cooldown opened by another replica is observed even when this process
 has already loaded the key. A durable lookup or persistence failure MUST NOT

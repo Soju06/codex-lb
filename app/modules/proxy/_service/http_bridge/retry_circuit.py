@@ -25,6 +25,7 @@ class _HTTPBridgeRetryCircuitState:
     consecutive_failures: int = 0
     cooldown_until: float = 0.0
     last_detail: str | None = None
+    last_touched_monotonic: float = 0.0
 
 
 def _initialize_http_bridge_retry_circuit(service: Any) -> None:
@@ -35,11 +36,25 @@ def _initialize_http_bridge_retry_circuit(service: Any) -> None:
 
 
 class _HTTPBridgeRetryCircuitMixin:
+    def _prune_http_bridge_retry_circuit_state(self: Any, now: float) -> None:
+        expiry = now - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+        for key, state in list(self._http_bridge_retry_circuits.items()):
+            if state.last_touched_monotonic > expiry:
+                continue
+            self._http_bridge_retry_circuits.pop(key, None)
+            self._http_bridge_retry_circuit_loaded_keys.discard(key)
+            self._http_bridge_retry_circuit_persisted_keys.discard(key)
+
     async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":
             return
 
         async with self._http_bridge_retry_circuit_lock:
+            now_monotonic = time.monotonic()
+            self._prune_http_bridge_retry_circuit_state(now_monotonic)
+            local_state = self._http_bridge_retry_circuits.get(session.key)
+            if local_state is not None:
+                local_state.last_touched_monotonic = now_monotonic
             try:
                 persisted = await self._durable_bridge.lookup_retry_circuit(
                     session_key_kind=session.key.affinity_kind,
@@ -87,10 +102,10 @@ class _HTTPBridgeRetryCircuitMixin:
 
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
             cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
-            persisted_cooldown_until = time.monotonic() + cooldown_remaining
+            persisted_cooldown_until = now_monotonic + cooldown_remaining
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
-                state = _HTTPBridgeRetryCircuitState()
+                state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[session.key] = state
             # Durable state may have been opened by another replica since the
             # previous decision. Merge it into the local state instead of
@@ -101,6 +116,7 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
             state.last_detail = persisted.last_detail or state.last_detail
+            state.last_touched_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(session.key)
 
     async def _persist_http_bridge_retry_circuit(
@@ -207,7 +223,11 @@ class _HTTPBridgeRetryCircuitMixin:
         clean_close_max_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS)
         now = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
-            state = self._http_bridge_retry_circuits.setdefault(session.key, _HTTPBridgeRetryCircuitState())
+            state = self._http_bridge_retry_circuits.setdefault(
+                session.key,
+                _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
+            )
+            state.last_touched_monotonic = now
             state.consecutive_failures += 1
             state.last_detail = detail
             if state.consecutive_failures >= threshold:

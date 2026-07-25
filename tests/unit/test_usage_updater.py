@@ -16,6 +16,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.usage.models import UsagePayload
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
@@ -430,7 +431,12 @@ class StubUsageRepository:
                     used_percent=entry.used_percent,
                     input_tokens=entry.input_tokens,
                     output_tokens=entry.output_tokens,
-                    recorded_at=entry.recorded_at or datetime.now(tz=timezone.utc),
+                    # Production stores UTC-naive timestamps (``utcnow()``), and
+                    # the freshness check subtracts this value from one. A
+                    # tz-aware fallback here would raise TypeError as soon as a
+                    # test writes a row and then refreshes the same account
+                    # again, so keep the stub on the production contract.
+                    recorded_at=entry.recorded_at or utcnow(),
                     window=entry.window,
                     reset_at=entry.reset_at,
                     window_minutes=entry.window_minutes,
@@ -477,7 +483,7 @@ class StubUsageRepository:
             used_percent=used_percent,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            recorded_at=recorded_at or datetime.now(tz=timezone.utc),
+            recorded_at=recorded_at or utcnow(),
             window=window,
             reset_at=reset_at,
             window_minutes=window_minutes,
@@ -495,7 +501,7 @@ class StubUsageRepository:
         *,
         recorded_at: datetime | None = None,
     ) -> list[UsageHistory]:
-        captured_at = recorded_at or datetime.now(tz=timezone.utc)
+        captured_at = recorded_at or utcnow()
         snapshot_windows = tuple(windows)
         self.snapshot_calls.append(
             UsageSnapshotCall(
@@ -2102,6 +2108,234 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
     assert accounts_repo.metadata_updates == []
     assert account.plan_type == "unknown"
     assert account.workspace_id is None
+
+
+def _free_downgrade_payload_factory(plan_types: list[str]):
+    """Return a stub fetch_usage that walks ``plan_types`` one call at a time."""
+    calls = {"index": 0}
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        index = min(calls["index"], len(plan_types) - 1)
+        calls["index"] += 1
+        return UsagePayload.model_validate(
+            {
+                "plan_type": plan_types[index],
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    return stub_fetch_usage
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_confirms_free_downgrade_without_workspace_on_second_observation(
+    monkeypatch,
+) -> None:
+    """Regression for #1456: an expired paid subscription on a workspace-less
+    account must converge to ``free`` once a second consecutive refresh agrees,
+    instead of being discarded forever as an identity mismatch."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_personal_expired", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    # First observation is recorded but never mutates the stored entitlement.
+    assert usage_repo.entries == []
+    assert account.plan_type == "plus"
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    # The confirming observation persists the downgrade and writes the sample.
+    assert usage_repo.entries != []
+    assert account.plan_type == "free"
+    assert account.workspace_id is None
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_paid_payload_clears_pending_free_downgrade(monkeypatch) -> None:
+    """A transient ``free`` blip must not accumulate toward a downgrade once the
+    account reports a recognized paid plan again."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "plus", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_personal_blip", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    for _ in range(3):
+        await updater.refresh_accounts([account], latest_usage={})
+
+    # The intervening paid payload reset the pending state, so the trailing
+    # single ``free`` observation is once again unconfirmed.
+    assert account.plan_type == "plus"
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_never_confirms_unrecognized_plan_without_workspace(monkeypatch) -> None:
+    """Confirmation applies to ``free`` only: an unrecognized plan value stays
+    rejected no matter how many times it repeats."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["mystery", "mystery", "mystery"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_personal_mystery", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "business"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    for _ in range(3):
+        await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries == []
+    assert accounts_repo.metadata_updates == []
+    assert account.plan_type == "business"
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_free_downgrade_confirmation_is_per_account(monkeypatch) -> None:
+    """One ``free`` observation on two different accounts must not combine into
+    a confirmation for either of them."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    first = _make_account("acc_personal_first", "upstream_user", email="first@example.com")
+    first.workspace_id = None
+    first.plan_type = "plus"
+    second = _make_account("acc_personal_second", "upstream_other", email="second@example.com")
+    second.workspace_id = None
+    second.plan_type = "plus"
+    accounts_repo.accounts_by_id[first.id] = first
+    accounts_repo.accounts_by_id[second.id] = second
+
+    await updater.refresh_accounts([first, second], latest_usage={})
+
+    assert first.plan_type == "plus"
+    assert second.plan_type == "plus"
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_confirms_free_downgrade_on_second_probe(monkeypatch) -> None:
+    """Force probe shares the confirmation path: two probes reporting ``free``
+    persist the downgrade without reauthentication."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_personal_force_probe", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "pro"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.force_refresh(account)
+    assert account.plan_type == "pro"
+
+    await updater.force_refresh(account)
+    assert account.plan_type == "free"
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_never_confirms_conflicting_workspace_identity(monkeypatch) -> None:
+    """A payload reporting another workspace's slot stays rejected regardless of
+    repetition; confirmation must not weaken the workspace-conflict guard."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "free",
+                "workspace_id": "ws_other",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_workspace_conflict_repeat", "upstream_user", email="same@example.com")
+    account.workspace_id = "ws_team"
+    account.plan_type = "business"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    for _ in range(3):
+        await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries == []
+    assert accounts_repo.metadata_updates == []
+    assert account.plan_type == "business"
+    assert account.workspace_id == "ws_team"
 
 
 class StubAccountsRepository:

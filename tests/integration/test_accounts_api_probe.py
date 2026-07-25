@@ -261,6 +261,74 @@ async def test_force_probe_persists_free_to_plus_plan_upgrade(async_client, monk
 
 
 @pytest.mark.asyncio
+async def test_force_probe_confirms_paid_to_free_plan_downgrade(async_client, monkeypatch):
+    """Regression for #1456 at the product path: an expired paid subscription on
+    a workspace-less account must surface as ``free`` on /api/accounts once a
+    second probe confirms it, instead of keeping a stale paid label forever."""
+
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        return UsagePayload.model_validate({"plan_type": "free"})
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-plan-downgrade@example.com",
+        account_id="acc_probe_plan_downgrade",
+        plan_type="plus",
+    )
+
+    async def _listed_plan_type() -> str:
+        listing = await async_client.get("/api/accounts")
+        assert listing.status_code == 200
+        account = next(item for item in listing.json()["accounts"] if item["accountId"] == account_id)
+        return account["planType"]
+
+    first = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert first.status_code == 200, first.text
+    assert await _listed_plan_type() == "plus"
+
+    second = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert second.status_code == 200, second.text
+    assert await _listed_plan_type() == "free"
+
+
+@pytest.mark.asyncio
+async def test_force_probe_keeps_paid_plan_for_unrecognized_payload_plan(async_client, monkeypatch):
+    """The confirmation path is scoped to ``free``: an unrecognized plan value
+    must never rewrite a stored paid plan, however often it repeats."""
+
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        return UsagePayload.model_validate({"plan_type": "mystery"})
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-plan-unrecognized@example.com",
+        account_id="acc_probe_plan_unrecognized",
+        plan_type="plus",
+    )
+
+    for _ in range(3):
+        response = await async_client.post(f"/api/accounts/{account_id}/probe")
+        assert response.status_code == 200, response.text
+
+    listing = await async_client.get("/api/accounts")
+    assert listing.status_code == 200
+    account = next(item for item in listing.json()["accounts"] if item["accountId"] == account_id)
+    assert account["planType"] == "plus"
+
+
+@pytest.mark.asyncio
 async def test_probe_uses_default_model_when_body_omitted(async_client, monkeypatch):
     captured: dict = {}
 

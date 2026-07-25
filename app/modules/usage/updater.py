@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection, Hashable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, cast
+from typing import Final, Mapping, Protocol, cast
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
@@ -146,6 +146,22 @@ class _MergedAdditionalWindow:
 # process. Updated only after a successful refresh that wrote data.
 _last_successful_refresh: dict[str, datetime] = {}
 _usage_refresh_auth_cooldowns: dict[str, float] = {}
+
+# Consecutive workspace-less "free" observations per account, used to confirm a
+# paid -> free downgrade before it is persisted (issue #1456). A single free
+# payload is also the signature of a degraded or wrong-identity usage response,
+# so the first observation is recorded here instead of being applied, and the
+# second consecutive one commits the downgrade. Any recognized paid payload for
+# that account clears the entry. Process-local by design: losing it on restart
+# only delays a downgrade by one refresh cycle, and never applies one early.
+_workspace_less_free_plan_observations: dict[str, int] = {}
+
+# Number of consecutive agreeing observations required before a workspace-less
+# paid -> free downgrade is persisted. Deliberately a constant rather than a
+# CODEX_LB_* setting: two observations is the minimum that distinguishes a real
+# expiry from a single degraded response, and operators gain nothing from tuning
+# it (PRINCIPLES.md P2, settings-surface ratchet in issue #1340).
+_FREE_PLAN_DOWNGRADE_CONFIRMATIONS: Final[int] = 2
 
 
 class _UsageRefreshSingleflight:
@@ -933,6 +949,8 @@ def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) ->
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
         # The payload reports a different workspace slot than the one this
         # account is bound to; refuse to write another workspace's usage/plan.
+        # This guard is unconditional: repetition never makes a conflicting
+        # workspace identity trustworthy.
         return True
     if not payload_workspace_id and payload.plan_type:
         payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
@@ -956,8 +974,65 @@ def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) ->
                 and payload_plan_type in recognized_paid_plans
             )
         ):
+            # A subscription that expires reports "free" every cycle from that
+            # account's own token, so an agreeing repeat observation is no
+            # longer the single-sample degraded signature above. Persist the
+            # downgrade only once it has been confirmed (issue #1456).
+            if _free_plan_downgrade_is_confirmed(
+                account,
+                stored_plan_type=stored_plan_type,
+                normalized_payload_plan_type=normalized_payload_plan_type,
+            ):
+                return False
             return True
+        _clear_workspace_less_free_plan_observations(account.id)
     return False
+
+
+def _free_plan_downgrade_is_confirmed(
+    account: Account,
+    *,
+    stored_plan_type: str,
+    normalized_payload_plan_type: str | None,
+) -> bool:
+    """Record a workspace-less paid -> free observation and report confirmation.
+
+    Only a recognized ``free`` payload against a recognized paid stored plan is
+    confirmable. Unrecognized plan values never accumulate, so a degraded
+    response reporting garbage can never downgrade an account no matter how
+    often it repeats.
+    """
+    if normalized_payload_plan_type != "free":
+        return False
+    if stored_plan_type not in (ACCOUNT_PLAN_TYPES - {"free"}):
+        return False
+    observations = _workspace_less_free_plan_observations.get(account.id, 0) + 1
+    if observations < _FREE_PLAN_DOWNGRADE_CONFIRMATIONS:
+        _workspace_less_free_plan_observations[account.id] = observations
+        logger.info(
+            "Usage refresh observed a workspace-less downgrade to free; awaiting confirmation "
+            "account_id=%s stored_plan_type=%s observations=%s required=%s request_id=%s",
+            account.id,
+            stored_plan_type,
+            observations,
+            _FREE_PLAN_DOWNGRADE_CONFIRMATIONS,
+            get_request_id(),
+        )
+        return False
+    _clear_workspace_less_free_plan_observations(account.id)
+    logger.info(
+        "Usage refresh confirmed a workspace-less downgrade to free; persisting plan change "
+        "account_id=%s stored_plan_type=%s observations=%s request_id=%s",
+        account.id,
+        stored_plan_type,
+        observations,
+        get_request_id(),
+    )
+    return True
+
+
+def _clear_workspace_less_free_plan_observations(account_id: str) -> None:
+    _workspace_less_free_plan_observations.pop(account_id, None)
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -1278,4 +1353,5 @@ def _prune_usage_refresh_auth_cooldowns() -> None:
 def _clear_usage_refresh_state() -> None:
     _usage_refresh_auth_cooldowns.clear()
     _last_successful_refresh.clear()
+    _workspace_less_free_plan_observations.clear()
     _USAGE_REFRESH_SINGLEFLIGHT.clear()

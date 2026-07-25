@@ -252,6 +252,15 @@ def _account_to_summary(
         reset_at_primary = None
         window_minutes_primary = None
 
+    quota_snapshot_at = max(
+        [
+            u.recorded_at
+            for u in (effective_primary_usage, effective_secondary_usage, monthly_usage, primary_usage, secondary_usage)
+            if u is not None and getattr(u, "recorded_at", None) is not None
+        ],
+        default=None,
+    )
+
     return AccountSummary(
         account_id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
@@ -276,7 +285,7 @@ def _account_to_summary(
         window_minutes_primary=window_minutes_primary,
         window_minutes_secondary=window_minutes_secondary,
         window_minutes_monthly=window_minutes_monthly,
-        last_refresh_at=account.last_refresh,
+        last_refresh_at=quota_snapshot_at or account.last_refresh,
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,

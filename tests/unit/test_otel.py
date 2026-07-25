@@ -20,7 +20,7 @@ import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
 from app.core.audit import service as audit_service_module
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
@@ -694,7 +694,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
                 ),
                 request_model="gpt-5.4",
                 account=cast(Any, SimpleNamespace(id="acc-existing", status=AccountStatus.ACTIVE)),
-                upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+                upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
                 upstream_control=proxy_module._WebSocketUpstreamControl(),
                 pending_requests=deque(),
                 pending_lock=anyio.Lock(),

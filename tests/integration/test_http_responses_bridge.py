@@ -160,7 +160,7 @@ async def _wait_for_event(event: asyncio.Event, *, timeout: float = _TEST_SYNC_T
 async def _replace_http_bridge_upstream_reader(
     service: proxy_module.ProxyService,
     session: proxy_module._HTTPBridgeSession,
-    upstream: proxy_module.UpstreamResponsesWebSocket,
+    upstream: proxy_module.UpstreamWebSocket,
 ) -> None:
     reader = session.upstream_reader
     if reader is not None:
@@ -1394,7 +1394,7 @@ def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) 
         affinity=proxy_module._AffinityPolicy(),
         request_model="gpt-5.4",
         account=cast(Account, SimpleNamespace(id=None, status=AccountStatus.ACTIVE, plan_type="plus")),
-        upstream=cast(proxy_module.UpstreamResponsesWebSocket, SimpleNamespace(close=_close)),
+        upstream=cast(proxy_module.UpstreamWebSocket, SimpleNamespace(close=_close)),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_lock=anyio.Lock(),
         pending_requests=deque(),
@@ -2249,7 +2249,7 @@ async def test_v1_responses_http_bridge_previous_response_alias_rejects_service_
     owner_session.account = account
     owner_session.unanchored_reservation_id = None
     owner_upstream = _FakeBridgeUpstreamWebSocket()
-    owner_session.upstream = cast(proxy_module.UpstreamResponsesWebSocket, owner_upstream)
+    owner_session.upstream = cast(proxy_module.UpstreamWebSocket, owner_upstream)
     owner_session.catalog_omission_quota_admission = CatalogOmissionQuotaAdmission(
         normalized_model="gpt-5.3-codex-spark",
         canonical_quota_key="codex_spark",
@@ -2299,7 +2299,7 @@ async def test_v1_responses_http_bridge_previous_response_alias_rejects_service_
         ),
         request_model="gpt-5.3-codex-spark",
         account=account,
-        upstream=cast(proxy_module.UpstreamResponsesWebSocket, fallback_upstream),
+        upstream=cast(proxy_module.UpstreamWebSocket, fallback_upstream),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),
@@ -7158,7 +7158,7 @@ async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_
     stale_upstream = _FakeBridgeUpstreamWebSocket("resp_backend_soft_stale")
     stale_session = _make_dummy_bridge_session(key)
     stale_session.account = stale_account
-    stale_session.upstream = cast(proxy_module.UpstreamResponsesWebSocket, stale_upstream)
+    stale_session.upstream = cast(proxy_module.UpstreamWebSocket, stale_upstream)
     stale_session.request_model = "gpt-5.1"
     stale_session.affinity = proxy_module._AffinityPolicy(
         key=prompt_cache_key,
@@ -8807,7 +8807,7 @@ async def test_http_bridge_stale_gate_retires_after_leading_rate_limit_telemetry
         affinity=proxy_module._AffinityPolicy(key="stale-after-rate-limits"),
         request_model="gpt-5.6-sol",
         account=cast(Account, SimpleNamespace(id="acct-stale-rate-limits", status=AccountStatus.ACTIVE)),
-        upstream=cast(proxy_module.UpstreamResponsesWebSocket, upstream),
+        upstream=cast(proxy_module.UpstreamWebSocket, upstream),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -8946,7 +8946,7 @@ async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_
         affinity=affinity,
         request_model="gpt-5.6-sol",
         account=account,
-        upstream=cast(proxy_module.UpstreamResponsesWebSocket, stale_upstream),
+        upstream=cast(proxy_module.UpstreamWebSocket, stale_upstream),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque([stale_request]),
         pending_lock=anyio.Lock(),
@@ -11282,7 +11282,7 @@ async def test_retry_http_bridge_precreated_request_releases_pending_lock_before
         ),
         request_model="gpt-5.1",
         account=cast(Account, SimpleNamespace(id="acct-retry", status=AccountStatus.ACTIVE)),
-        upstream=cast(proxy_module.UpstreamResponsesWebSocket, _SilentUpstreamWebSocket()),
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),
@@ -11353,7 +11353,7 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
         ),
         request_model="gpt-5.1",
         account=cast(Account, SimpleNamespace(id="acct-race", status=AccountStatus.ACTIVE)),
-        upstream=cast(proxy_module.UpstreamResponsesWebSocket, _SilentUpstreamWebSocket()),
+        upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),
@@ -11497,7 +11497,7 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
         await _replace_http_bridge_upstream_reader(
             service,
             session,
-            cast(proxy_module.UpstreamResponsesWebSocket, failing_upstream),
+            cast(proxy_module.UpstreamWebSocket, failing_upstream),
         )
 
     second = await async_client.post(
@@ -11611,7 +11611,7 @@ async def test_v1_responses_http_bridge_precreated_disconnect_returns_upstream_u
         await _replace_http_bridge_upstream_reader(
             service,
             session,
-            cast(proxy_module.UpstreamResponsesWebSocket, precreated_close_upstream),
+            cast(proxy_module.UpstreamWebSocket, precreated_close_upstream),
         )
 
     second = await async_client.post(
@@ -11728,7 +11728,7 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
         await _replace_http_bridge_upstream_reader(
             service,
             session,
-            cast(proxy_module.UpstreamResponsesWebSocket, _PreviousResponseNotFoundUpstreamWebSocket()),
+            cast(proxy_module.UpstreamWebSocket, _PreviousResponseNotFoundUpstreamWebSocket()),
         )
 
     second = await async_client.post(
@@ -11844,7 +11844,7 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_p
         await _replace_http_bridge_upstream_reader(
             service,
             session,
-            cast(proxy_module.UpstreamResponsesWebSocket, _InvalidRequestPreviousResponseUpstreamWebSocket()),
+            cast(proxy_module.UpstreamWebSocket, _InvalidRequestPreviousResponseUpstreamWebSocket()),
         )
 
     second = await async_client.post(

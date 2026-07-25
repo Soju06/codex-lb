@@ -9,6 +9,8 @@ Codex Live Voice setup creates a call over HTTP and then joins a control sideban
 ## Evidence
 
 - An authorized, bounded probe of Codex app 26.721.31836 (build 5828) observed `POST /backend-api/codex/realtime/calls`, a successful `Location: /v1/realtime/calls/{call_id}`, and app-derived `WS /backend-api/codex/{call_id}` against the configured proxy base. The observation retained no opaque id, credential, SDP, audio, transcript, or frame payload.
+- The SDK documentation describes related public `POST /v1/realtime/calls` and `POST /v1/realtime/client_secrets` endpoints. They establish the surrounding endpoint family but are not routes implemented by this private installed-app compatibility change.
+- Discovery stayed within the authorized account and endpoint workflow, sent no prompts or other content to unrelated users, and retained no media, private payload, opaque identifier, credential, or session artifact.
 - First-party Codex revision `99744cfe04806ebaa1e5d08e3e790070f852472b` distinguishes v3 `/v1/live/{call_id}` from legacy v1/v2 `/v1/realtime?...&call_id={call_id}`, appends the legacy call id after shaped query fields, and uses version-dependent `openai-alpha` values. The proxy preserves caller-supplied protocol context rather than guessing from call-id syntax.
 - Codex-LB's request-log producer persists the sideband as `request_kind=realtime_live` and `transport=websocket`. The current dashboard consumer enumerates accepted kinds and rejects that full row until this change adds the matching value.
 - The existing sticky-session table is suitable for an opaque reserved owner mapping, but ordinary list/delete paths must exclude and protect that namespace so internal call continuity never becomes operator session data.
@@ -25,8 +27,8 @@ The required-key rule does not add setup to the base install. Operators who do n
 
 - All ids, mappings, batches, waits, messages, close reasons, and cleanup work are bounded.
 - Missing/invalid keys fail before account selection; attachment rechecks current assignment and capacity.
-- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from persistence and diagnostics.
-- No new setting, dependency, migration, model, public route, navigation item, README section, `.env.example` line, docs page, or background scheduler is introduced.
+- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from request persistence and diagnostics; ownership persistence contains only the scoped digest and owner reference required for continuity.
+- No new setting, dependency, migration, model, dashboard navigation item, README section, `.env.example` line, background scheduler, public `/v1/realtime/calls`, or public `/v1/realtime/client_secrets` route is introduced. The user-facing guide documents this private boundary and links to the synced main `realtime-api-compat` capability.
 - No protocol is inferred, no `OpenAI-Beta` or `Sec-WebSocket-Protocol` is synthesized, and no event payload is interpreted.
 
 ## Failure modes
@@ -34,8 +36,9 @@ The required-key rule does not add setup to the base install. Operators who do n
 - Missing or unsupported successful `Location` → replace the unusable success with one credential-safe `503`; never replay the created call.
 - Conflicting immutable owner → preserve the original owner and fail closed.
 - Expired, cross-key, reassigned, paused, deleted, capped, or unavailable owner → deny attachment without substitution.
-- Routed handshake denial → preserve normalized status, suppress route credentials, and do not replay or penalize the account.
-- `InvalidProxy` → use the fixed live-only message; preserve ordinary Responses behavior.
+- Routed handshake denial or network failure → preserve normalized safe context and do not replay or penalize the account; ordinary Responses routed network fallback remains unchanged.
+- Direct Live `InvalidProxy`, `InvalidHandshake`, or `OSError` → use fixed credential-safe messages; preserve ordinary Responses behavior.
+- Private call-creation or sideband request row → retain request correlation and capability/status fields while omitting account identity, model content, upstream error text, failure metadata, call id, headers, query, body, and frame content.
 - Peer disconnect, oversize, cancellation, or close timeout → cancel and await owned work, close peers at most once, and release the lease once.
 - Reserved operator action → hide the row from lists and reject or skip single, bulk, and filtered deletion.
 - Dashboard request-log parse → accept the backend's `realtime_live` WebSocket row; do not weaken the field to arbitrary strings.
@@ -52,4 +55,4 @@ The required-key rule does not add setup to the base install. Operators who do n
 
 ## Operational notes
 
-The capability is zero-config and ships as one coherent unit. Existing request-log retention and sticky-session storage apply. There is no new monitoring or rollout knob. The dashboard parser change is user-visible and therefore subject to the repository's P5 media gate; the separate private no-media rule may block merge readiness even when textual verification is green.
+The capability is zero-config and ships as one coherent unit. Existing request-log retention and sticky-session storage apply. There is no new monitoring or rollout knob. The dashboard parser change is user-visible and therefore subject to the repository's P5 media gate.

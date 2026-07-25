@@ -36,9 +36,9 @@ import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
-    CodexResponsesWebSocket,
+    CodexUpstreamWebSocket,
     UpstreamWebSocketTransportError,
-    WebsocketsResponsesWebSocket,
+    WebsocketsUpstreamWebSocket,
 )
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
@@ -14957,7 +14957,7 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=regular_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, _FakeUpstreamWebSocket()),
+        upstream=cast(proxy_service.UpstreamWebSocket, _FakeUpstreamWebSocket()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15225,7 +15225,7 @@ async def test_http_bridge_token_invalidated_retries_then_fails_over(monkeypatch
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=first_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, _FakeUpstreamWebSocket()),
+        upstream=cast(proxy_service.UpstreamWebSocket, _FakeUpstreamWebSocket()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15308,7 +15308,7 @@ async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(mo
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15367,7 +15367,7 @@ async def test_http_bridge_recovery_permanent_auth_failure_keeps_auth_classifica
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15424,7 +15424,7 @@ async def test_http_bridge_recovery_auth_reconnect_failure_preserves_original_au
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15496,7 +15496,7 @@ async def test_http_bridge_keeps_previous_response_pinned_security_work_error(mo
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15568,7 +15568,7 @@ async def test_http_bridge_recovery_lane_does_not_retry_security_work_on_another
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.6-sol",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15659,7 +15659,7 @@ async def test_http_bridge_refuses_file_backed_proxy_anchor_security_work_retry(
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15885,7 +15885,7 @@ async def test_http_bridge_reports_missing_security_work_pool_before_original_wa
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=regular_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, _FakeUpstreamWebSocket()),
+        upstream=cast(proxy_service.UpstreamWebSocket, _FakeUpstreamWebSocket()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -15998,7 +15998,7 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
         ),
         request_model="gpt-5.1",
         account=rejected_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -16129,7 +16129,7 @@ async def test_http_bridge_security_retry_retires_rebound_session_when_resend_fa
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=rejected_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -16270,7 +16270,7 @@ async def test_http_bridge_security_retry_restores_codex_affinity_and_turn_alias
         affinity=affinity,
         request_model="gpt-5.1",
         account=rejected_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -16336,7 +16336,7 @@ async def test_http_bridge_does_not_replay_security_work_warning_after_response_
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=regular_account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -24624,7 +24624,7 @@ async def test_relay_upstream_websocket_emits_keepalive_while_upstream_is_silent
     relay = asyncio.create_task(
         service._relay_upstream_websocket_messages(
             cast(WebSocket, downstream),
-            cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+            cast(proxy_service.UpstreamWebSocket, upstream),
             account=_make_account("acc_ws_keepalive"),
             account_id_value="acc_ws_keepalive",
             pending_requests=pending_requests,
@@ -24702,7 +24702,7 @@ async def test_relay_upstream_websocket_emits_codex_keepalive_before_response_cr
     relay = asyncio.create_task(
         service._relay_upstream_websocket_messages(
             cast(WebSocket, downstream),
-            cast(proxy_service.UpstreamResponsesWebSocket, upstream),
+            cast(proxy_service.UpstreamWebSocket, upstream),
             account=_make_account("acc_ws_precreated_keepalive"),
             account_id_value="acc_ws_precreated_keepalive",
             pending_requests=pending_requests,
@@ -24783,7 +24783,7 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
 
     await service._relay_upstream_websocket_messages(
         cast(WebSocket, downstream),
-        cast(proxy_service.UpstreamResponsesWebSocket, _NetworkFailureUpstream()),
+        cast(proxy_service.UpstreamWebSocket, _NetworkFailureUpstream()),
         account=_make_account("acc_ws_network_failure"),
         account_id_value="acc_ws_network_failure",
         pending_requests=pending_requests,
@@ -24857,9 +24857,9 @@ async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incom
     downstream = _FakeDownstreamWebSocket()
     account = _make_account("acc_ws_ordinary_close")
     upstream = (
-        CodexResponsesWebSocket(_RoutedReceiveFailureWebSocket())
+        CodexUpstreamWebSocket(_RoutedReceiveFailureWebSocket())
         if routed
-        else WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+        else WebsocketsUpstreamWebSocket(cast(Any, _OrdinaryCloseConnection()))
     )
 
     await service._relay_upstream_websocket_messages(
@@ -35725,7 +35725,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_
         request_model="gpt-5.1",
         account=_make_account("acc_bridge_retry_fresh"),
         upstream=cast(
-            proxy_service.UpstreamResponsesWebSocket,
+            proxy_service.UpstreamWebSocket,
             SimpleNamespace(send_text=send_text, close=AsyncMock()),
         ),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
@@ -36893,7 +36893,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
         send_request_ids.append(get_request_id())
 
     send_text = AsyncMock(side_effect=capture_send_text)
-    upstream = cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    upstream = cast(proxy_service.UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-inline", None),
         headers={},
@@ -36968,7 +36968,7 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
         request_model="gpt-5.5",
         account=_make_account("acc_submit_network"),
         upstream=cast(
-            proxy_service.UpstreamResponsesWebSocket,
+            proxy_service.UpstreamWebSocket,
             SimpleNamespace(send_text=send_text, close=close),
         ),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
@@ -37035,7 +37035,7 @@ async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypat
         request_model="gpt-5.5",
         account=cast(Account, SimpleNamespace(id="acc-submit-queue-full")),
         upstream=cast(
-            proxy_service.UpstreamResponsesWebSocket,
+            proxy_service.UpstreamWebSocket,
             SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()),
         ),
         upstream_control=proxy_service._WebSocketUpstreamControl(),

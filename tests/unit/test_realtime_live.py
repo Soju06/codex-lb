@@ -11,10 +11,9 @@ from starlette.websockets import WebSocketState
 import app.core.clients.proxy as core_proxy_module
 import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.modules.proxy._service.realtime_live as realtime_live_module
-import app.modules.proxy.service as proxy_service_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
-    UpstreamResponsesWebSocket,
+    UpstreamWebSocket,
     UpstreamWebSocketMessage,
     normalize_realtime_call_id,
 )
@@ -26,6 +25,17 @@ from app.modules.proxy._service.realtime_live import (
     realtime_call_id_from_location,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+
+
+def _unscoped_api_key(*, key_id: str = "api-key-a") -> ApiKeyData:
+    return cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id=key_id,
+            account_assignment_scope_enabled=False,
+            assigned_account_ids=(),
+        ),
+    )
 
 
 class _FakeDownstreamWebSocket:
@@ -141,6 +151,7 @@ class _ProxyService(_RealtimeLiveMixin):
         *,
         owner_account_id: str = "account-a",
         current_account=None,
+        live_websocket_connector=None,
     ) -> None:
         self.account = account
         self.current_account = account if current_account is None else current_account
@@ -150,6 +161,7 @@ class _ProxyService(_RealtimeLiveMixin):
         self._load_balancer = _FakeLoadBalancer()
         self.decrypt_calls: list[str] = []
         self._encryptor = SimpleNamespace(decrypt=self._decrypt)
+        self._live_websocket_connector = live_websocket_connector
 
     def _repo_factory(self):
         return _FakeProxyRepoContext(self.accounts)
@@ -180,10 +192,16 @@ class _ProxyService(_RealtimeLiveMixin):
     [
         ("rtc_example", "rtc_example"),
         (" rtc_example-2 ", "rtc_example-2"),
+        ("rtc_example.with_dot~and-hyphen", "rtc_example.with_dot~and-hyphen"),
         ("123e4567-e89b-12d3-a456-426614174000", "123e4567-e89b-12d3-a456-426614174000"),
+        ("123E4567-E89B-12D3-A456-426614174000", "123e4567-e89b-12d3-a456-426614174000"),
         ("call_example", None),
         ("rtc_", None),
         ("rtc_bad/value", None),
+        ("rtc_bad$value", None),
+        ("rtc_" + ("a" * 253), None),
+        ("123e4567e89b12d3a456426614174000", None),
+        ("not-a-live-id", None),
     ],
 )
 def test_normalize_realtime_call_id(value: str, expected: str | None) -> None:
@@ -202,6 +220,24 @@ def test_realtime_call_id_from_exact_relative_or_absolute_location() -> None:
         realtime_call_id_from_location({"location": "/v1/realtime/calls/123e4567-e89b-12d3-a456-426614174000"})
         == "123e4567-e89b-12d3-a456-426614174000"
     )
+    assert (
+        realtime_call_id_from_location(
+            {"location": "https://api.openai.com/v1/realtime/calls/123E4567-E89B-12D3-A456-426614174000"}
+        )
+        == "123e4567-e89b-12d3-a456-426614174000"
+    )
+    assert (
+        realtime_call_id_from_location(
+            {"location": "/v1/realtime/calls/rtc_query?intent=quicksilver&token=private-query"}
+        )
+        == "rtc_query"
+    )
+    assert (
+        realtime_call_id_from_location(
+            {"location": ("https://api.openai.com/v1/realtime/calls/rtc_fragment?intent=quicksilver#opaque-fragment")}
+        )
+        == "rtc_fragment"
+    )
 
 
 @pytest.mark.parametrize(
@@ -214,7 +250,6 @@ def test_realtime_call_id_from_exact_relative_or_absolute_location() -> None:
         "//attacker.invalid/v1/realtime/calls/rtc_unsupported",
         "///v1/realtime/calls/rtc_unsupported",
         "v1/realtime/calls/rtc_unsupported",
-        "/v1/realtime/calls/rtc_unsupported?intent=quicksilver",
         "/v1/realtime/calls/rtc_unsupported#fragment",
         "/v1/realtime/calls/rtc_unsupported/extra",
         "ftp://api.openai.com/v1/realtime/calls/rtc_unsupported",
@@ -227,11 +262,13 @@ def test_realtime_call_id_rejects_unsupported_location_paths(location: str) -> N
 
 
 @pytest.mark.asyncio
-async def test_realtime_sdp_is_never_emitted_by_opt_in_payload_trace(
+async def test_realtime_call_core_trace_is_content_free_on_success(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     secret_sdp = b"v=0\r\na=ice-ufrag:secret-ice-credential\r\n"
+    account_id = "private-account-identifier"
+    access_token = "private-account-token"
 
     class Response:
         status = 201
@@ -239,7 +276,7 @@ async def test_realtime_sdp_is_never_emitted_by_opt_in_payload_trace(
         headers = {"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_trace"}
 
         async def read(self) -> bytes:
-            return b"v=answer\r\n"
+            return b"v=answer\r\na=ice-pwd:secret-answer-credential\r\n"
 
     class RequestContext:
         async def __aenter__(self):
@@ -252,24 +289,104 @@ async def test_realtime_sdp_is_never_emitted_by_opt_in_payload_trace(
         def request(self, *_args, **_kwargs):
             return RequestContext()
 
-    settings = core_proxy_module.get_settings().model_copy(update={"trace_channels": {"upstream_payload"}})
+    settings = core_proxy_module.get_settings().model_copy(
+        update={"trace_channels": {"upstream_summary", "upstream_payload"}}
+    )
     monkeypatch.setattr(core_proxy_module, "get_settings", lambda: settings)
 
-    with caplog.at_level(logging.DEBUG, logger="app.core.clients.proxy"):
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="app.core.clients.proxy"):
         response = await core_proxy_module.codex_control_request(
             "realtime/calls",
             method="POST",
             payload=secret_sdp,
             query_params=[],
             headers={"content-type": "application/sdp"},
-            access_token="account-token",
-            account_id="account-a",
+            access_token=access_token,
+            account_id=account_id,
             session=cast(Any, Session()),
         )
 
     assert response.status_code == 201
-    assert "secret-ice-credential" not in caplog.text
+    assert "upstream_request_start" in caplog.text
+    assert "upstream_request_complete" in caplog.text
+    assert "account_id=<redacted>" in caplog.text
     assert all(getattr(record, "event", None) != "upstream_request_payload" for record in caplog.records)
+    for secret in (
+        account_id,
+        access_token,
+        "secret-ice-credential",
+        "secret-answer-credential",
+        "rtc_trace",
+    ):
+        assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_core_trace_redacts_upstream_failure_details(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account_id = "private-failure-account"
+    access_token = "private-failure-token"
+    raw_error_code = "malicious-upstream-code"
+    raw_error_message = "malicious upstream body with private-failure-token"
+
+    class Response:
+        status = 403
+        status_code = 403
+        reason = "malicious forbidden reason"
+        headers = {"content-type": "application/json", "x-private-header": "private-header-value"}
+
+        async def read(self) -> bytes:
+            return (
+                b'{"error":{"code":"malicious-upstream-code","message":'
+                b'"malicious upstream body with private-failure-token","type":"permission_error"}}'
+            )
+
+    class RequestContext:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def request(self, *_args, **_kwargs):
+            return RequestContext()
+
+    settings = core_proxy_module.get_settings().model_copy(
+        update={"trace_channels": {"upstream_summary", "upstream_payload"}}
+    )
+    monkeypatch.setattr(core_proxy_module, "get_settings", lambda: settings)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="app.core.clients.proxy"):
+        with pytest.raises(ProxyResponseError) as raised:
+            await core_proxy_module.codex_control_request(
+                "realtime/calls",
+                method="POST",
+                payload=b"v=0\r\na=ice-pwd:failure-sdp-secret\r\n",
+                query_params=[],
+                headers={"content-type": "application/sdp"},
+                access_token=access_token,
+                account_id=account_id,
+                session=cast(Any, Session()),
+            )
+
+    assert raised.value.status_code == 403
+    assert "upstream_request_start" in caplog.text
+    assert "upstream_request_complete" in caplog.text
+    assert "error_code=upstream_error error_message=Upstream request failed" in caplog.text
+    for secret in (
+        account_id,
+        access_token,
+        raw_error_code,
+        raw_error_message,
+        "private-header-value",
+        "failure-sdp-secret",
+    ):
+        assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -373,7 +490,7 @@ async def test_live_relay_forwards_downstream_text_and_binary_verbatim() -> None
             self.close_frames.append((code, reason))
 
     upstream = Upstream()
-    wrapped = realtime_live_module._CloseOnceLiveWebSocket(cast(UpstreamResponsesWebSocket, upstream))
+    wrapped = realtime_live_module._CloseOnceLiveWebSocket(cast(UpstreamWebSocket, upstream))
     await _relay_live_websocket(
         cast(Any, Downstream()),
         wrapped,
@@ -384,6 +501,72 @@ async def test_live_relay_forwards_downstream_text_and_binary_verbatim() -> None
     assert upstream.text == ["event"]
     assert upstream.binary == [b"audio"]
     assert upstream.close_frames == [(1001, "client done")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("frame_key", "allowed_frame", "oversized_frame"),
+    [
+        ("text", "€", "€a"),
+        ("bytes", b"abc", b"abcd"),
+    ],
+    ids=["text-utf8-bytes", "binary-bytes"],
+)
+async def test_live_relay_enforces_downstream_frame_byte_cap(
+    frame_key: str,
+    allowed_frame: str | bytes,
+    oversized_frame: str | bytes,
+) -> None:
+    class Downstream:
+        def __init__(self) -> None:
+            self.application_state = WebSocketState.CONNECTED
+            self.messages = [
+                {"type": "websocket.receive", frame_key: allowed_frame},
+                {"type": "websocket.receive", frame_key: oversized_frame},
+            ]
+            self.close_codes: list[int] = []
+
+        async def receive(self) -> dict[str, Any]:
+            return self.messages.pop(0)
+
+        async def send_text(self, text: str) -> None:
+            raise AssertionError(f"unexpected downstream text: {text}")
+
+        async def send_bytes(self, data: bytes) -> None:
+            raise AssertionError(f"unexpected downstream bytes: {data!r}")
+
+        async def close(self, *, code: int, reason: str = "") -> None:
+            del reason
+            self.close_codes.append(code)
+            self.application_state = WebSocketState.DISCONNECTED
+
+    class Upstream(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sent_text: list[str] = []
+            self.sent_bytes: list[bytes] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, data: bytes) -> None:
+            self.sent_bytes.append(data)
+
+    downstream = Downstream()
+    upstream = Upstream()
+    wrapped = realtime_live_module._CloseOnceLiveWebSocket(upstream)
+
+    await _relay_live_websocket(
+        cast(Any, downstream),
+        wrapped,
+        max_message_bytes=3,
+        close_timeout_seconds=1,
+    )
+
+    assert upstream.sent_text == ([allowed_frame] if isinstance(allowed_frame, str) else [])
+    assert upstream.sent_bytes == ([allowed_frame] if isinstance(allowed_frame, bytes) else [])
+    assert upstream.close_calls == [(1009, "")]
+    assert downstream.close_codes == [1009]
 
 
 @pytest.mark.asyncio
@@ -477,7 +660,7 @@ async def test_live_relay_forwards_upstream_frames_and_close_code() -> None:
 
     downstream = Downstream()
     upstream = Upstream()
-    wrapped = realtime_live_module._CloseOnceLiveWebSocket(cast(UpstreamResponsesWebSocket, upstream))
+    wrapped = realtime_live_module._CloseOnceLiveWebSocket(cast(UpstreamWebSocket, upstream))
     await _relay_live_websocket(
         cast(Any, downstream),
         wrapped,
@@ -541,7 +724,7 @@ async def test_live_relay_cancellation_stops_both_direction_tasks() -> None:
         def archive_received(self, _message: UpstreamWebSocketMessage) -> None:
             return None
 
-    wrapped = realtime_live_module._CloseOnceLiveWebSocket(cast(UpstreamResponsesWebSocket, Upstream()))
+    wrapped = realtime_live_module._CloseOnceLiveWebSocket(cast(UpstreamWebSocket, Upstream()))
 
     task = asyncio.create_task(
         _relay_live_websocket(
@@ -561,7 +744,7 @@ async def test_live_relay_cancellation_stops_both_direction_tasks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease(monkeypatch) -> None:
+async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease() -> None:
     class HangingDownstream(_FakeDownstreamWebSocket):
         def __init__(self) -> None:
             super().__init__()
@@ -583,21 +766,20 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease(m
         chatgpt_account_id="chatgpt-account-a",
         codex_installation_id="installation-a",
     )
-    service = _ProxyService(account, lease)
     downstream = HangingDownstream()
     upstream = _FakeUpstreamWebSocket()
 
     async def fake_connect_live_websocket(*_args, **_kwargs):
         return upstream
 
-    monkeypatch.setattr(proxy_service_module, "connect_live_websocket", fake_connect_live_websocket)
+    service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
     task = asyncio.create_task(
         service.proxy_realtime_live_websocket(
             cast(Any, downstream),
             "rtc_example",
             {},
             protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
-            api_key=cast(ApiKeyData, SimpleNamespace(id="api-key-a")),
+            api_key=_unscoped_api_key(),
         )
     )
     await asyncio.wait_for(downstream.accepted_event.wait(), timeout=1)
@@ -612,16 +794,29 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease(m
 
 
 @pytest.mark.asyncio
-async def test_live_sideband_fails_closed_when_fresh_owner_snapshot_is_unavailable() -> None:
+@pytest.mark.parametrize(
+    "status",
+    [
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+        AccountStatus.PAUSED,
+        AccountStatus.REAUTH_REQUIRED,
+        AccountStatus.DEACTIVATED,
+    ],
+    ids=["rate-limited", "quota-exceeded", "paused", "reauth-required", "deactivated"],
+)
+async def test_live_sideband_fails_closed_when_fresh_owner_snapshot_is_unavailable(
+    status: AccountStatus,
+) -> None:
     lease = cast(AccountLease, object())
     selected_account = SimpleNamespace(id="account-a")
-    paused_account = SimpleNamespace(
+    unavailable_account = SimpleNamespace(
         id="account-a",
-        status=AccountStatus.PAUSED,
+        status=status,
         access_token_encrypted="current-encrypted-token",
     )
-    service = _ProxyService(selected_account, lease, current_account=paused_account)
-    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
+    service = _ProxyService(selected_account, lease, current_account=unavailable_account)
+    api_key = _unscoped_api_key()
     downstream = _FakeDownstreamWebSocket()
 
     with pytest.raises(ProxyResponseError) as raised:
@@ -643,7 +838,7 @@ async def test_live_sideband_fails_closed_when_fresh_owner_snapshot_is_unavailab
 @pytest.mark.asyncio
 async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypts() -> None:
     service = _ProxyService(None, None)
-    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
+    api_key = _unscoped_api_key()
     downstream = _FakeDownstreamWebSocket()
 
     with pytest.raises(ProxyResponseError) as raised:

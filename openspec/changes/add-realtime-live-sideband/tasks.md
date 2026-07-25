@@ -12,6 +12,7 @@
 
 - [x] 3.1 Add and observe public HTTP regressions for required keys, final owner after initial/failover/refresh success, immutable binding, and missing/unsupported `Location` fail-closed behavior.
 - [x] 3.2 Implement dedicated required-key routing, final-success observation, bounded call-id parsing, and one non-replayed `503 realtime_call_binding_failed`; observe the focused HTTP suite pass.
+- [x] 3.3 Document the authorized endpoint family: implement only private installed-app `POST /backend-api/codex/realtime/calls`; treat SDK-documented `POST /v1/realtime/calls` and `POST /v1/realtime/client_secrets` as related context, not public routes.
 
 ## 4. Returned Location to every sideband
 
@@ -22,6 +23,7 @@
 
 - [x] 5.1 Add and observe regressions for cross-key denial, reassignment/unavailable/capped owners, current persisted credentials, no refresh/fallback, and exactly-once stream-lease release.
 - [x] 5.2 Implement exact-owner resolution, assignment enforcement, reattach leasing, fresh owner loading, and fail-closed policy; observe focused service/integration suites pass.
+- [x] 5.3 Cover every non-active persisted owner status and fail closed before token decryption or upstream attachment.
 
 ## 6. Reserved persistence and operator cleanup
 
@@ -32,15 +34,25 @@
 
 - [x] 7.1 Add and observe connector/relay regressions for protocol headers/query order, definitive-denial no-replay, cancelled-handshake cleanup, bounded peer close, paired-task cancellation, and live-vs-Responses `InvalidProxy` behavior.
 - [x] 7.2 Implement the typed live connector and deterministic relay ownership while preserving ordinary Responses behavior; adapt the current-main fake close contract and observe focused unit suites pass.
+- [x] 7.3 Disable both definitive-handshake and routed-network replay for live sideband while proving ordinary Responses keeps default routed network fallback.
 
 ## 8. Privacy and request-log observability
 
 - [x] 8.1 Add and observe public-seam regressions proving trace/archive sinks retain no SDP or frame bodies, live path/query data is redacted, and the producer emits `realtime_live`/`websocket` rows.
 - [x] 8.2 Implement trace suppression and credential-safe request logging; observe focused privacy and request-log suites pass.
+- [x] 8.3 Exercise redaction at the Uvicorn accepted-handshake log sink and pass a typed account-safe privacy policy through the realtime call adapter so every covered failure branch suppresses identifiers and exception details.
 
 ## 9. Zero-config and final focused verification
 
-- [x] 9.1 Prove the private feature requires an existing registered key while base proxy/dashboard startup needs no new setting or setup; verify no setting, migration, dependency, model, nav, README, `.env.example`, or docs path changed.
+- [x] 9.1 Prove the private feature requires an existing registered key while base proxy/dashboard startup needs no new setting or setup; verify no setting, migration, dependency, model, dashboard navigation, README, or `.env.example` path changed.
 - [x] 9.2 Run all affected Voice and existing Responses regressions, dashboard schema tests, current-main upstream-path test, targeted frontend lint/type/test, Ruff check/format, ty, LSP diagnostics, architecture/simplicity ratchets, and `git diff --check`.
 - [x] 9.3 Run `openspec validate add-realtime-live-sideband --strict`, `openspec validate --specs --strict`, and `/opsx:verify`-style completeness/correctness/coherence review; record final status.
-- [x] 9.4 Verify the exact 27-path allowlist (`18 M`, `9 A`, `0 D`), oracle-byte equivalence or documented divergence, no symlink/media/private-path content, canonical WORKTREE digest, attribution plan, and uncommitted `FOCUSED_GREEN` stop.
+- [x] 9.4 Verify the changed-source allowlist plus absence of symlink, media, and private-path content using only project-verifiable evidence.
+- [x] 9.5 Sync `realtime-api-compat` into the main spec and narrative context while retaining this active change; publish `docs/live-voice.md` with a main-spec backlink and register it in the MkDocs navigation.
+- [x] 9.6 Re-run successor-focused and complete Python/frontend/OpenSpec/docs validation after the review repairs; record the project-verifiable results.
+
+## 10. Final advisory repair pass
+
+- [x] 10.1 Add red-to-green regressions and fixed credential-safe branches for realtime call summary traces, unexpected/decryption failures, and direct Live handshake denials without changing ordinary control or Responses behavior.
+- [x] 10.2 Exercise `realtime_live`/`websocket` persistence through `/api/request-logs`, replace hidden connector lookup with an explicit service seam, and cleanly rename shared `*ResponsesWebSocket*` transport types to generic `*UpstreamWebSocket*` names without aliases.
+- [x] 10.3 Re-run focused and complete Python/frontend/OpenSpec/docs/static/runtime verification and record the project-verifiable results.

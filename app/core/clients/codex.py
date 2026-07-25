@@ -241,6 +241,7 @@ class CodexClient:
         *,
         route: ResolvedUpstreamRoute,
         retry_handshake_status: bool = True,
+        retry_network_errors: bool = True,
         **kwargs: Any,
     ) -> CodexWebSocketResult:
         if route is None:
@@ -273,6 +274,14 @@ class CodexClient:
                     await context.__aexit__(None, None, None)
                 handshake_status = _transport_error_status_code(exc)
                 if handshake_status is not None and not retry_handshake_status:
+                    raise _transport_error(
+                        "websocket",
+                        endpoint.id,
+                        exc,
+                        failure_phase="connect",
+                        retryable_same_contract=False,
+                    ) from None
+                if handshake_status is None and not retry_network_errors:
                     raise _transport_error(
                         "websocket",
                         endpoint.id,
@@ -368,7 +377,7 @@ async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **
             context = await context
         websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
         return websocket, _SessionOwnedWebSocketContext(context, session)
-    except Exception:
+    except BaseException:
         await session.close()
         raise
 

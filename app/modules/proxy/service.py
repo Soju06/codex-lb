@@ -51,7 +51,7 @@ from app.core.clients.proxy import stream_responses as core_stream_responses  # 
 from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
-    UpstreamResponsesWebSocket as UpstreamResponsesWebSocket,
+    UpstreamWebSocket as UpstreamWebSocket,
 )
 from app.core.clients.proxy_websocket import (
     connect_live_websocket as connect_live_websocket,
@@ -339,7 +339,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
 )
-from app.modules.proxy._service.realtime_live import _RealtimeLiveMixin
+from app.modules.proxy._service.realtime_live import LiveWebSocketConnector, _RealtimeLiveMixin
 from app.modules.proxy._service.refresh import (
     ensure_fresh_with_budget as _recover_fresh_account,
 )
@@ -921,10 +921,16 @@ class ProxyService(
     _WebSocketMixin,
     _HTTPBridgeMixin,
 ):
-    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+    def __init__(
+        self,
+        repo_factory: ProxyRepoFactory,
+        *,
+        live_websocket_connector: LiveWebSocketConnector = connect_live_websocket,
+    ) -> None:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()

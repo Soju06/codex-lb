@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from datetime import timedelta, timezone
@@ -1661,6 +1662,67 @@ async def test_sticky_insert_if_absent_never_rebinds_existing_owner(db_setup):
     assert first_owner == "acc_live_immutable_a"
     assert second_owner == "acc_live_immutable_a"
     assert persisted_owner == "acc_live_immutable_a"
+
+
+@pytest.mark.asyncio
+async def test_stale_expiry_cleanup_cannot_delete_fresh_rebound_owner(async_client) -> None:
+    from sqlalchemy import select, update
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    old_owner = await _import_account(async_client, "acc_live_expiry_old", "live-expiry-old@example.com")
+    new_owner = await _import_account(async_client, "acc_live_expiry_new", "live-expiry-new@example.com")
+    key = "\ncodex_live_call:expiry-race"
+    stale_read = asyncio.Event()
+    rebound = asyncio.Event()
+
+    async with SessionLocal() as setup_session:
+        repo = StickySessionsRepository(setup_session)
+        await repo.upsert(key, old_owner, kind=StickySessionKind.CODEX_SESSION)
+        await setup_session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(updated_at=utcnow() - timedelta(hours=3))
+        )
+        await setup_session.commit()
+
+    class PausedAfterStaleReadRepository(StickySessionsRepository):
+        async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
+            row = await super().get_entry(key, kind=kind)
+            await self._session.commit()
+            stale_read.set()
+            await rebound.wait()
+            return row
+
+    async with SessionLocal() as stale_session, SessionLocal() as rebinding_session:
+        stale_repo = PausedAfterStaleReadRepository(stale_session)
+        resolution = asyncio.create_task(
+            stale_repo.get_account_id(
+                key,
+                kind=StickySessionKind.CODEX_SESSION,
+                max_age_seconds=60,
+            )
+        )
+        await asyncio.wait_for(stale_read.wait(), timeout=1)
+        await StickySessionsRepository(rebinding_session).upsert(
+            key,
+            new_owner,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        rebound.set()
+        resolved_owner = await asyncio.wait_for(resolution, timeout=1)
+
+    async with SessionLocal() as verification_session:
+        persisted_owner = await verification_session.scalar(
+            select(StickySession.account_id).where(
+                StickySession.key == key,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+        )
+
+    assert resolved_owner == new_owner
+    assert persisted_owner == new_owner
 
 
 def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:

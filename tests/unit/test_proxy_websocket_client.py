@@ -19,10 +19,10 @@ import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
-    CodexResponsesWebSocket,
+    CodexUpstreamWebSocket,
     RealtimeWebSocketProtocol,
     UpstreamWebSocketTransportError,
-    WebsocketsResponsesWebSocket,
+    WebsocketsUpstreamWebSocket,
     connect_live_websocket,
     connect_responses_websocket,
 )
@@ -197,7 +197,7 @@ async def test_live_direct_adapter_preserves_abnormal_close_code_and_reason() ->
         async def recv(self):
             raise ConnectionClosedError(Close(1011, "server restart"), None)
 
-    websocket = WebsocketsResponsesWebSocket(
+    websocket = WebsocketsUpstreamWebSocket(
         cast(Any, Connection()),
         uses_proxy=False,
         preserve_close_semantics=True,
@@ -218,7 +218,7 @@ async def test_codex_responses_websocket_closes_owned_client_when_context_exit_f
             raise RuntimeError("websocket context exit failed")
 
     codex_client = _FailingCodexClient()
-    websocket = CodexResponsesWebSocket(
+    websocket = CodexUpstreamWebSocket(
         _FakeCodexWebSocket(),
         context=_FailingContext(),
         codex_client=cast(Any, codex_client),
@@ -409,6 +409,7 @@ async def test_connect_live_websocket_routed_call_disables_denial_replay_and_ena
 
     call = codex_client.calls[0]
     assert call["retry_handshake_status"] is False
+    assert call["retry_network_errors"] is False
     assert call["heartbeat"] == 120.0
     assert call["max_msg_size"] == 4321
 
@@ -514,6 +515,106 @@ async def test_connect_live_websocket_preserves_handshake_status_without_endpoin
     assert _proxy_error_code(exc_info.value) == "upstream_websocket_handshake_failed"
     assert "ep_secret" not in (_proxy_error_message(exc_info.value) or "")
     assert "sensitive" not in (_proxy_error_message(exc_info.value) or "")
+
+
+@pytest.mark.asyncio
+async def test_connect_live_websocket_direct_invalid_status_is_credential_safe(monkeypatch):
+    denial = Response(
+        403,
+        "malicious denial reason with account-secret",
+        Headers(
+            {
+                "Content-Type": "application/json",
+                "X-Private-Credential": "private-header-secret",
+            }
+        ),
+        body=(b'{"error":{"code":"malicious_error","message":"malicious denial body with bearer-secret"}}'),
+    )
+
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise InvalidStatus(denial)
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            allow_direct_egress=True,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert _proxy_error_code(exc_info.value) == "upstream_websocket_handshake_failed"
+    assert _proxy_error_type(exc_info.value) == "server_error"
+    message = _proxy_error_message(exc_info.value)
+    assert message == "Upstream websocket handshake failed with HTTP 403"
+    assert message is not None
+    for secret in (
+        "account-secret",
+        "private-header-secret",
+        "bearer-secret",
+        "malicious_error",
+    ):
+        assert secret not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_message"),
+    [
+        (InvalidHandshake("private-handshake-secret"), "Invalid upstream websocket handshake"),
+        (OSError("private-network-secret"), "Upstream websocket connection failed"),
+    ],
+    ids=["invalid-handshake", "os-error"],
+)
+async def test_connect_live_websocket_redacts_generic_direct_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected_message: str,
+) -> None:
+    async def fake_websocket_connect(url: str, **kwargs):
+        del url, kwargs
+        raise failure
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_live_websocket(
+            "rtc_live",
+            {},
+            "access-token",
+            "account-123",
+            protocol=RealtimeWebSocketProtocol.LIVE_V3,
+            allow_direct_egress=True,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_message(exc_info.value) == expected_message
+    assert "private" not in expected_message
 
 
 @pytest.mark.asyncio
@@ -812,7 +913,7 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_exception", [False, True], ids=["without-exception", "with-exception"])
 async def test_routed_websocket_error_message_defers_ordinary_code_to_relay(with_exception: bool):
-    websocket = CodexResponsesWebSocket(
+    websocket = CodexUpstreamWebSocket(
         _FakeCodexErrorWebSocket(ConnectionResetError("upstream reset") if with_exception else None)
     )
 

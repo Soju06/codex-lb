@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.convertors import Convertor, register_url_convertor
 from starlette.websockets import WebSocketState
 
 from app.core import usage as usage_core
@@ -42,8 +43,16 @@ from app.core.auth.dependencies import (
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
-from app.core.clients.proxy import CodexControlResponse, ProxyResponseError, _is_native_codex_request
-from app.core.clients.proxy_websocket import RealtimeWebSocketProtocol
+from app.core.clients.proxy import (
+    CodexControlRequestPrivacyPolicy,
+    CodexControlResponse,
+    ProxyResponseError,
+    _is_native_codex_request,
+)
+from app.core.clients.proxy_websocket import (
+    REALTIME_LIVE_CALL_ID_ROUTE_REGEX,
+    RealtimeWebSocketProtocol,
+)
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ResetCreditFetchError,
@@ -301,6 +310,20 @@ class _V1ResetCreditFreshCredentials:
         self.access_token_encrypted = access_token_encrypted
         self.chatgpt_account_id = chatgpt_account_id
 
+
+class _RealtimeLiveCallIdConvertor(Convertor[str]):
+    """Case-preserving path segment convertor for installed-app live call ids."""
+
+    regex = REALTIME_LIVE_CALL_ID_ROUTE_REGEX
+
+    def convert(self, value: str) -> str:
+        return value
+
+    def to_string(self, value: str) -> str:
+        return value
+
+
+register_url_convertor("realtime_live_call_id", _RealtimeLiveCallIdConvertor())
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -709,7 +732,22 @@ def _codex_control_response(response: CodexControlResponse) -> Response:
     )
 
 
+def _realtime_call_error_response(request: Request, *, status_code: int) -> JSONResponse:
+    return _logged_error_json_response(
+        request,
+        status_code,
+        openai_error(
+            "realtime_call_unavailable",
+            "Realtime call could not be created",
+            error_type="server_error",
+        ),
+    )
+
+
 class _CodexControlAdapter(Protocol):
+    @property
+    def privacy_policy(self) -> CodexControlRequestPrivacyPolicy: ...
+
     @property
     def success_account_callback(self) -> Callable[[str], None] | None: ...
 
@@ -722,6 +760,7 @@ class _CodexControlAdapter(Protocol):
 
 
 class _PassthroughCodexControlAdapter:
+    privacy_policy: Final[CodexControlRequestPrivacyPolicy] = CodexControlRequestPrivacyPolicy.STANDARD
     success_account_callback: Final[None] = None
 
     async def finalize(
@@ -738,6 +777,10 @@ class _PassthroughCodexControlAdapter:
 class _RealtimeCallCodexControlAdapter:
     api_key: ApiKeyData
     _successful_account_id: str | None = None
+
+    @property
+    def privacy_policy(self) -> CodexControlRequestPrivacyPolicy:
+        return CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
 
     @property
     def success_account_callback(self) -> Callable[[str], None]:
@@ -771,7 +814,7 @@ class _RealtimeCallCodexControlAdapter:
                 api_key=self.api_key,
             )
         except Exception:
-            logger.exception("Failed to persist realtime call owner binding")
+            logger.error("Failed to persist realtime call owner binding")
             return _logged_error_json_response(
                 request,
                 503,
@@ -814,10 +857,21 @@ async def _codex_control_proxy(
             headers=request.headers,
             codex_session_affinity=True,
             api_key=api_key,
+            privacy_policy=adapter.privacy_policy,
             success_account_callback=adapter.success_account_callback,
         )
     except ProxyResponseError as exc:
+        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
+            return _realtime_call_error_response(request, status_code=exc.status_code)
         return _logged_error_json_response(request, exc.status_code, exc.payload)
+    except Exception:
+        if adapter.privacy_policy is not CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
+            raise
+        logger.warning(
+            "Realtime call creation failed before upstream response request_id=%s",
+            get_request_id(),
+        )
+        return _realtime_call_error_response(request, status_code=503)
     return await adapter.finalize(request, context, response)
 
 
@@ -1279,7 +1333,7 @@ async def _proxy_realtime_live_websocket_route(
             await websocket.close(code=1011)
 
 
-@v1_ws_router.websocket("/live/{call_id}")
+@v1_ws_router.websocket("/live/{call_id:realtime_live_call_id}")
 async def v1_live_websocket(
     websocket: WebSocket,
     call_id: str,
@@ -1295,7 +1349,7 @@ async def v1_live_websocket(
     )
 
 
-@ws_router.websocket("/{call_id}")
+@ws_router.websocket("/{call_id:realtime_live_call_id}")
 async def backend_codex_realtime_live_websocket(
     websocket: WebSocket,
     call_id: str,

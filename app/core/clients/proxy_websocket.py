@@ -66,9 +66,18 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = _HOP_BY_HOP_HEADER_NAMES | frozenset(
 _RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
 _RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS = frozenset({"responses=experimental"})
 _OPENAI_LIVE_BASE_URL = "https://api.openai.com/v1"
-_LIVE_CALL_ID_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-")
 _LIVE_CALL_ID_MAX_LENGTH = 256
-_LIVE_CALL_UUID_PATTERN = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+_LIVE_CALL_ID_RTC_PREFIX = "rtc_"
+# Keep the route convertor and normalizer on one grammar: total-length-capped rtc_
+# ids using the installed-app character set, or a hyphenated UUID form.
+_LIVE_CALL_ID_CHAR_CLASS = r"A-Za-z0-9._~\-"
+_LIVE_CALL_UUID_CORE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_LIVE_CALL_ID_RTC_MAX_SUFFIX_LENGTH = _LIVE_CALL_ID_MAX_LENGTH - len(_LIVE_CALL_ID_RTC_PREFIX)
+REALTIME_LIVE_CALL_ID_ROUTE_REGEX = (
+    rf"(?:{_LIVE_CALL_ID_RTC_PREFIX}[{_LIVE_CALL_ID_CHAR_CLASS}]{{1,{_LIVE_CALL_ID_RTC_MAX_SUFFIX_LENGTH}}}"
+    rf"|{_LIVE_CALL_UUID_CORE})"
+)
+_LIVE_CALL_ID_PATTERN = re.compile(rf"{REALTIME_LIVE_CALL_ID_ROUTE_REGEX}\Z")
 
 
 class RealtimeWebSocketProtocol(StrEnum):
@@ -122,14 +131,11 @@ def normalize_realtime_call_id(value: str) -> str | None:
     normalized = value.strip()
     if not normalized or len(normalized) > _LIVE_CALL_ID_MAX_LENGTH:
         return None
-    rtc_shaped = (
-        normalized.startswith("rtc_")
-        and len(normalized) > len("rtc_")
-        and all(character in _LIVE_CALL_ID_CHARACTERS for character in normalized)
-    )
-    if not rtc_shaped and _LIVE_CALL_UUID_PATTERN.fullmatch(normalized) is None:
+    if _LIVE_CALL_ID_PATTERN.fullmatch(normalized) is None:
         return None
-    return normalized
+    if normalized.startswith(_LIVE_CALL_ID_RTC_PREFIX):
+        return normalized
+    return normalized.lower()
 
 
 @dataclass(slots=True)
@@ -194,7 +200,7 @@ async def _raise_websocket_send_error(
     ) from None
 
 
-class UpstreamResponsesWebSocket(Protocol):
+class UpstreamWebSocket(Protocol):
     async def send_text(self, text: str) -> None: ...
 
     async def send_bytes(self, data: bytes) -> None: ...
@@ -206,7 +212,7 @@ class UpstreamResponsesWebSocket(Protocol):
     def response_header(self, name: str) -> str | None: ...
 
 
-class WebsocketsResponsesWebSocket:
+class WebsocketsUpstreamWebSocket:
     def __init__(
         self,
         connection: ClientConnection,
@@ -290,7 +296,7 @@ class WebsocketsResponsesWebSocket:
         return str(value)
 
 
-class CodexResponsesWebSocket:
+class CodexUpstreamWebSocket:
     def __init__(
         self,
         websocket: Any,
@@ -384,10 +390,10 @@ class CodexResponsesWebSocket:
         return self._response_headers.get(name.lower())
 
 
-class ArchivingResponsesWebSocket:
+class ArchivingUpstreamWebSocket:
     def __init__(
         self,
-        wrapped: UpstreamResponsesWebSocket,
+        wrapped: UpstreamWebSocket,
         *,
         url: str,
         headers: dict[str, str],
@@ -678,7 +684,7 @@ async def _connect_upstream_websocket(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
     policy: _UpstreamWebSocketPolicy,
-) -> UpstreamResponsesWebSocket:
+) -> UpstreamWebSocket:
     settings = get_settings()
     if policy.include_responses_beta:
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
@@ -703,6 +709,7 @@ async def _connect_upstream_websocket(
                     url,
                     route=route,
                     retry_handshake_status=policy.retry_handshake_status,
+                    retry_network_errors=policy.retry_routed_network_errors,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
                     max_msg_size=settings.max_sse_event_bytes,
@@ -758,8 +765,8 @@ async def _connect_upstream_websocket(
             if owns_codex_client:
                 await active_codex_client.close()
             raise
-        return ArchivingResponsesWebSocket(
-            CodexResponsesWebSocket(
+        return ArchivingUpstreamWebSocket(
+            CodexUpstreamWebSocket(
                 websocket,
                 context=context if hasattr(context, "__aenter__") else None,
                 codex_client=active_codex_client,
@@ -806,10 +813,21 @@ async def _connect_upstream_websocket(
         ) from exc
     except InvalidStatus as exc:
         response = exc.response
-        message = response.reason_phrase or f"Upstream websocket error: HTTP {response.status_code}"
+        if policy.credential_safe_connect_errors:
+            status_code = response.status_code if 400 <= response.status_code <= 599 else 502
+            payload = openai_error(
+                "upstream_websocket_handshake_failed",
+                f"Upstream websocket handshake failed with HTTP {status_code}",
+                error_type="server_error",
+            )
+        else:
+            status_code = response.status_code
+            message = response.reason_phrase or f"Upstream websocket error: HTTP {status_code}"
+            payload = _handshake_error_payload(status_code, message, response.headers, response.body)
         raise ProxyResponseError(
-            response.status_code,
-            _handshake_error_payload(response.status_code, message, response.headers, response.body),
+            status_code,
+            payload,
+            failure_phase="connect",
         ) from exc
     except InvalidProxy as exc:
         message = (
@@ -822,10 +840,14 @@ async def _connect_upstream_websocket(
             openai_error("upstream_unavailable", message, error_type="server_error"),
         ) from exc
     except InvalidHandshake as exc:
-        message = str(exc) or "Invalid upstream websocket handshake"
+        message = (
+            "Invalid upstream websocket handshake"
+            if policy.credential_safe_connect_errors
+            else (str(exc) or "Invalid upstream websocket handshake")
+        )
         raise ProxyResponseError(
             502,
-            openai_error("upstream_unavailable", message, error_type="server_error"),
+            openai_error("upstream_unavailable", message),
         ) from exc
     except OSError as exc:
         error_code = process_network_error_code(
@@ -833,15 +855,16 @@ async def _connect_upstream_websocket(
             fallback="upstream_unavailable",
             include_permanent_dns=proxy_url is None,
         )
+        message = "Upstream websocket connection failed" if policy.credential_safe_connect_errors else str(exc)
         raise ProxyResponseError(
             502,
-            openai_error(error_code, str(exc)),
+            openai_error(error_code, message),
             failure_phase="connect",
             retryable_same_contract=error_code == PROCESS_NETWORK_UNAVAILABLE_CODE,
         ) from exc
 
-    return ArchivingResponsesWebSocket(
-        WebsocketsResponsesWebSocket(
+    return ArchivingUpstreamWebSocket(
+        WebsocketsUpstreamWebSocket(
             response,
             uses_proxy=proxy_url is not None,
             preserve_close_semantics=policy.preserve_close_semantics,
@@ -863,7 +886,7 @@ async def connect_responses_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
-) -> UpstreamResponsesWebSocket:
+) -> UpstreamWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     return await _connect_upstream_websocket(
@@ -890,7 +913,7 @@ async def connect_live_websocket(
     allow_direct_egress: bool = False,
     base_url: str = _OPENAI_LIVE_BASE_URL,
     query_params: list[tuple[str, str]] | None = None,
-) -> UpstreamResponsesWebSocket:
+) -> UpstreamWebSocket:
     """Connect an account-bound Codex realtime sideband without refreshing auth."""
 
     return await _connect_upstream_websocket(

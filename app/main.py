@@ -671,8 +671,8 @@ def create_app() -> FastAPI:
     add_exception_handlers(app)
     add_trusted_proxy_headers_middleware(app)
 
-    app.include_router(proxy_api.router)
     app.include_router(proxy_api.realtime_call_router)
+    app.include_router(proxy_api.router)
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
     app.include_router(proxy_api.wham_router)

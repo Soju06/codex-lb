@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -257,6 +258,59 @@ async def test_websocket_definitive_handshake_status_can_disable_route_replay(
 
 
 @pytest.mark.asyncio
+async def test_websocket_network_error_can_disable_route_fallback(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    class _NetworkFailSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def ws_connect(self, url: str, **kwargs: Any) -> object:
+            self.calls.append({"url": url, **kwargs})
+            raise OSError("network unavailable")
+
+    session = _NetworkFailSession()
+    client = CodexClient(session)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.open_ws_with_route_metadata(
+            "wss://upstream.test",
+            route=route,
+            retry_network_errors=False,
+        )
+
+    assert getattr(exc_info.value, "status_code", None) is None
+    assert getattr(exc_info.value, "retryable_same_contract") is False
+    assert len(session.calls) == 1
+    assert "retry_network_errors" not in session.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_websocket_network_error_uses_route_fallback_by_default(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    class _FailFirstNetworkSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def ws_connect(self, url: str, **kwargs: Any) -> object:
+            self.calls.append({"url": url, **kwargs})
+            if len(self.calls) == 1:
+                raise OSError("network unavailable")
+            return object()
+
+    session = _FailFirstNetworkSession()
+    result = await CodexClient(session).open_ws_with_route_metadata(
+        "wss://upstream.test",
+        route=route,
+    )
+
+    assert len(session.calls) == 2
+    assert result.fallback_used is True
+    assert result.route.endpoint_id == "ep_2"
+
+
+@pytest.mark.asyncio
 async def test_websocket_connector_error_preserves_pre_dispatch_retry_provenance(
     route: ResolvedUpstreamRoute,
 ) -> None:
@@ -314,3 +368,62 @@ async def test_socks_websocket_uses_proxy_connector_and_closes_session(
 
     assert session.context.exited is True
     assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_socks_websocket_cancel_during_enter_closes_local_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080, "u", "p"),
+    )
+    entered = asyncio.Event()
+
+    class _HangingWsContext:
+        def __init__(self) -> None:
+            self.exited = False
+            self.owned = False
+
+        async def __aenter__(self) -> object:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("hanging enter must be cancelled")
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            self.exited = True
+
+    class _HangingSocksWsSession:
+        latest: "_HangingSocksWsSession | None" = None
+
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.context = _HangingWsContext()
+            self.closed = 0
+            _HangingSocksWsSession.latest = self
+
+        def ws_connect(self, url: str, **kwargs: Any) -> _HangingWsContext:
+            del url, kwargs
+            return self.context
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    _SocksConnector.calls = []
+    monkeypatch.setattr("app.core.clients.codex.ProxyConnector", _SocksConnector)
+    monkeypatch.setattr("app.core.clients.codex.aiohttp.ClientSession", _HangingSocksWsSession)
+    client = CodexClient(_Session())
+
+    task = asyncio.create_task(client.open_ws_with_route_metadata("wss://upstream.test", route=route))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    session = _HangingSocksWsSession.latest
+    assert session is not None
+    assert session.closed == 1
+    assert session.context.exited is False
+    assert session.context.owned is False

@@ -53,12 +53,52 @@ class StickySessionsRepository:
         row = await self.get_entry(key, kind=kind)
         if row is None:
             return None
-        if max_age_seconds is not None:
-            cutoff = utcnow() - timedelta(seconds=max_age_seconds)
-            if to_utc_naive(row.updated_at) < cutoff:
-                await self.delete(key, kind=kind)
-                return None
-        return row.account_id
+        if max_age_seconds is None:
+            return row.account_id
+        cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+        observed_updated_at = to_utc_naive(row.updated_at)
+        if observed_updated_at >= cutoff:
+            return row.account_id
+
+        # Release the read snapshot before attempting a SQLite write upgrade.
+        # The DELETE remains safe because every value observed above participates
+        # in the predicate; a concurrent rebind therefore wins the comparison.
+        await self._session.commit()
+        statement = (
+            delete(StickySession)
+            .where(
+                StickySession.key == key,
+                StickySession.kind == kind,
+                StickySession.account_id == row.account_id,
+                StickySession.updated_at == observed_updated_at,
+                StickySession.updated_at < cutoff,
+            )
+            .returning(StickySession.key)
+        )
+        current: tuple[str, datetime] | None = None
+        async with sqlite_writer_section():
+            deleted_key = (await self._session.execute(statement)).scalar_one_or_none()
+            if deleted_key is None:
+                current = (
+                    (
+                        await self._session.execute(
+                            select(StickySession.account_id, StickySession.updated_at).where(
+                                StickySession.key == key,
+                                StickySession.kind == kind,
+                            )
+                        )
+                    )
+                    .tuples()
+                    .one_or_none()
+                )
+            await self._session.commit()
+
+        if deleted_key is not None or current is None:
+            return None
+        current_account_id, current_updated_at = current
+        if to_utc_naive(current_updated_at) < cutoff:
+            return None
+        return current_account_id
 
     async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
         if not key:

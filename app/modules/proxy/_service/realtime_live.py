@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import sys
 import time
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
@@ -16,13 +15,10 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 from app.core.clients.proxy import ProxyResponseError, apply_codex_installation_headers
 from app.core.clients.proxy_websocket import (
     RealtimeWebSocketProtocol,
-    UpstreamResponsesWebSocket,
+    UpstreamWebSocket,
     UpstreamWebSocketMessage,
     UpstreamWebSocketTransportError,
     normalize_realtime_call_id,
-)
-from app.core.clients.proxy_websocket import (
-    connect_live_websocket as core_connect_live_websocket,
 )
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
@@ -47,6 +43,8 @@ _REALTIME_CALL_CLEANUP_BATCH_SIZE = 250
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _UNAVAILABLE_LIVE_OWNER_STATUSES = frozenset(
     {
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
         AccountStatus.PAUSED,
         AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
@@ -65,7 +63,7 @@ class _AccountLeaseReleaser(Protocol):
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
 
 
-class _LiveWebSocketConnector(Protocol):
+class LiveWebSocketConnector(Protocol):
     async def __call__(
         self,
         call_id: str,
@@ -77,13 +75,14 @@ class _LiveWebSocketConnector(Protocol):
         route: ResolvedUpstreamRoute | None,
         allow_direct_egress: bool,
         query_params: list[tuple[str, str]],
-    ) -> UpstreamResponsesWebSocket: ...
+    ) -> UpstreamWebSocket: ...
 
 
 class _RealtimeLiveServiceProtocol(Protocol):
     _encryptor: _AccessTokenDecryptor
     _load_balancer: _AccountLeaseReleaser
     _repo_factory: ProxyRepoFactory
+    _live_websocket_connector: LiveWebSocketConnector
 
     async def _select_account_with_budget_compatible(
         self,
@@ -110,7 +109,7 @@ class _RealtimeLiveServiceProtocol(Protocol):
     async def _write_request_log(
         self,
         *,
-        account_id: str,
+        account_id: str | None,
         api_key: ApiKeyData,
         request_id: str,
         model: str | None,
@@ -128,28 +127,23 @@ class _RealtimeLiveServiceProtocol(Protocol):
         upstream_proxy_pool_id: str | None,
         upstream_proxy_endpoint_id: str | None,
         upstream_proxy_fallback_used: bool | None,
+        upstream_proxy_fail_closed_reason: str | None,
     ) -> None: ...
-
-
-def _service_connect_live_websocket() -> _LiveWebSocketConnector:
-    service_module = sys.modules.get("app.modules.proxy.service")
-    if service_module is not None:
-        return cast(
-            _LiveWebSocketConnector,
-            getattr(service_module, "connect_live_websocket", core_connect_live_websocket),
-        )
-    return core_connect_live_websocket
 
 
 def realtime_call_id_from_location(headers: Mapping[str, str]) -> str | None:
     location = next((value for key, value in headers.items() if key.lower() == "location"), None)
-    if not location or "?" in location or "#" in location:
+    if not location:
         return None
 
-    parsed = urlparse(location)
-    root_relative = not parsed.scheme and not parsed.netloc and location == parsed.path
+    # Match the pinned first-party decoder: everything from the first query
+    # delimiter onward is ignored before path inspection. A bare fragment or
+    # semicolon parameter remains part of the path input and fails closed.
+    location_path = location.split("?", maxsplit=1)[0]
+    parsed = urlparse(location_path)
+    root_relative = not parsed.scheme and not parsed.netloc and location_path == parsed.path
     absolute_http = parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
-    if parsed.params or not (root_relative or absolute_http):
+    if parsed.params or parsed.query or parsed.fragment or not (root_relative or absolute_http):
         return None
 
     path_segments = parsed.path.split("/")
@@ -193,7 +187,7 @@ async def _safe_close_downstream(websocket: WebSocket, *, code: int, reason: str
 
 
 class _CloseOnceLiveWebSocket:
-    def __init__(self, wrapped: UpstreamResponsesWebSocket) -> None:
+    def __init__(self, wrapped: UpstreamWebSocket) -> None:
         self._wrapped = wrapped
         self._close_task: asyncio.Task[None] | None = None
 
@@ -443,7 +437,9 @@ class _RealtimeLiveMixin:
 
         proxy = cast(_RealtimeLiveServiceProtocol, self)
         owner_account_id = await self._resolve_realtime_call_owner(normalized_call_id, api_key=api_key)
-        if owner_account_id is None:
+        if owner_account_id is None or (
+            api_key.account_assignment_scope_enabled and owner_account_id not in api_key.assigned_account_ids
+        ):
             raise ProxyResponseError(
                 404,
                 openai_error("realtime_call_not_found", "Realtime call binding not found or expired"),
@@ -478,11 +474,9 @@ class _RealtimeLiveMixin:
                 ),
             )
 
-        upstream: UpstreamResponsesWebSocket | None = None
+        upstream: UpstreamWebSocket | None = None
         relay_upstream: _CloseOnceLiveWebSocket | None = None
         log_status = "error"
-        log_error_code: str | None = None
-        log_error_message: str | None = None
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         route: ResolvedUpstreamRoute | None = None
         try:
@@ -517,13 +511,13 @@ class _RealtimeLiveMixin:
             access_token = proxy._encryptor.decrypt(encrypted_access_token)
             forwarded_headers = apply_codex_installation_headers(
                 {key: value for key, value in headers.items() if key.lower() != "x-codex-installation-id"},
-                getattr(account, "codex_installation_id", None),
+                account.codex_installation_id,
             )
             route = await proxy._resolve_upstream_route_for_account(
                 account,
                 operation="realtime_live_websocket",
             )
-            upstream = await _service_connect_live_websocket()(
+            upstream = await proxy._live_websocket_connector(
                 normalized_call_id,
                 forwarded_headers,
                 access_token,
@@ -549,24 +543,16 @@ class _RealtimeLiveMixin:
         except WebSocketDisconnect:
             log_status = "success"
         except asyncio.CancelledError:
-            log_error_code = "cancelled"
-            log_error_message = "Realtime live websocket cancelled"
             await _safe_close_downstream(websocket, code=1011)
             raise
         except ProxyResponseError:
-            log_error_code = "upstream_error"
-            log_error_message = "Realtime live websocket handshake failed"
             if websocket.application_state == WebSocketState.CONNECTED:
                 await _safe_close_downstream(websocket, code=1011)
                 return
             raise
-        except UpstreamWebSocketTransportError as exc:
-            log_error_code = exc.error_code
-            log_error_message = "Realtime live websocket transport failed"
+        except UpstreamWebSocketTransportError:
             await _safe_close_downstream(websocket, code=1011)
         except Exception as exc:
-            log_error_code = "realtime_live_unavailable"
-            log_error_message = "Realtime live websocket failed"
             if websocket.application_state == WebSocketState.CONNECTED:
                 await _safe_close_downstream(websocket, code=1011)
                 return
@@ -586,45 +572,29 @@ class _RealtimeLiveMixin:
                     except Exception:
                         logger.warning("Failed to close realtime live upstream websocket")
                         log_status = "error"
-                        if log_error_code is None:
-                            log_error_code = "upstream_close_failed"
-                            log_error_message = "Realtime live upstream close failed"
             finally:
                 await proxy._load_balancer.release_account_lease(account_lease)
             try:
                 await proxy._write_request_log(
-                    account_id=account.id,
+                    account_id=None,
                     api_key=api_key,
                     request_id=request_id,
                     model=None,
                     latency_ms=int((time.monotonic() - start) * 1000),
                     status=log_status,
                     request_kind="realtime_live",
-                    error_code=log_error_code,
-                    error_message=log_error_message,
+                    error_code=None,
+                    error_message=None,
                     transport=_REQUEST_TRANSPORT_WEBSOCKET,
                     useragent=useragent,
                     useragent_group=useragent_group,
                     client_ip=client_ip,
-                    conversation_id=conversation_id,
-                    upstream_proxy_route_mode=(
-                        getattr(upstream, "upstream_proxy_route_mode", None)
-                        if upstream is not None
-                        else (route.mode if route is not None else None)
-                    ),
-                    upstream_proxy_pool_id=(
-                        getattr(upstream, "upstream_proxy_pool_id", None)
-                        if upstream is not None
-                        else (route.pool_id if route is not None else None)
-                    ),
-                    upstream_proxy_endpoint_id=(
-                        getattr(upstream, "upstream_proxy_endpoint_id", None)
-                        if upstream is not None
-                        else (route.endpoint_id if route is not None else None)
-                    ),
-                    upstream_proxy_fallback_used=(
-                        getattr(upstream, "upstream_proxy_fallback_used", None) if upstream is not None else None
-                    ),
+                    conversation_id=None,
+                    upstream_proxy_route_mode=None,
+                    upstream_proxy_pool_id=None,
+                    upstream_proxy_endpoint_id=None,
+                    upstream_proxy_fallback_used=None,
+                    upstream_proxy_fail_closed_reason=None,
                 )
             except Exception:
                 logger.exception("Failed to write realtime live websocket request log")

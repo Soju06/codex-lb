@@ -1,4 +1,10 @@
-## ADDED Requirements
+# realtime-api-compat Specification
+
+## Purpose
+
+Define private Codex Live Voice call-owner continuity, authenticated sideband routing, transport privacy, and dashboard/operator contracts without implementing the public OpenAI Realtime API.
+
+## Requirements
 
 ### Requirement: Realtime call creation binds the final account under a required proxy key
 

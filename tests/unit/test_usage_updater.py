@@ -2274,6 +2274,74 @@ async def test_usage_refresh_free_downgrade_confirmation_is_per_account(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_free_downgrade_reset_only_clears_the_reporting_account(monkeypatch) -> None:
+    """Clearing one account's pending downgrade must not discard another's.
+
+    Two accounts each hold a pending observation; only the one that reports a
+    recognized paid plan may be reset, so the other still confirms on its own
+    next ``free`` observation."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    plans_by_account: dict[str, list[str]] = {
+        "acc_reset_self": ["free", "plus"],
+        "acc_reset_other": ["free", "free"],
+    }
+    calls: dict[str, int] = {}
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token
+        key = str(account_id)
+        index = min(calls.get(key, 0), len(plans_by_account[key]) - 1)
+        calls[key] = index + 1
+        return UsagePayload.model_validate(
+            {
+                "plan_type": plans_by_account[key][index],
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    resetting = _make_account("acc_reset_self", "acc_reset_self", email="self@example.com")
+    resetting.workspace_id = None
+    resetting.plan_type = "plus"
+    other = _make_account("acc_reset_other", "acc_reset_other", email="other@example.com")
+    other.workspace_id = None
+    other.plan_type = "plus"
+    accounts_repo.accounts_by_id[resetting.id] = resetting
+    accounts_repo.accounts_by_id[other.id] = other
+
+    # Both accounts record one pending free observation.
+    await updater.force_refresh(resetting)
+    await updater.force_refresh(other)
+    observations = usage_updater_module._workspace_less_free_plan_observations
+    assert observations.get(resetting.id) == 1
+    assert observations.get(other.id) == 1
+
+    # A paid payload for the first account must clear only its own entry.
+    await updater.force_refresh(resetting)
+    assert resetting.id not in observations
+    assert observations.get(other.id) == 1
+
+    # The untouched account therefore still confirms on its own second sighting.
+    await updater.force_refresh(other)
+    assert other.plan_type == "free"
+    assert resetting.plan_type == "plus"
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_confirms_free_downgrade_on_second_probe(monkeypatch) -> None:
     """Force probe shares the confirmation path: two probes reporting ``free``
     persist the downgrade without reauthentication."""

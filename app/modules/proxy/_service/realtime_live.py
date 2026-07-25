@@ -143,9 +143,16 @@ def _service_connect_live_websocket() -> _LiveWebSocketConnector:
 
 def realtime_call_id_from_location(headers: Mapping[str, str]) -> str | None:
     location = next((value for key, value in headers.items() if key.lower() == "location"), None)
-    if not location:
+    if not location or "?" in location or "#" in location:
         return None
-    path_segments = urlparse(location).path.split("/")
+
+    parsed = urlparse(location)
+    root_relative = not parsed.scheme and not parsed.netloc and location == parsed.path
+    absolute_http = parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+    if parsed.params or not (root_relative or absolute_http):
+        return None
+
+    path_segments = parsed.path.split("/")
     if len(path_segments) != 5 or path_segments[:4] != ["", "v1", "realtime", "calls"]:
         return None
     return normalize_realtime_call_id(path_segments[4])

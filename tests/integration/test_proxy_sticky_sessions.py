@@ -4,6 +4,7 @@ import base64
 import json
 from datetime import timedelta, timezone
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from sqlalchemy import text
@@ -15,6 +16,11 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._service.realtime_live import (
+    _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
+    realtime_call_affinity_key,
+)
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.usage.repository import UsageRepository
 
@@ -1655,3 +1661,95 @@ async def test_sticky_insert_if_absent_never_rebinds_existing_owner(db_setup):
     assert first_owner == "acc_live_immutable_a"
     assert second_owner == "acc_live_immutable_a"
     assert persisted_owner == "acc_live_immutable_a"
+
+
+def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
+    api_key_a = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
+    api_key_b = cast(ApiKeyData, SimpleNamespace(id="api-key-b"))
+
+    key_a = realtime_call_affinity_key("rtc_secret", api_key_a)
+    key_b = realtime_call_affinity_key("rtc_secret", api_key_b)
+
+    assert key_a != key_b
+    assert "rtc_secret" not in key_a
+    assert "api-key-a" not in key_a
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_owner_binding_is_immutable_and_persists_only_digest(async_client):
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    account_a = await _import_account(async_client, "acc_live_binding_a", "live-binding-a@example.com")
+    account_b = await _import_account(async_client, "acc_live_binding_b", "live-binding-b@example.com")
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-live-binding"))
+    service = get_proxy_service_for_app(async_client._transport.app)
+
+    call_id = await service.bind_realtime_call_owner(
+        response_headers={"Location": "/v1/realtime/calls/rtc_secret"},
+        account_id=account_a,
+        api_key=api_key,
+    )
+
+    affinity_key = realtime_call_affinity_key("rtc_secret", api_key)
+    async with SessionLocal() as session:
+        persisted_owner = await StickySessionsRepository(session).get_account_id(
+            affinity_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    assert call_id == "rtc_secret"
+    assert persisted_owner == account_a
+    assert "rtc_secret" not in affinity_key
+    assert "api-key-live-binding" not in affinity_key
+
+    with pytest.raises(RuntimeError, match="already bound"):
+        await service.bind_realtime_call_owner(
+            response_headers={"Location": "/v1/realtime/calls/rtc_secret"},
+            account_id=account_b,
+            api_key=api_key,
+        )
+
+    async with SessionLocal() as session:
+        persisted_owner = await StickySessionsRepository(session).get_account_id(
+            affinity_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+    assert persisted_owner == account_a
+
+
+@pytest.mark.asyncio
+async def test_resolve_missing_realtime_call_does_not_purge_other_bindings(async_client):
+    from sqlalchemy import select, update
+
+    from app.db.models import StickySession
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    account_id = await _import_account(async_client, "acc_live_expired", "live-expired@example.com")
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-live-expired"))
+    affinity_key = realtime_call_affinity_key("rtc_retained", api_key)
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            affinity_key,
+            account_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == affinity_key)
+            .values(updated_at=utcnow() - timedelta(seconds=_REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS + 1))
+        )
+        await session.commit()
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    resolved_owner = await service._resolve_realtime_call_owner("rtc_missing", api_key=api_key)
+
+    async with SessionLocal() as session:
+        retained_row = (
+            await session.execute(select(StickySession).where(StickySession.key == affinity_key))
+        ).scalar_one()
+
+    assert resolved_owner is None
+    assert retained_row.account_id == account_id

@@ -809,8 +809,16 @@ async def test_codex_realtime_call_requires_api_key_even_when_global_auth_is_dis
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("location", "call_id"),
+    [
+        ("/v1/realtime/calls/rtc_123", "rtc_123"),
+        ("https://api.openai.com/v1/realtime/calls/rtc_absolute", "rtc_absolute"),
+    ],
+    ids=["root-relative", "absolute-https"],
+)
 async def test_codex_realtime_call_accepts_valid_key_for_remote_client_when_global_auth_is_disabled(
-    async_client, monkeypatch
+    async_client, monkeypatch, location: str, call_id: str
 ):
     account_id = await _import_account(async_client, "acc_codex_realtime", "codex-realtime@example.com")
     auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-forward")
@@ -838,7 +846,7 @@ async def test_codex_realtime_call_accepts_valid_key_for_remote_client_when_glob
         return core_proxy.CodexControlResponse(
             status_code=201,
             body=b"v=answer\r\n",
-            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_123"},
+            headers={"content-type": "application/sdp", "location": location},
         )
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
@@ -851,7 +859,7 @@ async def test_codex_realtime_call_accepts_valid_key_for_remote_client_when_glob
 
     assert response.status_code == 201
     assert response.content == b"v=answer\r\n"
-    assert response.headers["location"] == "/v1/realtime/calls/rtc_123"
+    assert response.headers["location"] == location
     assert calls == [
         (
             "realtime/calls",
@@ -866,7 +874,7 @@ async def test_codex_realtime_call_accepts_valid_key_for_remote_client_when_glob
     assert isinstance(calls[0][6], float)
     assert calls[0][6] > 0
 
-    affinity_key = realtime_call_affinity_key("rtc_123", api_key)
+    affinity_key = realtime_call_affinity_key(call_id, api_key)
     async with SessionLocal() as session:
         binding = (
             await session.execute(
@@ -877,7 +885,7 @@ async def test_codex_realtime_call_accepts_valid_key_for_remote_client_when_glob
             )
         ).scalar_one()
     assert binding.account_id == account_id
-    assert "rtc_123" not in binding.key
+    assert call_id not in binding.key
 
 
 @pytest.mark.asyncio
@@ -1004,8 +1012,31 @@ async def test_codex_realtime_call_without_bindable_location_fails_closed(async_
         "/unrelated/live/rtc_unsupported",
         "realtime/calls/rtc_unsupported",
         "/unrelated/realtime/calls/rtc_unsupported",
+        "//attacker.invalid/v1/realtime/calls/rtc_unsupported",
+        "///v1/realtime/calls/rtc_unsupported",
+        "v1/realtime/calls/rtc_unsupported",
+        "/v1/realtime/calls/rtc_unsupported?intent=quicksilver",
+        "/v1/realtime/calls/rtc_unsupported#fragment",
+        "/v1/realtime/calls/rtc_unsupported/extra",
+        "ftp://api.openai.com/v1/realtime/calls/rtc_unsupported",
+        "https:///v1/realtime/calls/rtc_unsupported",
+        "https://api.openai.com/v1/realtime/calls/rtc_unsupported;param",
     ],
-    ids=["relative-live", "unrelated-live", "relative-realtime-calls", "unrelated-realtime-calls"],
+    ids=[
+        "relative-live",
+        "unrelated-live",
+        "relative-realtime-calls",
+        "unrelated-realtime-calls",
+        "network-path-reference",
+        "ambiguous-leading-slashes",
+        "relative-exact-path",
+        "query",
+        "fragment",
+        "extra-segment",
+        "unsupported-scheme",
+        "absolute-without-authority",
+        "path-parameters",
+    ],
 )
 async def test_codex_realtime_call_rejects_unsupported_location_without_binding_or_replay(
     async_client,
@@ -1050,7 +1081,14 @@ async def test_codex_realtime_call_rejects_unsupported_location_without_binding_
 
 
 @pytest.mark.asyncio
-async def test_codex_realtime_call_binds_final_failover_account(async_client, monkeypatch):
+@pytest.mark.parametrize(
+    ("failure_status", "initial_attempts"),
+    [(401, 2), (502, 1)],
+    ids=["post-refresh-auth-failover", "previsible-connect-failover"],
+)
+async def test_codex_realtime_call_binds_final_failover_account(
+    async_client, monkeypatch, failure_status: int, initial_attempts: int
+):
     await _import_account(async_client, "acc_codex_realtime_a", "codex-realtime-a@example.com")
     await _import_account(async_client, "acc_codex_realtime_b", "codex-realtime-b@example.com")
     auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-failover")
@@ -1063,9 +1101,12 @@ async def test_codex_realtime_call_binds_final_failover_account(async_client, mo
             rejected_account_id = account_id
         captured_account_ids.append(account_id)
         if account_id == rejected_account_id:
+            if failure_status == 401:
+                raise ProxyResponseError(401, {"error": {"code": "invalid_api_key", "message": "retry elsewhere"}})
             raise ProxyResponseError(
-                401,
-                {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+                502,
+                {"error": {"code": "upstream_unavailable", "message": "[Errno 104] Connection reset by peer"}},
+                failure_phase="connect",
             )
         return core_proxy.CodexControlResponse(
             status_code=201,
@@ -1088,9 +1129,9 @@ async def test_codex_realtime_call_binds_final_failover_account(async_client, mo
     )
 
     assert response.status_code == 201
-    assert len(captured_account_ids) == 3
-    assert captured_account_ids[0] == captured_account_ids[1]
-    assert captured_account_ids[2] != captured_account_ids[0]
+    assert len(captured_account_ids) == initial_attempts + 1
+    assert captured_account_ids[:initial_attempts] == [captured_account_ids[0]] * initial_attempts
+    assert captured_account_ids[-1] != captured_account_ids[0]
 
     affinity_key = realtime_call_affinity_key("rtc_failover", api_key)
     async with SessionLocal() as session:

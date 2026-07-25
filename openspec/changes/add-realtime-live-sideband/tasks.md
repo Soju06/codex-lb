@@ -35,7 +35,7 @@
 
 ## 8. Privacy and request-log observability
 
-- [x] 8.1 Add and observe public-seam regressions proving SDP/frame bodies are absent, live path/query data is redacted, no archive runs, and the producer emits `realtime_live`/`websocket` rows.
+- [x] 8.1 Add and observe public-seam regressions proving trace/archive sinks retain no SDP or frame bodies, live path/query data is redacted, and the producer emits `realtime_live`/`websocket` rows.
 - [x] 8.2 Implement trace suppression and credential-safe request logging; observe focused privacy and request-log suites pass.
 
 ## 9. Zero-config and final focused verification

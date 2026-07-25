@@ -1383,3 +1383,180 @@ def test_responses_websocket_builder_leaves_native_codex_unchanged():
     assert headers["User-Agent"] == native_ua
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
+
+
+@pytest.fixture
+def live_websocket_connect(monkeypatch):
+    connector = AsyncMock(return_value=_FakeConnection())
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", connector)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+    return connector
+
+
+@pytest.mark.asyncio
+async def test_live_connector_uses_frameless_url(live_websocket_connect) -> None:
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {"OpenAI-Alpha": "quicksilver=v2"},
+        "access-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        query_params=[("intent", "quicksilver"), ("architecture", "avas")],
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+
+    assert (
+        live_websocket_connect.await_args.args[0]
+        == "wss://api.openai.com/v1/live/rtc_example?intent=quicksilver&architecture=avas"
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_connector_uses_legacy_realtime_url_with_one_ordered_call_id(
+    live_websocket_connect,
+) -> None:
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {},
+        "access-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.REALTIME_V1_V2,
+        query_params=[("intent", "quicksilver"), ("architecture", "avas")],
+        base_url="https://api.openai.com/v1?configured=one",
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+
+    assert (
+        live_websocket_connect.await_args.args[0]
+        == "wss://api.openai.com/v1/realtime?configured=one&intent=quicksilver&architecture=avas&call_id=rtc_example"
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_connector_rejects_duplicate_legacy_call_id(live_websocket_connect) -> None:
+    with pytest.raises(ValueError, match="must not include call_id"):
+        await proxy_websocket_module.connect_live_websocket(
+            "rtc_example",
+            {},
+            "access-token",
+            "account-a",
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.REALTIME_V1_V2,
+            query_params=[("call_id", "rtc_duplicate"), ("intent", "quicksilver")],
+            allow_direct_egress=True,
+        )
+
+    live_websocket_connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_v3_connector_rejects_query_call_id_before_connect(live_websocket_connect) -> None:
+    with pytest.raises(ValueError, match="must not include call_id"):
+        await proxy_websocket_module.connect_live_websocket(
+            "rtc_a",
+            {},
+            "access-token",
+            "account-a",
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+            query_params=[("intent", "quicksilver"), ("call_id", "rtc_b")],
+            allow_direct_egress=True,
+        )
+
+    live_websocket_connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_connector_replaces_identity_and_preserves_frameless_metadata(
+    live_websocket_connect,
+) -> None:
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {
+            "Authorization": "Bearer codex-lb-key",
+            "ChatGPT-Account-ID": "wrong-account",
+            "User-Agent": "frameless-desktop/1.0",
+            "OpenAI-Alpha": "quicksilver=v2",
+            "OpenAI-Beta": "realtime=v1, responses=experimental, responses_websockets=2026-07-01",
+            "x-oai-attestation": "attestation",
+            "x-session-id": "session-a",
+            "session-id": "session-b",
+            "thread-id": "thread-a",
+            "originator": "frameless_desktop",
+            "X-OpenAI-Fedramp": "true",
+            "x-openai-internal-codex-residency": "us",
+            "Sec-WebSocket-Key": "must-not-forward",
+        },
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+    first_call = live_websocket_connect.await_args_list[0]
+    lowered = {key.lower(): value for key, value in first_call.kwargs["additional_headers"].items()}
+
+    assert lowered["authorization"] == "Bearer account-token"
+    assert lowered["chatgpt-account-id"] == "account-a"
+    assert lowered["openai-alpha"] == "quicksilver=v2"
+    assert lowered["x-oai-attestation"] == "attestation"
+    assert lowered["x-session-id"] == "session-a"
+    assert lowered["session-id"] == "session-b"
+    assert lowered["thread-id"] == "thread-a"
+    assert lowered["originator"] == "frameless_desktop"
+    assert lowered["x-openai-fedramp"] == "true"
+    assert lowered["x-openai-internal-codex-residency"] == "us"
+    assert lowered["openai-beta"] == "realtime=v1"
+    assert "sec-websocket-key" not in lowered
+    assert "codex-lb-key" not in str(first_call)
+    assert first_call.kwargs["user_agent_header"] == "frameless-desktop/1.0"
+
+    responses_only_websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {"OpenAI-Beta": "responses=experimental, responses_websockets=2026-07-01"},
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    await responses_only_websocket.close()
+    responses_only_headers = live_websocket_connect.await_args_list[1].kwargs["additional_headers"]
+    assert "openai-beta" not in {key.lower() for key in responses_only_headers}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "supplied_alpha",
+    ["quicksilver=v1", None, "quicksilver=v2"],
+    ids=["v1", "v2", "v3"],
+)
+async def test_live_connector_preserves_version_specific_alpha_without_synthesis(
+    live_websocket_connect,
+    supplied_alpha: str | None,
+) -> None:
+    inbound = {"OpenAI-Alpha": supplied_alpha} if supplied_alpha is not None else {}
+
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        inbound,
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    await websocket.close()
+    headers = live_websocket_connect.await_args.kwargs["additional_headers"]
+    lowered = {key.lower(): value for key, value in headers.items()}
+
+    assert lowered.get("openai-alpha") == supplied_alpha
+    assert "openai-beta" not in lowered
+    assert "sec-websocket-protocol" not in lowered

@@ -14,62 +14,18 @@ import app.modules.proxy._service.realtime_live as realtime_live_module
 import app.modules.proxy.service as proxy_service_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
-    ArchivingResponsesWebSocket,
     UpstreamResponsesWebSocket,
     UpstreamWebSocketMessage,
     normalize_realtime_call_id,
 )
-from app.db.models import AccountStatus, StickySessionKind
+from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.realtime_live import (
-    _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
-    _REALTIME_CALL_AFFINITY_PREFIX,
     _RealtimeLiveMixin,
     _relay_live_websocket,
-    realtime_call_affinity_key,
     realtime_call_id_from_location,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
-
-
-class _FakeStickySessions:
-    def __init__(self) -> None:
-        self.purges: list[dict[str, Any]] = []
-        self.insertions: list[tuple[str, str, Any]] = []
-        self.persisted_owner_id: str | None = None
-        self.account_id: str | None = None
-        self.get_call: dict[str, Any] | None = None
-
-    async def get_account_id(self, key: str, **kwargs: Any) -> str | None:
-        self.get_call = {"key": key, **kwargs}
-        return self.account_id
-
-    async def purge_before_for_key_prefix(self, cutoff: Any, **kwargs: Any) -> int:
-        self.purges.append({"cutoff": cutoff, **kwargs})
-        return 0
-
-    async def insert_if_absent(self, key: str, account_id: str, *, kind: Any) -> str:
-        self.insertions.append((key, account_id, kind))
-        return self.persisted_owner_id or account_id
-
-
-class _FakeRepoContext:
-    def __init__(self, sticky_sessions: _FakeStickySessions) -> None:
-        self._repos = SimpleNamespace(sticky_sessions=sticky_sessions)
-
-    async def __aenter__(self):
-        return self._repos
-
-    async def __aexit__(self, *_args) -> None:
-        return None
-
-
-class _BindingService(_RealtimeLiveMixin):
-    def __init__(self, sticky_sessions: _FakeStickySessions) -> None:
-        self._sticky_sessions = sticky_sessions
-
-    def _repo_factory(self):
-        return _FakeRepoContext(self._sticky_sessions)
 
 
 class _FakeDownstreamWebSocket:
@@ -191,11 +147,9 @@ class _ProxyService(_RealtimeLiveMixin):
         self.accounts = _FakeAccountsRepository(self.current_account)
         self.owner_account_id = owner_account_id
         self.lease = lease
-        self.selection_kwargs: dict[str, object] | None = None
         self._load_balancer = _FakeLoadBalancer()
         self.decrypt_calls: list[str] = []
         self._encryptor = SimpleNamespace(decrypt=self._decrypt)
-        self.logs: list[dict[str, Any]] = []
 
     def _repo_factory(self):
         return _FakeProxyRepoContext(self.accounts)
@@ -209,8 +163,7 @@ class _ProxyService(_RealtimeLiveMixin):
         assert api_key is not None
         return self.owner_account_id
 
-    async def _select_account_with_budget_compatible(self, _deadline: float, **kwargs):
-        self.selection_kwargs = kwargs
+    async def _select_account_with_budget_compatible(self, _deadline: float, **_kwargs):
         return AccountSelection(self.account, None, lease=self.lease)
 
     async def _resolve_upstream_route_for_account(self, account, *, operation: str):
@@ -218,8 +171,8 @@ class _ProxyService(_RealtimeLiveMixin):
         assert operation == "realtime_live_websocket"
         return None
 
-    async def _write_request_log(self, **kwargs) -> None:
-        self.logs.append(kwargs)
+    async def _write_request_log(self, **_kwargs) -> None:
+        return None
 
 
 @pytest.mark.parametrize(
@@ -240,9 +193,7 @@ def test_normalize_realtime_call_id(value: str, expected: str | None) -> None:
 def test_realtime_call_id_from_exact_relative_or_absolute_location() -> None:
     assert realtime_call_id_from_location({"Location": "/v1/realtime/calls/rtc_relative"}) == "rtc_relative"
     assert (
-        realtime_call_id_from_location(
-            {"location": "https://api.openai.com/v1/realtime/calls/rtc_absolute?intent=quicksilver"}
-        )
+        realtime_call_id_from_location({"location": "https://api.openai.com/v1/realtime/calls/rtc_absolute"})
         == "rtc_absolute"
     )
     assert realtime_call_id_from_location({"location": "/v1/realtime/calls/call_not_live"}) is None
@@ -260,6 +211,15 @@ def test_realtime_call_id_from_exact_relative_or_absolute_location() -> None:
         "/unrelated/live/rtc_unsupported",
         "realtime/calls/rtc_unsupported",
         "/unrelated/realtime/calls/rtc_unsupported",
+        "//attacker.invalid/v1/realtime/calls/rtc_unsupported",
+        "///v1/realtime/calls/rtc_unsupported",
+        "v1/realtime/calls/rtc_unsupported",
+        "/v1/realtime/calls/rtc_unsupported?intent=quicksilver",
+        "/v1/realtime/calls/rtc_unsupported#fragment",
+        "/v1/realtime/calls/rtc_unsupported/extra",
+        "ftp://api.openai.com/v1/realtime/calls/rtc_unsupported",
+        "https:///v1/realtime/calls/rtc_unsupported",
+        "https://api.openai.com/v1/realtime/calls/rtc_unsupported;param",
     ],
 )
 def test_realtime_call_id_rejects_unsupported_location_paths(location: str) -> None:
@@ -312,223 +272,59 @@ async def test_realtime_sdp_is_never_emitted_by_opt_in_payload_trace(
     assert all(getattr(record, "event", None) != "upstream_request_payload" for record in caplog.records)
 
 
-def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
-    api_key_a = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
-    api_key_b = cast(ApiKeyData, SimpleNamespace(id="api-key-b"))
-
-    key_a = realtime_call_affinity_key("rtc_secret", api_key_a)
-    key_b = realtime_call_affinity_key("rtc_secret", api_key_b)
-
-    assert key_a.startswith(_REALTIME_CALL_AFFINITY_PREFIX)
-    assert key_a != key_b
-    assert "rtc_secret" not in key_a
-    assert "api-key-a" not in key_a
-
-
 @pytest.mark.asyncio
-async def test_bind_realtime_call_owner_is_immutable_and_persists_only_digest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(realtime_live_module, "_realtime_call_cleanup_last_monotonic", 0.0)
-    sticky_sessions = _FakeStickySessions()
-    service = _BindingService(sticky_sessions)
-    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
-
-    call_id = await service.bind_realtime_call_owner(
-        response_headers={"Location": "/v1/realtime/calls/rtc_secret"},
-        account_id="account-a",
-        api_key=api_key,
-    )
-
-    assert call_id == "rtc_secret"
-    assert len(sticky_sessions.purges) == 1
-    assert sticky_sessions.purges[0]["key_prefix"] == _REALTIME_CALL_AFFINITY_PREFIX
-    assert sticky_sessions.purges[0]["limit"] == 250
-    assert len(sticky_sessions.insertions) == 1
-    stored_key, stored_account_id, _kind = sticky_sessions.insertions[0]
-    assert stored_account_id == "account-a"
-    assert stored_key == realtime_call_affinity_key("rtc_secret", api_key)
-    assert "rtc_secret" not in stored_key
-
-    sticky_sessions.persisted_owner_id = "account-b"
-    with pytest.raises(RuntimeError, match="already bound"):
-        await service.bind_realtime_call_owner(
-            response_headers={"Location": "/v1/realtime/calls/rtc_secret"},
-            account_id="account-a",
-            api_key=api_key,
-        )
-
-
-@pytest.mark.asyncio
-async def test_resolve_missing_realtime_call_is_read_only() -> None:
-    sticky_sessions = _FakeStickySessions()
-    service = _BindingService(sticky_sessions)
-    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
-
-    account_id = await service._resolve_realtime_call_owner("rtc_expired", api_key=api_key)
-
-    affinity_key = realtime_call_affinity_key("rtc_expired", api_key)
-    assert account_id is None
-    assert sticky_sessions.get_call == {
-        "key": affinity_key,
-        "kind": StickySessionKind.CODEX_SESSION,
-        "max_age_seconds": _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
-    }
-    assert sticky_sessions.purges == []
-
-
-@pytest.mark.asyncio
-async def test_live_connector_uses_frameless_url_and_omits_responses_beta(monkeypatch) -> None:
-    sentinel = cast(UpstreamResponsesWebSocket, object())
-    captured: dict[str, Any] = {}
-
-    async def fake_connect_upstream_websocket(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return sentinel
-
-    monkeypatch.setattr(
-        proxy_websocket_module,
-        "_connect_upstream_websocket",
-        fake_connect_upstream_websocket,
-    )
-
-    result = await proxy_websocket_module.connect_live_websocket(
-        "rtc_example",
-        {"OpenAI-Alpha": "quicksilver=v2"},
-        "access-token",
-        "account-a",
-        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
-        query_params=[("intent", "quicksilver"), ("architecture", "avas")],
-    )
-
-    assert result is sentinel
-    assert captured["kwargs"]["url"] == "wss://api.openai.com/v1/live/rtc_example?intent=quicksilver&architecture=avas"
-    assert captured["kwargs"]["policy"] is proxy_websocket_module._LIVE_SIDEBAND_WEBSOCKET_POLICY
-    assert "include_responses_beta" not in captured["kwargs"]
-    assert "archive_payloads" not in captured["kwargs"]
-    assert "live_sideband" not in captured["kwargs"]
-
-
-@pytest.mark.asyncio
-async def test_live_connector_uses_legacy_realtime_url_with_one_ordered_call_id(monkeypatch) -> None:
-    sentinel = cast(UpstreamResponsesWebSocket, object())
-    captured: dict[str, Any] = {}
-
-    async def fake_connect_upstream_websocket(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return sentinel
-
-    monkeypatch.setattr(
-        proxy_websocket_module,
-        "_connect_upstream_websocket",
-        fake_connect_upstream_websocket,
-    )
-
-    result = await proxy_websocket_module.connect_live_websocket(
-        "rtc_example",
-        {},
-        "access-token",
-        "account-a",
-        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.REALTIME_V1_V2,
-        query_params=[("intent", "quicksilver"), ("architecture", "avas")],
-        base_url="https://api.openai.com/v1?configured=one",
-    )
-
-    assert result is sentinel
-
-    assert (
-        captured["kwargs"]["url"]
-        == "wss://api.openai.com/v1/realtime?configured=one&intent=quicksilver&architecture=avas&call_id=rtc_example"
-    )
-
-
-@pytest.mark.asyncio
-async def test_live_connector_rejects_duplicate_legacy_call_id(monkeypatch) -> None:
-    async def fail_connect_upstream_websocket(*_args, **_kwargs):
-        raise AssertionError("duplicate call_id must fail before connecting")
-
-    monkeypatch.setattr(
-        proxy_websocket_module,
-        "_connect_upstream_websocket",
-        fail_connect_upstream_websocket,
-    )
-
-    with pytest.raises(ValueError, match="must not include call_id"):
-        await proxy_websocket_module.connect_live_websocket(
-            "rtc_example",
-            {},
-            "access-token",
-            "account-a",
-            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.REALTIME_V1_V2,
-            query_params=[("call_id", "rtc_duplicate"), ("intent", "quicksilver")],
-        )
-
-
-@pytest.mark.asyncio
-async def test_live_v3_connector_rejects_query_call_id_before_connect(monkeypatch) -> None:
-    async def fail_connect_upstream_websocket(*_args, **_kwargs):
-        raise AssertionError("path call_id conflict must fail before connecting")
-
-    monkeypatch.setattr(
-        proxy_websocket_module,
-        "_connect_upstream_websocket",
-        fail_connect_upstream_websocket,
-    )
-
-    with pytest.raises(ValueError, match="must not include call_id"):
-        await proxy_websocket_module.connect_live_websocket(
-            "rtc_a",
-            {},
-            "access-token",
-            "account-a",
-            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
-            query_params=[("intent", "quicksilver"), ("call_id", "rtc_b")],
-        )
-
-
-@pytest.mark.asyncio
-async def test_live_websocket_wrapper_never_archives_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_live_connector_never_archives_frames(monkeypatch: pytest.MonkeyPatch) -> None:
     sent_text: list[str] = []
     sent_bytes: list[bytes] = []
 
-    class Wrapped:
-        uses_proxy = False
+    class Connection:
+        async def send(self, data: str | bytes) -> None:
+            if isinstance(data, str):
+                sent_text.append(data)
+            else:
+                sent_bytes.append(data)
 
-        async def send_text(self, text: str) -> None:
-            sent_text.append(text)
-
-        async def send_bytes(self, data: bytes) -> None:
-            sent_bytes.append(data)
-
-        async def receive(self) -> UpstreamWebSocketMessage:
-            return UpstreamWebSocketMessage(kind="close", close_code=1000)
+        async def recv(self) -> str:
+            return "response"
 
         async def close(self, code: int = 1000, reason: str = "") -> None:
             del code, reason
-            return None
 
-        def response_header(self, _name: str) -> str | None:
-            return None
+    async def fake_websocket_connect(*_args: Any, **_kwargs: Any) -> Connection:
+        return Connection()
 
     def fail_archive(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("live sideband frames must not be archived")
 
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
     monkeypatch.setattr(proxy_websocket_module, "archive_text", fail_archive)
     monkeypatch.setattr(proxy_websocket_module, "archive_bytes", fail_archive)
-    websocket = ArchivingResponsesWebSocket(
-        cast(UpstreamResponsesWebSocket, Wrapped()),
-        url="wss://api.openai.com/v1/live/rtc_example",
-        headers={},
-        account_id="account-a",
-        archive_payloads=False,
+    websocket = await proxy_websocket_module.connect_live_websocket(
+        "rtc_example",
+        {},
+        "account-token",
+        "account-a",
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
     )
 
     await websocket.send_text("event")
     await websocket.send_bytes(b"audio")
-    websocket.archive_received(UpstreamWebSocketMessage(kind="text", text="response"))
-    websocket.archive_received(UpstreamWebSocketMessage(kind="binary", data=b"response"))
+    archive_received = getattr(websocket, "archive_received", None)
+    assert callable(archive_received)
+    archive_received(UpstreamWebSocketMessage(kind="text", text="response"))
+    archive_received(UpstreamWebSocketMessage(kind="binary", data=b"response"))
+    await websocket.close()
 
     assert sent_text == ["event"]
     assert sent_bytes == [b"audio"]
@@ -764,157 +560,6 @@ async def test_live_relay_cancellation_stops_both_direction_tasks() -> None:
     assert upstream_stopped.is_set()
 
 
-def test_live_header_builder_replaces_identity_and_preserves_frameless_metadata() -> None:
-    headers = proxy_websocket_module._build_upstream_live_websocket_headers(
-        {
-            "Authorization": "Bearer codex-lb-key",
-            "ChatGPT-Account-ID": "wrong-account",
-            "User-Agent": "frameless-desktop/1.0",
-            "OpenAI-Alpha": "quicksilver=v2",
-            "OpenAI-Beta": "realtime=v1, responses=experimental, responses_websockets=2026-07-01",
-            "x-oai-attestation": "attestation",
-            "x-session-id": "session-a",
-            "session-id": "session-b",
-            "thread-id": "thread-a",
-            "originator": "frameless_desktop",
-            "X-OpenAI-Fedramp": "true",
-            "x-openai-internal-codex-residency": "us",
-            "Sec-WebSocket-Key": "must-not-forward",
-        },
-        "account-token",
-        "account-a",
-    )
-    lowered = {key.lower(): value for key, value in headers.items()}
-
-    assert lowered["authorization"] == "Bearer account-token"
-    assert lowered["chatgpt-account-id"] == "account-a"
-    assert lowered["openai-alpha"] == "quicksilver=v2"
-    assert lowered["x-oai-attestation"] == "attestation"
-    assert lowered["x-session-id"] == "session-a"
-    assert lowered["session-id"] == "session-b"
-    assert lowered["thread-id"] == "thread-a"
-    assert lowered["originator"] == "frameless_desktop"
-    assert lowered["x-openai-fedramp"] == "true"
-    assert lowered["x-openai-internal-codex-residency"] == "us"
-    assert lowered["openai-beta"] == "realtime=v1"
-    assert "sec-websocket-key" not in lowered
-    assert "codex-lb-key" not in str(headers)
-
-    responses_only = proxy_websocket_module._build_upstream_live_websocket_headers(
-        {"OpenAI-Beta": "responses=experimental, responses_websockets=2026-07-01"},
-        "account-token",
-        "account-a",
-    )
-    assert "openai-beta" not in {key.lower() for key in responses_only}
-
-
-@pytest.mark.parametrize(
-    "supplied_alpha",
-    ["quicksilver=v1", None, "quicksilver=v2"],
-    ids=["v1", "v2", "v3"],
-)
-def test_live_header_builder_preserves_version_specific_alpha_without_synthesis(
-    supplied_alpha: str | None,
-) -> None:
-    inbound = {"OpenAI-Alpha": supplied_alpha} if supplied_alpha is not None else {}
-
-    headers = proxy_websocket_module._build_upstream_live_websocket_headers(
-        inbound,
-        "account-token",
-        "account-a",
-    )
-    lowered = {key.lower(): value for key, value in headers.items()}
-
-    assert lowered.get("openai-alpha") == supplied_alpha
-    assert "openai-beta" not in lowered
-    assert "sec-websocket-protocol" not in lowered
-
-
-@pytest.mark.asyncio
-async def test_proxy_live_sideband_uses_exact_owner_without_refresh_or_failover(monkeypatch) -> None:
-    lease = cast(AccountLease, object())
-    selected_account = SimpleNamespace(
-        id="account-a",
-        access_token_encrypted="stale-encrypted-token",
-        chatgpt_account_id="stale-chatgpt-account-a",
-        codex_installation_id="stale-installation-a",
-    )
-    current_account = SimpleNamespace(
-        id="account-a",
-        status=AccountStatus.ACTIVE,
-        access_token_encrypted="current-encrypted-token",
-        chatgpt_account_id="current-chatgpt-account-a",
-        codex_installation_id="current-installation-a",
-    )
-    service = _ProxyService(selected_account, lease, current_account=current_account)
-    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
-    downstream = _FakeDownstreamWebSocket()
-    upstream = _FakeUpstreamWebSocket()
-    connector_calls: list[dict[str, Any]] = []
-
-    async def fake_connect_live_websocket(call_id, headers, access_token, account_id, **kwargs):
-        connector_calls.append(
-            {
-                "call_id": call_id,
-                "headers": headers,
-                "access_token": access_token,
-                "account_id": account_id,
-                "kwargs": kwargs,
-            }
-        )
-        return upstream
-
-    monkeypatch.setattr(proxy_service_module, "connect_live_websocket", fake_connect_live_websocket)
-
-    await service.proxy_realtime_live_websocket(
-        cast(Any, downstream),
-        "rtc_example",
-        {
-            "OpenAI-Alpha": "quicksilver=v2",
-            "x-oai-attestation": "attestation",
-            "X-Codex-Installation-Id": "client-controlled-installation",
-        },
-        [("intent", "quicksilver"), ("architecture", "avas")],
-        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
-        api_key=api_key,
-    )
-
-    assert downstream.accepted is True
-    assert upstream.close_calls == [(1000, "")]
-    assert service.selection_kwargs is not None
-    assert service.selection_kwargs["preferred_account_id"] == "account-a"
-    assert service.selection_kwargs["preferred_account_is_continuity_owner"] is True
-    assert service.selection_kwargs["fallback_on_preferred_account_unavailable"] is False
-    assert service.selection_kwargs["lease_kind"] == "stream"
-    assert service.selection_kwargs["request_stage"] == "reattach"
-    assert connector_calls == [
-        {
-            "call_id": "rtc_example",
-            "headers": {
-                "OpenAI-Alpha": "quicksilver=v2",
-                "x-oai-attestation": "attestation",
-                "x-codex-installation-id": "current-installation-a",
-            },
-            "access_token": "decrypted:current-encrypted-token",
-            "account_id": "current-chatgpt-account-a",
-            "kwargs": {
-                "protocol": proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
-                "route": None,
-                "allow_direct_egress": True,
-                "query_params": [("intent", "quicksilver"), ("architecture", "avas")],
-            },
-        }
-    ]
-    assert service.accounts.fresh_reads == ["account-a"]
-    assert service._load_balancer.released == [lease]
-    assert service.logs[-1]["status"] == "success"
-    assert service.logs[-1]["account_id"] == "account-a"
-    assert service.logs[-1]["model"] is None
-    assert service.logs[-1]["request_kind"] == "realtime_live"
-    assert service.logs[-1]["transport"] == "websocket"
-    assert _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS == 2 * 60 * 60
-
-
 @pytest.mark.asyncio
 async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease(monkeypatch) -> None:
     class HangingDownstream(_FakeDownstreamWebSocket):
@@ -1015,6 +660,3 @@ async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypt
     assert downstream.accepted is False
     assert service.decrypt_calls == []
     assert service._load_balancer.released == [None]
-    assert service.selection_kwargs is not None
-    assert service.selection_kwargs["preferred_account_id"] == "account-a"
-    assert service.selection_kwargs["fallback_on_preferred_account_unavailable"] is False

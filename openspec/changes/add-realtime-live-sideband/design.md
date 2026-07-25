@@ -60,7 +60,7 @@ The service resolves ownership under the caller's key, rechecks current account 
 
 The live connector preserves remaining ordered query fields plus supplied version-specific alpha value or absence, FedRAMP, residency, session/context, originator, and attestation headers. It replaces proxy authorization, account identity, and client-supplied installation identity; strips Responses-only beta values; and synthesizes neither `OpenAI-Beta` nor `Sec-WebSocket-Protocol`.
 
-A routed definitive handshake response is not replayed through route fallback. `InvalidProxy` is caught before broader handshake failures: live sideband returns a fixed credential-safe message, while the existing Responses connector retains its established `InvalidProxy` mapping byte-for-byte. Capability-specific denials do not mark the account globally unhealthy.
+A routed definitive handshake response is not replayed through route fallback. `InvalidProxy` is caught before broader handshake failures: live sideband returns a fixed credential-safe message, while the existing Responses connector retains its established `InvalidProxy` behavior unchanged. Capability-specific denials do not mark the account globally unhealthy.
 
 ### Own relay and observability exactly once
 

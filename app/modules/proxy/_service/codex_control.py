@@ -183,6 +183,17 @@ class _CodexControlMixin:
         route_fail_closed_reason: str | None = None
         request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
 
+        def _finalize_success(
+            successful_account: Account,
+            response: CodexControlResponse,
+        ) -> CodexControlResponse:
+            nonlocal account_id_value, log_status
+            account_id_value = successful_account.id
+            log_status = "success"
+            if success_account_callback is not None:
+                success_account_callback(successful_account.id)
+            return response
+
         try:
             selection = await proxy._select_account_with_budget_compatible(
                 deadline,
@@ -284,10 +295,7 @@ class _CodexControlMixin:
                 account_id_value = account.id
                 response = await _call_control(account)
                 await proxy._load_balancer.record_success(account)
-                log_status = "success"
-                if success_account_callback is not None:
-                    success_account_callback(account.id)
-                return response
+                return _finalize_success(account, response)
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
                     failed_account = _refresh_error_failed_account(refresh_exc, account)
@@ -312,11 +320,7 @@ class _CodexControlMixin:
                     )
                     if failover is not None:
                         account, response = failover
-                        account_id_value = account.id
-                        log_status = "success"
-                        if success_account_callback is not None:
-                            success_account_callback(account.id)
-                        return response
+                        return _finalize_success(account, response)
                 if exc.status_code == 401:
                     try:
                         remaining_budget = _remaining_budget_seconds(deadline)
@@ -347,10 +351,7 @@ class _CodexControlMixin:
                         try:
                             response = await _call_control(account)
                             await proxy._load_balancer.record_success(account)
-                            log_status = "success"
-                            if success_account_callback is not None:
-                                success_account_callback(account.id)
-                            return response
+                            return _finalize_success(account, response)
                         except ProxyResponseError as retry_exc:
                             await proxy._handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
@@ -381,10 +382,7 @@ class _CodexControlMixin:
                                     try:
                                         response = await _call_control(account)
                                         await proxy._load_balancer.record_success(account)
-                                        log_status = "success"
-                                        if success_account_callback is not None:
-                                            success_account_callback(account.id)
-                                        return response
+                                        return _finalize_success(account, response)
                                     except ProxyResponseError as failover_exc:
                                         await proxy._handle_proxy_error(account, failover_exc)
                                         raise

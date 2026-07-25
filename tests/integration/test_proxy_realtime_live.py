@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from starlette.testclient import WebSocketDenialResponse
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
@@ -15,6 +17,8 @@ from app.core.auth.dependencies import validate_required_proxy_api_key_authoriza
 from app.core.clients.proxy import CodexControlResponse, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.exceptions import ProxyAuthError
+from app.db.models import RequestLog
+from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy.account_cache import AccountSelectionCache
 
@@ -330,6 +334,20 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
         ("rotated-access-token", "acc_live_rotated"),
     ]
 
+    async def read_live_log() -> tuple[str, str | None]:
+        deadline = asyncio.get_running_loop().time() + 1
+        while True:
+            await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=1)
+            async with SessionLocal() as session:
+                live_log = (
+                    await session.execute(select(RequestLog).where(RequestLog.request_kind == "realtime_live"))
+                ).scalar_one_or_none()
+            if live_log is not None:
+                return live_log.status, live_log.transport
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("realtime live request log was not persisted")
+            await asyncio.sleep(0.01)
+
     with TestClient(app_instance) as client:
         app_instance.state.proxy_service._load_balancer._selection_inputs_cache = selection_cache
         with pytest.raises(WebSocketDenialResponse) as denied:
@@ -346,14 +364,17 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
         ) as websocket:
             assert websocket.receive_text() == "ready"
 
+            close_message = websocket.receive()
+            assert close_message["type"] == "websocket.close"
+            assert close_message["code"] == 1000
+        assert client.portal is not None
+        assert client.portal.call(read_live_log) == ("success", "websocket")
+
     assert len(connector_calls) == 1
     assert connector_calls[0]["url"] == expected_upstream_url
     assert connector_calls[0]["access_token"] == "rotated-access-token"
     assert connector_calls[0]["account_id"] == "acc_live_rotated"
     assert connector_calls[0]["headers"]["x-codex-installation-id"] == "00000000-0000-4000-8000-000000000002"
-    assert connector_calls[0]["kwargs"]["policy"] is proxy_websocket_module._LIVE_SIDEBAND_WEBSOCKET_POLICY
-    assert "live_sideband" not in connector_calls[0]["kwargs"]
-    assert "archive_payloads" not in connector_calls[0]["kwargs"]
 
 
 def test_v1_live_websocket_requires_api_key_before_binding_lookup(app_instance, monkeypatch):

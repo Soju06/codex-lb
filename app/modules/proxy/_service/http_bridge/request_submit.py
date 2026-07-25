@@ -1784,13 +1784,6 @@ class _HTTPBridgeRequestSubmitMixin:
         retry_jitter_seconds = (
             self._http_bridge_clean_close_retry_jitter_seconds() if additional_clean_close_retry else 0.0
         )
-        if retry_jitter_seconds > 0:
-            logger.info(
-                "HTTP bridge clean-close retry jitter request_id=%s sleep_seconds=%.3f",
-                request_state.request_id,
-                retry_jitter_seconds,
-            )
-            await asyncio.sleep(retry_jitter_seconds)
         retry_event = "retry_precreated_clean_close" if additional_clean_close_retry else "retry_precreated"
         _log_http_bridge_event(
             retry_event,
@@ -1803,6 +1796,13 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         reconnect_reader_kwargs = {"restart_reader": True} if restart_reader else {}
         try:
+            if retry_jitter_seconds > 0:
+                logger.info(
+                    "HTTP bridge clean-close retry jitter request_id=%s sleep_seconds=%.3f",
+                    request_state.request_id,
+                    retry_jitter_seconds,
+                )
+                await asyncio.sleep(retry_jitter_seconds)
             if hard_owner_bound:
                 await self._reconnect_http_bridge_session(
                     session,
@@ -1887,6 +1887,9 @@ class _HTTPBridgeRequestSubmitMixin:
             session.last_used_at = _service_time().monotonic()
             request_state.clean_close_retry_result = True
             return True
+        except asyncio.CancelledError:
+            request_state.clean_close_retry_result = False
+            raise
         except UpstreamWebSocketTransportError:
             request_state.clean_close_retry_result = False
             raise

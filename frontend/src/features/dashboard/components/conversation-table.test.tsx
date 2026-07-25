@@ -57,7 +57,9 @@ describe("ConversationTable", () => {
           createConversationEntry({
             conversationId: "conv_visible",
             representativeAccount: "acc-1",
-            lastRequest: "2026-01-01T12:00:00.000Z",
+            firstRequest: "2026-01-01T10:00:00.000Z",
+            lastRequest: "2026-01-01T12:15:00.000Z",
+            requestCount: 3,
             remainingAccountCount: 2,
             apiKeyName: "Operator key",
             representativeModel: "gpt-5.4",
@@ -87,19 +89,24 @@ describe("ConversationTable", () => {
     const headers = screen.getAllByRole("columnheader").map((header) => header.textContent);
     expect(headers).toEqual([
       "Last request",
+      "Lasted",
       "Conversation",
       "Accounts",
       "API key",
       "Models",
+      "Requests",
       "Tokens",
       "Cost",
       "Details",
     ]);
     expect(screen.getByText("conv_visible")).toBeInTheDocument();
+    expect(screen.getByText("2h 15m")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("conv_visible").closest("td")).toHaveClass("align-top");
     expect(screen.getByText("conv_visible")).toHaveAttribute("translate", "no");
     expect(screen.getByText("Primary Account")).toBeInTheDocument();
     expect(screen.queryByText("acc-1")).not.toBeInTheDocument();
-    const time = formatTimeLong("2026-01-01T12:00:00.000Z");
+    const time = formatTimeLong("2026-01-01T12:15:00.000Z");
     expect(screen.getByText(time.time)).toBeInTheDocument();
     expect(screen.getByText(time.date)).toBeInTheDocument();
     expect(screen.getByText("+ 2 more")).toBeInTheDocument();

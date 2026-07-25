@@ -18,7 +18,9 @@ import type { AccountSummary, ConversationEntry } from "@/features/dashboard/sch
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import {
   formatCompactNumber,
+  formatConversationDuration,
   formatCurrency,
+  formatNumber,
   formatTimeLong,
 } from "@/utils/formatters";
 
@@ -83,16 +85,18 @@ export function ConversationTable({
     <div className="space-y-3">
       <div className="rounded-xl border bg-card shadow-sm shadow-black/[0.02] dark:shadow-black/20">
         <div className="relative overflow-x-auto">
-          <Table className="min-w-[860px] table-fixed">
+          <Table className="min-w-[980px] table-fixed">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className={`w-[13%] pl-4 ${headerClass}`}>{t("dashboard.conversations.columns.lastRequest")}</TableHead>
-                <TableHead className={`w-[19%] ${headerClass}`}>{t("dashboard.conversations.columns.conversation")}</TableHead>
-                <TableHead className={`w-[14%] ${headerClass}`}>{t("dashboard.conversations.columns.accounts")}</TableHead>
-                <TableHead className={`w-[13%] ${headerClass}`}>{t("dashboard.conversations.columns.apiKey")}</TableHead>
-                <TableHead className={`w-[14%] ${headerClass}`}>{t("dashboard.conversations.columns.models")}</TableHead>
-                <TableHead className={`w-[12%] text-right ${headerClass}`}>{t("dashboard.conversations.columns.tokens")}</TableHead>
-                <TableHead className={`w-[8%] text-right ${headerClass}`}>{t("dashboard.conversations.columns.cost")}</TableHead>
+                <TableHead className={`w-[10%] pl-4 ${headerClass}`}>{t("dashboard.conversations.columns.lastRequest")}</TableHead>
+                <TableHead className={`w-[9%] ${headerClass}`}>{t("dashboard.conversations.columns.lasted")}</TableHead>
+                <TableHead className={`w-[16%] ${headerClass}`}>{t("dashboard.conversations.columns.conversation")}</TableHead>
+                <TableHead className={`w-[12%] ${headerClass}`}>{t("dashboard.conversations.columns.accounts")}</TableHead>
+                <TableHead className={`w-[11%] ${headerClass}`}>{t("dashboard.conversations.columns.apiKey")}</TableHead>
+                <TableHead className={`w-[12%] ${headerClass}`}>{t("dashboard.conversations.columns.models")}</TableHead>
+                <TableHead className={`w-[8%] text-right ${headerClass}`}>{t("dashboard.conversations.columns.requests")}</TableHead>
+                <TableHead className={`w-[9%] text-right ${headerClass}`}>{t("dashboard.conversations.columns.tokens")}</TableHead>
+                <TableHead className={`w-[6%] text-right ${headerClass}`}>{t("dashboard.conversations.columns.cost")}</TableHead>
                 <TableHead className={`w-[7%] pr-4 ${headerClass}`}>{t("dashboard.conversations.columns.details")}</TableHead>
               </TableRow>
             </TableHeader>
@@ -115,7 +119,10 @@ export function ConversationTable({
                         <div className="text-xs text-muted-foreground">{time.date}</div>
                       </div>
                     </TableCell>
-                    <TableCell className="max-w-0">
+                    <TableCell className="align-top font-mono text-xs tabular-nums">
+                      {formatConversationDuration(conversation.firstRequest, conversation.lastRequest)}
+                    </TableCell>
+                    <TableCell className="max-w-0 align-top">
                       <span className="block truncate font-mono text-xs" title={conversation.conversationId}>
                         <span translate="no">{conversation.conversationId || "—"}</span>
                       </span>
@@ -137,6 +144,9 @@ export function ConversationTable({
                         mono
                         translateNo
                       />
+                    </TableCell>
+                    <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                      {formatNumber(conversation.requestCount)}
                     </TableCell>
                     <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                       <div>{formatCompactNumber(conversation.totalTokens)}</div>

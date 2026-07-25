@@ -107,7 +107,9 @@ class PreviousResponseOwnerRecord:
 @dataclass(frozen=True, slots=True)
 class ConversationListSummary:
     conversation_id: str
+    first_requested_at: datetime
     last_requested_at: datetime
+    request_count: int
     account_count: int
     total_tokens: int
     cached_input_tokens: int | None
@@ -228,7 +230,9 @@ class RequestLogsRepository:
         summary_stmt = (
             select(
                 conversation_id.label("conversation_id"),
+                func.min(RequestLog.requested_at).label("first_requested_at"),
                 func.max(RequestLog.requested_at).label("last_requested_at"),
+                func.count().label("request_count"),
                 func.count(func.distinct(RequestLog.account_id)).label("account_count"),
                 func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0) + output), 0).label("total_tokens"),
                 func.sum(cached).label("cached_input_tokens"),
@@ -262,7 +266,9 @@ class RequestLogsRepository:
         summaries = [
             ConversationListSummary(
                 conversation_id=row.conversation_id,
+                first_requested_at=row.first_requested_at,
                 last_requested_at=row.last_requested_at,
+                request_count=int(row.request_count),
                 account_count=int(row.account_count),
                 total_tokens=int(row.total_tokens),
                 cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),

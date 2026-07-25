@@ -875,7 +875,9 @@ describe("ConversationsResponseSchema", () => {
       conversations: [
         {
           conversationId: "conv_abc",
+          firstRequest: ISO,
           lastRequest: ISO,
+          requestCount: 1,
           representativeAccount: null,
           remainingAccountCount: 0,
           apiKeyId: null,
@@ -912,7 +914,9 @@ describe("ConversationsResponseSchema", () => {
       conversations: [
         {
           conversationId: "conv_full",
+          firstRequest: ISO,
           lastRequest: ISO,
+          requestCount: 1,
           representativeAccount: "acc_primary",
           remainingAccountCount: 1,
           apiKeyId: "key_1",
@@ -938,7 +942,9 @@ describe("ConversationEntrySchema", () => {
   it("keeps representative account/id as nullable", () => {
     const parsed = ConversationEntrySchema.parse({
       conversationId: "c",
+      firstRequest: ISO,
       lastRequest: ISO,
+      requestCount: 1,
       representativeAccount: null,
       remainingAccountCount: 0,
       apiKeyId: null,
@@ -958,7 +964,9 @@ describe("ConversationEntrySchema", () => {
   it("accepts null cached input totals from the list endpoint", () => {
     const parsed = ConversationEntrySchema.parse({
       conversationId: "c-null-cache",
+      firstRequest: ISO,
       lastRequest: ISO,
+      requestCount: 1,
       representativeAccount: "acc-1",
       remainingAccountCount: 0,
       apiKeyId: null,

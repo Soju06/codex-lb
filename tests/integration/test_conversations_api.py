@@ -206,7 +206,9 @@ async def test_conversation_list_contract_search_and_aggregate(async_client, db_
     entry = body["conversations"][0]
     assert set(entry) == {
         "conversationId",
+        "firstRequest",
         "lastRequest",
+        "requestCount",
         "representativeAccount",
         "remainingAccountCount",
         "apiKeyId",
@@ -218,6 +220,9 @@ async def test_conversation_list_contract_search_and_aggregate(async_client, db_
         "totalCostUsd",
     }
     assert entry["conversationId"] == "Conv-A"
+    assert entry["requestCount"] == 3
+    assert entry["firstRequest"].startswith((base - timedelta(minutes=3)).isoformat())
+    assert entry["lastRequest"].startswith((base - timedelta(minutes=1)).isoformat())
     assert entry["representativeAccount"] == "acc-a"
     assert entry["remainingAccountCount"] == 1
     assert entry["apiKeyId"] == "key-z"
@@ -284,6 +289,8 @@ async def test_conversation_list_excludes_blank_warmup_limit_warmup_and_deleted(
     assert body["total"] == 2
     assert {row["conversationId"] for row in body["conversations"]} == {"Conv-A", "conv-b"}
     conv_a = next(row for row in body["conversations"] if row["conversationId"] == "Conv-A")
+    assert conv_a["requestCount"] == 3
+    assert conv_a["firstRequest"].startswith((base - timedelta(minutes=3)).isoformat())
     assert conv_a["totalTokens"] == 225
     assert conv_a["lastRequest"].startswith((base - timedelta(minutes=1)).isoformat())
 

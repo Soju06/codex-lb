@@ -106,7 +106,9 @@ class ConversationModelStat(DashboardModel):
 
 class ConversationEntry(DashboardModel):
     conversation_id: str
+    first_request: datetime
     last_request: datetime
+    request_count: int
     representative_account: str | None = None
     remaining_account_count: int
     api_key_id: str | None = None

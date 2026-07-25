@@ -284,7 +284,9 @@ def _to_conversations(result: ConversationListResult, api_key_names: dict[str, s
         entries.append(
             ConversationEntry(
                 conversation_id=summary.conversation_id,
+                first_request=summary.first_requested_at,
                 last_request=summary.last_requested_at,
+                request_count=summary.request_count,
                 representative_account=account.value if account else None,
                 remaining_account_count=max(0, account_counts[summary.conversation_id] - 1),
                 api_key_id=api_key.value if api_key is not None and api_key_name is not None else None,

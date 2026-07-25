@@ -805,7 +805,9 @@ export function createConversationEntry(
 ): ConversationEntry {
 	return ConversationEntrySchema.parse({
 		conversationId: "conv_abc",
+		firstRequest: offsetIso(-2),
 		lastRequest: offsetIso(-1),
+		requestCount: 1,
 		representativeAccount: "acc_primary",
 		remainingAccountCount: 1,
 		apiKeyId: "key_1",

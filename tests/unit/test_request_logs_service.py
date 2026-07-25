@@ -23,7 +23,9 @@ def test_to_conversations_only_emits_api_key_fields_for_resolved_safe_name(
         summaries=[
             ConversationListSummary(
                 conversation_id="conversation-1",
+                first_requested_at=datetime(2026, 7, 23),
                 last_requested_at=datetime(2026, 7, 24),
+                request_count=1,
                 account_count=0,
                 total_tokens=0,
                 cached_input_tokens=0,
@@ -40,3 +42,5 @@ def test_to_conversations_only_emits_api_key_fields_for_resolved_safe_name(
 
     assert entry.api_key_id == expected_id
     assert entry.api_key_name == expected_name
+    assert entry.first_request == datetime(2026, 7, 23)
+    assert entry.request_count == 1

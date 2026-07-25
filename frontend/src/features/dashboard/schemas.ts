@@ -293,7 +293,9 @@ export const ConversationModelStatSchema = z.object({
 
 export const ConversationEntrySchema = z.object({
   conversationId: z.string(),
+  firstRequest: z.iso.datetime({ offset: true }),
   lastRequest: z.iso.datetime({ offset: true }),
+  requestCount: z.number().int().nonnegative(),
   representativeAccount: z.string().nullable().optional().default(null),
   remainingAccountCount: z.number().int().nonnegative(),
   apiKeyId: z.string().nullable().optional().default(null),

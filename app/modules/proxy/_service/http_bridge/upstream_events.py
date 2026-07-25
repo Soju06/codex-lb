@@ -188,6 +188,12 @@ _MODEL_OUTPUT_EVENT_TYPES = frozenset(
         "response.output_tool_call.delta",
     }
 )
+_UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES = frozenset(
+    {
+        "computer_call",
+        "mcp_approval_request",
+    }
+)
 
 
 def _record_http_bridge_tool_call_lifecycle(
@@ -204,6 +210,13 @@ def _record_http_bridge_tool_call_lifecycle(
         return
     item_type = item.get("type")
     if not isinstance(item_type, str):
+        request_state.tool_call_manifest_invalid = True
+        return
+    if item_type in _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES:
+        # These calls require client-provided continuation state but are not
+        # representable by the direct function/custom/apply-patch replay proof.
+        # Persisting only a parallel supported call would make a partial suffix
+        # look complete, so keep the whole durable manifest unknown.
         request_state.tool_call_manifest_invalid = True
         return
     if item_type not in _PENDING_TOOL_CALL_ITEM_TYPES:
@@ -235,6 +248,8 @@ def _response_completed_tool_call_types(payload: dict[str, JsonValue] | None) ->
             return None
         item_type = item.get("type")
         if not isinstance(item_type, str):
+            return None
+        if item_type in _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES:
             return None
         if item_type not in _PENDING_TOOL_CALL_ITEM_TYPES:
             continue

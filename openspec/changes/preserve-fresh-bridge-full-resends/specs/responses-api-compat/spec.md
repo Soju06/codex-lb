@@ -22,6 +22,10 @@ manifest MUST bind its call map to the exact durable response ID, and a response
 ID mismatch MUST be treated as an unknown manifest so rolling-upgrade writers
 that do not know the manifest column cannot leave stale calls on a newer
 response.
+If a response contains a client-settled call type that the direct tool-loop
+proof cannot represent, including `computer_call` or `mcp_approval_request`,
+the service MUST treat the entire manifest as unknown rather than persist a
+partial manifest for any parallel supported calls.
 The service MUST submit that safe original full resend without adding
 `previous_response_id`, MUST retain the durable preferred owner and hard
 affinity, MUST NOT move the request through account-neutral replay, and MUST NOT
@@ -71,6 +75,13 @@ handling, and existing account-neutral replay eligibility remain unchanged.
 - **WHEN** the durable response alias is persisted
 - **THEN** its tool-call manifest is unknown rather than a one-call partial manifest
 - **AND** a later direct tool-loop full resend remains anchored
+
+#### Scenario: Unsupported parallel client-settled call keeps manifest unknown
+
+- **GIVEN** a response emits a supported direct call and a parallel client-settled call that the replay proof cannot represent
+- **WHEN** the durable response alias is persisted
+- **THEN** its tool-call manifest is unknown rather than a partial supported-call manifest
+- **AND** a later resend that settles only the supported call remains anchored
 
 #### Scenario: Legacy durable row remains anchored
 

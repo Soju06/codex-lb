@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 
 import pytest
@@ -453,6 +454,13 @@ def _add_durable_bridge_session(session: AsyncSession, *, account_id: str, sessi
         latest_response_id=response_id,
         latest_input_item_count=3,
         latest_input_full_fingerprint="a" * 64,
+        latest_pending_tool_calls_json=json.dumps(
+            {
+                "response_id": response_id,
+                "calls": {"call_stale": "function_call"},
+            },
+            separators=(",", ":"),
+        ),
         last_seen_at=utcnow(),
     )
     session.add(record)
@@ -512,6 +520,7 @@ def _assert_bridge_session_closed_without_continuity(record: HttpBridgeSessionRe
     assert record.latest_response_id is None
     assert record.latest_input_item_count is None
     assert record.latest_input_full_fingerprint is None
+    assert record.latest_pending_tool_calls_json is None
 
 
 @pytest.mark.asyncio

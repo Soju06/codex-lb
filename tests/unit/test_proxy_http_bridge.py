@@ -2414,6 +2414,30 @@ def test_durable_tool_call_manifest_requires_complete_added_and_done_lifecycle()
     )
     assert duplicate_state.tool_call_manifest_invalid is True
 
+    duplicate_done_state = proxy_service._WebSocketRequestState(
+        request_id="req-duplicate-done-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    duplicate_done_event = {
+        **duplicate_event,
+        "type": "response.output_item.done",
+    }
+    for event_type, event_payload in (
+        ("response.output_item.added", duplicate_event),
+        ("response.output_item.done", duplicate_done_event),
+        ("response.output_item.done", duplicate_done_event),
+    ):
+        http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+            duplicate_done_state,
+            event_type=event_type,
+            payload=event_payload,
+        )
+    assert duplicate_done_state.tool_call_manifest_invalid is True
+
 
 def test_durable_tool_call_manifest_rejects_unobserved_terminal_call() -> None:
     state = proxy_service._WebSocketRequestState(
@@ -2463,6 +2487,70 @@ def test_durable_tool_call_manifest_rejects_unobserved_terminal_call() -> None:
         )
         is None
     )
+
+
+def test_durable_tool_call_manifest_rejects_mixed_client_settled_call_types() -> None:
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-mixed-client-settled-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    function_item: dict[str, proxy_service.JsonValue] = {
+        "type": "function_call",
+        "call_id": "call_function",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+    for event_type in ("response.output_item.added", "response.output_item.done"):
+        http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+            state,
+            event_type=event_type,
+            payload={"type": event_type, "item": function_item},
+        )
+
+    assert (
+        http_bridge_upstream_events_module._durable_pending_tool_call_manifest(
+            state,
+            {
+                "type": "response.completed",
+                "response": {
+                    "output": [
+                        function_item,
+                        {
+                            "type": "computer_call",
+                            "call_id": "call_computer",
+                            "action": {"type": "screenshot"},
+                        },
+                    ]
+                },
+            },
+        )
+        is None
+    )
+
+    lifecycle_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsupported-lifecycle-manifest",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    http_bridge_upstream_events_module._record_http_bridge_tool_call_lifecycle(
+        lifecycle_state,
+        event_type="response.output_item.added",
+        payload={
+            "type": "response.output_item.added",
+            "item": {
+                "type": "mcp_approval_request",
+                "id": "approval_1",
+            },
+        },
+    )
+    assert lifecycle_state.tool_call_manifest_invalid is True
 
 
 @pytest.mark.asyncio
@@ -6611,6 +6699,24 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
             {"call-1": "function_call"},
             True,
             id="self-contained-tool-loop",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "result",
+                },
+            ],
+            None,
+            False,
+            id="tool-loop-with-unknown-manifest",
         ),
         pytest.param(
             [{"role": "user", "content": "revise that answer"}],

@@ -27,6 +27,10 @@ loop and require the Codex client to be restarted.
   the downstream client's request timeout boundary.
 - Do not let a proxy-initiated close of a superseded socket retire pending work
   on the replacement socket or increment the retry circuit.
+- Detect a stuck pre-response gate from the absence of upstream activity and
+  response creation, rather than admission flags alone. Give requests with a
+  prior continuity anchor a bounded two-threshold grace period, and emit
+  diagnostic state when the watchdog skips a candidate.
 
 ## Impact
 

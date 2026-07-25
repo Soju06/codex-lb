@@ -7,5 +7,7 @@
 - [x] Keep the shared session live across the cancelled reader's socket-generation finalizer.
 - [x] Add regression coverage for concurrent pruning during reader handoff.
 - [x] Move the default pre-response recovery threshold ahead of the client timeout boundary.
+- [x] Bound anchored stuck-gate grace and evaluate staleness from upstream activity/response creation.
+- [x] Emit stuck-watchdog skip diagnostics with pending-state verdict inputs.
 - [x] Validate the OpenSpec change and run the focused and full test suites.
 - [x] Build and deploy the validated image, then verify production health and logs.

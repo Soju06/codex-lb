@@ -33,6 +33,14 @@ keepalive interval, the proxy MUST initiate eligible recovery after no more
 than six silent intervals so replacement connection and first output can occur
 before a 120-second client deadline.
 
+The stuck pre-response watchdog MUST judge staleness using elapsed time since
+the last upstream activity and the absence of a response identifier or
+`response.created` latency, not admission flags alone. A request with a prior
+continuity anchor MUST receive at most two retire-thresholds of grace before
+being considered stale. When the watchdog skips a candidate, it MUST emit a
+low-cardinality diagnostic containing the session-closed state, candidate
+count, and pending-state verdicts.
+
 #### Scenario: clean close before response output receives one bounded additional replay
 
 - **GIVEN** an HTTP bridge request has no surfaced `response.*` events
@@ -81,6 +89,23 @@ before a 120-second client deadline.
 - **WHEN** six silent intervals elapse
 - **THEN** the proxy initiates eligible pre-response recovery
 - **AND** at least sixty seconds remain before a 120-second client request timeout
+
+#### Scenario: anchored stuck-gate grace is bounded
+
+- **GIVEN** a pending HTTP bridge request has a prior continuity anchor
+- **AND** no response identifier or `response.created` latency has been recorded
+- **WHEN** less than two retire thresholds have elapsed since the gate began waiting
+- **THEN** the watchdog does not classify the request as stale
+- **WHEN** two retire thresholds elapse without upstream activity
+- **THEN** the watchdog may classify the request as stale
+
+#### Scenario: upstream activity resolves admission-flag ambiguity
+
+- **GIVEN** a pending request has not acquired the response-created gate
+- **AND** upstream activity has not produced a response identifier or `response.created`
+- **WHEN** the staleness threshold elapses
+- **THEN** the watchdog classifies the request as stale
+- **AND** emits pending-state verdict inputs when it skips a watchdog pass
 
 ### Requirement: Durable retry-circuit state protects repeated hard-affinity failures
 

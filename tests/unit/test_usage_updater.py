@@ -2182,10 +2182,8 @@ async def test_usage_refresh_paid_payload_clears_pending_free_downgrade(monkeypa
 
     get_settings.cache_clear()
 
-    monkeypatch.setattr(
-        "app.modules.usage.updater.fetch_usage",
-        _free_downgrade_payload_factory(["free", "plus", "free"]),
-    )
+    fetch = _free_downgrade_payload_factory(["free", "plus", "free"])
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch)
 
     usage_repo = StubUsageRepository(return_rows=True)
     accounts_repo = StubAccountsRepository()
@@ -2195,11 +2193,21 @@ async def test_usage_refresh_paid_payload_clears_pending_free_downgrade(monkeypa
     account.plan_type = "plus"
     accounts_repo.accounts_by_id[account.id] = account
 
-    for _ in range(3):
-        await updater.refresh_accounts([account], latest_usage={})
+    # Force refresh, not the scheduled path: a scheduled refresh skips accounts
+    # whose usage is still fresh, so the third payload would never be fetched and
+    # the trailing observation would go unexercised.
+    await updater.force_refresh(account)
+    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+    assert account.plan_type == "plus"
 
-    # The intervening paid payload reset the pending state, so the trailing
-    # single ``free`` observation is once again unconfirmed.
+    await updater.force_refresh(account)
+    # The recognized paid payload must discard the pending downgrade outright.
+    assert account.id not in usage_updater_module._workspace_less_free_plan_observations
+    assert account.plan_type == "plus"
+
+    await updater.force_refresh(account)
+    # Back to a single unconfirmed observation, so no downgrade is applied.
+    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
     assert account.plan_type == "plus"
 
 
@@ -2291,6 +2299,39 @@ async def test_force_refresh_confirms_free_downgrade_on_second_probe(monkeypatch
     assert account.plan_type == "pro"
 
     await updater.force_refresh(account)
+    assert account.plan_type == "free"
+    # The counter must not leak after a confirmed downgrade, or a later
+    # unrelated observation would inherit a head start toward another mutation.
+    assert account.id not in usage_updater_module._workspace_less_free_plan_observations
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_confirms_free_downgrade_with_access_token_override(monkeypatch) -> None:
+    """The Codex usage-identity path refreshes with an explicit access token
+    override. Confirmation must apply there too, otherwise that caller can never
+    converge an expired account."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_personal_token_override", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.force_refresh(account, access_token_override="override-token")
+    assert account.plan_type == "plus"
+
+    await updater.force_refresh(account, access_token_override="override-token")
     assert account.plan_type == "free"
 
 

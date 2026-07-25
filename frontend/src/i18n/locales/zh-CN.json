@@ -913,6 +913,7 @@
   "reports.errors.data": "加载报表数据失败：{{error}}",
   "reports.errors.options": "加载 Model 和 User Agent 选项失败：{{error}}",
   "reports.errors.partial": "部分报表数据无法加载。请重试。",
+  "reports.filters.charts": "图表",
   "reports.filters.endDate": "结束日期",
   "reports.filters.invalidDateRange": "开始日期必须早于或等于结束日期。",
   "reports.filters.startDate": "开始日期",

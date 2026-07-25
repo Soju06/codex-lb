@@ -8,7 +8,7 @@ Define private Codex Live Voice call-owner continuity, authenticated sideband ro
 
 ### Requirement: Realtime call creation binds the final account under a required proxy key
 
-The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/realtime/calls` even when ordinary proxy API-key authentication is disabled. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, it MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the proxy key, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body.
+The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/realtime/calls` even when ordinary proxy API-key authentication is disabled. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, it MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the proxy key, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body. Private call-creation diagnostics, including caller-local AuthManager metadata work and process-global shared refresh work, MUST redact internal account identifiers and suppress exception details; shared refresh diagnostics MUST use the strict policy regardless of which caller creates the singleflight task.
 
 #### Scenario: initial or replacement account creates the call
 
@@ -35,6 +35,7 @@ The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/
 - **WHEN** upstream returns success without a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{bounded_call_id}`, or durable owner binding fails
 - **THEN** the proxy returns one `503` with code `realtime_call_binding_failed`
 - **AND** it does not expose or replay the already-created upstream call through another account
+- **AND** the single private call-creation request row is persisted with error status
 
 #### Scenario: ownership and cleanup remain bounded
 
@@ -45,6 +46,13 @@ The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/
 - **WHEN** a binding expires or opportunistic cleanup runs
 - **THEN** expiry removal is conditional on the owner and timestamp observed as expired, or cleanup removes one bounded reserved-prefix batch
 - **AND** unrelated sticky-session rows remain unchanged
+
+#### Scenario: private freshness diagnostics remain account-safe
+
+- **GIVEN** private call creation reaches account freshness or legacy account-id metadata backfill
+- **WHEN** shared refresh cleanup or caller-local metadata persistence emits a warning
+- **THEN** the warning contains no internal account identifier, exception text, or traceback
+- **AND** shared refresh safety does not depend on whether an ordinary or private caller created the singleflight task
 
 ### Requirement: Every sideband route uses the exact bound owner without refresh or failover
 
@@ -86,13 +94,15 @@ The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}
 
 ### Requirement: Realtime forwarding preserves protocol context, privacy, and deterministic ownership
 
-The live connector MUST replace downstream proxy authorization, account identity, and client-supplied installation identity with the bound owner identity. It MUST preserve remaining ordered query pairs and supplied version-specific alpha value or absence, FedRAMP, residency, session/context, originator, and attestation headers; strip Responses-only beta values; synthesize neither `OpenAI-Beta` nor `Sec-WebSocket-Protocol`; and apply existing egress policy. It MUST relay text and binary messages without interpretation, preserve only bounded valid close data, enforce the existing message-size boundary, and close/cancel/await each owned peer or task at most once.
+The live connector MUST replace downstream proxy authorization, account identity, and client-supplied installation identity with the bound owner identity. It MUST preserve remaining ordered query pairs and supplied version-specific alpha value or absence, FedRAMP, residency, session/context, originator, and attestation headers; strip Responses-only beta values; synthesize neither `OpenAI-Beta` nor `Sec-WebSocket-Protocol`; and apply existing egress policy. It MUST pass the exact ordered downstream WebSocket subprotocol offers through the transport negotiation API, MUST accept downstream only with an upstream-selected value that the downstream offered, and MUST preserve no selection when upstream selects none. It MUST relay text and binary messages without interpretation, preserve only bounded valid close data, enforce the existing message-size boundary, and close/cancel/await each owned peer or task at most once. Both the initial upstream close and its post-cancel drain MUST be bounded; cancellation-resistant cleanup MUST NOT delay handler completion or stream-lease release, and any eventual late task result MUST be consumed without exposing its details.
 
 #### Scenario: protocol-faithful handshake
 
 - **WHEN** a live caller supplies supported query and context headers
 - **THEN** upstream receives those values in their required order with bound-owner credentials
 - **AND** it does not receive the downstream proxy bearer, client installation identity, duplicate call id, Responses beta, or synthesized subprotocol
+- **AND** any ordered subprotocol offers are negotiated upstream without a raw duplicated header
+- **AND** downstream receives only the upstream-selected offered value, or no value when upstream selects none
 
 #### Scenario: definitive denial and proxy errors remain isolated
 
@@ -108,6 +118,7 @@ The live connector MUST replace downstream proxy authorization, account identity
 - **THEN** the opposite peer receives only a valid bounded close code/reason when available
 - **AND** paired work is cancelled and awaited
 - **AND** each peer, connector, and stream lease is released at most once
+- **AND** a close task that ignores cancellation is awaited only through a fixed post-cancel drain cap before lease release continues
 
 #### Scenario: diagnostics remain content-free
 

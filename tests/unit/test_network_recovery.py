@@ -109,6 +109,76 @@ async def test_recovery_controller_retries_and_logs_recovery(monkeypatch, caplog
 
 
 @pytest.mark.asyncio
+async def test_private_recovery_controller_redacts_account_diagnostics(monkeypatch, caplog) -> None:
+    sleep = AsyncMock()
+    rotate = AsyncMock(return_value="rotated")
+    monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(network_recovery.time, "monotonic", lambda: 100.0)
+    recovery = network_recovery.ProcessNetworkRecovery(
+        transport="refresh",
+        request_id="req_private_network_recovery",
+        account_id="account-private-marker",
+        redact_sensitive_details=True,
+    )
+
+    with caplog.at_level(logging.INFO, logger=network_recovery.__name__):
+        decision = await recovery.wait(
+            error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+            retryable_same_contract=True,
+            deadline=110.0,
+            rotate_shared_client=True,
+        )
+        recovery.log_recovered()
+
+    assert decision == "retry"
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.name == network_recovery.__name__ and "process_network_recovery stage=" in record.getMessage()
+    ]
+    assert len(matching_records) == 2
+    assert "account_id=<redacted>" in caplog.text
+    assert "account-private-marker" not in caplog.text
+    assert all(record.exc_info is None for record in matching_records)
+
+
+@pytest.mark.asyncio
+async def test_private_recovery_rotation_failure_suppresses_traceback(monkeypatch, caplog) -> None:
+    async def fail_rotation(**_kwargs: object) -> str:
+        raise RuntimeError("private-network-recovery-traceback")
+
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", fail_rotation)
+    recovery = network_recovery.ProcessNetworkRecovery(
+        transport="refresh",
+        request_id="req_private_rotation_failure",
+        account_id="account-private-marker",
+        redact_sensitive_details=True,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=network_recovery.__name__):
+        decision = await recovery.wait(
+            error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+            retryable_same_contract=False,
+            deadline=network_recovery.time.monotonic() + 10.0,
+            rotate_shared_client=True,
+            failed_session=cast(aiohttp.ClientSession, object()),
+        )
+
+    assert decision == "not_applicable"
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.name == network_recovery.__name__ and "stage=rotation_failed" in record.getMessage()
+    ]
+    assert len(matching_records) == 1
+    assert "account_id=<redacted>" in matching_records[0].getMessage()
+    assert matching_records[0].exc_info is None
+    assert "account-private-marker" not in caplog.text
+    assert "private-network-recovery-traceback" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_recovery_controller_is_bounded_by_remaining_budget(monkeypatch) -> None:
     sleep = AsyncMock()
     monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)

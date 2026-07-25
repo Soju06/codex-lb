@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
 from app.core.errors import openai_error
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
@@ -21,6 +21,16 @@ class _RefreshServiceProtocol(Protocol):
         *,
         force: bool = False,
         timeout_seconds: float | None = None,
+        redact_sensitive_details: bool = False,
+    ) -> Account: ...
+
+    async def _ensure_fresh_with_budget_or_auth_error(
+        self,
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float | None = None,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account: ...
 
 
@@ -32,23 +42,33 @@ async def ensure_fresh_with_budget(
     deadline: float | None,
     remaining_budget_seconds: Callable[[float], float],
     request_id: str | None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> Account:
     """Refresh one account within the caller's deadline and replay boundary."""
     recovery = ProcessNetworkRecovery(
         transport="refresh",
         request_id=request_id,
         account_id=account.id,
+        redact_sensitive_details=privacy_policy.redacts_sensitive_details,
     )
     while True:
         remaining_seconds = None if deadline is None else remaining_budget_seconds(deadline)
         if remaining_seconds is not None and remaining_seconds <= 0:
             raise _refresh_budget_exhausted()
         try:
-            refreshed = await proxy._ensure_fresh(
-                account,
-                force=force,
-                timeout_seconds=remaining_seconds,
-            )
+            if privacy_policy.redacts_sensitive_details:
+                refreshed = await proxy._ensure_fresh(
+                    account,
+                    force=force,
+                    timeout_seconds=remaining_seconds,
+                    redact_sensitive_details=True,
+                )
+            else:
+                refreshed = await proxy._ensure_fresh(
+                    account,
+                    force=force,
+                    timeout_seconds=remaining_seconds,
+                )
             recovery.log_recovered()
             return refreshed
         except RefreshError as exc:
@@ -77,6 +97,40 @@ async def ensure_fresh_with_budget(
             if reason is not None:
                 raise UpstreamProxyRouteError(reason, account_id=account.id) from exc
             raise
+
+
+async def ensure_fresh_with_auth_error(
+    proxy: _RefreshServiceProtocol,
+    account: Account,
+    *,
+    force: bool,
+    timeout_seconds: float,
+    privacy_policy: CodexControlRequestPrivacyPolicy,
+) -> Account:
+    """Preserve ordinary call shape while attaching private diagnostic policy."""
+    if privacy_policy.redacts_sensitive_details:
+        if force:
+            return await proxy._ensure_fresh_with_budget_or_auth_error(
+                account,
+                force=True,
+                timeout_seconds=timeout_seconds,
+                privacy_policy=privacy_policy,
+            )
+        return await proxy._ensure_fresh_with_budget_or_auth_error(
+            account,
+            timeout_seconds=timeout_seconds,
+            privacy_policy=privacy_policy,
+        )
+    if force:
+        return await proxy._ensure_fresh_with_budget_or_auth_error(
+            account,
+            force=True,
+            timeout_seconds=timeout_seconds,
+        )
+    return await proxy._ensure_fresh_with_budget_or_auth_error(
+        account,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _refresh_budget_exhausted() -> ProxyResponseError:

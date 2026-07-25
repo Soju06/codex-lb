@@ -20,18 +20,18 @@ See `openspec/specs/realtime-api-compat/spec.md` for normative requirements and 
 
 - All ids, mappings, batches, waits, messages, close reasons, and cleanup work are bounded.
 - Missing or invalid keys fail before account selection; attachment rechecks current assignment and capacity.
-- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from persistence and diagnostics.
+- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from persistence and diagnostics. Private call creation also keeps AuthManager metadata and shared-refresh warnings account-safe; the process-global refresh singleflight uses content-free task diagnostics regardless of caller order.
 - No new setting, dependency, migration, public model, dashboard navigation item, README section, `.env.example` entry, background scheduler, or public Realtime endpoint is introduced.
-- The connector does not infer a protocol, synthesize `OpenAI-Beta` or `Sec-WebSocket-Protocol`, or interpret event payloads.
+- The connector does not infer a protocol, synthesize `OpenAI-Beta` or `Sec-WebSocket-Protocol`, or interpret event payloads. Client-offered WebSocket subprotocols retain their exact order through transport negotiation; downstream receives only an upstream-selected offered value.
 - Reserved ownership is hidden from and protected against ordinary sticky-session list and delete operations.
 
 ## Failure Modes
 
-- **Missing or unsupported successful `Location`:** Replace the unusable success with one credential-safe `503 realtime_call_binding_failed`; never replay the created call through another account.
+- **Missing or unsupported successful `Location` or durable binding failure:** Persist the single private request row as an error, replace the unusable success with one credential-safe `503 realtime_call_binding_failed`, and never replay the created call through another account.
 - **Conflicting immutable owner:** Preserve the original owner and fail closed.
 - **Expired, cross-key, reassigned, paused, deleted, capped, or unavailable owner:** Deny attachment without substitution.
 - **Routed handshake denial or network failure:** Preserve normalized safe context and do not replay or penalize the account; ordinary Responses network fallback remains unchanged.
-- **Peer disconnect, oversize, cancellation, or close timeout:** Cancel and await owned work, close peers at most once, and release the lease once.
+- **Peer disconnect, oversize, cancellation, or close timeout:** Cancel owned work, bound both initial close and post-cancel drain, consume any late close-task result, close peers at most once, and release the lease once without waiting indefinitely for cancellation-resistant transport cleanup.
 - **Reserved operator action:** Hide the row from lists and reject or skip single, bulk, filtered, and delete-all operations.
 
 ## Sanitized Example

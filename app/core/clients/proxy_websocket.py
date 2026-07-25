@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping, NoReturn, Protocol, cast
+from typing import Any, Mapping, NoReturn, Protocol, Sequence, cast
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import aiohttp
@@ -21,7 +21,7 @@ from websockets.exceptions import (
     InvalidProxy,
     InvalidStatus,
 )
-from websockets.typing import Origin
+from websockets.typing import Origin, Subprotocol
 
 from app.core.clients.codex import (
     CodexClient,
@@ -286,6 +286,10 @@ class WebsocketsUpstreamWebSocket:
         await self._connection.close(code=code, reason=reason)
 
     def response_header(self, name: str) -> str | None:
+        if name.lower() == "sec-websocket-protocol":
+            selected = getattr(self._connection, "subprotocol", None)
+            if selected is not None:
+                return cast(str, selected)
         response = getattr(self._connection, "response", None)
         headers = getattr(response, "headers", None)
         if headers is None:
@@ -387,6 +391,10 @@ class CodexUpstreamWebSocket:
                     await self._codex_client.close()
 
     def response_header(self, name: str) -> str | None:
+        if name.lower() == "sec-websocket-protocol":
+            selected = getattr(self._websocket, "protocol", None)
+            if selected is not None:
+                return cast(str, selected)
         return self._response_headers.get(name.lower())
 
 
@@ -684,6 +692,7 @@ async def _connect_upstream_websocket(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
     policy: _UpstreamWebSocketPolicy,
+    subprotocols: Sequence[str] = (),
 ) -> UpstreamWebSocket:
     settings = get_settings()
     if policy.include_responses_beta:
@@ -702,6 +711,7 @@ async def _connect_upstream_websocket(
         active_route = route
         fallback_used = False
         heartbeat = settings.proxy_downstream_websocket_idle_timeout_seconds if policy.enable_routed_heartbeat else None
+        protocol_kwargs = {"protocols": subprotocols} if subprotocols else {}
         try:
             opener = getattr(active_codex_client, "open_ws_with_route_metadata", None)
             if callable(opener):
@@ -714,6 +724,7 @@ async def _connect_upstream_websocket(
                     timeout=settings.upstream_connect_timeout_seconds,
                     max_msg_size=settings.max_sse_event_bytes,
                     heartbeat=heartbeat,
+                    **protocol_kwargs,
                 )
                 context = result.context
                 websocket = result.websocket
@@ -728,6 +739,7 @@ async def _connect_upstream_websocket(
                     timeout=settings.upstream_connect_timeout_seconds,
                     max_msg_size=settings.max_sse_event_bytes,
                     heartbeat=heartbeat,
+                    **protocol_kwargs,
                 )
                 websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
                 if not hasattr(context, "__aenter__"):
@@ -796,6 +808,7 @@ async def _connect_upstream_websocket(
         settings.proxy_downstream_websocket_idle_timeout_seconds if policy.enable_direct_ping_timeout else None
     )
     try:
+        subprotocol_kwargs = {"subprotocols": cast(Sequence[Subprotocol], subprotocols)} if subprotocols else {}
         response = await websocket_connect(
             url,
             origin=origin,
@@ -805,6 +818,7 @@ async def _connect_upstream_websocket(
             ping_timeout=ping_timeout,
             max_size=settings.max_sse_event_bytes,
             proxy=proxy_url,
+            **subprotocol_kwargs,
         )
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(
@@ -913,6 +927,7 @@ async def connect_live_websocket(
     allow_direct_egress: bool = False,
     base_url: str = _OPENAI_LIVE_BASE_URL,
     query_params: list[tuple[str, str]] | None = None,
+    subprotocols: Sequence[str] = (),
 ) -> UpstreamWebSocket:
     """Connect an account-bound Codex realtime sideband without refreshing auth."""
 
@@ -930,6 +945,7 @@ async def connect_live_websocket(
         codex_client=codex_client,
         allow_direct_egress=allow_direct_egress,
         policy=_LIVE_SIDEBAND_WEBSOCKET_POLICY,
+        subprotocols=subprotocols,
     )
 
 

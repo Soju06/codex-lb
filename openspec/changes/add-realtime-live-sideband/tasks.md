@@ -56,3 +56,13 @@
 - [x] 10.1 Add red-to-green regressions and fixed credential-safe branches for realtime call summary traces, unexpected/decryption failures, and direct Live handshake denials without changing ordinary control or Responses behavior.
 - [x] 10.2 Exercise `realtime_live`/`websocket` persistence through `/api/request-logs`, replace hidden connector lookup with an explicit service seam, and cleanly rename shared `*ResponsesWebSocket*` transport types to generic `*UpstreamWebSocket*` names without aliases.
 - [x] 10.3 Re-run focused and complete Python/frontend/OpenSpec/docs/static/runtime verification and record the project-verifiable results.
+
+## 11. Post-verification hardening
+
+- [x] 11.1 Add a red-to-green OpenTelemetry regression and redact private routed Live path/query data from exported aiohttp span URLs without changing the network request URL.
+- [x] 11.2 Add red-to-green regressions and preserve the exact downstream WebSocket subprotocol offers plus the upstream-selected offered value across routed and direct Live transports, without changing Responses.
+- [x] 11.3 Add red-to-green public request-log regressions and classify missing-Location or durable-binding failures as errors before the single call-create row is persisted, without replaying the created call.
+- [x] 11.4 Exercise the actual `yarl.URL` aiohttp filter input and the rejected duplicated Live alias at the server-span sink; keep both credential-safe without changing ordinary traffic.
+- [x] 11.5 Add red-to-green regressions for private process-network diagnostics, raw upstream subprotocol rejection, pre-stack OTEL instrumentation, rejected private path/query redaction, and Trusted Proxy scope projection while preserving ordinary call shapes and routing.
+- [x] 11.6 Add red-to-green product-path coverage and fixes for AuthManager privacy-policy propagation and cancellation-resistant bounded upstream close cleanup.
+- [x] 11.7 Re-run focused and complete Python/frontend/OpenSpec/docs/static/package verification plus final standards/spec/privacy review.

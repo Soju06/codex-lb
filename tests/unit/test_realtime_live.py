@@ -39,14 +39,17 @@ def _unscoped_api_key(*, key_id: str = "api-key-a") -> ApiKeyData:
 
 
 class _FakeDownstreamWebSocket:
-    def __init__(self) -> None:
+    def __init__(self, *, subprotocols: tuple[str, ...] = ()) -> None:
+        self.scope = {"subprotocols": list(subprotocols)}
         self.application_state = WebSocketState.CONNECTING
         self.accepted = False
+        self.accepted_subprotocol: str | None = None
         self.close_codes: list[int] = []
 
-    async def accept(self) -> None:
+    async def accept(self, subprotocol: str | None = None) -> None:
         self.application_state = WebSocketState.CONNECTED
         self.accepted = True
+        self.accepted_subprotocol = subprotocol
 
     async def receive(self) -> dict[str, Any]:
         self.application_state = WebSocketState.DISCONNECTED
@@ -65,9 +68,10 @@ class _FakeDownstreamWebSocket:
 
 
 class _FakeUpstreamWebSocket:
-    def __init__(self) -> None:
+    def __init__(self, *, selected_subprotocol: str | None = None) -> None:
         self.close_calls: list[tuple[int, str]] = []
         self._wait_forever = asyncio.Event()
+        self.selected_subprotocol = selected_subprotocol
 
     async def send_text(self, text: str) -> None:
         del text
@@ -83,7 +87,8 @@ class _FakeUpstreamWebSocket:
         self.close_calls.append((code, reason))
 
     def response_header(self, name: str) -> str | None:
-        del name
+        if name.lower() == "sec-websocket-protocol":
+            return self.selected_subprotocol
         return None
 
 
@@ -110,6 +115,37 @@ async def test_close_once_live_websocket_cancels_and_awaits_timed_out_close() ->
 
     assert upstream.close_cancelled.is_set()
     await wrapped.close(timeout_seconds=0.01)
+    assert upstream.close_calls == [(1000, "")]
+
+
+@pytest.mark.asyncio
+async def test_close_once_live_websocket_bounds_cancellation_resistant_cleanup() -> None:
+    class CancellationResistantCloseUpstream(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_cancelled = asyncio.Event()
+            self.cleanup_finished = asyncio.Event()
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.close_calls.append((code, reason))
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.close_cancelled.set()
+                await asyncio.sleep(0.2)
+                self.cleanup_finished.set()
+
+    upstream = CancellationResistantCloseUpstream()
+    wrapped = realtime_live_module._CloseOnceLiveWebSocket(upstream)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError):
+        await wrapped.close(timeout_seconds=0.01)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.1
+    assert upstream.close_cancelled.is_set()
+    await asyncio.wait_for(upstream.cleanup_finished.wait(), timeout=1)
     assert upstream.close_calls == [(1000, "")]
 
 
@@ -750,8 +786,8 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
             super().__init__()
             self.accepted_event = asyncio.Event()
 
-        async def accept(self) -> None:
-            await super().accept()
+        async def accept(self, subprotocol: str | None = None) -> None:
+            await super().accept(subprotocol=subprotocol)
             self.accepted_event.set()
 
         async def receive(self) -> dict[str, Any]:
@@ -789,6 +825,83 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
         await task
 
     assert downstream.close_codes == [1011]
+    assert upstream.close_calls == [(1000, "")]
+    assert service._load_balancer.released == [lease]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selected_subprotocol", "expected_accepted_subprotocol"),
+    [(None, None), ("live.v1", "live.v1")],
+    ids=["absent", "offered"],
+)
+async def test_live_sideband_accepts_only_absent_or_offered_upstream_subprotocol(
+    selected_subprotocol: str | None,
+    expected_accepted_subprotocol: str | None,
+) -> None:
+    lease = cast(AccountLease, object())
+    account = SimpleNamespace(
+        id="account-a",
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted="encrypted-token",
+        chatgpt_account_id="chatgpt-account-a",
+        codex_installation_id="installation-a",
+    )
+    downstream = _FakeDownstreamWebSocket(subprotocols=("live.v0", "live.v1"))
+    upstream = _FakeUpstreamWebSocket(selected_subprotocol=selected_subprotocol)
+    connector_subprotocols: tuple[str, ...] | None = None
+
+    async def fake_connect_live_websocket(*_args, subprotocols, **_kwargs):
+        nonlocal connector_subprotocols
+        connector_subprotocols = subprotocols
+        return upstream
+
+    service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
+
+    await service.proxy_realtime_live_websocket(
+        cast(Any, downstream),
+        "rtc_example",
+        {},
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        api_key=_unscoped_api_key(),
+    )
+
+    assert connector_subprotocols == ("live.v0", "live.v1")
+    assert isinstance(connector_subprotocols, tuple)
+    assert downstream.accepted_subprotocol == expected_accepted_subprotocol
+    assert service._load_balancer.released == [lease]
+
+
+@pytest.mark.asyncio
+async def test_live_sideband_rejects_an_upstream_subprotocol_the_client_did_not_offer() -> None:
+    lease = cast(AccountLease, object())
+    account = SimpleNamespace(
+        id="account-a",
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted="encrypted-token",
+        chatgpt_account_id="chatgpt-account-a",
+        codex_installation_id="installation-a",
+    )
+    downstream = _FakeDownstreamWebSocket(subprotocols=("live.v0", "live.v1"))
+    upstream = _FakeUpstreamWebSocket(selected_subprotocol="live.private")
+
+    async def fake_connect_live_websocket(*_args, **_kwargs):
+        return upstream
+
+    service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
+
+    with pytest.raises(ProxyResponseError) as raised:
+        await service.proxy_realtime_live_websocket(
+            cast(Any, downstream),
+            "rtc_example",
+            {},
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+            api_key=_unscoped_api_key(),
+        )
+
+    assert raised.value.status_code == 502
+    assert raised.value.payload["error"]["code"] == "upstream_websocket_subprotocol_mismatch"
+    assert downstream.accepted is False
     assert upstream.close_calls == [(1000, "")]
     assert service._load_balancer.released == [lease]
 

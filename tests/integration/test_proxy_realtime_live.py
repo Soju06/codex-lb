@@ -20,7 +20,11 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
-from app.core.clients.proxy import CodexControlResponse, ProxyResponseError
+from app.core.clients.proxy import (
+    CodexControlRequestPrivacyPolicy,
+    CodexControlResponse,
+    ProxyResponseError,
+)
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.exceptions import ProxyAuthError
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -72,7 +76,7 @@ def _allow_proxy_websocket_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _UvicornWebSocketLogProbe:
-    """Emit the same accepted-handshake record Uvicorn reads from the shared ASGI scope."""
+    """Emit Uvicorn-equivalent handshake records from the server-owned ASGI scope."""
 
     def __init__(self, app: ASGIApp) -> None:
         self._app = app
@@ -82,14 +86,34 @@ class _UvicornWebSocketLogProbe:
             await self._app(scope, receive, send)
             return
 
+        handshake_started = False
+        websocket_scope = cast(Any, scope)
+
         async def send_with_access_log(message: Message) -> None:
-            if message["type"] == "websocket.accept":
-                websocket_scope = cast(Any, scope)
-                logging.getLogger("uvicorn.error").info(
-                    '%s - "WebSocket %s" [accepted]',
-                    get_client_addr(websocket_scope),
-                    get_path_with_query_string(websocket_scope),
-                )
+            nonlocal handshake_started
+            if not handshake_started:
+                if message["type"] == "websocket.accept":
+                    logging.getLogger("uvicorn.error").info(
+                        '%s - "WebSocket %s" [accepted]',
+                        get_client_addr(websocket_scope),
+                        get_path_with_query_string(websocket_scope),
+                    )
+                    handshake_started = True
+                elif message["type"] == "websocket.close":
+                    logging.getLogger("uvicorn.error").info(
+                        '%s - "WebSocket %s" 403',
+                        get_client_addr(websocket_scope),
+                        get_path_with_query_string(websocket_scope),
+                    )
+                    handshake_started = True
+                elif message["type"] == "websocket.http.response.start":
+                    logging.getLogger("uvicorn.error").info(
+                        '%s - "WebSocket %s" %d',
+                        get_client_addr(websocket_scope),
+                        get_path_with_query_string(websocket_scope),
+                        message["status"],
+                    )
+                    handshake_started = True
             await send(message)
 
         await self._app(scope, receive, send_with_access_log)
@@ -198,7 +222,64 @@ def test_realtime_sideband_websocket_aliases_route_to_shared_service(
     assert "quicksilver" not in access_messages[0]
 
 
-def test_duplicated_prefix_live_alias_is_rejected_without_accepted_handshake_log(
+@pytest.mark.parametrize(
+    ("path", "logged_path", "call_id"),
+    [
+        (
+            "/backend-api/codex/rtc_rejected_current?intent=rejected-query-marker",
+            "/backend-api/codex/%3Credacted%3E",
+            "rtc_rejected_current",
+        ),
+        (
+            "/v1/live/rtc_rejected_v3?intent=rejected-query-marker",
+            "/v1/live/%3Credacted%3E",
+            "rtc_rejected_v3",
+        ),
+        (
+            "/v1/realtime?call_id=rtc_rejected_legacy&intent=rejected-query-marker",
+            "/v1/realtime",
+            "rtc_rejected_legacy",
+        ),
+    ],
+    ids=["current-app", "v3", "legacy-query"],
+)
+def test_realtime_sideband_websocket_rejections_log_redacted_server_scope(
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    logged_path: str,
+    call_id: str,
+) -> None:
+    service_called = False
+
+    async def fail_if_called(*_args, **_kwargs):
+        nonlocal service_called
+        service_called = True
+        raise AssertionError("authentication rejection must happen before the Live service")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", fail_if_called)
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        with TestClient(_UvicornWebSocketLogProbe(app_instance)) as client:
+            with pytest.raises(WebSocketDenialResponse) as raised:
+                with client.websocket_connect(path):
+                    pass
+
+    assert raised.value.status_code == 401
+    assert service_called is False
+    access_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "uvicorn.error" and ' - "WebSocket ' in record.getMessage()
+    ]
+    assert len(access_messages) == 1
+    assert f'"WebSocket {logged_path}" 401' in access_messages[0]
+    assert call_id not in access_messages[0]
+    assert "rejected-query-marker" not in access_messages[0]
+
+
+def test_duplicated_prefix_live_alias_logs_redacted_rejection(
     app_instance,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -224,22 +305,29 @@ def test_duplicated_prefix_live_alias_is_rejected_without_accepted_handshake_log
     monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", accept_if_routed)
     call_id = "rtc_alias_log_marker"
     query_marker = "alias-query-marker"
+    non_live_query_marker = "ordinary-query-marker"
+    non_live_path = f"/backend-api/codex/v1/not-a-live-route?trace={non_live_query_marker}"
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         with TestClient(_UvicornWebSocketLogProbe(app_instance)) as client:
-            expected_rejection = observe_rejection(client, "/backend-api/codex/v1/not-a-live-route")
+            expected_rejection = observe_rejection(client, non_live_path)
             alias_rejection = observe_rejection(
                 client,
                 f"/backend-api/codex/v1/{call_id}?intent=quicksilver&trace={query_marker}",
             )
 
-    access_messages = "\n".join(
+    access_messages = [
         record.getMessage()
         for record in caplog.records
         if record.name == "uvicorn.error" and ' - "WebSocket ' in record.getMessage()
-    )
-    assert call_id not in access_messages
-    assert query_marker not in access_messages
+    ]
+    assert len(access_messages) == 2
+    assert f'"WebSocket {non_live_path}" 403' in access_messages[0]
+    assert non_live_query_marker in access_messages[0]
+    assert '"WebSocket /backend-api/codex/v1/%3Credacted%3E" 403' in access_messages[1]
+    assert call_id not in access_messages[1]
+    assert query_marker not in access_messages[1]
+    assert "quicksilver" not in access_messages[1]
     assert alias_rejection == expected_rejection
     assert alias_rejection[0] != "accepted"
     assert service_calls == 0
@@ -455,6 +543,8 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
     )
     connector_calls = []
     control_calls: list[tuple[str, str | None]] = []
+    offered_subprotocols = ("live.v0", "live.v1")
+    selected_subprotocol = "live.v1"
 
     async def fake_codex_control_request(*_args, access_token, account_id=None, **_kwargs):
         control_calls.append((access_token, account_id))
@@ -469,8 +559,16 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
             headers={"content-type": "application/sdp", "location": location},
         )
 
-    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+    async def fake_ensure_fresh(
+        self,
+        account,
+        *,
+        force=False,
+        timeout_seconds=None,
+        privacy_policy=CodexControlRequestPrivacyPolicy.STANDARD,
+    ):
         assert timeout_seconds is not None
+        assert privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
         if not force:
             return account
         async with self._repo_factory() as repos:
@@ -524,7 +622,9 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
         async def close(self, code: int = 1000, reason: str = "") -> None:
             del code, reason
 
-        def response_header(self, _name: str) -> str | None:
+        def response_header(self, name: str) -> str | None:
+            if name.lower() == "sec-websocket-protocol":
+                return selected_subprotocol
             return None
 
         def archive_received(self, _message: UpstreamWebSocketMessage) -> None:
@@ -597,7 +697,9 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
         with client.websocket_connect(
             sideband_path,
             headers={"Authorization": f"Bearer {key_a}"},
+            subprotocols=list(offered_subprotocols),
         ) as websocket:
+            assert websocket.accepted_subprotocol == selected_subprotocol
             assert websocket.receive_text() == "ready"
 
             close_message = websocket.receive()
@@ -691,6 +793,7 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
     assert connector_calls[0]["url"] == expected_upstream_url
     assert connector_calls[0]["access_token"] == "rotated-access-token"
     assert connector_calls[0]["account_id"] == "acc_live_rotated"
+    assert connector_calls[0]["kwargs"]["subprotocols"] == offered_subprotocols
     assert connector_calls[0]["headers"]["x-codex-installation-id"] == "00000000-0000-4000-8000-000000000002"
 
 

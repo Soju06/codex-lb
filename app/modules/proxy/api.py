@@ -749,7 +749,7 @@ class _CodexControlAdapter(Protocol):
     def privacy_policy(self) -> CodexControlRequestPrivacyPolicy: ...
 
     @property
-    def success_account_callback(self) -> Callable[[str], None] | None: ...
+    def success_gate(self) -> Callable[[str, CodexControlResponse], Awaitable[bool]] | None: ...
 
     async def finalize(
         self,
@@ -761,7 +761,7 @@ class _CodexControlAdapter(Protocol):
 
 class _PassthroughCodexControlAdapter:
     privacy_policy: Final[CodexControlRequestPrivacyPolicy] = CodexControlRequestPrivacyPolicy.STANDARD
-    success_account_callback: Final[None] = None
+    success_gate: Final[None] = None
 
     async def finalize(
         self,
@@ -775,19 +775,49 @@ class _PassthroughCodexControlAdapter:
 
 @dataclass(slots=True)
 class _RealtimeCallCodexControlAdapter:
+    context: ProxyContext
     api_key: ApiKeyData
-    _successful_account_id: str | None = None
+    _binding_failure_message: str | None = "Realtime call owner could not be determined"
 
     @property
     def privacy_policy(self) -> CodexControlRequestPrivacyPolicy:
         return CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
 
     @property
-    def success_account_callback(self) -> Callable[[str], None]:
-        return self._capture_success_account
+    def success_gate(self) -> Callable[[str, CodexControlResponse], Awaitable[bool]]:
+        return self._bind_successful_call_owner
 
-    def _capture_success_account(self, account_id: str) -> None:
-        self._successful_account_id = account_id
+    async def _bind_successful_call_owner(
+        self,
+        account_id: str,
+        response: CodexControlResponse,
+    ) -> bool:
+        if not 200 <= response.status_code < 300:
+            self._binding_failure_message = None
+            return True
+        try:
+            bound_call_id = await self.context.service.bind_realtime_call_owner(
+                response_headers=response.headers,
+                account_id=account_id,
+                api_key=self.api_key,
+            )
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is None or current_task.cancelling():
+                raise
+            logger.error("Failed to persist realtime call owner binding")
+            self._binding_failure_message = "Realtime call owner binding could not be persisted"
+            return False
+
+        except Exception:
+            logger.error("Failed to persist realtime call owner binding")
+            self._binding_failure_message = "Realtime call owner binding could not be persisted"
+            return False
+        if bound_call_id is None:
+            self._binding_failure_message = "Realtime call response did not include a bindable Location"
+            return False
+        self._binding_failure_message = None
+        return True
 
     async def finalize(
         self,
@@ -795,42 +825,16 @@ class _RealtimeCallCodexControlAdapter:
         context: ProxyContext,
         response: CodexControlResponse,
     ) -> Response:
+        del context
         if not 200 <= response.status_code < 300:
             return _codex_control_response(response)
-        if self._successful_account_id is None:
+        if self._binding_failure_message is not None:
             return _logged_error_json_response(
                 request,
                 503,
                 openai_error(
                     "realtime_call_binding_failed",
-                    "Realtime call owner could not be determined",
-                    error_type="server_error",
-                ),
-            )
-        try:
-            bound_call_id = await context.service.bind_realtime_call_owner(
-                response_headers=response.headers,
-                account_id=self._successful_account_id,
-                api_key=self.api_key,
-            )
-        except Exception:
-            logger.error("Failed to persist realtime call owner binding")
-            return _logged_error_json_response(
-                request,
-                503,
-                openai_error(
-                    "realtime_call_binding_failed",
-                    "Realtime call owner binding could not be persisted",
-                    error_type="server_error",
-                ),
-            )
-        if bound_call_id is None:
-            return _logged_error_json_response(
-                request,
-                503,
-                openai_error(
-                    "realtime_call_binding_failed",
-                    "Realtime call response did not include a bindable Location",
+                    self._binding_failure_message,
                     error_type="server_error",
                 ),
             )
@@ -858,7 +862,7 @@ async def _codex_control_proxy(
             codex_session_affinity=True,
             api_key=api_key,
             privacy_policy=adapter.privacy_policy,
-            success_account_callback=adapter.success_account_callback,
+            success_gate=adapter.success_gate,
         )
     except ProxyResponseError as exc:
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
@@ -932,7 +936,7 @@ async def codex_realtime_calls(
         "realtime/calls",
         context,
         api_key,
-        adapter=_RealtimeCallCodexControlAdapter(api_key),
+        adapter=_RealtimeCallCodexControlAdapter(context, api_key),
     )
 
 

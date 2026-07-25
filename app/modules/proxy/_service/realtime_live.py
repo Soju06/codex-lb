@@ -41,6 +41,7 @@ _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS = 2 * 60 * 60
 _REALTIME_CALL_CLEANUP_INTERVAL_SECONDS = 5 * 60
 _REALTIME_CALL_CLEANUP_BATCH_SIZE = 250
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_UPSTREAM_CLOSE_CANCEL_DRAIN_MAX_SECONDS = 0.05
 _UNAVAILABLE_LIVE_OWNER_STATUSES = frozenset(
     {
         AccountStatus.RATE_LIMITED,
@@ -75,6 +76,7 @@ class LiveWebSocketConnector(Protocol):
         route: ResolvedUpstreamRoute | None,
         allow_direct_egress: bool,
         query_params: list[tuple[str, str]],
+        subprotocols: Sequence[str],
     ) -> UpstreamWebSocket: ...
 
 
@@ -212,6 +214,7 @@ class _CloseOnceLiveWebSocket:
                 self._wrapped.close(code=code, reason=reason),
                 name="realtime-live-close-upstream",
             )
+            self._close_task.add_done_callback(_consume_close_task_result)
         if self._close_task.cancelled():
             return
         if timeout_seconds is None:
@@ -222,8 +225,11 @@ class _CloseOnceLiveWebSocket:
         except (TimeoutError, asyncio.CancelledError):
             self._close_task.cancel()
             try:
-                await self._close_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(
+                    asyncio.shield(self._close_task),
+                    timeout=_UPSTREAM_CLOSE_CANCEL_DRAIN_MAX_SECONDS,
+                )
+            except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
             raise
 
@@ -234,6 +240,16 @@ class _CloseOnceLiveWebSocket:
         archive_received = getattr(self._wrapped, "archive_received", None)
         if callable(archive_received):
             archive_received(message)
+
+
+def _consume_close_task_result(task: asyncio.Task[None]) -> None:
+    try:
+        task.result()
+    except BaseException:
+        # The owning close call reports its bounded failure. A cancellation-
+        # resistant transport cleanup may finish only after that owner has
+        # returned, so consume its terminal result without logging details.
+        return
 
 
 async def _relay_downstream_to_upstream(
@@ -449,6 +465,7 @@ class _RealtimeLiveMixin:
         start = time.monotonic()
         settings = get_settings()
         upstream_close_timeout_seconds = max(1.0, settings.upstream_connect_timeout_seconds)
+        offered_subprotocols = tuple(cast(Sequence[str], websocket.scope.get("subprotocols", ())))
         selection = await proxy._select_account_with_budget_compatible(
             start + settings.proxy_request_budget_seconds,
             request_id=request_id,
@@ -530,9 +547,23 @@ class _RealtimeLiveMixin:
                     if isinstance(query_params, Mapping)
                     else list(query_params)
                 ),
+                subprotocols=offered_subprotocols,
             )
             relay_upstream = _CloseOnceLiveWebSocket(upstream)
-            await websocket.accept()
+            selected_subprotocol = relay_upstream.response_header("sec-websocket-protocol")
+            if selected_subprotocol is not None and selected_subprotocol not in offered_subprotocols:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_websocket_subprotocol_mismatch",
+                        "Upstream websocket selected an unsupported subprotocol",
+                        error_type="server_error",
+                    ),
+                )
+            if selected_subprotocol is None:
+                await websocket.accept()
+            else:
+                await websocket.accept(subprotocol=selected_subprotocol)
             await _relay_live_websocket(
                 websocket,
                 relay_upstream,

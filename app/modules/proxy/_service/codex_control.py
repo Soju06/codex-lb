@@ -55,12 +55,45 @@ class _CodexControlServiceProtocol(Protocol):
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     ) -> Account | None: ...
-    async def _ensure_previsible_unary_fresh_with_failover(self, account: Account, **kwargs: Any) -> Account: ...
+    async def _ensure_previsible_unary_fresh_with_failover(
+        self,
+        account: Account,
+        *,
+        deadline: float,
+        request_id: str,
+        kind: str,
+        select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+        strict_account_id: str | None = None,
+        force: bool = False,
+        max_account_attempts: int = 2,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> Account: ...
     async def _retry_previsible_unary_call_failover(
-        self, exc: ProxyResponseError, account: Account, **kwargs: Any
+        self,
+        exc: ProxyResponseError,
+        account: Account,
+        *,
+        deadline: float,
+        select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+        call_next: Callable[[Account], Awaitable[CodexControlResponse]],
+        strict_account_id: str | None = None,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> tuple[Account, CodexControlResponse] | None: ...
-    async def _ensure_fresh_with_budget_or_auth_error(self, account: Account, *, timeout_seconds: float) -> Account: ...
-    async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None: ...
+    async def _ensure_fresh_with_budget_or_auth_error(
+        self,
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> Account: ...
+    async def _handle_proxy_error(
+        self,
+        account: Account,
+        exc: ProxyResponseError,
+        *,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> None: ...
     async def _write_request_log(self, **kwargs: Any) -> None: ...
     async def _resolve_upstream_route_for_account(
         self, account: Account, *, operation: str
@@ -156,7 +189,7 @@ class _CodexControlMixin:
         headers: Mapping[str, str],
         codex_session_affinity: bool = True,
         api_key: ApiKeyData | None = None,
-        success_account_callback: Callable[[str], None] | None = None,
+        success_gate: Callable[[str, CodexControlResponse], Awaitable[bool]] | None = None,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> CodexControlResponse:
         proxy = cast(_CodexControlServiceProtocol, self)
@@ -195,15 +228,24 @@ class _CodexControlMixin:
                 return account_id
             return "<redacted>"
 
-        def _finalize_success(
+        async def _handle_proxy_error(account: Account, exc: ProxyResponseError) -> None:
+            if sensitive_realtime_request:
+                await proxy._handle_proxy_error(
+                    account,
+                    exc,
+                    privacy_policy=effective_privacy_policy,
+                )
+                return
+            await proxy._handle_proxy_error(account, exc)
+
+        async def _finalize_success(
             successful_account: Account,
             response: CodexControlResponse,
         ) -> CodexControlResponse:
             nonlocal account_id_value, log_status
             account_id_value = successful_account.id
-            log_status = "success"
-            if success_account_callback is not None:
-                success_account_callback(successful_account.id)
+            gate_succeeded = success_gate is None or await success_gate(successful_account.id, response)
+            log_status = "success" if gate_succeeded else "error"
             return response
 
         try:
@@ -304,11 +346,12 @@ class _CodexControlMixin:
                     request_id=request_id,
                     kind=request_kind,
                     select_next_account=_select_control_failover,
+                    privacy_policy=effective_privacy_policy,
                 )
                 account_id_value = account.id
                 response = await _call_control(account)
                 await proxy._load_balancer.record_success(account)
-                return _finalize_success(account, response)
+                return await _finalize_success(account, response)
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
                     failed_account = _refresh_error_failed_account(refresh_exc, account)
@@ -330,10 +373,11 @@ class _CodexControlMixin:
                         deadline=deadline,
                         select_next_account=_select_control_failover,
                         call_next=_call_control,
+                        privacy_policy=effective_privacy_policy,
                     )
                     if failover is not None:
                         account, response = failover
-                        return _finalize_success(account, response)
+                        return await _finalize_success(account, response)
                 if exc.status_code == 401:
                     try:
                         remaining_budget = _remaining_budget_seconds(deadline)
@@ -354,19 +398,20 @@ class _CodexControlMixin:
                                 kind=request_kind,
                                 select_next_account=_select_control_failover,
                                 force=True,
+                                privacy_policy=effective_privacy_policy,
                             )
                         except ProxyResponseError as refresh_failover_exc:
                             failed_account = _proxy_response_failed_account(refresh_failover_exc, account)
                             account_id_value = failed_account.id
-                            await proxy._handle_proxy_error(failed_account, refresh_failover_exc)
+                            await _handle_proxy_error(failed_account, refresh_failover_exc)
                             raise
                         account_id_value = account.id
                         try:
                             response = await _call_control(account)
                             await proxy._load_balancer.record_success(account)
-                            return _finalize_success(account, response)
+                            return await _finalize_success(account, response)
                         except ProxyResponseError as retry_exc:
-                            await proxy._handle_proxy_error(account, retry_exc)
+                            await _handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
                                 selection = await proxy._select_account_with_budget(
                                     deadline,
@@ -388,16 +433,23 @@ class _CodexControlMixin:
                                 if selection.account is not None:
                                     account = selection.account
                                     account_id_value = account.id
-                                    account = await proxy._ensure_fresh_with_budget_or_auth_error(
-                                        account,
-                                        timeout_seconds=_remaining_budget_seconds(deadline),
-                                    )
+                                    if sensitive_realtime_request:
+                                        account = await proxy._ensure_fresh_with_budget_or_auth_error(
+                                            account,
+                                            timeout_seconds=_remaining_budget_seconds(deadline),
+                                            privacy_policy=effective_privacy_policy,
+                                        )
+                                    else:
+                                        account = await proxy._ensure_fresh_with_budget_or_auth_error(
+                                            account,
+                                            timeout_seconds=_remaining_budget_seconds(deadline),
+                                        )
                                     try:
                                         response = await _call_control(account)
                                         await proxy._load_balancer.record_success(account)
-                                        return _finalize_success(account, response)
+                                        return await _finalize_success(account, response)
                                     except ProxyResponseError as failover_exc:
-                                        await proxy._handle_proxy_error(account, failover_exc)
+                                        await _handle_proxy_error(account, failover_exc)
                                         raise
                             raise
                     except RefreshError as refresh_exc:
@@ -421,7 +473,7 @@ class _CodexControlMixin:
                         _raise_proxy_unavailable(failure_message)
                 failed_account = _proxy_response_failed_account(exc, account)
                 account_id_value = failed_account.id
-                await proxy._handle_proxy_error(failed_account, exc)
+                await _handle_proxy_error(failed_account, exc)
                 raise
         except ProxyResponseError as exc:
             failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)

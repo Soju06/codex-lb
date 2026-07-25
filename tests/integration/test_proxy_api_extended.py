@@ -7,6 +7,7 @@ import logging
 from collections import Counter
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.responses import StreamingResponse
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from starlette.requests import Request
 
 import app.core.auth.dependencies as auth_dependencies
+import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
@@ -29,6 +31,7 @@ from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME
 from app.db.models import Account, AccountStatus, RequestLog, StickySession, StickySessionKind
 from app.db.session import SessionLocal
 from app.dependencies import ProxyContext, get_proxy_service_for_app
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.realtime_live import realtime_call_affinity_key
 from app.modules.proxy._service.support import _signal_propagated_capacity_startup_ready
@@ -108,6 +111,39 @@ async def _create_realtime_api_key(async_client, name: str) -> tuple[dict[str, s
         {"authorization": f"Bearer {payload['key']}"},
         cast(ApiKeyData, SimpleNamespace(id=payload["id"])),
     )
+
+
+async def _assert_realtime_call_request_log_error(
+    async_client,
+    *,
+    request_id: str,
+    api_key: ApiKeyData,
+) -> None:
+    service = get_proxy_service_for_app(async_client._transport.app)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(RequestLog).where(RequestLog.request_id == request_id))).scalars().all()
+    assert len(rows) == 1
+    persisted = rows[0]
+    assert persisted.status == "error"
+    assert persisted.transport == "http"
+    assert persisted.api_key_id == api_key.id
+    assert persisted.account_id is None
+    assert persisted.error_code is None
+    assert persisted.error_message is None
+
+    response = await async_client.get("/api/request-logs?limit=100")
+    assert response.status_code == 200, response.text
+    public_rows = [entry for entry in response.json()["requests"] if entry["requestId"] == request_id]
+    assert len(public_rows) == 1
+    public_row = public_rows[0]
+    assert public_row["status"] == "error"
+    assert public_row["transport"] == "http"
+    assert public_row["apiKeyId"] == api_key.id
+    assert public_row["accountId"] is None
+    assert public_row["errorCode"] is None
+    assert public_row["errorMessage"] is None
 
 
 def _sse_data_events(lines: list[str]) -> list[dict]:
@@ -953,6 +989,86 @@ async def test_codex_realtime_call_accepts_valid_key_for_remote_client_when_glob
 
 
 @pytest.mark.asyncio
+async def test_codex_realtime_call_awaits_durable_binding_before_success_log(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_codex_realtime_awaited_binding",
+        "codex-realtime-awaited-binding@example.com",
+    )
+    auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-awaited-binding")
+    binding_started = asyncio.Event()
+    allow_binding = asyncio.Event()
+    upstream_calls = 0
+    request_id = "req-realtime-awaited-binding"
+    original_bind = proxy_module.ProxyService.bind_realtime_call_owner
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_awaited_binding"},
+        )
+
+    async def delayed_binding(self, **kwargs):
+        binding_started.set()
+        await allow_binding.wait()
+        return await original_bind(self, **kwargs)
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_module.ProxyService, "bind_realtime_call_owner", delayed_binding)
+
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={"content-type": "application/sdp", "x-request-id": request_id, **auth_headers},
+        )
+    )
+    try:
+        await asyncio.wait_for(binding_started.wait(), timeout=1)
+        assert request_task.done() is False
+        async with SessionLocal() as session:
+            rows_before_binding = (
+                (await session.execute(select(RequestLog).where(RequestLog.request_id == request_id))).scalars().all()
+            )
+        assert rows_before_binding == []
+
+        allow_binding.set()
+        response = await asyncio.wait_for(request_task, timeout=1)
+    finally:
+        allow_binding.set()
+        if not request_task.done():
+            request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
+
+    assert response.status_code == 201
+    assert upstream_calls == 1
+    service = get_proxy_service_for_app(async_client._transport.app)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    async with SessionLocal() as session:
+        [persisted] = (
+            (await session.execute(select(RequestLog).where(RequestLog.request_id == request_id))).scalars().all()
+        )
+        binding = (
+            await session.execute(
+                select(StickySession).where(
+                    StickySession.key == realtime_call_affinity_key("rtc_awaited_binding", api_key),
+                    StickySession.kind == StickySessionKind.CODEX_SESSION,
+                )
+            )
+        ).scalar_one()
+    assert persisted.status == "success"
+    assert persisted.account_id is None
+    assert persisted.api_key_id == api_key.id
+    assert binding.account_id == account_id
+
+
+@pytest.mark.asyncio
 async def test_codex_realtime_call_binds_account_after_forced_refresh_success(async_client, monkeypatch):
     account_id = await _import_account(
         async_client,
@@ -977,9 +1093,17 @@ async def test_codex_realtime_call_binds_account_after_forced_refresh_success(as
             headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_refreshed"},
         )
 
-    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+    async def fake_ensure_fresh(
+        self,
+        account,
+        *,
+        force=False,
+        timeout_seconds=None,
+        privacy_policy=core_proxy.CodexControlRequestPrivacyPolicy.STANDARD,
+    ):
         del self
         assert timeout_seconds is not None
+        assert privacy_policy is core_proxy.CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
         refresh_forces.append(force)
         return account
 
@@ -1009,18 +1133,21 @@ async def test_codex_realtime_call_binds_account_after_forced_refresh_success(as
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("binding_failure", ["insert-failure", "owner-conflict"])
 async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    binding_failure: str,
 ) -> None:
     account_id = await _import_account(
         async_client,
-        "acc_codex_realtime_binding",
-        "codex-realtime-binding@example.com",
+        f"acc_codex_realtime_binding_{binding_failure}",
+        f"codex-realtime-binding-{binding_failure}@example.com",
     )
-    auth_headers, _api_key = await _create_realtime_api_key(async_client, "realtime-binding")
+    auth_headers, api_key = await _create_realtime_api_key(async_client, f"realtime-binding-{binding_failure}")
     upstream_calls = 0
+    request_id = f"req-realtime-binding-{binding_failure}"
 
     async def fake_codex_control_request(*_args, **_kwargs):
         nonlocal upstream_calls
@@ -1032,7 +1159,7 @@ async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(
         )
 
     async def fail_binding(*_args, **_kwargs):
-        raise RuntimeError(f"database unavailable for {account_id}")
+        raise RuntimeError(f"{binding_failure} for {account_id}")
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
     monkeypatch.setattr(proxy_module.ProxyService, "bind_realtime_call_owner", fail_binding)
@@ -1042,7 +1169,7 @@ async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(
         response = await async_client.post(
             "/backend-api/codex/realtime/calls",
             content=b"v=offer\r\n",
-            headers={"content-type": "application/sdp", **auth_headers},
+            headers={"content-type": "application/sdp", "x-request-id": request_id, **auth_headers},
         )
 
     assert response.status_code == 503
@@ -1056,6 +1183,7 @@ async def test_codex_realtime_call_binding_failure_fails_closed_without_replay(
     ]
     assert len(binding_records) == 1
     assert account_id not in caplog.text
+    await _assert_realtime_call_request_log_error(async_client, request_id=request_id, api_key=api_key)
 
 
 @pytest.mark.asyncio
@@ -1163,6 +1291,439 @@ async def test_codex_realtime_call_failure_logs_redact_account_identifiers(
         "bridge_stage",
     ):
         assert getattr(persisted, private_failure_field) is None
+
+
+@pytest.mark.asyncio
+async def test_codex_realtime_call_shared_freshness_budget_log_redacts_account_id(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_codex_realtime_shared_budget",
+        "codex-realtime-shared-budget@example.com",
+    )
+    auth_headers, _api_key = await _create_realtime_api_key(
+        async_client,
+        "realtime-shared-budget",
+    )
+
+    async def unexpected_codex_control_request(*_args, **_kwargs):
+        raise AssertionError("freshness budget exhaustion must prevent the upstream call")
+
+    remaining_budget = iter((1.0, 0.0))
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", unexpected_codex_control_request)
+    monkeypatch.setattr(proxy_module, "_remaining_budget_seconds", lambda _deadline: next(remaining_budget))
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        response = await async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "x-request-id": "req-private-shared-budget",
+                **auth_headers,
+            },
+        )
+
+    assert response.status_code >= 400
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.name == "app.modules.proxy.service"
+        and "request budget exhausted before freshness check" in record.getMessage()
+    ]
+    assert len(matching_records) == 1
+    assert "account_id=<redacted>" in matching_records[0].getMessage()
+    assert account_id not in matching_records[0].getMessage()
+    assert matching_records[0].exc_info is None
+
+
+@pytest.mark.asyncio
+async def test_codex_realtime_call_shared_refresh_failover_logs_redact_account_and_traceback(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    imported_account_ids = {
+        await _import_account(
+            async_client,
+            "acc_codex_realtime_shared_refresh_a",
+            "codex-realtime-shared-refresh-a@example.com",
+        ),
+        await _import_account(
+            async_client,
+            "acc_codex_realtime_shared_refresh_b",
+            "codex-realtime-shared-refresh-b@example.com",
+        ),
+    }
+    auth_headers, _api_key = await _create_realtime_api_key(
+        async_client,
+        "realtime-shared-refresh",
+    )
+    first_account_id: str | None = None
+    refresh_secret = "private-refresh-traceback-secret"
+
+    async def fake_ensure_fresh(
+        self,
+        account,
+        *,
+        force=False,
+        timeout_seconds=None,
+        privacy_policy=core_proxy.CodexControlRequestPrivacyPolicy.STANDARD,
+    ):
+        nonlocal first_account_id
+        del self, force
+        assert timeout_seconds is not None
+        assert privacy_policy is core_proxy.CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
+        if first_account_id is None:
+            first_account_id = account.id
+        if account.id == first_account_id:
+            raise RefreshError(
+                "transport_error",
+                f"oauth timed out for {account.id}: {refresh_secret}",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_shared_refresh"},
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        response = await async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "x-request-id": "req-private-shared-refresh",
+                **auth_headers,
+            },
+        )
+
+    assert response.status_code == 201
+    assert first_account_id in imported_account_ids
+    refresh_records = [
+        record
+        for record in caplog.records
+        if record.name == "app.modules.proxy._service.support"
+        and "codex_control_realtime_calls refresh failed" in record.getMessage()
+    ]
+    assert len(refresh_records) == 1
+    assert "account_id=<redacted>" in refresh_records[0].getMessage()
+    assert refresh_records[0].exc_info is None
+    assert refresh_secret not in caplog.handler.format(refresh_records[0])
+
+    health_records = [
+        record
+        for record in caplog.records
+        if record.name == "app.modules.proxy.service"
+        and record.getMessage().startswith("Recorded transient account error ")
+    ]
+    assert len(health_records) == 1
+    assert "account_id=<redacted>" in health_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_codex_realtime_call_auth_manager_backfill_log_redacts_account_and_traceback(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_codex_realtime_auth_manager_backfill",
+        "codex-realtime-auth-manager-backfill@example.com",
+    )
+    auth_headers, _api_key = await _create_realtime_api_key(
+        async_client,
+        "realtime-auth-manager-backfill",
+    )
+    async with SessionLocal() as session:
+        account = (await session.execute(select(Account).where(Account.id == account_id))).scalar_one()
+        account.chatgpt_account_id = None
+        await session.commit()
+
+    private_exception_detail = "private-auth-manager-backfill-traceback"
+
+    async def fail_metadata_backfill(
+        self,
+        persisted_account_id: str,
+        **_kwargs,
+    ) -> bool:
+        del self
+        assert persisted_account_id == account_id
+        raise RuntimeError(private_exception_detail)
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "location": "/v1/realtime/calls/rtc_auth_manager_backfill",
+            },
+        )
+
+    monkeypatch.setattr(
+        AccountsRepository,
+        "update_account_metadata",
+        fail_metadata_backfill,
+    )
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        response = await async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "x-request-id": "req-private-auth-manager-backfill",
+                **auth_headers,
+            },
+        )
+
+    assert response.status_code == 201
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.name == "app.modules.accounts.auth_manager"
+        and "Failed to persist chatgpt_account_id" in record.getMessage()
+    ]
+    assert len(matching_records) == 1
+    assert "account_id=<redacted>" in matching_records[0].getMessage()
+    assert matching_records[0].exc_info is None
+    assert account_id not in caplog.text
+    assert private_exception_detail not in caplog.handler.format(matching_records[0])
+
+
+@pytest.mark.asyncio
+async def test_codex_realtime_call_process_network_recovery_logs_redact_account_id(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_codex_realtime_process_network",
+        "codex-realtime-process-network@example.com",
+    )
+    auth_headers, _api_key = await _create_realtime_api_key(
+        async_client,
+        "realtime-process-network",
+    )
+    refresh_calls = 0
+
+    async def fake_ensure_fresh(
+        self,
+        account,
+        *,
+        force=False,
+        timeout_seconds=None,
+        redact_sensitive_details=False,
+    ):
+        nonlocal refresh_calls
+        del self, force
+        assert timeout_seconds is not None
+        assert redact_sensitive_details is True
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RefreshError(
+                "transport_error",
+                f"network recovery failed for {account.id}",
+                False,
+                transport_error=True,
+                transport_error_code=network_recovery_module.PROCESS_NETWORK_UNAVAILABLE_CODE,
+                retryable_same_contract=True,
+            )
+        return account
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_process_network"},
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(network_recovery_module, "backoff_seconds", lambda _attempt: 0.0)
+    monkeypatch.setattr(
+        network_recovery_module,
+        "rotate_shared_http_transport",
+        AsyncMock(return_value="rotated"),
+    )
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        response = await async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "x-request-id": "req-private-process-network",
+                **auth_headers,
+            },
+        )
+
+    assert response.status_code == 201
+    assert refresh_calls == 2
+    recovery_records = [
+        record
+        for record in caplog.records
+        if record.name == network_recovery_module.__name__ and "process_network_recovery stage=" in record.getMessage()
+    ]
+    assert len(recovery_records) == 2
+    assert all("account_id=<redacted>" in record.getMessage() for record in recovery_records)
+    assert all(account_id not in record.getMessage() for record in recovery_records)
+    assert all(record.exc_info is None for record in recovery_records)
+
+
+@pytest.mark.asyncio
+async def test_codex_realtime_call_shared_upstream_failover_log_redacts_account_id(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await _import_account(
+        async_client,
+        "acc_codex_realtime_shared_upstream_a",
+        "codex-realtime-shared-upstream-a@example.com",
+    )
+    await _import_account(
+        async_client,
+        "acc_codex_realtime_shared_upstream_b",
+        "codex-realtime-shared-upstream-b@example.com",
+    )
+    auth_headers, _api_key = await _create_realtime_api_key(
+        async_client,
+        "realtime-shared-upstream",
+    )
+    rejected_upstream_account_id: str | None = None
+
+    async def fake_codex_control_request(*_args, account_id=None, **_kwargs):
+        nonlocal rejected_upstream_account_id
+        if rejected_upstream_account_id is None:
+            rejected_upstream_account_id = account_id
+        if account_id == rejected_upstream_account_id:
+            raise ProxyResponseError(
+                502,
+                {
+                    "error": {
+                        "code": "upstream_unavailable",
+                        "message": "upstream connection reset before dispatch",
+                    }
+                },
+                failure_phase="connect",
+            )
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_shared_upstream"},
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        response = await async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "x-request-id": "req-private-shared-upstream",
+                **auth_headers,
+            },
+        )
+
+    assert response.status_code == 201
+    health_records = [
+        record
+        for record in caplog.records
+        if record.name == "app.modules.proxy.service"
+        and record.getMessage().startswith("Recorded transient account error ")
+    ]
+    assert len(health_records) == 1
+    assert "account_id=<redacted>" in health_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_codex_control_shared_refresh_log_keeps_account_diagnostics(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    imported_account_ids = {
+        await _import_account(
+            async_client,
+            "acc_codex_control_shared_refresh_a",
+            "codex-control-shared-refresh-a@example.com",
+        ),
+        await _import_account(
+            async_client,
+            "acc_codex_control_shared_refresh_b",
+            "codex-control-shared-refresh-b@example.com",
+        ),
+    }
+    first_account_id: str | None = None
+    refresh_diagnostic = "ordinary-refresh-diagnostic"
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        nonlocal first_account_id
+        del self, force
+        assert timeout_seconds is not None
+        if first_account_id is None:
+            first_account_id = account.id
+        if account.id == first_account_id:
+            raise RefreshError(
+                "transport_error",
+                f"oauth timed out for {account.id}: {refresh_diagnostic}",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return core_proxy.CodexControlResponse(
+            status_code=200,
+            body=b'{"ok":true}',
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        response = await async_client.post(
+            "/backend-api/codex/alpha/search",
+            json={"query": "ordinary diagnostics"},
+            headers={"x-request-id": "req-ordinary-shared-refresh"},
+        )
+
+    assert response.status_code == 200
+    assert first_account_id in imported_account_ids
+    refresh_records = [
+        record
+        for record in caplog.records
+        if record.name == "app.modules.proxy._service.support"
+        and "codex_control_alpha_search refresh failed" in record.getMessage()
+    ]
+    assert len(refresh_records) == 1
+    assert f"account_id={first_account_id}" in refresh_records[0].getMessage()
+    assert refresh_records[0].exc_info is not None
+    assert refresh_diagnostic in caplog.handler.format(refresh_records[0])
 
 
 @pytest.mark.asyncio
@@ -1481,8 +2042,9 @@ async def test_codex_control_unexpected_failure_remains_visible_on_ordinary_rout
 @pytest.mark.asyncio
 async def test_codex_realtime_call_without_bindable_location_fails_closed(async_client, monkeypatch):
     await _import_account(async_client, "acc_codex_realtime_location", "codex-realtime-location@example.com")
-    auth_headers, _api_key = await _create_realtime_api_key(async_client, "realtime-location")
+    auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-location")
     upstream_calls = 0
+    request_id = "req-realtime-location-failure"
 
     async def fake_codex_control_request(*_args, **_kwargs):
         nonlocal upstream_calls
@@ -1498,12 +2060,13 @@ async def test_codex_realtime_call_without_bindable_location_fails_closed(async_
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp", **auth_headers},
+        headers={"content-type": "application/sdp", "x-request-id": request_id, **auth_headers},
     )
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "realtime_call_binding_failed"
     assert upstream_calls == 1
+    await _assert_realtime_call_request_log_error(async_client, request_id=request_id, api_key=api_key)
 
 
 @pytest.mark.asyncio
@@ -1546,6 +2109,7 @@ async def test_codex_realtime_call_rejects_unsupported_location_without_binding_
     await _import_account(async_client, "acc_codex_realtime_unsupported", "codex-realtime-unsupported@example.com")
     auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-unsupported")
     upstream_calls = 0
+    request_id = "req-realtime-unsupported-location"
 
     async def fake_codex_control_request(*_args, **_kwargs):
         nonlocal upstream_calls
@@ -1561,7 +2125,7 @@ async def test_codex_realtime_call_rejects_unsupported_location_without_binding_
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
         content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp", **auth_headers},
+        headers={"content-type": "application/sdp", "x-request-id": request_id, **auth_headers},
     )
 
     assert response.status_code == 503
@@ -1578,6 +2142,7 @@ async def test_codex_realtime_call_rejects_unsupported_location_without_binding_
             )
         ).scalar_one_or_none()
     assert binding is None
+    await _assert_realtime_call_request_log_error(async_client, request_id=request_id, api_key=api_key)
 
 
 @pytest.mark.asyncio
@@ -1614,9 +2179,17 @@ async def test_codex_realtime_call_binds_final_failover_account(
             headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_failover"},
         )
 
-    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+    async def fake_ensure_fresh(
+        self,
+        account,
+        *,
+        force=False,
+        timeout_seconds=None,
+        privacy_policy=core_proxy.CodexControlRequestPrivacyPolicy.STANDARD,
+    ):
         del self, force
         assert timeout_seconds is not None
+        assert privacy_policy is core_proxy.CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
         return account
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
@@ -1647,6 +2220,79 @@ async def test_codex_realtime_call_binds_final_failover_account(
             await session.execute(select(Account).where(Account.chatgpt_account_id == captured_account_ids[-1]))
         ).scalar_one()
     assert binding.account_id == final_account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "privacy_policy",
+    [
+        core_proxy.CodexControlRequestPrivacyPolicy.STANDARD,
+        core_proxy.CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME,
+    ],
+    ids=["standard", "private-realtime"],
+)
+async def test_previsible_unary_failover_refresh_preserves_keyword_callshape(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    privacy_policy: core_proxy.CodexControlRequestPrivacyPolicy,
+) -> None:
+    service = get_proxy_service_for_app(async_client._transport.app)
+    failed_account = cast(Account, SimpleNamespace(id="acc_callshape_failed"))
+    selected_account = cast(Account, SimpleNamespace(id="acc_callshape_selected"))
+    fresh_calls: list[tuple[Account, dict[str, object]]] = []
+    upstream_calls = 0
+
+    async def fake_ensure_fresh(account: Account, **kwargs: object) -> Account:
+        fresh_calls.append((account, kwargs))
+        return account
+
+    async def select_next_account(excluded_account_ids: set[str]) -> proxy_module.AccountSelection:
+        assert excluded_account_ids == {failed_account.id}
+        return proxy_module.AccountSelection(account=selected_account, error_message=None)
+
+    async def call_next(account: Account) -> object:
+        nonlocal upstream_calls
+        assert account is selected_account
+        upstream_calls += 1
+        if upstream_calls == 1:
+            raise ProxyResponseError(
+                401,
+                {"error": {"code": "invalid_api_key", "message": "stale token"}},
+            )
+        return "ok"
+
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget_or_auth_error", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    result = await service._retry_previsible_unary_call_failover(
+        ProxyResponseError(
+            502,
+            {
+                "error": {
+                    "code": "upstream_unavailable",
+                    "message": "[Errno 104] Connection reset by peer",
+                }
+            },
+            failure_phase="connect",
+        ),
+        failed_account,
+        deadline=proxy_module.time.monotonic() + 10.0,
+        select_next_account=select_next_account,
+        call_next=call_next,
+        privacy_policy=privacy_policy,
+    )
+
+    assert result == (selected_account, "ok")
+    assert [account for account, _kwargs in fresh_calls] == [selected_account, selected_account]
+    assert "force" not in fresh_calls[0][1]
+    assert fresh_calls[1][1]["force"] is True
+    for _account, kwargs in fresh_calls:
+        assert cast(float, kwargs["timeout_seconds"]) > 0
+        if privacy_policy.redacts_sensitive_details:
+            assert kwargs["privacy_policy"] is privacy_policy
+        else:
+            assert "privacy_policy" not in kwargs
 
 
 @pytest.mark.asyncio

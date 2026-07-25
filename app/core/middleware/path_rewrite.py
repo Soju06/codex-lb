@@ -1,23 +1,15 @@
-"""Path-rewrite middleware for backwards-compatible `/v1/` URL handling.
+"""Redact Live WebSocket server scopes and rewrite duplicated Codex paths.
 
-Some OpenAI-compatible clients unconditionally append ``/v1/`` to
-whatever base URL the operator configured. When the configured base URL
-already terminates at ``/backend-api/codex`` (codex-lb's Codex-style
-entry point), those clients end up hitting
-``/backend-api/codex/v1/<rest>`` -- a shape codex-lb does not register
-because the OpenAI-style endpoints are mounted at the top-level
-``/v1/<rest>`` and the Codex-style endpoints at
-``/backend-api/codex/<rest>``.
+Some OpenAI-compatible clients unconditionally append ``/v1/`` to a configured
+``/backend-api/codex`` base URL. For non-Live requests this middleware collapses
+``/backend-api/codex/v1/<rest>`` to the canonical
+``/backend-api/codex/<rest>`` route for both HTTP and WebSocket scopes.
 
-This middleware collapses the duplicated ``/v1`` segment in-place by
-mutating ``scope["path"]`` (and ``scope["raw_path"]``) before routing,
-so the canonical handler picks the request up unchanged. Implemented as
-a pure ASGI middleware so the rewrite covers both HTTP and WebSocket
-scopes -- ``app/modules/proxy/api.py`` exposes websocket endpoints under
-``/backend-api/codex`` (and ``/v1``), so a client that appends ``/v1``
-to its ``/backend-api/codex`` base URL needs the alias for handshakes
-just as much as it does for HTTP requests. See
-``openspec/changes/strip-codex-v1-prefix/`` for the spec delta.
+Live WebSocket handshakes require the inverse ownership rule: Uvicorn retains
+the original ASGI scope for accepted and rejected handshake logs, while the
+application still needs the original path and query for routing. The middleware
+therefore copies the original routing scope for downstream use, then redacts the
+server-owned scope before any downstream accept or rejection can be emitted.
 """
 
 from __future__ import annotations
@@ -30,13 +22,32 @@ from starlette.types import Receive, Scope, Send
 
 from app.core.clients.proxy_websocket import REALTIME_LIVE_CALL_ID_ROUTE_REGEX
 
-# The middleware is intentionally scoped to the duplicated Codex prefix
-# only. The top-level ``/v1/`` namespace is the canonical OpenAI-style
-# route surface and must be left alone.
+# Alias rewriting stays scoped to the duplicated Codex prefix. Live WebSocket
+# redaction separately covers every routed ingress family plus the unsupported
+# duplicated Live alias.
 _CODEX_V1_PREFIX = "/backend-api/codex/v1/"
 _CODEX_V1_PREFIX_BYTES = _CODEX_V1_PREFIX.encode("ascii")
 _CODEX_CANONICAL_PREFIX = "/backend-api/codex/"
 _CODEX_CANONICAL_PREFIX_BYTES = _CODEX_CANONICAL_PREFIX.encode("ascii")
+_V1_LIVE_PREFIX = "/v1/live/"
+_V1_LIVE_PREFIX_BYTES = _V1_LIVE_PREFIX.encode("ascii")
+_V1_REALTIME_PATH = "/v1/realtime"
+_V1_REALTIME_RAW_PATH = _V1_REALTIME_PATH.encode("ascii")
+_REDACTED_CALL_ID = "<redacted>"
+_REDACTED_CALL_ID_BYTES = b"%3Credacted%3E"
+_REALTIME_LIVE_CALL_ID_PATTERN = re.compile(rf"{REALTIME_LIVE_CALL_ID_ROUTE_REGEX}\Z")
+_REALTIME_LIVE_PATH_REDACTIONS = (
+    (
+        _CODEX_V1_PREFIX,
+        f"{_CODEX_V1_PREFIX}{_REDACTED_CALL_ID}",
+        _CODEX_V1_PREFIX_BYTES + _REDACTED_CALL_ID_BYTES,
+    ),
+    (
+        _CODEX_CANONICAL_PREFIX,
+        f"{_CODEX_CANONICAL_PREFIX}{_REDACTED_CALL_ID}",
+        _CODEX_CANONICAL_PREFIX_BYTES + _REDACTED_CALL_ID_BYTES,
+    ),
+)
 
 
 def _canonicalize_backend_api_codex_path(path: str) -> str:
@@ -54,9 +65,25 @@ def _canonicalize_backend_api_codex_path(path: str) -> str:
     return _CODEX_CANONICAL_PREFIX + path[len(_CODEX_V1_PREFIX) :]
 
 
-def _is_unsupported_realtime_live_alias(path: str) -> bool:
-    call_id = path.removeprefix(_CODEX_V1_PREFIX)
-    return call_id != path and re.fullmatch(REALTIME_LIVE_CALL_ID_ROUTE_REGEX, call_id) is not None
+def _realtime_live_scope_redaction(path: str) -> tuple[str, bytes] | None:
+    if path == _V1_REALTIME_PATH:
+        return _V1_REALTIME_PATH, _V1_REALTIME_RAW_PATH
+
+    # The v3 ingress owns this whole namespace, including requests whose
+    # suffix cannot match a route. Rejected handshakes must therefore redact
+    # malformed, empty, and overlong suffixes before Uvicorn can log them.
+    if path.startswith(_V1_LIVE_PREFIX):
+        return (
+            f"{_V1_LIVE_PREFIX}{_REDACTED_CALL_ID}",
+            _V1_LIVE_PREFIX_BYTES + _REDACTED_CALL_ID_BYTES,
+        )
+
+    # Generic Codex paths share their namespace with non-Live routes, so their
+    # redaction boundary remains the exact Live call-id grammar.
+    for prefix, redacted_path, redacted_raw_path in _REALTIME_LIVE_PATH_REDACTIONS:
+        if path.startswith(prefix) and _REALTIME_LIVE_CALL_ID_PATTERN.fullmatch(path[len(prefix) :]) is not None:
+            return redacted_path, redacted_raw_path
+    return None
 
 
 def _canonicalize_raw_path(raw_path: bytes) -> bytes:
@@ -66,16 +93,13 @@ def _canonicalize_raw_path(raw_path: bytes) -> bytes:
 
 
 class BackendApiCodexV1AliasMiddleware:
-    """ASGI middleware that canonicalises the duplicated Codex prefix.
+    """Keep Live handshake logs private and canonicalise the duplicated Codex prefix.
 
-    Runs before Starlette's router matches a route. Both ``scope["path"]``
-    and ``scope["raw_path"]`` are kept in sync so downstream middleware
-    that re-derive the request URL from either field see the canonical
-    form.
-
-    Handles both ``http`` and ``websocket`` scopes -- HTTP-only middleware
-    misses websocket handshakes, which is the bug Codex flagged on #610.
-    Lifespan and other scope types pass through untouched.
+    This runs immediately inside trusted-proxy projection. For a Live WebSocket,
+    the downstream application receives a copy containing the projected client
+    metadata and original routing values while the server-owned scope is
+    redacted in place. Lifespan and non-Live scopes preserve the existing
+    alias-only behavior.
     """
 
     def __init__(self, app: Any) -> None:
@@ -83,28 +107,32 @@ class BackendApiCodexV1AliasMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope.get("type")
-        if scope_type in {"http", "websocket"}:
-            path = scope.get("path")
-            if isinstance(path, str) and path.startswith(_CODEX_V1_PREFIX):
-                # The duplicated prefix is not a supported Live ingress. Leaving it
-                # untouched lets the router reject it before an accepted handshake can
-                # expose the server-owned path and query in access logs.
-                if scope_type == "websocket" and _is_unsupported_realtime_live_alias(path):
-                    await self.app(scope, receive, send)
-                    return
+        path = scope.get("path")
 
-                rewritten = _canonicalize_backend_api_codex_path(path)
-                if rewritten != path:
-                    # Copy the scope so we don't mutate the caller's dict; some ASGI servers
-                    # reuse scope instances across calls.
-                    scope = dict(scope)
-                    scope["path"] = rewritten
-                    if isinstance(raw_path := scope.get("raw_path"), bytes):
-                        scope["raw_path"] = _canonicalize_raw_path(raw_path)
+        if scope_type == "websocket" and isinstance(path, str):
+            redaction = _realtime_live_scope_redaction(path)
+            if redaction is not None:
+                routing_scope = dict(scope)
+                redacted_path, redacted_raw_path = redaction
+                scope["path"] = redacted_path
+                scope["raw_path"] = redacted_raw_path
+                scope["query_string"] = b""
+                await self.app(routing_scope, receive, send)
+                return
+
+        if scope_type in {"http", "websocket"} and isinstance(path, str) and path.startswith(_CODEX_V1_PREFIX):
+            rewritten = _canonicalize_backend_api_codex_path(path)
+            if rewritten != path:
+                # Preserve the server-owned scope when only downstream routing changes.
+                routing_scope = dict(scope)
+                routing_scope["path"] = rewritten
+                if isinstance(raw_path := routing_scope.get("raw_path"), bytes):
+                    routing_scope["raw_path"] = _canonicalize_raw_path(raw_path)
+                scope = routing_scope
         await self.app(scope, receive, send)
 
 
 def add_backend_api_codex_v1_alias_middleware(app: FastAPI) -> None:
-    """Register the path-rewrite ASGI middleware for the duplicated prefix."""
+    """Register path rewriting and Live scope redaction inside trusted proxying."""
 
     app.add_middleware(BackendApiCodexV1AliasMiddleware)

@@ -27,19 +27,19 @@ The required-key rule does not add setup to the base install. Operators who do n
 
 - All ids, mappings, batches, waits, messages, close reasons, and cleanup work are bounded.
 - Missing/invalid keys fail before account selection; attachment rechecks current assignment and capacity.
-- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from request persistence and diagnostics; ownership persistence contains only the scoped digest and owner reference required for continuity.
+- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from request persistence and diagnostics; ownership persistence contains only the scoped digest and owner reference required for continuity. Private call creation also keeps AuthManager metadata and shared-refresh warnings account-safe; the process-global refresh singleflight uses content-free task diagnostics regardless of caller order.
 - No new setting, dependency, migration, model, dashboard navigation item, README section, `.env.example` line, background scheduler, public `/v1/realtime/calls`, or public `/v1/realtime/client_secrets` route is introduced. The user-facing guide documents this private boundary and links to the synced main `realtime-api-compat` capability.
-- No protocol is inferred, no `OpenAI-Beta` or `Sec-WebSocket-Protocol` is synthesized, and no event payload is interpreted.
+- No protocol is inferred, no `OpenAI-Beta` or `Sec-WebSocket-Protocol` is synthesized, and no event payload is interpreted. Client-offered WebSocket subprotocols retain their exact order through transport negotiation; downstream receives only an upstream-selected offered value.
 
 ## Failure modes
 
-- Missing or unsupported successful `Location` → replace the unusable success with one credential-safe `503`; never replay the created call.
+- Missing or unsupported successful `Location` or durable binding failure → persist the single private request row as an error, replace the unusable success with one credential-safe `503`, and never replay the created call.
 - Conflicting immutable owner → preserve the original owner and fail closed.
 - Expired, cross-key, reassigned, paused, deleted, capped, or unavailable owner → deny attachment without substitution.
 - Routed handshake denial or network failure → preserve normalized safe context and do not replay or penalize the account; ordinary Responses routed network fallback remains unchanged.
 - Direct Live `InvalidProxy`, `InvalidHandshake`, or `OSError` → use fixed credential-safe messages; preserve ordinary Responses behavior.
 - Private call-creation or sideband request row → retain request correlation and capability/status fields while omitting account identity, model content, upstream error text, failure metadata, call id, headers, query, body, and frame content.
-- Peer disconnect, oversize, cancellation, or close timeout → cancel and await owned work, close peers at most once, and release the lease once.
+- Peer disconnect, oversize, cancellation, or close timeout → cancel owned work, bound both initial close and post-cancel drain, consume any late close-task result, close peers at most once, and release the lease once without waiting indefinitely for cancellation-resistant transport cleanup.
 - Reserved operator action → hide the row from lists and reject or skip single, bulk, and filtered deletion.
 - Dashboard request-log parse → accept the backend's `realtime_live` WebSocket row; do not weaken the field to arbitrary strings.
 

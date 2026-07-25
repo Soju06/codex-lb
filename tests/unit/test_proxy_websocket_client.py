@@ -55,9 +55,10 @@ class _UnexpectedHttpClient:
 
 
 class _FakeConnection:
-    def __init__(self) -> None:
+    def __init__(self, *, subprotocol: str | None = None) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False
+        self.subprotocol = subprotocol
 
     async def send(self, data: str | bytes) -> None:
         self.sent.append(data)
@@ -119,8 +120,9 @@ async def _local_proxy_tunnel_handler(
 
 
 class _FakeCodexWebSocket:
-    def __init__(self) -> None:
+    def __init__(self, *, protocol: str | None = None) -> None:
         self.closed = False
+        self.protocol = protocol
         self.response = SimpleNamespace(headers={"x-codex-turn-state": "turn-routed"})
 
     async def send_str(self, data: str) -> None:
@@ -283,6 +285,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert "ping_interval" not in kwargs
     assert kwargs["ping_timeout"] is None
     assert kwargs["max_size"] == 4321
+    assert "subprotocols" not in kwargs
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])
     assert additional_headers["Authorization"] == "Bearer access-token"
     assert additional_headers["chatgpt-account-id"] == "account-123"
@@ -377,6 +380,7 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert call["timeout"] == 7.0
     assert call["max_msg_size"] == 4321
     assert "max_size" not in call
+    assert "protocols" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
 
 
@@ -387,7 +391,8 @@ async def test_connect_live_websocket_routed_call_disables_denial_replay_and_ena
         pool_id="pool_1",
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
-    codex_client = _FakeCodexClient()
+    codex_client = _FakeCodexClient(_FakeCodexWebSocket(protocol="live.v1"))
+    offered_subprotocols = ("live.v0", "live.v1")
     monkeypatch.setattr(
         proxy_websocket_module,
         "get_settings",
@@ -402,12 +407,13 @@ async def test_connect_live_websocket_routed_call_disables_denial_replay_and_ena
 
     websocket = await connect_live_websocket(
         "rtc_live",
-        {},
+        {"Sec-WebSocket-Protocol": "raw-header-must-not-be-forwarded"},
         "access-token",
         "account-123",
         protocol=RealtimeWebSocketProtocol.LIVE_V3,
         route=route,
         codex_client=cast(Any, codex_client),
+        subprotocols=offered_subprotocols,
     )
     await websocket.close()
 
@@ -416,6 +422,21 @@ async def test_connect_live_websocket_routed_call_disables_denial_replay_and_ena
     assert call["retry_network_errors"] is False
     assert call["heartbeat"] == 120.0
     assert call["max_msg_size"] == 4321
+    assert call["protocols"] is offered_subprotocols
+    headers = cast(dict[str, str], call["headers"])
+    assert not any(key.lower() == "sec-websocket-protocol" for key in headers)
+    assert websocket.response_header("sec-websocket-protocol") == "live.v1"
+
+
+def test_routed_live_websocket_exposes_unoffered_raw_subprotocol_for_rejection() -> None:
+    websocket = CodexUpstreamWebSocket(
+        _FakeCodexWebSocket(protocol=None),
+        response_headers={
+            "Sec-WebSocket-Protocol": "live.private",
+        },
+    )
+
+    assert websocket.response_header("sec-websocket-protocol") == "live.private"
 
 
 @pytest.mark.asyncio
@@ -1514,13 +1535,19 @@ def live_websocket_connect(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_live_connector_uses_frameless_url(live_websocket_connect) -> None:
+    live_websocket_connect.return_value = _FakeConnection(subprotocol="live.v1")
+    offered_subprotocols = ("live.v0", "live.v1")
     websocket = await proxy_websocket_module.connect_live_websocket(
         "rtc_example",
-        {"OpenAI-Alpha": "quicksilver=v2"},
+        {
+            "OpenAI-Alpha": "quicksilver=v2",
+            "Sec-WebSocket-Protocol": "raw-header-must-not-be-forwarded",
+        },
         "access-token",
         "account-a",
         protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
         query_params=[("intent", "quicksilver"), ("architecture", "avas")],
+        subprotocols=offered_subprotocols,
         allow_direct_egress=True,
     )
     await websocket.close()
@@ -1529,6 +1556,10 @@ async def test_live_connector_uses_frameless_url(live_websocket_connect) -> None
         live_websocket_connect.await_args.args[0]
         == "wss://api.openai.com/v1/live/rtc_example?intent=quicksilver&architecture=avas"
     )
+    assert live_websocket_connect.await_args.kwargs["subprotocols"] is offered_subprotocols
+    additional_headers = live_websocket_connect.await_args.kwargs["additional_headers"]
+    assert not any(key.lower() == "sec-websocket-protocol" for key in additional_headers)
+    assert websocket.response_header("sec-websocket-protocol") == "live.v1"
 
 
 @pytest.mark.asyncio

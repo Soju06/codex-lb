@@ -60,7 +60,10 @@ from app.modules.proxy.load_balancer import (
     AccountSelection,
     effective_account_concurrency_caps,
 )
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    responses_input_suffix_retains_prior_output,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -535,9 +538,11 @@ class _CompactMixin:
         HTTP bridge full-resend replay path already trusts: the input item count
         and prefix fingerprint persisted when the anchored response was created.
         Recovery requires the request's `input` to still open with exactly that
-        recorded prefix; anything else (no durable row, no recorded prefix, a
-        fingerprint mismatch, or a durable owner that disagrees with the pin)
-        keeps the request owner-bound.
+        recorded prefix and to then retain the anchored response's own assistant
+        output before any new input, exactly as the bridge requires; anything
+        else (no durable row, no recorded prefix, a fingerprint mismatch, a
+        suffix that skips the anchored output, or a durable owner that disagrees
+        with the pin) keeps the request owner-bound.
         """
 
         proxy = cast(_CompactServiceProtocol, self)
@@ -561,14 +566,26 @@ class _CompactMixin:
             and durable_account_id != owner_account_id
         ):
             return False
+        stored_count = durable_lookup.latest_input_item_count or 0
         prefix_matches = cast(
             Callable[..., bool],
             _service_global("_input_prefix_matches_stored_context"),
         )
-        return prefix_matches(
+        if not prefix_matches(
             payload.input,
-            stored_count=durable_lookup.latest_input_item_count or 0,
+            stored_count=stored_count,
             stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
+        ):
+            return False
+        if not isinstance(payload.input, list):
+            return False
+        # A matching prefix alone still allows the anchored response's own output
+        # to be missing: the client could resend the recorded request input plus
+        # only a new user turn. Require the anchored output to be retained ahead
+        # of the new input, the same proof the bridge replay path demands.
+        return responses_input_suffix_retains_prior_output(
+            cast(list[JsonValue], payload.input),
+            stored_count=stored_count,
         )
 
     async def _resolve_compact_turn_state_owner(

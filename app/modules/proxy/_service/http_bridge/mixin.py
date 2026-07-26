@@ -2025,9 +2025,6 @@ class _HTTPBridgeMixin(
         )
         require_same_account = require_same_account or account_neutral_recovery
         old_account_id = session.account.id
-        if session.account_lease is None and request_state.websocket_stream_lease is not None:
-            session.account_lease = request_state.websocket_stream_lease
-            request_state.websocket_stream_lease = None
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         if old_reader is not None:
@@ -2106,6 +2103,8 @@ class _HTTPBridgeMixin(
                 return
             if lease is session.account_lease:
                 session.account_lease = None
+            if lease is request_state.websocket_stream_lease:
+                request_state.websocket_stream_lease = None
             await self._load_balancer.release_account_lease(lease)
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
@@ -2118,7 +2117,9 @@ class _HTTPBridgeMixin(
             await release_selected_account_lease()
 
         while True:
-            reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
+            reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(
+                session.account_lease or request_state.websocket_stream_lease
+            )
             selection = await self._select_account_with_budget_for_stream(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
@@ -2207,7 +2208,7 @@ class _HTTPBridgeMixin(
                 record_selected_account_takeover(account.id, required_preferred_account_id)
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
-                session.account_lease
+                session.account_lease or request_state.websocket_stream_lease
                 if reuse_current_account_lease and account.id == session.account.id
                 else selection.lease
             )
@@ -2330,8 +2331,12 @@ class _HTTPBridgeMixin(
             await old_upstream.close()
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-        if selected_account_lease is not session.account_lease:
-            await self._load_balancer.release_account_lease(session.account_lease)
+        request_stream_lease = request_state.websocket_stream_lease
+        session_stream_lease = session.account_lease
+        if session_stream_lease is not None and selected_account_lease is not session_stream_lease:
+            await self._load_balancer.release_account_lease(session_stream_lease)
+        if request_stream_lease is not None and selected_account_lease is not request_stream_lease:
+            await self._load_balancer.release_account_lease(request_stream_lease)
         session.account_lease = selected_account_lease
         session.account, session.headers, session.upstream = account, connect_headers, upstream
         request_state.websocket_stream_lease = session.account_lease

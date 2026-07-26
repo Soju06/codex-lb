@@ -33170,6 +33170,43 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
 
 @pytest.mark.asyncio
+async def test_reconnect_http_bridge_reader_shutdown_failure_restores_request_stream_lease(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_reconnect_reader_shutdown")
+    lease = AccountLease(
+        lease_id="lease_bridge_reconnect_reader_shutdown",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=10.0,
+    )
+    request_state = _make_request_stream_lease_test_state("req_bridge_reconnect_reader_shutdown")
+    request_state.websocket_stream_lease = lease
+    session = _make_request_stream_lease_test_bridge(account, account_lease=None)
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    session.upstream_reader = cast(asyncio.Task[None], object())
+    release = AsyncMock()
+
+    monkeypatch.setattr(
+        "app.modules.proxy._service.http_bridge.mixin._await_cancelled_task",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._reconnect_http_bridge_session(
+            session,
+            request_state=request_state,
+            restart_reader=True,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert request_state.websocket_stream_lease is lease
+    assert session.account_lease is None
+    release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_security_rebind_clears_previous_response_state(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -35818,6 +35855,8 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
     reconnect_observations: list[dict[str, object]] = []
     admission_observations: list[dict[str, object]] = []
+    reconnect_started = asyncio.Event()
+    allow_reconnect = asyncio.Event()
     original_acquire_admission = service._acquire_request_state_response_create_admission
 
     async def capture_acquire_admission(
@@ -35860,22 +35899,35 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
                 "request_id": request_state.request_id,
                 "restart_reader": restart_reader,
                 "request_stream_lease_id": getattr(request_state.websocket_stream_lease, "lease_id", None),
+                "response_create_gate_locked": reconnect_session.response_create_gate.locked(),
             }
         )
+        reconnect_started.set()
+        await allow_reconnect.wait()
         reconnect_session.upstream_control = proxy_service._WebSocketUpstreamControl()
         reconnect_session.closed = False
 
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", capture_acquire_admission)
 
-    await asyncio.wait_for(
+    prewarm_task = asyncio.create_task(
         service._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,
             text_data='{"type":"response.create"}',
-        ),
-        timeout=2.0,
+        )
     )
+    try:
+        await asyncio.wait_for(reconnect_started.wait(), timeout=2.0)
+        assert len(reconnect_observations) == 1
+        blocked_observation = reconnect_observations[0]
+        assert blocked_observation["response_create_gate_locked"] is False
+        pending_while_reconnect_blocked = cast(list[str], blocked_observation["pending_request_ids"])
+        assert len(pending_while_reconnect_blocked) == 1
+        assert pending_while_reconnect_blocked[0].startswith("http_prewarm_")
+    finally:
+        allow_reconnect.set()
+        await asyncio.wait_for(prewarm_task, timeout=2.0)
 
     # After timeout the session should be reset to not-prewarmed, and the
     # upstream must be reconnected before the warmup state is dropped so late

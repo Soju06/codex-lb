@@ -1150,6 +1150,12 @@ class _HTTPBridgeRequestSubmitMixin:
                         if warmup_stream_lease is not None and request_state.websocket_stream_lease is None:
                             warmup_state.websocket_stream_lease = None
                             request_state.websocket_stream_lease = warmup_stream_lease
+                        if gate_acquired:
+                            await _release_websocket_response_create_gate(
+                                warmup_state,
+                                session.response_create_gate,
+                            )
+                            gate_acquired = False
                         try:
                             # The warmup request has already been sent upstream.  Close/reconnect the
                             # socket while the warmup state is still attached so any late warmup

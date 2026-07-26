@@ -22,15 +22,18 @@ may send only the turns that follow `previous_response_id` and rely on the owner
 earlier conversation. Recovery MUST additionally require independently trusted proxy-side
 evidence that the request still carries the anchored conversation: the durable continuity
 record for that `previous_response_id` MUST exist, MUST NOT name an account other than the
-pinned owner, MUST carry a recorded input prefix count and prefix fingerprint, and the
+pinned owner, MUST report the requested `previous_response_id` as its own latest response —
+because the recorded prefix is session-level and every later response registration overwrites
+it, so a record that moved on describes a different turn — MUST carry a recorded input prefix
+count and prefix fingerprint, and the
 request `input` MUST strictly extend that recorded prefix with an item-for-item fingerprint
 match. Because a matching prefix still permits a resend that omits the anchored response's own
 output, the items after the recorded prefix MUST also retain that response's completed
 assistant output, with any tool calls settled, before any new client input, using the same
-retained-output rule the HTTP bridge replay path applies. A missing record, a missing recorded
-prefix, a durable owner mismatch, a prefix fingerprint mismatch, a suffix that does not retain
-the anchored output ahead of new input, or a failed durable lookup MUST keep the request
-owner-bound.
+retained-output rule the HTTP bridge replay path applies. A missing record, a record whose latest response is not the
+requested anchor, a missing recorded prefix, a durable owner mismatch, a prefix fingerprint
+mismatch, a suffix that does not retain the anchored output ahead of new input, or a failed
+durable lookup MUST keep the request owner-bound.
 
 For an eligible recovery, the proxy MUST remove `previous_response_id` from the upstream
 compact payload, strip downstream session/turn affinity aliases from the upstream-bound
@@ -53,7 +56,7 @@ failover.
 - **GIVEN** account A owns the previous response referenced by a compact request and account B is eligible
 - **AND** account A is rate-limited or quota-exhausted with an unelapsed reset
 - **AND** the compact payload carries an account-neutral full-resend `input`
-- **AND** the durable continuity record for the anchor names account A and records a prefix the request `input` still opens with, followed by the anchored response's retained output and the new client input
+- **AND** the durable continuity record for the anchor names account A, reports the anchor as its latest response, and records a prefix the request `input` still opens with, followed by the anchored response's retained output and the new client input
 - **WHEN** pinned account selection cannot return account A
 - **THEN** the proxy sends the compact upstream exactly once on account B without `previous_response_id`
 - **AND** downstream session/turn affinity aliases are not sent to account B
@@ -85,7 +88,7 @@ failover.
 #### Scenario: Unproven anchored history stays fail-closed
 
 - **GIVEN** a pinned compact request whose serialized `input` is an account-neutral multi-item history
-- **AND** the durable continuity record for `previous_response_id` is missing, records no input prefix, names a different account, records a prefix the request `input` does not open with, or records a prefix the request `input` follows without retaining the anchored response's output
+- **AND** the durable continuity record for `previous_response_id` is missing, has moved on to a later response, records no input prefix, names a different account, records a prefix the request `input` does not open with, or records a prefix the request `input` follows without retaining the anchored response's output
 - **WHEN** the pinned owner cannot be selected
 - **THEN** the request fails with the existing selection or upstream error
 - **AND** the proxy keeps the anchor and sends no part of the payload to another account

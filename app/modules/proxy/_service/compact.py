@@ -555,10 +555,13 @@ class _CompactMixin:
         and prefix fingerprint persisted when the anchored response was created.
         Recovery requires the request's `input` to still open with exactly that
         recorded prefix and to then retain the anchored response's own assistant
-        output before any new input, exactly as the bridge requires; anything
-        else (no durable row, no recorded prefix, a fingerprint mismatch, a
-        suffix that skips the anchored output, or a durable owner that disagrees
-        with the pin) keeps the request owner-bound.
+        output before any new input, exactly as the bridge requires.  Because the
+        recorded prefix is session-level and every later response registration
+        overwrites it, the snapshot's latest response must also be the requested
+        anchor.  Anything else (no durable row, a snapshot describing a newer
+        response, no recorded prefix, a fingerprint mismatch, a suffix that skips
+        the anchored output, or a durable owner that disagrees with the pin)
+        keeps the request owner-bound.
         """
 
         proxy = cast(_CompactServiceProtocol, self)
@@ -581,6 +584,13 @@ class _CompactMixin:
             and durable_account_id.strip()
             and durable_account_id != owner_account_id
         ):
+            return False
+        if durable_lookup.latest_response_id != previous_response_id:
+            # The recorded prefix count and fingerprint are session-level: every
+            # later response registration overwrites them. A snapshot whose
+            # latest response is not the requested anchor therefore describes a
+            # different turn, and matching it would prove nothing about the
+            # history the anchor stands for.
             return False
         stored_count = durable_lookup.latest_input_item_count or 0
         prefix_matches = cast(

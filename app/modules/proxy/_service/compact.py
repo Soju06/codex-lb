@@ -56,6 +56,7 @@ from app.modules.proxy.continuity import (
     resolve_required_account_id,
     without_http_bridge_session_affinity_headers,
 )
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
 from app.modules.proxy.helpers import (
     _header_account_id,
     _normalize_error_code,
@@ -73,13 +74,8 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 from app.modules.proxy.selection_errors import selection_failure_response
-=======
-from app.modules.proxy.replay_safety import (
-    responses_input_suffix_retains_prior_output,
-    responses_payload_is_account_neutral_fresh_replay,
-)
->>>>>>> 7e8957ed3 (fix(compact): require the anchored response output to be retained)
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -152,7 +148,19 @@ class _CompactServiceProtocol(Protocol):
         api_key: ApiKeyData | None,
         owner_account_id: str,
         payload: ResponsesCompactRequest,
-    ) -> bool: ...
+    ) -> DurableBridgeLookup | None: ...
+
+    async def _compact_rebind_recovered_continuity_owner(
+        self,
+        *,
+        account_id: str,
+        affinity: _AffinityPolicy,
+        durable_session: DurableBridgeLookup | None,
+        api_key: ApiKeyData | None,
+        model: str | None,
+        service_tier: str | None,
+        request_id: str,
+    ) -> None: ...
 
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
@@ -543,7 +551,7 @@ class _CompactMixin:
         api_key: ApiKeyData | None,
         owner_account_id: str,
         payload: ResponsesCompactRequest,
-    ) -> bool:
+    ) -> DurableBridgeLookup | None:
         """Prove the compact request still carries the anchor's own history.
 
         A self-contained wire payload is not by itself a full resend: the client
@@ -562,6 +570,10 @@ class _CompactMixin:
         response, no recorded prefix, a fingerprint mismatch, a suffix that skips
         the anchored output, or a durable owner that disagrees with the pin)
         keeps the request owner-bound.
+
+        Returns the proving durable snapshot so a successful recovery can move
+        that session's continuity ownership to the replacement account, or
+        ``None`` when the request must stay owner-bound.
         """
 
         proxy = cast(_CompactServiceProtocol, self)
@@ -575,23 +587,23 @@ class _CompactMixin:
                 "Compact previous-response durable anchor lookup failed; keeping the request owner-bound",
                 exc_info=True,
             )
-            return False
+            return None
         if durable_lookup is None:
-            return False
+            return None
         durable_account_id = getattr(durable_lookup, "account_id", None)
         if (
             isinstance(durable_account_id, str)
             and durable_account_id.strip()
             and durable_account_id != owner_account_id
         ):
-            return False
+            return None
         if durable_lookup.latest_response_id != previous_response_id:
             # The recorded prefix count and fingerprint are session-level: every
             # later response registration overwrites them. A snapshot whose
             # latest response is not the requested anchor therefore describes a
             # different turn, and matching it would prove nothing about the
             # history the anchor stands for.
-            return False
+            return None
         stored_count = durable_lookup.latest_input_item_count or 0
         prefix_matches = cast(
             Callable[..., bool],
@@ -602,17 +614,124 @@ class _CompactMixin:
             stored_count=stored_count,
             stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
         ):
-            return False
+            return None
         if not isinstance(payload.input, list):
-            return False
+            return None
         # A matching prefix alone still allows the anchored response's own output
         # to be missing: the client could resend the recorded request input plus
         # only a new user turn. Require the anchored output to be retained ahead
         # of the new input, the same proof the bridge replay path demands.
-        return responses_input_suffix_retains_prior_output(
+        if not responses_input_suffix_retains_prior_output(
             cast(list[JsonValue], payload.input),
             stored_count=stored_count,
-        )
+        ):
+            return None
+        return durable_lookup
+
+    async def _compact_rebind_recovered_continuity_owner(
+        self,
+        *,
+        account_id: str,
+        affinity: _AffinityPolicy,
+        durable_session: DurableBridgeLookup | None,
+        api_key: ApiKeyData | None,
+        model: str | None,
+        service_tier: str | None,
+        request_id: str,
+    ) -> None:
+        """Move the conversation's continuity ownership to the recovery account.
+
+        The recovered compaction returns account-scoped `encrypted_content` from
+        the replacement account, so every continuity record that still names the
+        lost owner would send that state across accounts on the client's next
+        turn and wedge the conversation again.  Rebind both routing sources the
+        next turn consults: the sticky mapping for the client's own affinity key
+        (the same rebind the HTTP bridge performs when a session moves account)
+        and the durable session that proved the anchored history, whose account,
+        stale aliases, and recorded turn state must move with it.
+
+        Hard turn-state sticky rows are never rebound: that key is the lost
+        owner's opaque state, so pointing it at another account would authorize
+        exactly the cross-account send this rebind exists to prevent.
+
+        Rebinding runs after the compaction succeeded upstream.  A failure here
+        cannot be repaired by discarding that result — a retry would take the
+        same recovery path — so failures are logged and the compaction is still
+        returned to the client.
+        """
+
+        proxy = cast(_CompactServiceProtocol, self)
+        if (
+            affinity.selection_key is not None
+            and affinity.kind is not None
+            and (affinity.kind != StickySessionKind.CODEX_SESSION or affinity.codex_session_source == "session_header")
+        ):
+            try:
+                async with proxy._repo_factory() as repos:
+                    await repos.sticky_sessions.upsert(
+                        affinity.selection_key,
+                        account_id,
+                        kind=affinity.kind,
+                    )
+                logger.info(
+                    "Compact recovery rebound sticky mapping request_id=%s sticky_kind=%s account_id=%s",
+                    request_id,
+                    affinity.kind.value,
+                    account_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Compact recovery failed to rebind sticky mapping request_id=%s sticky_kind=%s account_id=%s",
+                    request_id,
+                    affinity.kind.value,
+                    account_id,
+                    exc_info=True,
+                )
+        if durable_session is None or durable_session.account_id == account_id:
+            return
+        try:
+            # Takeover is intentional: the conversation's state now lives on the
+            # replacement account, so a lease still held for the lost owner is
+            # stale by definition and its fenced writes must not re-publish the
+            # abandoned owner. The account change also clears that session's
+            # aliases and recorded turn state, which describe the lost owner's
+            # upstream state and must never resolve to the new one.
+            claimed = await proxy._durable_bridge.claim_live_session(
+                session_key_kind=durable_session.canonical_kind,
+                session_key_value=durable_session.canonical_key,
+                api_key_id=api_key.id if api_key is not None else None,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                lease_ttl_seconds=float(RING_STALE_THRESHOLD_SECONDS),
+                account_id=account_id,
+                model=model,
+                service_tier=service_tier,
+                latest_turn_state=None,
+                latest_response_id=None,
+                allow_takeover=True,
+            )
+            # The claim only exists to publish the new owner; the compact surface
+            # runs no live bridge session, so hand the lease straight back instead
+            # of holding it until it expires and drawing owner-forwarded traffic.
+            await proxy._durable_bridge.release_live_session(
+                session_id=claimed.session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=claimed.owner_epoch,
+                draining=True,
+            )
+            logger.info(
+                "Compact recovery rebound durable continuity owner request_id=%s session_id=%s account_id=%s",
+                request_id,
+                claimed.session_id,
+                account_id,
+            )
+        except Exception:
+            logger.warning(
+                "Compact recovery failed to rebind durable continuity owner request_id=%s session_id=%s account_id=%s",
+                request_id,
+                durable_session.session_id,
+                account_id,
+                exc_info=True,
+            )
 
     async def _resolve_compact_turn_state_owner(
         self,
@@ -1137,6 +1256,8 @@ class _CompactMixin:
             # exclude the owner, and those keep their existing owner-bound handling
             # instead of moving the history to another account.
             owner_quota_failover_eligible = False
+            recovery_rebind_affinity: _AffinityPolicy | None = None
+            recovery_rebind_durable_session: DurableBridgeLookup | None = None
             require_security_work_authorized = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
@@ -1210,20 +1331,24 @@ class _CompactMixin:
                         # owner's quota window resets. Turn-state and file pins
                         # never reach this branch and stay owner-bound.
                         replay_payload = _compact_account_neutral_replay_payload(payload)
-                        if replay_payload is not None and not (
-                            isinstance(previous_response_id, str)
-                            and await proxy._compact_previous_response_carries_anchored_history(
-                                previous_response_id=previous_response_id,
-                                api_key=api_key,
-                                owner_account_id=preferred_account_id,
-                                payload=payload,
+                        anchored_history_session: DurableBridgeLookup | None = None
+                        if replay_payload is not None:
+                            anchored_history_session = (
+                                await proxy._compact_previous_response_carries_anchored_history(
+                                    previous_response_id=previous_response_id,
+                                    api_key=api_key,
+                                    owner_account_id=preferred_account_id,
+                                    payload=payload,
+                                )
+                                if isinstance(previous_response_id, str)
+                                else None
                             )
-                        ):
-                            # Self-contained wire state does not prove the
-                            # request carries the conversation the anchor stands
-                            # for; without that proof the replacement account
-                            # would compact a partial history.
-                            replay_payload = None
+                            if anchored_history_session is None:
+                                # Self-contained wire state does not prove the
+                                # request carries the conversation the anchor
+                                # stands for; without that proof the replacement
+                                # account would compact a partial history.
+                                replay_payload = None
                         if replay_payload is None:
                             _record_continuity_fail_closed(
                                 surface="compact",
@@ -1246,6 +1371,13 @@ class _CompactMixin:
                             filtered = without_http_bridge_session_affinity_headers(filtered)
                             preferred_account_id = None
                             previous_response_preferred_account_id = None
+                            # Continuity ownership moves to whichever account
+                            # serves the recovered compaction, so remember the
+                            # client's own affinity key and the durable session
+                            # that proved the history before blanking affinity
+                            # for the fresh selection.
+                            recovery_rebind_affinity = affinity
+                            recovery_rebind_durable_session = anchored_history_session
                             affinity = _AffinityPolicy()
                             selection = await proxy._select_account_with_budget_compatible(
                                 deadline,
@@ -1502,6 +1634,19 @@ class _CompactMixin:
                             response=response,
                             request_service_tier=request_service_tier,
                         )
+                        if recovery_rebind_affinity is not None:
+                            # The recovered compaction is account-scoped state
+                            # from this account; continuity must follow it or the
+                            # client's next turn wedges on the lost owner again.
+                            await proxy._compact_rebind_recovered_continuity_owner(
+                                account_id=account.id,
+                                affinity=recovery_rebind_affinity,
+                                durable_session=recovery_rebind_durable_session,
+                                api_key=api_key,
+                                model=payload.model,
+                                service_tier=request_service_tier,
+                                request_id=request_id,
+                            )
                         log_status = "success"
                         return response
                     except ProxyResponseError as exc:

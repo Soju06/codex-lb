@@ -40,6 +40,16 @@ compact payload, strip downstream session/turn affinity aliases from the upstrea
 headers, clear sticky affinity for the retried selection, exclude the unavailable owner
 account from the remaining attempts, and reselect among the remaining eligible accounts.
 
+A recovered compaction returns account-scoped compaction state from the replacement account,
+so after the compact succeeds the proxy MUST move the conversation's continuity ownership to
+the account that served it. It MUST rebind the client's sticky session mapping and MUST rebind
+the durable continuity session that proved the anchored history, so that session names the
+replacement account and no longer publishes the lost owner's anchor or turn state. It MUST NOT
+rebind a hard turn-state sticky key, because that key is the lost owner's own opaque state and
+pointing it at another account would authorize the cross-account send the rebind prevents.
+Because the compaction already succeeded upstream and a retry would repeat the same recovery,
+a rebind failure MUST be logged and MUST NOT fail the returned compaction.
+
 When the payload is not a verified account-neutral full resend, the proxy MUST keep the
 existing fail-closed failure for that request, MUST NOT send any of the payload to another
 account, and MUST record the fail-closed outcome on the continuity fail-closed observability
@@ -61,6 +71,22 @@ failover.
 - **THEN** the proxy sends the compact upstream exactly once on account B without `previous_response_id`
 - **AND** downstream session/turn affinity aliases are not sent to account B
 - **AND** the compact response is returned successfully
+
+#### Scenario: Recovered compaction moves continuity ownership to the serving account
+
+- **GIVEN** a compact request recovers on account B after the pinned owner account A is unavailable
+- **AND** the request carries a session sticky key and the anchored history was proven by a durable continuity session naming account A
+- **WHEN** the compaction succeeds on account B
+- **THEN** the client's sticky session mapping resolves to account B
+- **AND** the durable continuity session names account B and no longer publishes account A's anchor alias or recorded turn state
+- **AND** a hard turn-state sticky key is left bound to account A
+
+#### Scenario: Continuity rebind failure keeps the successful compaction
+
+- **GIVEN** a compact request recovered on another account and the compaction succeeded upstream
+- **WHEN** rebinding the sticky mapping or the durable continuity session fails
+- **THEN** the proxy logs the rebind failure
+- **AND** still returns the successful compaction to the client
 
 #### Scenario: Owner exhausts quota during the compact request
 

@@ -32,3 +32,9 @@
   serializer transformation (poisoned local-compact fallback stripping can collapse a
   multi-item history to one message) and run the account-neutral rules on the same serialized
   payload, with unit and compact-route regression tests.
+- [x] 8. Require the serialized wire `input` to be item-for-item identical to the validated
+  request `input`, so an oversized history trimmed to a head, trim marker, and tail (or any
+  other serializer-dropped history that still leaves two or more items) fails closed instead of
+  replaying an incomplete conversation. Guard the speculative serialization against
+  `ClientPayloadError` / `ValidationError`, and cover the trimmed case with unit and
+  compact-route regression tests.

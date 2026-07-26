@@ -402,6 +402,7 @@ class _CodexControlMixin:
                     routing_strategy=routing_strategy,
                     model=selection_model,
                     exclude_account_ids=excluded_account_ids,
+                    redact_sensitive_details=sensitive_realtime_request,
                 )
 
             try:
@@ -494,6 +495,7 @@ class _CodexControlMixin:
                                     routing_strategy=routing_strategy,
                                     model=selection_model,
                                     exclude_account_ids={account.id},
+                                    redact_sensitive_details=sensitive_realtime_request,
                                 )
                                 if selection.account is not None:
                                     account = selection.account

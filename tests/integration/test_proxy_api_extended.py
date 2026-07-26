@@ -2193,7 +2193,13 @@ async def test_codex_realtime_call_binds_final_failover_account(
     await _import_account(async_client, "acc_codex_realtime_b", "codex-realtime-b@example.com")
     auth_headers, api_key = await _create_realtime_api_key(async_client, "realtime-failover")
     captured_account_ids: list[str | None] = []
+    selection_redaction_values: list[object] = []
     rejected_account_id: str | None = None
+    select_account_with_budget = proxy_module.ProxyService._select_account_with_budget
+
+    async def recording_select_account_with_budget(self, *args, **kwargs):
+        selection_redaction_values.append(kwargs.get("redact_sensitive_details", False))
+        return await select_account_with_budget(self, *args, **kwargs)
 
     async def fake_codex_control_request(*_args, account_id=None, **_kwargs):
         nonlocal rejected_account_id
@@ -2229,6 +2235,11 @@ async def test_codex_realtime_call_binds_final_failover_account(
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_account_with_budget",
+        recording_select_account_with_budget,
+    )
 
     response = await async_client.post(
         "/backend-api/codex/realtime/calls",
@@ -2240,6 +2251,8 @@ async def test_codex_realtime_call_binds_final_failover_account(
     assert len(captured_account_ids) == initial_attempts + 1
     assert captured_account_ids[:initial_attempts] == [captured_account_ids[0]] * initial_attempts
     assert captured_account_ids[-1] != captured_account_ids[0]
+    assert selection_redaction_values
+    assert all(value is True for value in selection_redaction_values)
 
     affinity_key = realtime_call_affinity_key("rtc_failover", api_key)
     async with SessionLocal() as session:

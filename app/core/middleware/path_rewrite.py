@@ -86,6 +86,13 @@ def _realtime_live_scope_redaction(path: str) -> tuple[str, bytes] | None:
     return None
 
 
+def redact_realtime_live_path(path: str) -> str:
+    """Return the credential-safe path used by pre-routing diagnostics."""
+
+    redaction = _realtime_live_scope_redaction(path)
+    return path if redaction is None else redaction[0]
+
+
 def _canonicalize_raw_path(raw_path: bytes) -> bytes:
     if not raw_path.startswith(_CODEX_V1_PREFIX_BYTES):
         return raw_path

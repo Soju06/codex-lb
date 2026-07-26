@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 115 settings. Every setting is an environment
+codex-lb currently exposes 118 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -90,8 +90,10 @@ the host side of the compose `ports` mapping instead.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID` | `str` | process hostname |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING` | `list[str]` | `[]` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_MAX_SESSIONS` | `int` | `256` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUARANTINE_SECONDS` | `float` | `60.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_QUEUE_LIMIT` | `int` | `8` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_REQUEST_BUDGET_SECONDS` | `float` | `7200.0` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_RESPONSE_CREATED_TIMEOUT_SECONDS` | `float` | `5.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS` | `float` | `300.0` |
 
 ## Proxy admission & account caps
@@ -239,6 +241,7 @@ the host side of the compose `ports` mapping instead.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
+| `CODEX_LB_STRICT_SERVICE_TIER_ACCOUNT_FILTER` | `bool` | `True` |
 | `CODEX_LB_WARMUP_MODEL` | `str` | `'gpt-5.4-mini'` |
 
 ## Removed / deprecated

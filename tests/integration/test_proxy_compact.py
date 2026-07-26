@@ -879,6 +879,51 @@ async def test_proxy_compact_pinned_owner_unavailable_non_neutral_payload_stays_
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_wire_trimmed_history_stays_fail_closed(async_client, monkeypatch):
+    """An oversized history trimmed for the wire must not cross accounts.
+
+    ``to_payload`` replaces omitted middle items with an account-neutral trim
+    marker, so the wire input stays a multi-item list. Without the anchor the
+    replacement account cannot resolve the omitted owner-resident context.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-trimmed-owner@example.com", raw_account_id="acc_trimmed_owner"
+    )
+    await _import_account(async_client, email="compact-trimmed-alt@example.com", raw_account_id="acc_trimmed_alt")
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": f"turn {index} " + "x" * 12_000}
+            for index in range(60)
+        ],
+        "previous_response_id": "resp_trimmed_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_pinned_owner_unavailable_wire_truncated_history_stays_fail_closed(
     async_client, monkeypatch
 ):

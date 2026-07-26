@@ -3848,6 +3848,35 @@ def test_compact_account_neutral_replay_payload_rejects_unsafe_histories(
     assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None, reason
 
 
+def test_compact_account_neutral_replay_payload_rejects_wire_trimmed_history() -> None:
+    """An oversized history trimmed for the wire is not a full resend.
+
+    ``to_payload`` replaces the omitted middle items with a trim marker, so the
+    wire input stays a multi-item account-neutral list. Only the owner can
+    resolve the omitted context from the dropped anchor, so replaying the
+    trimmed history on another account would compact an incomplete
+    conversation.
+    """
+
+    oversized_input: list[dict[str, object]] = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"turn {index} " + "x" * 12_000}
+        for index in range(60)
+    ]
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": oversized_input,
+            "previous_response_id": "resp_owner_oversized",
+        }
+    )
+    wire_input = payload.to_payload()["input"]
+    assert isinstance(wire_input, list)
+    assert 1 < len(wire_input) < len(oversized_input)
+
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
 @pytest.mark.asyncio
 async def test_compact_previous_response_owner_unavailable_recovers_with_account_neutral_replay(
     monkeypatch: pytest.MonkeyPatch,

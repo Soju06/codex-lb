@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
+from pydantic import ValidationError
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy, failover_decision
@@ -23,6 +24,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
@@ -468,13 +470,17 @@ def _compact_account_neutral_replay_payload(
     the shared fresh-replay validation, so no encrypted, compaction, file, or
     other account-scoped state can reach the replacement account.
 
-    Both checks run against the serialized upstream-bound payload, never the
-    request model. ``to_payload`` still drops items on the wire (poisoned
-    local-compact fallback messages take their trailing encrypted compaction
-    item with them), so a multi-item request can serialize down to a single
-    message. Replaying that would compact only the latest message on the
-    replacement account and silently lose the conversation, so the wire input
-    itself must keep more than one item.
+    Neutrality is checked on the serialized upstream-bound payload, never on
+    the request model, and the serialized history must additionally be a
+    complete resend. ``to_payload`` can still drop history on the wire: it
+    strips poisoned local-compact fallback messages together with their
+    trailing encrypted compaction item, and it trims oversized inputs down to a
+    head, a trim marker, and a tail. Both remain multi-item account-neutral
+    lists. Sending either to a replacement account without the anchor would
+    compact an incomplete conversation, because only the owner can resolve the
+    omitted context from the dropped anchor. So the wire input must be
+    item-for-item identical to the validated request input, and must still
+    carry more than one item.
     """
     previous_response_id = getattr(payload, "previous_response_id", None)
     if not isinstance(previous_response_id, str) or not previous_response_id.strip():
@@ -483,10 +489,18 @@ def _compact_account_neutral_replay_payload(
         return None
     replay_source = payload.model_dump(mode="json", exclude_none=True)
     replay_source.pop("previous_response_id", None)
-    replay_payload = ResponsesCompactRequest.model_validate(replay_source)
-    replay_wire_payload = replay_payload.to_payload()
+    request_input = replay_source.get("input")
+    if not isinstance(request_input, list) or len(request_input) <= 1:
+        return None
+    try:
+        replay_payload = ResponsesCompactRequest.model_validate(replay_source)
+        replay_wire_payload = replay_payload.to_payload()
+    except (ValidationError, ClientPayloadError):
+        return None
     replay_wire_input = replay_wire_payload.get("input")
     if not isinstance(replay_wire_input, list) or len(replay_wire_input) <= 1:
+        return None
+    if replay_wire_input != request_input:
         return None
     if not responses_payload_is_account_neutral_fresh_replay(replay_wire_payload):
         return None

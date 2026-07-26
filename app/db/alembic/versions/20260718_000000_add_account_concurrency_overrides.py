@@ -23,11 +23,7 @@ def _columns(connection: Connection) -> set[str]:
     inspector = sa.inspect(connection)
     if not inspector.has_table("accounts"):
         return set()
-    return {
-        str(column["name"])
-        for column in inspector.get_columns("accounts")
-        if column.get("name") is not None
-    }
+    return {str(column["name"]) for column in inspector.get_columns("accounts") if column.get("name") is not None}
 
 
 def upgrade() -> None:

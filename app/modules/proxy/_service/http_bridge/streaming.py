@@ -1060,7 +1060,7 @@ class _HTTPBridgeStreamingMixin:
                         ),
                         cache_key_family=bridge_session_key.affinity_kind,
                         model_class=_extract_model_class(payload.model) if payload.model else None,
-                )
+                    )
         elif quarantine_remaining_seconds > 0:
             model_transition_owner_account_id = (
                 durable_model_transition_lookup.account_id

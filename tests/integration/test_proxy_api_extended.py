@@ -1089,6 +1089,13 @@ async def test_codex_realtime_call_selection_logs_redact_account_identifiers(
         )
 
     monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    service = get_proxy_service_for_app(async_client._transport.app)
+    stale_lease = await service._load_balancer.acquire_account_lease(
+        account_id,
+        kind="response_create",
+    )
+    assert stale_lease is not None
+    object.__setattr__(stale_lease, "acquired_at", float("-inf"))
 
     caplog.clear()
     with caplog.at_level(logging.INFO):

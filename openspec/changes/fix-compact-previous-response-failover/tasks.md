@@ -46,3 +46,8 @@
   `_input_prefix_matches_stored_context`. Missing records, missing prefixes, owner mismatches,
   fingerprint mismatches, and failed lookups stay owner-bound, with unit and compact-route
   regression tests for each.
+- [x] 10. Also require the recorded prefix to be followed by the anchored response's retained
+  output before any new client input via `responses_input_suffix_retains_prior_output`, so a
+  resend of the recorded input plus only a new user turn fails closed instead of compacting a
+  conversation that is missing the anchored assistant output, with unit and compact-route
+  regression tests.

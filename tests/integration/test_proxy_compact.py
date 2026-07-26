@@ -1049,7 +1049,7 @@ async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neut
         account_id=owner_account_id,
         response_id="resp_replay_anchor",
         session_key="sid-durable-compact-replay",
-        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:2],
+        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:1],
     )
 
     async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
@@ -1120,7 +1120,7 @@ async def test_proxy_compact_pinned_owner_rate_limited_at_selection_fails_over_w
         account_id=owner_account_id,
         response_id="resp_wedged_anchor",
         session_key="sid-durable-compact-wedged",
-        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:2],
+        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:1],
     )
     await _mark_account_rate_limited(owner_account_id)
 
@@ -1190,6 +1190,59 @@ async def test_proxy_compact_pinned_owner_unavailable_without_anchor_evidence_st
         "instructions": "hi",
         "input": _NEUTRAL_FULL_RESEND_INPUT,
         "previous_response_id": "resp_unproven_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_without_retained_output_stays_fail_closed(
+    async_client, app_instance, monkeypatch
+):
+    """A resend that skips the anchored response's output must stay owner-bound.
+
+    The request repeats exactly the input recorded for the anchored turn and then
+    a new user message, so the durable prefix fingerprint matches, but the
+    assistant output ``previous_response_id`` stands for is absent and only the
+    owner account can supply it.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-outputless-owner@example.com", raw_account_id="acc_outputless_owner"
+    )
+    await _import_account(async_client, email="compact-outputless-alt@example.com", raw_account_id="acc_outputless_alt")
+    recorded_prefix: list[dict[str, object]] = [{"role": "user", "content": "hello"}]
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_outputless_anchor",
+        session_key="sid-durable-compact-outputless",
+        recorded_prefix=recorded_prefix,
+    )
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [*recorded_prefix, {"role": "user", "content": "please compact"}],
+        "previous_response_id": "resp_outputless_anchor",
     }
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
 

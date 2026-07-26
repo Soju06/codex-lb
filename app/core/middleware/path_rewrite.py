@@ -113,6 +113,9 @@ class BackendApiCodexV1AliasMiddleware:
             redaction = _realtime_live_scope_redaction(path)
             if redaction is not None:
                 routing_scope = dict(scope)
+                routing_scope["path"] = _canonicalize_backend_api_codex_path(path)
+                if isinstance(raw_path := routing_scope.get("raw_path"), bytes):
+                    routing_scope["raw_path"] = _canonicalize_raw_path(raw_path)
                 redacted_path, redacted_raw_path = redaction
                 scope["path"] = redacted_path
                 scope["raw_path"] = redacted_raw_path

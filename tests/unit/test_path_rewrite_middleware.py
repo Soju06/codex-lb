@@ -220,12 +220,6 @@ async def test_middleware_does_not_mutate_caller_scope_on_rewrite() -> None:
             "/v1/realtime",
             b"/v1/realtime",
         ),
-        (
-            "/backend-api/codex/v1/rtc_unit_unsupported_alias",
-            b"intent=alias-secret",
-            "/backend-api/codex/v1/<redacted>",
-            b"/backend-api/codex/v1/%3Credacted%3E",
-        ),
     ],
     ids=[
         "current-app",
@@ -234,7 +228,6 @@ async def test_middleware_does_not_mutate_caller_scope_on_rewrite() -> None:
         "v3-malformed-suffix",
         "v3-overlong-suffix",
         "legacy",
-        "unsupported-duplicated-alias",
     ],
 )
 @pytest.mark.asyncio
@@ -270,6 +263,43 @@ async def test_middleware_redacts_server_scope_while_routing_with_original_live_
         "path": redacted_path,
         "raw_path": redacted_raw_path,
         "query_string": b"",
+    }
+
+
+@pytest.mark.asyncio
+async def test_middleware_routes_duplicated_live_alias_canonically_while_redacting_server_scope() -> None:
+    inner = _RecordingApp()
+    middleware = BackendApiCodexV1AliasMiddleware(inner)
+    server_scope = {
+        "type": "websocket",
+        "path": "/backend-api/codex/v1/rtc_unit_alias",
+        "raw_path": b"/backend-api/codex/v1/rtc_unit_alias",
+        "query_string": b"intent=alias-secret",
+        "headers": [(b"authorization", b"Bearer live-key")],
+    }
+
+    async def _receive():
+        return {"type": "websocket.connect"}
+
+    async def _send(message):
+        pass
+
+    await middleware(server_scope, _receive, _send)
+
+    assert inner.calls == [
+        {
+            **server_scope,
+            "path": "/backend-api/codex/rtc_unit_alias",
+            "raw_path": b"/backend-api/codex/rtc_unit_alias",
+            "query_string": b"intent=alias-secret",
+        }
+    ]
+    assert server_scope == {
+        "type": "websocket",
+        "path": "/backend-api/codex/v1/<redacted>",
+        "raw_path": b"/backend-api/codex/v1/%3Credacted%3E",
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer live-key")],
     }
 
 

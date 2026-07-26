@@ -286,8 +286,9 @@ def test_duplicated_prefix_live_alias_logs_redacted_rejection(
 ) -> None:
     service_calls = 0
 
-    async def accept_if_routed(_self, websocket, *_args, **_kwargs):
+    async def accept_if_routed(_self, websocket, call_id, *_args, **_kwargs):
         nonlocal service_calls
+        assert call_id == "rtc_alias_log_marker"
         service_calls += 1
         await websocket.accept()
         await websocket.close(code=1000)
@@ -311,7 +312,7 @@ def test_duplicated_prefix_live_alias_logs_redacted_rejection(
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
         with TestClient(_UvicornWebSocketLogProbe(app_instance)) as client:
             expected_rejection = observe_rejection(client, non_live_path)
-            alias_rejection = observe_rejection(
+            alias_result = observe_rejection(
                 client,
                 f"/backend-api/codex/v1/{call_id}?intent=quicksilver&trace={query_marker}",
             )
@@ -324,13 +325,13 @@ def test_duplicated_prefix_live_alias_logs_redacted_rejection(
     assert len(access_messages) == 2
     assert f'"WebSocket {non_live_path}" 403' in access_messages[0]
     assert non_live_query_marker in access_messages[0]
-    assert '"WebSocket /backend-api/codex/v1/%3Credacted%3E" 403' in access_messages[1]
+    assert '"WebSocket /backend-api/codex/v1/%3Credacted%3E" [accepted]' in access_messages[1]
     assert call_id not in access_messages[1]
     assert query_marker not in access_messages[1]
     assert "quicksilver" not in access_messages[1]
-    assert alias_rejection == expected_rejection
-    assert alias_rejection[0] != "accepted"
-    assert service_calls == 0
+    assert expected_rejection[0] != "accepted"
+    assert alias_result == ("accepted", None, None)
+    assert service_calls == 1
 
 
 @pytest.mark.parametrize(

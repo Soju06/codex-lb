@@ -3888,7 +3888,7 @@ def _compact_durable_anchor_lookup(
     account_id: str | None,
     stored_count: int | None,
     stored_fingerprint: str | None,
-    latest_response_id: str = "resp_compact_replay",
+    latest_response_id: str | None = "resp_compact_replay",
 ) -> proxy_service.DurableBridgeLookup:
     return proxy_service.DurableBridgeLookup(
         session_id="durable-compact-replay",
@@ -3919,18 +3919,29 @@ async def test_compact_previous_response_owner_unavailable_recovers_with_account
 ) -> None:
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    sticky_sessions = AsyncMock()
+    service = proxy_service.ProxyService(_repo_factory(request_logs, sticky_sessions=sticky_sessions))
     owner = _make_account("acc_compact_replay_owner")
     replacement = _make_account("acc_compact_replay_replacement")
     request_logs.response_owner_by_id[("resp_compact_replay", None, "sid-replay")] = owner.id
-    lookup_anchor = AsyncMock(
+    anchor_lookup = _compact_durable_anchor_lookup(
+        account_id=owner.id,
+        stored_count=1,
+        stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+    )
+    lookup_anchor = AsyncMock(return_value=anchor_lookup)
+    monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_target", lookup_anchor)
+    claim_session = AsyncMock(
         return_value=_compact_durable_anchor_lookup(
-            account_id=owner.id,
-            stored_count=1,
-            stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+            account_id=replacement.id,
+            stored_count=None,
+            stored_fingerprint=None,
+            latest_response_id=None,
         )
     )
-    monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_target", lookup_anchor)
+    release_session = AsyncMock(return_value=None)
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", claim_session)
+    monkeypatch.setattr(service._durable_bridge, "release_live_session", release_session)
     selection_calls: list[dict[str, object]] = []
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
@@ -3982,6 +3993,111 @@ async def test_compact_previous_response_owner_unavailable_recovers_with_account
     assert lookup_anchor.await_args is not None
     assert lookup_anchor.await_args.kwargs["previous_response_id"] == "resp_compact_replay"
     assert lookup_anchor.await_args.kwargs["api_key_id"] is None
+
+    # The recovered compaction is account-scoped state from the replacement
+    # account, so continuity ownership must follow it: the client's sticky key
+    # and the durable session that proved the anchored history both rebind, or
+    # the next turn routes back to the lost owner with the new account's
+    # encrypted compaction state.
+    owner_affinity = cast(proxy_affinity._AffinityPolicy, selection_calls[0]["affinity_policy"])
+    assert owner_affinity.selection_key is not None
+    sticky_sessions.upsert.assert_awaited_once_with(
+        owner_affinity.selection_key,
+        replacement.id,
+        kind=owner_affinity.kind,
+    )
+    assert claim_session.await_count == 1
+    assert claim_session.await_args is not None
+    claim_kwargs = claim_session.await_args.kwargs
+    assert claim_kwargs["session_key_kind"] == anchor_lookup.canonical_kind
+    assert claim_kwargs["session_key_value"] == anchor_lookup.canonical_key
+    assert claim_kwargs["account_id"] == replacement.id
+    assert claim_kwargs["allow_takeover"] is True
+    assert claim_kwargs["latest_response_id"] is None
+    assert claim_kwargs["latest_turn_state"] is None
+    assert release_session.await_count == 1
+    assert release_session.await_args is not None
+    assert release_session.await_args.kwargs["draining"] is True
+
+
+@pytest.mark.asyncio
+async def test_compact_recovery_never_rebinds_a_hard_turn_state_sticky_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn-state key is the lost owner's own opaque state, never rebindable.
+
+    Recovery can run with a synthesized turn-state key that resolves to no owner.
+    Pointing that key at the replacement account would authorize a later resend
+    of the lost owner's turn state on a different account, which is exactly the
+    cross-account send the rebind exists to prevent, so only the durable session
+    that proved the history moves.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+    service = proxy_service.ProxyService(_repo_factory(request_logs, sticky_sessions=sticky_sessions))
+    owner = _make_account("acc_compact_turn_state_owner")
+    replacement = _make_account("acc_compact_turn_state_replacement")
+    turn_state = proxy_affinity.ensure_http_downstream_turn_state({})
+    request_logs.response_owner_by_id[("resp_compact_replay", None, None)] = owner.id
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(
+            return_value=_compact_durable_anchor_lookup(
+                account_id=owner.id,
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    claim_session = AsyncMock(
+        return_value=_compact_durable_anchor_lookup(
+            account_id=replacement.id,
+            stored_count=None,
+            stored_fingerprint=None,
+            latest_response_id=None,
+        )
+    )
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", claim_session)
+    monkeypatch.setattr(service._durable_bridge, "release_live_session", AsyncMock(return_value=None))
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        if kwargs.get("preferred_account_id") == owner.id:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 60s",
+                error_code=None,
+            )
+        return AccountSelection(account=replacement, error_message=None)
+
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    await service.compact_responses(payload, {"x-codex-turn-state": turn_state})
+
+    assert core_compact.await_count == 1
+    sticky_sessions.upsert.assert_not_awaited()
+    assert claim_session.await_count == 1
+    assert claim_session.await_args is not None
+    assert claim_session.await_args.kwargs["account_id"] == replacement.id
 
 
 @pytest.mark.parametrize(
@@ -4961,12 +5077,12 @@ class _RequestLogsRecorder:
 
 
 class _RepoContext:
-    def __init__(self, request_logs: _RequestLogsRecorder) -> None:
+    def __init__(self, request_logs: _RequestLogsRecorder, sticky_sessions: AsyncMock | None = None) -> None:
         self._repos = ProxyRepositories(
             accounts=cast(AccountsRepository, AsyncMock()),
             usage=cast(UsageRepository, AsyncMock()),
             request_logs=cast(RequestLogsRepository, request_logs),
-            sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
+            sticky_sessions=cast(StickySessionsRepository, sticky_sessions or AsyncMock()),
             api_keys=cast(ApiKeysRepository, AsyncMock()),
             additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
         )
@@ -4978,9 +5094,11 @@ class _RepoContext:
         return False
 
 
-def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepoFactory:
+def _repo_factory(
+    request_logs: _RequestLogsRecorder, *, sticky_sessions: AsyncMock | None = None
+) -> proxy_service.ProxyRepoFactory:
     def factory() -> _RepoContext:
-        return _RepoContext(request_logs)
+        return _RepoContext(request_logs, sticky_sessions)
 
     return factory
 

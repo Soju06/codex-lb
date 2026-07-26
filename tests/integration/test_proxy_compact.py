@@ -18,7 +18,15 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import (
+    Account,
+    AccountStatus,
+    HttpBridgeSessionAlias,
+    HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
+    StickySession,
+    StickySessionKind,
+)
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -808,7 +816,9 @@ async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neut
     owner_account_id = await _import_account(
         async_client, email="compact-replay-owner@example.com", raw_account_id="acc_replay_owner"
     )
-    await _import_account(async_client, email="compact-replay-alt@example.com", raw_account_id="acc_replay_alt")
+    alt_account_id = await _import_account(
+        async_client, email="compact-replay-alt@example.com", raw_account_id="acc_replay_alt"
+    )
     await _register_durable_previous_response_anchor(
         app_instance,
         account_id=owner_account_id,
@@ -870,6 +880,24 @@ async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neut
         owner = await session.get(Account, owner_account_id)
         assert owner is not None
         assert owner.status == AccountStatus.RATE_LIMITED
+
+    # The compaction returned from the replacement account is account-scoped
+    # state, so continuity ownership must follow it: the client's sticky session
+    # key and the durable session that proved the anchored history both point at
+    # the replacement account, and the stale anchor alias is gone.
+    async with SessionLocal() as session:
+        sticky_rows = (
+            (await session.execute(select(StickySession).where(StickySession.kind == StickySessionKind.CODEX_SESSION)))
+            .scalars()
+            .all()
+        )
+        assert [row.account_id for row in sticky_rows] == [alt_account_id]
+        durable_rows = (await session.execute(select(HttpBridgeSessionRecord))).scalars().all()
+        assert [row.account_id for row in durable_rows] == [alt_account_id]
+        assert durable_rows[0].state == HttpBridgeSessionState.DRAINING
+        assert durable_rows[0].latest_response_id is None
+        alias_rows = (await session.execute(select(HttpBridgeSessionAlias))).scalars().all()
+        assert alias_rows == []
 
 
 @pytest.mark.asyncio

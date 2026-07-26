@@ -57,3 +57,11 @@
   an older alias resolving to a session that has moved on stays owner-bound. Cover it with a
   unit case and a compact-route regression test that registers a later response on the same
   durable session.
+- [x] 12. Move continuity ownership to the account that serves a recovered compaction, so the
+  client's next turn does not carry that account's compaction state back to the lost owner:
+  after the upstream compact succeeds, rebind the client's sticky mapping (never a hard
+  turn-state key) and rebind the durable continuity session that proved the anchored history to
+  the serving account, clearing its stale aliases and recorded turn state. Rebind failures are
+  logged and never fail the completed compaction. Cover it with unit tests (rebind targets and
+  the turn-state exclusion) and a compact-route regression test asserting the persisted sticky
+  and durable rows after recovery.

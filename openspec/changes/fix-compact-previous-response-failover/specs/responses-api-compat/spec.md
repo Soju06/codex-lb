@@ -24,7 +24,10 @@ account, and MUST record the fail-closed outcome on the continuity fail-closed o
 counter for the compact surface. Recovery MUST NOT activate when the pin includes a
 client-supplied turn-state owner or an input-file owner, or when the previous-response owner
 cannot be resolved at all. Post-selection refresh, authentication, transport, and timeout
-failures on the pinned owner keep their existing owner-bound handling.
+failures on the pinned owner keep their existing owner-bound handling: recovery MUST only
+activate when the pinned owner was never used for the request at selection time, or when the
+pinned owner was excluded mid-request by a pre-visible quota or rate-limit failure that permits
+failover.
 
 #### Scenario: Quota-exhausted previous-response owner fails over with a verified full resend
 
@@ -51,6 +54,14 @@ failures on the pinned owner keep their existing owner-bound handling.
 - **THEN** the request fails with the existing selection or upstream error
 - **AND** no part of the payload is sent to another account
 - **AND** the continuity fail-closed counter records the compact-surface outcome
+
+#### Scenario: Post-selection authentication failure on the pinned owner stays owner-bound
+
+- **GIVEN** the pinned previous-response owner is selected for a compact request with an account-neutral full-resend `input`
+- **AND** the upstream compact fails with `401` again after the forced token refresh, which excludes the owner from the remaining attempts
+- **WHEN** reselection cannot return the now-excluded owner
+- **THEN** the proxy surfaces the owner's authentication failure
+- **AND** account-neutral fresh-replay recovery does not activate and no part of the payload is sent to another account
 
 #### Scenario: Turn-state-pinned compact remains owner-bound
 

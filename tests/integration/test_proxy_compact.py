@@ -879,6 +879,56 @@ async def test_proxy_compact_pinned_owner_unavailable_non_neutral_payload_stays_
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_post_selection_401_stays_owner_bound(async_client, monkeypatch):
+    """A pinned owner excluded by a repeated 401 must not replay on another account.
+
+    Account-neutral replay recovery is only eligible for owner loss caused by the
+    owner's quota state. A post-selection authentication failure also excludes the
+    owner, and the resulting selection miss must keep surfacing the owner's 401
+    instead of moving the history to a different account.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-auth-owner@example.com", raw_account_id="acc_auth_owner"
+    )
+    await _import_account(async_client, email="compact-auth-alt@example.com", raw_account_id="acc_auth_alt")
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        raise ProxyResponseError(
+            401,
+            openai_error("invalid_api_key", "token expired", error_type="authentication_error"),
+        )
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fake_ensure_fresh)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_auth_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 401
+    assert upstream_calls == ["acc_auth_owner", "acc_auth_owner"]
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monkeypatch):
     email = "compact-retry@example.com"
     raw_account_id = "acc_compact_retry_old"

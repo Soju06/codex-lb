@@ -59,6 +59,13 @@ the observed session's owner epoch, account, and latest response, MUST leave the
 current owner when that comparison does not hold, MUST log that the rebind did not apply, and
 MUST still return the successful compaction.
 
+A turn that has already been submitted upstream but has not returned yet does not change
+any of those completion-time fields, so the compare-and-set MUST additionally require the
+durable session to be unowned: while a bridge worker holds the session, its own continuity
+registration is fenced on that ownership, so moving the row would leave the response it has
+already streamed to its client with no durable continuity. The proxy MUST leave a held session
+to its owner and log that the rebind did not apply.
+
 When the payload is not a verified account-neutral full resend, the proxy MUST keep the
 existing fail-closed failure for that request, MUST NOT send any of the payload to another
 account, and MUST record the fail-closed outcome on the continuity fail-closed observability
@@ -98,6 +105,15 @@ failover.
 - **THEN** the compare-and-set does not apply and the durable session keeps the newer turn's account, anchor, and aliases
 - **AND** the proxy logs that the durable rebind did not apply
 - **AND** the successful compaction is still returned to the client
+
+#### Scenario: A durable session held by a bridge worker keeps its owner
+
+- **GIVEN** a compact request recovered on account B after the pinned owner account A was unavailable
+- **AND** the proving durable continuity session is still held by a bridge worker with a turn in flight
+- **WHEN** the proxy rebinds the durable continuity session
+- **THEN** the durable session keeps account A, its recorded anchor, and its aliases
+- **AND** the proxy logs that the durable rebind did not apply
+- **AND** the client's sticky session mapping still resolves to account B
 
 #### Scenario: Continuity rebind failure keeps the successful compaction
 

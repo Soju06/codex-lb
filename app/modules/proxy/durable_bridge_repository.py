@@ -385,6 +385,15 @@ class DurableBridgeRepository:
         turn that completed in the meantime keeps its own continuity instead of
         being erased, and the caller learns the rebind did not apply.  Advancing
         the epoch fences any writer still holding the observed one.
+
+        The row must also be unowned.  A turn that has been submitted upstream but
+        has not returned yet leaves every completion-time field untouched, so those
+        fields cannot see it; what it does hold is the lease, and continuity
+        registration is itself fenced on holding it (``register_owned_alias``).
+        Refusing while ``owner_instance_id`` is set therefore refuses exactly while
+        a bridge worker could still record a response, instead of stealing the row
+        and silently fencing out continuity that worker already returned to its
+        client.
         """
 
         now = utcnow()
@@ -394,6 +403,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeSessionRecord.id == session_id,
                     HttpBridgeSessionRecord.owner_epoch == expected_owner_epoch,
+                    HttpBridgeSessionRecord.owner_instance_id.is_(None),
                     HttpBridgeSessionRecord.account_id.is_(None)
                     if expected_account_id is None
                     else HttpBridgeSessionRecord.account_id == expected_account_id,

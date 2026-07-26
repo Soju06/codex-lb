@@ -1972,6 +1972,91 @@ async def test_durable_bridge_lookup_active_lease_survives_request_lookup(
 
 
 @pytest.mark.asyncio
+async def test_rebind_session_account_if_current_moves_only_an_unowned_matching_row(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """The rebind is a compare-and-set that also refuses while a worker holds the row.
+
+    A turn already submitted upstream leaves the account, epoch, and latest
+    response exactly as they were observed, and registers its response only while
+    it still owns the lease, so ownership is the field that can see it.
+    """
+
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-rebind",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="turn-1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_1",
+        lease_ttl_seconds=60.0,
+    )
+
+    held = await coordinator.rebind_session_account_if_current(
+        session_id=claimed.session_id,
+        expected_owner_epoch=claimed.owner_epoch,
+        expected_account_id="acc-1",
+        expected_latest_response_id="resp_1",
+        account_id="acc-2",
+        model="gpt-5.4",
+        service_tier=None,
+    )
+    assert held is None
+
+    await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+
+    stale = await coordinator.rebind_session_account_if_current(
+        session_id=claimed.session_id,
+        expected_owner_epoch=claimed.owner_epoch,
+        expected_account_id="acc-1",
+        expected_latest_response_id="resp_other",
+        account_id="acc-2",
+        model="gpt-5.4",
+        service_tier=None,
+    )
+    assert stale is None
+
+    rebound = await coordinator.rebind_session_account_if_current(
+        session_id=claimed.session_id,
+        expected_owner_epoch=claimed.owner_epoch,
+        expected_account_id="acc-1",
+        expected_latest_response_id="resp_1",
+        account_id="acc-2",
+        model="gpt-5.4",
+        service_tier=None,
+    )
+
+    assert rebound is not None
+    assert rebound.account_id == "acc-2"
+    assert rebound.owner_instance_id is None
+    assert rebound.owner_epoch == claimed.owner_epoch + 1
+    assert rebound.state == HttpBridgeSessionState.DRAINING
+    assert rebound.latest_response_id is None
+    assert rebound.latest_turn_state is None
+    async with async_session_factory() as session:
+        aliases = (await session.execute(select(HttpBridgeSessionAlias))).scalars().all()
+        assert aliases == []
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_lookup_falls_back_to_latest_turn_state_when_alias_missing(
     coordinator: DurableBridgeSessionCoordinator,
     async_session_factory: Callable[[], AsyncSession],

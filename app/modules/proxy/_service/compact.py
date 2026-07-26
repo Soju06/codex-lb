@@ -636,8 +636,10 @@ class _CompactMixin:
         (the same rebind the HTTP bridge performs when a session moves account)
         and the durable session that proved the anchored history, whose account,
         stale aliases, and recorded turn state must move with it.  The durable
-        move is compare-and-set on the proving snapshot, so a turn that completed
-        for the same session in the meantime keeps its own continuity.
+        move is compare-and-set on the proving snapshot and applies only while no
+        bridge worker holds the row, so a turn that completed in the meantime — or
+        one still in flight, which no completion-time field can see — keeps its own
+        continuity.
 
         Hard turn-state sticky rows are never rebound: that key is the lost
         owner's opaque state, so pointing it at another account would authorize
@@ -679,12 +681,13 @@ class _CompactMixin:
         if durable_session is None or durable_session.account_id == account_id:
             return
         try:
-            # Compare-and-set on the snapshot that proved the history: a normal
-            # turn for the same session can complete between that proof and this
-            # rebind, and the account change clears the row's aliases and
-            # recorded turn state, so an unconditional move would erase
-            # continuity a newer turn has already returned to its client. When
-            # the row moved on, its current owner keeps it.
+            # Compare-and-set on the snapshot that proved the history, and only
+            # on an unowned row: a turn for the same session can complete — or
+            # still be in flight — between that proof and this rebind, and the
+            # account change clears the row's aliases and recorded turn state,
+            # so an unconditional move would erase continuity that turn has
+            # already returned to its client. When the row moved on or is still
+            # held, its current owner keeps it.
             rebound = await proxy._durable_bridge.rebind_session_account_if_current(
                 session_id=durable_session.session_id,
                 expected_owner_epoch=durable_session.owner_epoch,
@@ -696,8 +699,8 @@ class _CompactMixin:
             )
             if rebound is None:
                 logger.warning(
-                    "Compact recovery left durable continuity owner unchanged; session moved on "
-                    "request_id=%s session_id=%s account_id=%s",
+                    "Compact recovery left durable continuity owner unchanged; session moved on or "
+                    "is still owned request_id=%s session_id=%s account_id=%s",
                     request_id,
                     durable_session.session_id,
                     account_id,

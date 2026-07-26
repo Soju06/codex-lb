@@ -10,6 +10,82 @@ const baseSettings = createDashboardSettings();
 const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("DataRetentionSettings", () => {
+  it("warns when effective request-log retention is disabled without changing policy", () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 0,
+          requestLogRetentionOverrideDays: null,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Request log pruning is disabled and logs will continue to accumulate/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use 30 days" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use 90 days" })).toBeInTheDocument();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("keeps disabled-state presets local until the operator explicitly saves", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 0,
+          requestLogRetentionOverrideDays: null,
+          usageHistoryRetentionOverrideDays: 45,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    const requestLogInput = screen.getByLabelText("Request log retention days");
+    await user.click(screen.getByRole("button", { name: "Use 30 days" }));
+    expect(requestLogInput).toHaveDisplayValue("30");
+    expect(onSave).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Use 90 days" }));
+    expect(requestLogInput).toHaveDisplayValue("90");
+    expect(onSave).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Save retention" }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ requestLogRetentionOverrideDays: 90 }),
+    );
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty("usageHistoryRetentionOverrideDays");
+  });
+
+  it("does not show the disabled-state warning or presets for an enabled effective policy", () => {
+    render(
+      <DataRetentionSettings
+        settings={{
+          ...baseSettings,
+          requestLogRetentionDays: 30,
+          requestLogRetentionOverrideDays: 30,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(
+      screen.queryByText(/Request log pruning is disabled and logs will continue to accumulate/i),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use 30 days" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use 90 days" })).not.toBeInTheDocument();
+  });
+
   it("shows stored overrides in the inputs", () => {
     render(
       <DataRetentionSettings

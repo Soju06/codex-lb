@@ -5,6 +5,8 @@ repo_url: https://github.com/Soju06/codex-lb
 repo_name: Soju06/codex-lb
 edit_uri: edit/main/docs/
 docs_dir: docs
+exclude_docs: |
+  /superpowers/
 
 theme:
   name: material

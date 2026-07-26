@@ -11,12 +11,9 @@ from python_socks import ProxyType
 
 from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 pytestmark = pytest.mark.unit
-
-
-def _runtime_basic_auth_url(user: str, value: str, authority: str) -> str:
-    return "http://" + user + ":" + value + "@" + authority
 
 
 @dataclass
@@ -38,7 +35,7 @@ class _Session:
     async def request(self, method: str, url: str, **kwargs: Any) -> _Response:
         self.calls.append({"method": method, "url": url, **kwargs})
         if self.fail_all:
-            raise OSError("proxy " + _runtime_basic_auth_url("u", "p", "proxy.test:8080") + " failed")
+            raise OSError("proxy " + runtime_basic_auth_url("u", "p", "proxy.test:8080") + " failed")
         if self.fail_first and len(self.calls) == 1:
             raise OSError("proxy failed before response")
         return _Response(headers={"content-type": "application/json"})
@@ -137,7 +134,7 @@ async def test_request_passes_resolver_proxy_and_builtin_fingerprint(route: Reso
 
     response = await client.request("POST", "https://upstream.test", route=route, json={"x": 1})
 
-    assert session.calls[0]["proxy"] == _runtime_basic_auth_url("u", "p", "proxy.test:8080")
+    assert session.calls[0]["proxy"] == runtime_basic_auth_url("u", "p", "proxy.test:8080")
     assert session.calls[0]["json"] == {"x": 1}
     assert response.content == b'{"ok": true}'
 
@@ -155,7 +152,7 @@ async def test_streaming_request_can_opt_out_of_response_buffering(route: Resolv
         json={"x": 1},
     )
 
-    assert session.calls[0]["proxy"] == _runtime_basic_auth_url("u", "p", "proxy.test:8080")
+    assert session.calls[0]["proxy"] == runtime_basic_auth_url("u", "p", "proxy.test:8080")
     assert "buffer_response" not in session.calls[0]
     assert isinstance(result.response, _Response)
 
@@ -175,7 +172,7 @@ async def test_request_converts_legacy_files_payload_to_form_data(route: Resolve
 
     assert "files" not in session.calls[0]
     assert isinstance(session.calls[0]["data"], aiohttp.FormData)
-    assert session.calls[0]["proxy"] == _runtime_basic_auth_url("u", "p", "proxy.test:8080")
+    assert session.calls[0]["proxy"] == runtime_basic_auth_url("u", "p", "proxy.test:8080")
 
 
 @pytest.mark.asyncio
@@ -199,7 +196,7 @@ async def test_pre_response_failure_uses_same_pool_fallback(route: ResolvedUpstr
     assert result.fallback_used is True
     assert result.route.endpoint_id == "ep_2"
     assert [call["proxy"] for call in session.calls] == [
-        _runtime_basic_auth_url("u", "p", "proxy.test:8080"),
+        runtime_basic_auth_url("u", "p", "proxy.test:8080"),
         "http://proxy-two.test:8081",
     ]
 
@@ -214,7 +211,7 @@ async def test_non_idempotent_request_failure_does_not_fallback(route: ResolvedU
 
     assert "ep_1" in str(exc_info.value)
     assert len(session.calls) == 1
-    assert session.calls[0]["proxy"] == _runtime_basic_auth_url("u", "p", "proxy.test:8080")
+    assert session.calls[0]["proxy"] == runtime_basic_auth_url("u", "p", "proxy.test:8080")
 
 
 @pytest.mark.asyncio

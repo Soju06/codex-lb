@@ -91,12 +91,9 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 pytestmark = pytest.mark.unit
-
-
-def _runtime_basic_auth_url(user: str, value: str, authority: str) -> str:
-    return "http://" + user + ":" + value + "@" + authority
 
 
 @pytest.fixture(autouse=True)
@@ -7852,7 +7849,7 @@ async def test_stream_codex_websocket_events_raises_sanitized_transport_error_on
         [
             _WsMessage(
                 proxy_module.aiohttp.WSMsgType.ERROR,
-                OSError("proxy " + _runtime_basic_auth_url("user", "pass", "proxy.local:8080") + " websocket failed"),
+                OSError("proxy " + runtime_basic_auth_url("user", "pass", "proxy.local:8080") + " websocket failed"),
             )
         ]
     )

@@ -27,10 +27,7 @@ from app.core.clients.proxy_websocket import (
     connect_responses_websocket,
 )
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
-
-
-def _runtime_basic_auth_url(user: str, value: str, authority: str) -> str:
-    return "http://" + user + ":" + value + "@" + authority
+from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
 
 def _proxy_error_code(exc: ProxyResponseError) -> str | None:
@@ -904,7 +901,7 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
     )
     codex_client = _FakeCodexClient(
         _FakeCodexErrorWebSocket(
-            OSError("proxy " + _runtime_basic_auth_url("user", "pass", "proxy.local:8080") + " websocket failed")
+            OSError("proxy " + runtime_basic_auth_url("user", "pass", "proxy.local:8080") + " websocket failed")
         )
     )
     monkeypatch.setattr(
@@ -1420,7 +1417,7 @@ async def test_connect_live_websocket_redacts_invalid_proxy_credentials(monkeypa
     async def fake_websocket_connect(url: str, **kwargs):
         del url, kwargs
         raise InvalidProxy(
-            _runtime_basic_auth_url("proxy-user", "proxy-secret", "proxy.invalid"),
+            runtime_basic_auth_url("proxy-user", "proxy-secret", "proxy.invalid"),
             "unsupported proxy scheme",
         )
 

@@ -124,6 +124,7 @@ async def test_close_once_live_websocket_bounds_cancellation_resistant_cleanup()
         def __init__(self) -> None:
             super().__init__()
             self.close_cancelled = asyncio.Event()
+            self.cleanup_release = asyncio.Event()
             self.cleanup_finished = asyncio.Event()
 
         async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -132,19 +133,18 @@ async def test_close_once_live_websocket_bounds_cancellation_resistant_cleanup()
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 self.close_cancelled.set()
-                await asyncio.sleep(0.2)
+                await self.cleanup_release.wait()
                 self.cleanup_finished.set()
 
     upstream = CancellationResistantCloseUpstream()
     wrapped = realtime_live_module._CloseOnceLiveWebSocket(upstream)
 
-    started = asyncio.get_running_loop().time()
     with pytest.raises(TimeoutError):
         await wrapped.close(timeout_seconds=0.01)
-    elapsed = asyncio.get_running_loop().time() - started
 
-    assert elapsed < 0.1
     assert upstream.close_cancelled.is_set()
+    assert not upstream.cleanup_finished.is_set()
+    upstream.cleanup_release.set()
     await asyncio.wait_for(upstream.cleanup_finished.wait(), timeout=1)
     assert upstream.close_calls == [(1000, "")]
 

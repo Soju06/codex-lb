@@ -799,6 +799,44 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
 
 
 @pytest.mark.asyncio
+async def test_realtime_sideband_unexpected_setup_log_is_content_free(
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private_exception_detail = "database setup failed for acc_private_sideband"
+
+    async def fail_setup(*_args, **_kwargs):
+        raise RuntimeError(private_exception_detail)
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "proxy_realtime_live_websocket",
+        fail_setup,
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=proxy_api_module.__name__):
+        with TestClient(app_instance) as client:
+            with pytest.raises(WebSocketDenialResponse) as denied:
+                with client.websocket_connect(
+                    "/v1/live/rtc_setup_failure",
+                    headers={"Authorization": "Bearer live-key"},
+                ):
+                    pass
+
+    assert denied.value.status_code == 503
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.name == proxy_api_module.__name__ and record.getMessage() == "Realtime live websocket setup failed"
+    ]
+    assert len(matching_records) == 1
+    assert matching_records[0].exc_info is None
+    assert private_exception_detail not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_realtime_sideband_failure_log_is_content_free(
     app_instance,
     async_client,

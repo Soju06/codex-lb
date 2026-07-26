@@ -1321,7 +1321,7 @@ async def _proxy_realtime_live_websocket_route(
         elif websocket.application_state == WebSocketState.CONNECTED:
             await websocket.close(code=1011)
     except Exception:
-        logger.exception("Realtime live websocket setup failed")
+        logger.error("Realtime live websocket setup failed")
         if websocket.application_state == WebSocketState.CONNECTING:
             await websocket.send_denial_response(
                 JSONResponse(

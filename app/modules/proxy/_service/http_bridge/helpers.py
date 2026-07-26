@@ -188,7 +188,6 @@ from app.modules.proxy.ring_membership import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 
@@ -626,7 +625,7 @@ def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestSt
 def _http_bridge_eventless_precreated_deadline(
     request_state: _WebSocketRequestState,
     *,
-    stuck_gate_retire_after_seconds: float,
+    response_created_timeout_seconds: float,
 ) -> float | None:
     sent_at = request_state.response_create_sent_at
     if (
@@ -643,10 +642,7 @@ def _http_bridge_eventless_precreated_deadline(
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
-    return sent_at + min(
-        float(stuck_gate_retire_after_seconds),
-        _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
-    )
+    return sent_at + float(response_created_timeout_seconds)
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

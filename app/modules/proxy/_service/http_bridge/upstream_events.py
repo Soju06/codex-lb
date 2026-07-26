@@ -230,7 +230,7 @@ async def _http_bridge_receive_timeout_with_eventless_deadline(
     receive_timeout: _WebSocketReceiveTimeout | None,
     *,
     now: float,
-    stuck_gate_retire_after_seconds: float,
+    response_created_timeout_seconds: float,
 ) -> _WebSocketReceiveTimeout | None:
     if session.closed:
         return receive_timeout
@@ -241,7 +241,7 @@ async def _http_bridge_receive_timeout_with_eventless_deadline(
             if (
                 deadline := _http_bridge_eventless_precreated_deadline(
                     request_state,
-                    stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                    response_created_timeout_seconds=response_created_timeout_seconds,
                 )
             )
             is not None
@@ -347,18 +347,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                     proxy_request_budget_seconds=_http_bridge_request_budget_seconds(runtime_settings),
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
-                stuck_gate_retire_after_seconds = float(
+                response_created_timeout_seconds = float(
                     getattr(
                         runtime_settings,
-                        "http_responses_session_bridge_stuck_gate_retire_after_seconds",
-                        300.0,
+                        "http_responses_session_bridge_response_created_timeout_seconds",
+                        5.0,
                     )
                 )
                 receive_timeout = await _http_bridge_receive_timeout_with_eventless_deadline(
                     session,
                     receive_timeout,
                     now=_service_time().monotonic(),
-                    stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                    response_created_timeout_seconds=response_created_timeout_seconds,
                 )
                 if receive_task is None:
                     receive_task = asyncio.create_task(session.upstream.receive())
@@ -415,7 +415,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     if (
                                         deadline := _http_bridge_eventless_precreated_deadline(
                                             request_state,
-                                            stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                                            response_created_timeout_seconds=response_created_timeout_seconds,
                                         )
                                     )
                                     is not None
@@ -423,6 +423,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 if not expired_owner:
                                     continue
                                 pending_count = len(session.pending_requests)
+                                self._record_http_bridge_quarantine(session.key)
                                 for request_state in session.pending_requests:
                                     if request_state.failure_phase_override is None:
                                         request_state.failure_phase_override = "upstream"

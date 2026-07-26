@@ -236,6 +236,26 @@ class _HTTPBridgeMixin(
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
+    def _record_http_bridge_quarantine(self, key: "_HTTPBridgeSessionKey") -> None:
+        settings = _service_get_settings()
+        now = _service_time().monotonic()
+        quarantine_until = self._http_bridge_quarantine_until
+        for expired_key, expires_at in tuple(quarantine_until.items()):
+            if expires_at <= now:
+                quarantine_until.pop(expired_key, None)
+
+        quarantine_seconds = float(settings.http_responses_session_bridge_quarantine_seconds)
+        if quarantine_seconds <= 0:
+            quarantine_until.pop(key, None)
+            return
+
+        quarantine_until[key] = now + quarantine_seconds
+        max_entries = int(settings.http_responses_session_bridge_max_sessions)
+        overflow = len(quarantine_until) - max_entries
+        if overflow > 0:
+            for oldest_key in sorted(quarantine_until, key=quarantine_until.__getitem__)[:overflow]:
+                quarantine_until.pop(oldest_key, None)
+
     async def _close_http_bridge_session_bounded(
         self,
         session: "_HTTPBridgeSession",
@@ -1574,6 +1594,7 @@ class _HTTPBridgeMixin(
             self._http_bridge_sessions.clear()
             self._http_bridge_inflight_sessions.clear()
             self._http_bridge_previous_response_index.clear()
+            self._http_bridge_quarantine_until.clear()
         shutdown_error = ProxyResponseError(
             503,
             openai_error(

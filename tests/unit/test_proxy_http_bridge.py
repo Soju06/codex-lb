@@ -126,31 +126,38 @@ def _make_eventless_http_bridge_owner(
     )
 
 
-def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
+def test_http_bridge_deadline_settings_defaults() -> None:
+    settings = _make_app_settings()
+
+    assert settings.http_responses_session_bridge_response_created_timeout_seconds == 5.0
+    assert settings.http_responses_session_bridge_quarantine_seconds == 60.0
+
+
+def test_http_bridge_eventless_precreated_deadline_uses_dedicated_timeout() -> None:
     request_state = _make_eventless_http_bridge_owner()
 
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
-            stuck_gate_retire_after_seconds=300.0,
+            response_created_timeout_seconds=5.0,
         )
-        == 340.0
+        == 105.0
     )
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
-            stuck_gate_retire_after_seconds=30.0,
+            response_created_timeout_seconds=2.0,
         )
-        == 130.0
+        == 102.0
     )
 
     request_state.latency_first_upstream_event_ms = 25
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
-            stuck_gate_retire_after_seconds=300.0,
+            response_created_timeout_seconds=5.0,
         )
-        == 340.0
+        == 105.0
     )
 
 
@@ -178,7 +185,7 @@ def test_http_bridge_eventless_precreated_deadline_requires_narrow_owner_evidenc
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
-            stuck_gate_retire_after_seconds=300.0,
+            response_created_timeout_seconds=5.0,
         )
         is None
     )
@@ -260,7 +267,7 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
-            stuck_gate_retire_after_seconds=300.0,
+            response_created_timeout_seconds=5.0,
         )
         is None
     )
@@ -12389,6 +12396,7 @@ async def test_close_all_http_bridge_sessions_fails_inflight_waiters() -> None:
     key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-shutdown", None)
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[key] = inflight_future
+    service._http_bridge_quarantine_until[key] = time.monotonic() + 60.0
 
     await service.close_all_http_bridge_sessions()
 
@@ -12397,6 +12405,39 @@ async def test_close_all_http_bridge_sessions_fails_inflight_waiters() -> None:
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert service._http_bridge_quarantine_until == {}
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_quarantine_registry_prunes_expired_and_bounds_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = _make_app_settings(
+        http_responses_session_bridge_max_sessions=2,
+        http_responses_session_bridge_quarantine_seconds=60.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monotonic_values = iter((100.0, 101.0, 102.0))
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: next(monotonic_values)),
+    )
+    expired_key = proxy_service._HTTPBridgeSessionKey("session_header", "expired", None)
+    first_key = proxy_service._HTTPBridgeSessionKey("session_header", "first", None)
+    second_key = proxy_service._HTTPBridgeSessionKey("session_header", "second", None)
+    newest_key = proxy_service._HTTPBridgeSessionKey("session_header", "newest", None)
+    service._http_bridge_quarantine_until[expired_key] = 99.0
+
+    service._record_http_bridge_quarantine(first_key)
+    service._record_http_bridge_quarantine(second_key)
+    service._record_http_bridge_quarantine(newest_key)
+
+    assert service._http_bridge_quarantine_until == {
+        second_key: 161.0,
+        newest_key: 162.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -17279,7 +17320,8 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+        http_responses_session_bridge_response_created_timeout_seconds=0.02,
+        http_responses_session_bridge_quarantine_seconds=60.0,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     retry_precreated = AsyncMock(return_value=False)
@@ -17307,6 +17349,24 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
     owner.preferred_account_id = "acc-bridge"
     owner.excluded_account_ids.add("acc-excluded")
+    account_response_create_lease = proxy_service.AccountLease(
+        lease_id="lease-response-create",
+        account_id="acc-bridge",
+        kind="response_create",
+        acquired_at=time.monotonic(),
+    )
+    websocket_stream_lease = proxy_service.AccountLease(
+        lease_id="lease-websocket-stream",
+        account_id="acc-bridge",
+        kind="stream",
+        acquired_at=time.monotonic(),
+    )
+    release_account_response_create = AsyncMock()
+    release_websocket_stream = AsyncMock()
+    owner.account_response_create_lease = account_response_create_lease
+    owner.account_response_create_release = release_account_response_create
+    owner.websocket_stream_lease = websocket_stream_lease
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_websocket_stream)
     sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
     sibling = proxy_service._WebSocketRequestState(
         request_id="req-created-sibling",
@@ -17349,7 +17409,11 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert session.queued_request_count == 0
     assert session.closed is True
     assert session.key not in service._http_bridge_sessions
+    assert service._http_bridge_quarantine_until[session.key] > time.monotonic()
     assert gate.locked() is False
+    assert owner.response_create_gate_acquired is False
+    assert owner.account_response_create_lease is None
+    assert owner.websocket_stream_lease is None
     assert owner.response_create_sent_at is not None
     assert owner.response_create_sent_at > owner.started_at
     assert owner.failure_phase_override == "upstream"
@@ -17362,6 +17426,8 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
     retry_precreated.assert_not_awaited()
+    release_account_response_create.assert_awaited_once_with(account_response_create_lease)
+    release_websocket_stream.assert_any_await(websocket_stream_lease)
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()
@@ -17422,7 +17488,7 @@ async def test_http_bridge_eventless_timeout_yields_to_locked_send_failure_clean
     settings = _make_app_settings(
         stream_idle_timeout_seconds=60.0,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.01,
+        http_responses_session_bridge_response_created_timeout_seconds=0.01,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))

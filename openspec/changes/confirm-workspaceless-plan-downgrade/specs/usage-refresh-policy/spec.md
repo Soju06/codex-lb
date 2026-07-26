@@ -91,6 +91,22 @@ the stored account has a `workspace_id`, a usage payload that omits
 `workspace_id` cannot establish that it describes that account's slot, so such a
 payload MUST NOT downgrade the account's plan regardless of repetition.
 
+Pending observations MUST be persisted in shared storage rather than in process
+memory, so that every replica operating against the same database observes and
+advances the same sequence for a given account. A `free` observation recorded by
+one replica MUST count toward confirmation on any other replica, and a recognized
+paid plan observed by one replica MUST discard the pending evidence for all of
+them. Persisted evidence MUST NOT reduce the confirmation threshold: a downgrade
+is still applied only on the second agreeing observation.
+
+Pending observations MUST be invalidated when the account's credentials are
+replaced. Account identifiers are deterministic, so deleting and re-importing an
+account, or reauthenticating it in place, reuses the identifier with new token
+material; evidence gathered under the previous credential MUST NOT count toward a
+downgrade for the new one, which MUST begin its own count. Evidence MUST also be
+removed when the account itself is deleted. The stored evidence MUST NOT contain
+usable token material.
+
 This requirement applies to scheduled usage refresh and to the forced refresh
 performed after an operator's Force probe. The confirmation threshold MUST work
 with zero configuration and MUST NOT require an operator setting.
@@ -158,3 +174,36 @@ with zero configuration and MUST NOT require an operator setting.
 - **GIVEN** two active workspace-less accounts with stored `plan_type` `plus`
 - **WHEN** each account receives exactly one workspace-less refresh reporting `plan_type` `free`
 - **THEN** both accounts keep stored `plan_type` `plus`
+
+#### Scenario: Observations split across replicas still confirm the downgrade
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** two replicas operating against the same database
+- **WHEN** one replica's workspace-less refresh reports `plan_type` `free`
+- **AND** the other replica's next workspace-less refresh also reports `plan_type` `free`
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: A paid payload on one replica clears pending evidence for all replicas
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one replica has recorded a workspace-less refresh reporting `plan_type` `free`
+- **WHEN** another replica's workspace-less refresh reports a recognized paid plan
+- **AND** the first replica's next workspace-less refresh reports `plan_type` `free` again
+- **THEN** the stored `plan_type` remains `plus` after that later single `free` observation
+
+#### Scenario: A single Force probe records durable pending evidence
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** an operator runs Force probe once and the payload reports `plan_type` `free`
+- **THEN** the pending observation is stored in shared storage with a count of one
+- **AND** the stored evidence records the plan value observed and no usable token material
+- **AND** the stored evidence is removed once the downgrade is applied
+
+#### Scenario: A replaced credential does not inherit pending evidence
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** the account is re-imported or reauthenticated with new token material under the same identifier
+- **AND** the next workspace-less refresh reports `plan_type` `free`
+- **THEN** the stored `plan_type` remains `plus`
+- **AND** the account's stored `plan_type` becomes `free` only on a further `free` observation

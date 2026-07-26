@@ -16,3 +16,12 @@
   capability.
 - [x] Restrict confirmation to workspace-less accounts so a workspace-bound
   seat is never downgraded by a payload that omits `workspace_id`.
+- [x] Persist pending observations in a per-account table so the observation
+  sequence is coherent across replicas sharing one database.
+- [x] Add a guarded, idempotent Alembic revision on the current single head, with
+  a matching downgrade and no data backfill.
+- [x] Pin each observation to a salted digest of the account's credential so a
+  re-import or in-place reauthentication starts its own count, and let the
+  foreign key remove evidence when the account is deleted.
+- [x] Cover the cross-replica and replaced-credential paths with unit regression
+  tests and product-path integration tests, including durable-state assertions.

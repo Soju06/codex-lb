@@ -48,10 +48,22 @@ protection the archived change was written to provide.
   unconditional: a payload that reports another workspace's slot is still never
   trusted, no matter how many times it repeats.
 
-Confirmation state is per-process in-memory, mirroring the existing
-`_usage_refresh_auth_cooldowns` pattern in the same module. No new setting, no
-schema change, and no migration: the confirmation threshold is a hardcoded
-default (two consecutive observations), so operators have nothing to configure.
+- Persist the pending observation in a new per-account table
+  (`account_plan_downgrade_observations`) so the observation sequence is coherent
+  across every replica sharing a database, and pin each observation to the
+  credential that produced it so a replaced credential starts its own count.
+
+Confirmation state is stored per account rather than per process, modelled on the
+existing `account_refresh_claims` table used for cross-replica refresh
+coordination. Process-local state would make the sequence diverge whenever more
+than one replica shares a database: one replica could confirm a downgrade the
+cluster had already contradicted, and two `free` samples split across replicas
+would never converge. The row holds no token material — only an observation
+count, a salted credential digest, and timestamps — and `ondelete="CASCADE"`
+removes it with the account.
+
+The confirmation threshold remains a hardcoded default (two consecutive
+observations), so no operator setting is introduced.
 
 ## Impact
 
@@ -61,5 +73,13 @@ default (two consecutive observations), so operators have nothing to configure.
   and plan-based routing stop disagreeing with the account's real entitlement.
 - No change for workspace-bound accounts, for upgrades, or for payloads
   reporting an unrecognized plan.
-- A replica restart drops pending confirmations, which only delays a downgrade
-  by one further refresh cycle; it never applies one unconfirmed.
+- Adds one Alembic revision creating an empty per-account table. It is
+  DDL-only with a guarded, idempotent upgrade and downgrade, and it backfills
+  nothing: an account with no stored evidence simply starts its count at the next
+  observation.
+- Pending evidence now survives a replica restart instead of being dropped, so an
+  expiry converges on the next refresh rather than restarting its count. A
+  downgrade is still never applied on fewer than two agreeing observations.
+- Deleting an account removes its evidence through the foreign key, and
+  re-importing or reauthenticating an account discards evidence gathered under
+  the previous credential.

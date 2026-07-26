@@ -2110,6 +2110,18 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
     assert account.workspace_id is None
 
 
+async def _pending_observations(account_id: str) -> int | None:
+    """Pending workspace-less downgrade observations for ``account_id``.
+
+    Reads through the observation-store abstraction the guard itself uses, so the
+    assertions stay valid whether the active store is the in-memory one installed
+    for unit tests or the database-backed default.
+    """
+    store = usage_updater_module._plan_downgrade_observation_store()
+    record = await store.get(account_id)
+    return None if record is None else record.observations
+
+
 def _free_downgrade_payload_factory(plan_types: list[str]):
     """Return a stub fetch_usage that walks ``plan_types`` one call at a time."""
     calls = {"index": 0}
@@ -2197,17 +2209,17 @@ async def test_usage_refresh_paid_payload_clears_pending_free_downgrade(monkeypa
     # whose usage is still fresh, so the third payload would never be fetched and
     # the trailing observation would go unexercised.
     await updater.force_refresh(account)
-    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+    assert await _pending_observations(account.id) == 1
     assert account.plan_type == "plus"
 
     await updater.force_refresh(account)
     # The recognized paid payload must discard the pending downgrade outright.
-    assert account.id not in usage_updater_module._workspace_less_free_plan_observations
+    assert await _pending_observations(account.id) is None
     assert account.plan_type == "plus"
 
     await updater.force_refresh(account)
     # Back to a single unconfirmed observation, so no downgrade is applied.
-    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+    assert await _pending_observations(account.id) == 1
     assert account.plan_type == "plus"
 
 
@@ -2273,11 +2285,11 @@ async def test_usage_refresh_free_downgrade_confirmation_is_per_account(monkeypa
     assert second.plan_type == "plus"
 
 
-def test_shared_test_isolation_clears_pending_downgrade_state() -> None:
-    """The shared `_reset_global_state` helper must clear the pending-downgrade
-    dict.
+@pytest.mark.asyncio
+async def test_shared_test_isolation_clears_pending_downgrade_state() -> None:
+    """The shared `_reset_global_state` helper must clear pending-downgrade state.
 
-    That dict is process-global, so without this a suite that leaves an
+    The fallback store is process-global, so without this a suite that leaves an
     observation behind would hand the next test a head start toward a downgrade.
     Only this module's own autouse fixture used to clear it, which left every
     other suite (notably the Force probe integration tests) exposed. Asserting it
@@ -2285,12 +2297,18 @@ def test_shared_test_isolation_clears_pending_downgrade_state() -> None:
     """
     from tests.conftest import _reset_global_state
 
-    usage_updater_module._workspace_less_free_plan_observations["leaked_account"] = 1
+    fallback = usage_updater_module._FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS
+    await fallback.record(
+        "leaked_account",
+        observations=1,
+        credential_fingerprint="deadbeef",
+        observed_plan_type="free",
+    )
     try:
         _reset_global_state()
-        assert usage_updater_module._workspace_less_free_plan_observations == {}
+        assert await fallback.get("leaked_account") is None
     finally:
-        usage_updater_module._workspace_less_free_plan_observations.clear()
+        fallback.clear_all()
 
 
 @pytest.mark.asyncio
@@ -2346,14 +2364,13 @@ async def test_free_downgrade_reset_only_clears_the_reporting_account(monkeypatc
     # Both accounts record one pending free observation.
     await updater.force_refresh(resetting)
     await updater.force_refresh(other)
-    observations = usage_updater_module._workspace_less_free_plan_observations
-    assert observations.get(resetting.id) == 1
-    assert observations.get(other.id) == 1
+    assert await _pending_observations(resetting.id) == 1
+    assert await _pending_observations(other.id) == 1
 
     # A paid payload for the first account must clear only its own entry.
     await updater.force_refresh(resetting)
-    assert resetting.id not in observations
-    assert observations.get(other.id) == 1
+    assert await _pending_observations(resetting.id) is None
+    assert await _pending_observations(other.id) == 1
 
     # The untouched account therefore still confirms on its own second sighting.
     await updater.force_refresh(other)
@@ -2390,7 +2407,7 @@ async def test_force_refresh_confirms_free_downgrade_on_second_probe(monkeypatch
     assert account.plan_type == "free"
     # The counter must not leak after a confirmed downgrade, or a later
     # unrelated observation would inherit a head start toward another mutation.
-    assert account.id not in usage_updater_module._workspace_less_free_plan_observations
+    assert await _pending_observations(account.id) is None
 
 
 @pytest.mark.asyncio
@@ -2448,12 +2465,12 @@ async def test_free_downgrade_confirms_across_an_intervening_degraded_payload(mo
     accounts_repo.accounts_by_id[account.id] = account
 
     await updater.force_refresh(account)
-    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+    assert await _pending_observations(account.id) == 1
 
     # The degraded payload neither confirms nor clears the pending observation.
     await updater.force_refresh(account)
     assert account.plan_type == "plus"
-    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+    assert await _pending_observations(account.id) == 1
 
     # The second real free observation therefore still confirms.
     await updater.force_refresh(account)
@@ -2568,6 +2585,157 @@ async def test_usage_refresh_never_confirms_conflicting_workspace_identity(monke
     assert accounts_repo.metadata_updates == []
     assert account.plan_type == "business"
     assert account.workspace_id == "ws_team"
+
+
+def _replica_module() -> Any:
+    """Import the updater a second time to stand in for another replica.
+
+    A separate module instance gives the guard its own module globals, so any
+    coherence these tests observe comes from the shared observation store rather
+    than from one process's memory — exactly the distinction the review asked
+    about.
+    """
+    import importlib.util
+
+    spec = importlib.util.find_spec("app.modules.usage.updater")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+async def test_free_downgrade_evidence_is_shared_across_replicas(monkeypatch) -> None:
+    """Two `free` observations split across replicas must still converge.
+
+    Regression for the cross-replica half of the review on #1456: while the
+    pending count lived in process memory, each replica stalled at one
+    observation and a genuinely expired account never downgraded.
+    """
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    first_replica = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    peer_module = _replica_module()
+    monkeypatch.setattr(peer_module, "fetch_usage", _free_downgrade_payload_factory(["free"]))
+    second_replica = peer_module.UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    account = _make_account("acc_multi_replica", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await first_replica.force_refresh(account)
+    assert account.plan_type == "plus"
+    assert await _pending_observations(account.id) == 1
+
+    # The confirming observation lands on the OTHER replica.
+    await second_replica.force_refresh(account)
+    assert account.plan_type == "free"
+    assert await _pending_observations(account.id) is None
+
+
+@pytest.mark.asyncio
+async def test_paid_payload_on_another_replica_clears_pending_downgrade(monkeypatch) -> None:
+    """Paid evidence seen by any replica must discard the pending downgrade.
+
+    Regression for the other cross-replica failure mode: with process-local
+    state, replica A could confirm a downgrade even though replica B had already
+    observed the account reporting a paid plan in between.
+    """
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    first_replica = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    peer_module = _replica_module()
+    second_replica = peer_module.UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    account = _make_account("acc_replica_reset", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free"]),
+    )
+    await first_replica.force_refresh(account)
+    assert await _pending_observations(account.id) == 1
+
+    # The peer replica observes a recognized paid plan, which is positive
+    # evidence the account is still paid.
+    monkeypatch.setattr(peer_module, "fetch_usage", _free_downgrade_payload_factory(["plus"]))
+    await second_replica.force_refresh(account)
+    assert await _pending_observations(account.id) is None
+
+    # The first replica's next `free` sighting is therefore observation one
+    # again, not a confirmation.
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free"]),
+    )
+    await first_replica.force_refresh(account)
+    assert account.plan_type == "plus"
+    assert await _pending_observations(account.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_replaced_credential_restarts_free_downgrade_confirmation(monkeypatch) -> None:
+    """A new credential must not inherit the previous one's pending evidence.
+
+    Account ids are deterministic and `upsert_account_slot` updates the existing
+    row, so delete-and-re-import (or an in-place reauthentication) reuses the id
+    with new token material. Regression for the second review item on #1456:
+    inheriting the old evidence let the new credential's very first `free`
+    payload downgrade the account on a single sample.
+    """
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "free", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    account = _make_account("acc_reimported", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.force_refresh(account)
+    assert await _pending_observations(account.id) == 1
+    assert account.plan_type == "plus"
+
+    # Same deterministic id, brand-new token material.
+    encryptor = TokenEncryptor()
+    account.refresh_token_encrypted = encryptor.encrypt("refresh-after-reimport")
+
+    await updater.force_refresh(account)
+    assert account.plan_type == "plus", "a replaced credential must not inherit pending evidence"
+    assert await _pending_observations(account.id) == 1
+
+    # The new credential converges on its own second observation.
+    await updater.force_refresh(account)
+    assert account.plan_type == "free"
 
 
 class StubAccountsRepository:

@@ -1649,6 +1649,41 @@ class AccountRefreshClaim(Base):
     claim_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class AccountPlanDowngradeObservation(Base):
+    """Pending workspace-less paid -> free plan-downgrade evidence per account.
+
+    A workspace-less usage payload reporting ``free`` for a paid account is only
+    trusted once two consecutive refreshes agree (issue #1456). The observation
+    count lives here rather than in process memory so the sequence is coherent
+    across replicas sharing one database: an intervening paid payload observed by
+    any replica clears the evidence for all of them, and two ``free`` samples
+    split across replicas still converge.
+
+    ``credential_fingerprint`` pins the evidence to the token material that
+    produced it. Account ids are deterministic, so a delete-and-re-import or an
+    in-place reauthentication reuses the same id with new credentials; comparing
+    fingerprints makes that new credential start its own count instead of
+    inheriting the previous one's. It is a salted digest, never token material.
+
+    The row holds no secrets and is deleted as soon as the downgrade is applied
+    or the evidence is invalidated. ``ondelete="CASCADE"`` drops it with the
+    account.
+    """
+
+    __tablename__ = "account_plan_downgrade_observations"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    observations: Mapped[int] = mapped_column(Integer, nullable=False)
+    credential_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class BridgeRingMember(Base):
     __tablename__ = "bridge_ring_members"
 

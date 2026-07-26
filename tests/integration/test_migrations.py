@@ -1396,3 +1396,36 @@ async def test_request_usage_time_rollups_migration_upgrade_and_downgrade(tmp_pa
         assert survivor == 3
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'stamped-merge-rollup-repair.sqlite'}"
+    merge_revision = "20260724_000000_merge_request_log_schema_heads"
+    repair_revision = "20260726_000000_repair_request_usage_rollups_after_merge"
+    rollup_tables = {
+        "request_usage_hourly_rollups",
+        "request_usage_hourly_error_rollups",
+        "request_demand_quarter_rollups",
+    }
+
+    await to_thread.run_sync(lambda: command.stamp(_build_alembic_config(db_url), merge_revision))
+    await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(lambda sync_conn: set(sa_inspect(sync_conn).get_table_names()))
+        assert rollup_tables <= tables
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), merge_revision))
+        async with engine.connect() as conn:
+            tables_after_downgrade = await conn.run_sync(lambda sync_conn: set(sa_inspect(sync_conn).get_table_names()))
+        assert rollup_tables <= tables_after_downgrade
+    finally:
+        await engine.dispose()

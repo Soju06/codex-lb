@@ -31,4 +31,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    _rollup_migration().downgrade()
+    # This revision repairs databases that were already stamped at the merge
+    # head. It must never remove objects owned by the canonical rollup
+    # revision, which remains an ancestor of that merge head on fresh installs.
+    pass

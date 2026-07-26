@@ -425,6 +425,7 @@ class LoadBalancer:
         stream_reserve_slots: int = 0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        redact_sensitive_details: bool = False,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
@@ -723,7 +724,7 @@ class LoadBalancer:
             set_normal()
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
-            selected_snapshot.id,
+            "<redacted>" if redact_sensitive_details else selected_snapshot.id,
             routing_strategy,
             bool(sticky_key),
             model,

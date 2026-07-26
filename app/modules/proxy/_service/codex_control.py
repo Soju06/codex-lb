@@ -54,6 +54,7 @@ class _CodexControlServiceProtocol(Protocol):
         api_key: ApiKeyData | None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None: ...
     async def _ensure_previsible_unary_fresh_with_failover(
         self,
@@ -259,6 +260,7 @@ class _CodexControlMixin:
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=selection_model,
+                redact_sensitive_details=sensitive_realtime_request,
             )
             account = selection.account
             if not account:
@@ -269,6 +271,7 @@ class _CodexControlMixin:
                     if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
                     else TRAFFIC_CLASS_FOREGROUND,
                     prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
+                    privacy_policy=effective_privacy_policy,
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"

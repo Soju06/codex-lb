@@ -1420,6 +1420,7 @@ class ProxyService(
         api_key: ApiKeyData | None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None:
         scoped_account_ids = (
             set(api_key.assigned_account_ids)
@@ -1443,6 +1444,7 @@ class ProxyService(
             sticky_max_age_seconds=affinity.max_age_seconds,
             account_ids=scoped_account_ids,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
+            redact_sensitive_details=privacy_policy.redacts_sensitive_details,
             routing_strategy=_routing_strategy(settings),
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
@@ -1743,6 +1745,7 @@ class ProxyService(
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        redact_sensitive_details: bool = False,
     ) -> AccountSelection:
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -1761,6 +1764,8 @@ class ProxyService(
             else traffic_class
         )
         excluded_account_ids_set = set(exclude_account_ids or ())
+        def log_account_id(account_id: str | None) -> str | None:
+            return "<redacted>" if redact_sensitive_details and account_id is not None else account_id
         logger.info(
             "Proxy account selection start request_id=%s kind=%s request_stage=%s model=%s "
             "additional_limit=%s sticky=%s sticky_kind=%s reallocate_sticky=%s prefer_earlier_reset=%s "
@@ -1780,7 +1785,7 @@ class ProxyService(
             bool(api_key is not None and api_key.account_assignment_scope_enabled),
             None if scoped_account_ids is None else len(scoped_account_ids),
             len(excluded_account_ids_set),
-            preferred_account_id,
+            log_account_id(preferred_account_id),
             remaining_budget,
         )
         try:
@@ -1848,7 +1853,7 @@ class ProxyService(
                         request_id,
                         kind,
                         request_stage,
-                        preferred_account_id,
+                        log_account_id(preferred_account_id),
                         preferred_account_id in excluded_account_ids_set,
                         scoped_account_ids is not None and preferred_account_id not in scoped_account_ids,
                     )
@@ -1899,6 +1904,7 @@ class ProxyService(
                         stream_reserve_slots=stream_reserve_slots,
                         traffic_class=effective_traffic_class,
                         concurrency_caps=concurrency_caps,
+                        redact_sensitive_details=redact_sensitive_details,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -1906,7 +1912,7 @@ class ProxyService(
                             request_id,
                             kind,
                             request_stage,
-                            preferred_account_id,
+                            log_account_id(preferred_account_id),
                         )
                         return preferred_selection
                     if not fallback_on_preferred_account_unavailable:
@@ -1916,7 +1922,7 @@ class ProxyService(
                             request_id,
                             kind,
                             request_stage,
-                            preferred_account_id,
+                            log_account_id(preferred_account_id),
                             preferred_selection.error_code,
                             preferred_selection.error_message,
                         )
@@ -1953,6 +1959,7 @@ class ProxyService(
                     stream_reserve_slots=stream_reserve_slots,
                     traffic_class=effective_traffic_class,
                     concurrency_caps=concurrency_caps,
+                    redact_sensitive_details=redact_sensitive_details,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
@@ -1961,7 +1968,7 @@ class ProxyService(
                         request_id,
                         kind,
                         request_stage,
-                        selection.account.id,
+                        log_account_id(selection.account.id),
                         len(excluded_account_ids_set),
                     )
                     return AccountSelection(
@@ -1976,7 +1983,7 @@ class ProxyService(
                     kind,
                     request_stage,
                     model,
-                    selection.account.id if selection.account is not None else None,
+                    log_account_id(selection.account.id) if selection.account is not None else None,
                     selection.error_code,
                     selection.error_message,
                     None if scoped_account_ids is None else len(scoped_account_ids),

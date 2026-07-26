@@ -1069,6 +1069,41 @@ async def test_codex_realtime_call_awaits_durable_binding_before_success_log(
 
 
 @pytest.mark.asyncio
+async def test_codex_realtime_call_selection_logs_redact_account_identifiers(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_codex_realtime_selection_private",
+        "codex-realtime-selection-private@example.com",
+    )
+    auth_headers, _api_key = await _create_realtime_api_key(async_client, "realtime-selection-private")
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_selection_private"},
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        response = await async_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={"content-type": "application/sdp", **auth_headers},
+        )
+
+    assert response.status_code == 201
+    assert "<redacted>" in caplog.text
+    assert account_id not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_codex_realtime_call_binds_account_after_forced_refresh_success(async_client, monkeypatch):
     account_id = await _import_account(
         async_client,

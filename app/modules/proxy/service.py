@@ -1413,48 +1413,6 @@ class ProxyService(
             optional_kwargs=kwargs,
         )
 
-    async def _select_codex_control_account_without_budget(
-        self,
-        *,
-        affinity: _AffinityPolicy,
-        api_key: ApiKeyData | None,
-        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
-        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
-        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
-    ) -> Account | None:
-        scoped_account_ids = (
-            set(api_key.assigned_account_ids)
-            if api_key is not None and api_key.account_assignment_scope_enabled
-            else None
-        )
-        settings = await get_settings_cache().get()
-        if _routing_strategy(settings) == "single_account":
-            selected_account_id = (settings.single_account_id or "").strip()
-            if not selected_account_id:
-                return None
-            if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
-                return None
-            scoped_account_ids = {selected_account_id}
-        selection = await self._load_balancer.select_account(
-            sticky_key=affinity.selection_key,
-            sticky_kind=affinity.kind,
-            reallocate_sticky=affinity.reallocate_sticky,
-            sticky_source=affinity.codex_session_source,
-            legacy_sticky_key=affinity.legacy_selection_key,
-            sticky_max_age_seconds=affinity.max_age_seconds,
-            account_ids=scoped_account_ids,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            redact_sensitive_details=privacy_policy.redacts_sensitive_details,
-            routing_strategy=_routing_strategy(settings),
-            budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
-            secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
-            traffic_class=traffic_class,
-            concurrency_caps=effective_account_concurrency_caps(settings),
-        )
-        if selection.account is None:
-            return None
-        return _detached_account_copy(selection.account)
-
     @asynccontextmanager
     async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
         # A self-contained repo prevents request cancellation from closing the
@@ -2507,11 +2465,6 @@ def _is_missing_thread_goal_protocol_error(exc: ProxyResponseError) -> bool:
     if exc.status_code == 404:
         return code == "not_found" and message == "not found"
     return code == "method_not_allowed" and message == "method not allowed"
-
-
-def _detached_account_copy(account: Account) -> Account:
-    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
-    return Account(**data)
 
 
 def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:

@@ -99,6 +99,7 @@ class _RealtimeLiveServiceProtocol(Protocol):
         fallback_on_preferred_account_unavailable: bool,
         lease_kind: str,
         request_stage: str,
+        redact_sensitive_details: bool,
     ) -> AccountSelection: ...
 
     async def _resolve_upstream_route_for_account(
@@ -477,6 +478,7 @@ class _RealtimeLiveMixin:
             fallback_on_preferred_account_unavailable=False,
             lease_kind="stream",
             request_stage="reattach",
+            redact_sensitive_details=True,
         )
         account = selection.account
         account_lease: AccountLease | None = selection.lease

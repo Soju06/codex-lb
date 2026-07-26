@@ -35,7 +35,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -175,11 +175,73 @@ def _routing_strategy(settings: Any) -> RoutingStrategy:
     return cast(Callable[[Any], RoutingStrategy], _service_global("_routing_strategy"))(settings)
 
 
+def _sticky_reallocation_primary_budget_threshold_pct(settings: Any) -> float:
+    return cast(
+        Callable[[Any], float],
+        _service_global("_sticky_reallocation_primary_budget_threshold_pct"),
+    )(settings)
+
+
+def _sticky_reallocation_secondary_budget_threshold_pct(settings: Any) -> float:
+    return cast(
+        Callable[[Any], float],
+        _service_global("_sticky_reallocation_secondary_budget_threshold_pct"),
+    )(settings)
+
+
+def _detached_account_copy(account: Account) -> Account:
+    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
+    return Account(**data)
+
+
 _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
 class _CodexControlMixin:
+    async def _select_codex_control_account_without_budget(
+        self,
+        *,
+        affinity: _AffinityPolicy,
+        api_key: ApiKeyData | None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> Account | None:
+        proxy = cast(_CodexControlServiceProtocol, self)
+        scoped_account_ids = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
+        settings = await _service_get_settings_cache().get()
+        if _routing_strategy(settings) == "single_account":
+            selected_account_id = (settings.single_account_id or "").strip()
+            if not selected_account_id:
+                return None
+            if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
+                return None
+            scoped_account_ids = {selected_account_id}
+        selection = await proxy._load_balancer.select_account(
+            sticky_key=affinity.selection_key,
+            sticky_kind=affinity.kind,
+            reallocate_sticky=affinity.reallocate_sticky,
+            sticky_source=affinity.codex_session_source,
+            legacy_sticky_key=affinity.legacy_selection_key,
+            sticky_max_age_seconds=affinity.max_age_seconds,
+            account_ids=scoped_account_ids,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            redact_sensitive_details=privacy_policy.redacts_sensitive_details,
+            routing_strategy=_routing_strategy(settings),
+            budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+            secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
+            traffic_class=traffic_class,
+            concurrency_caps=effective_account_concurrency_caps(settings),
+        )
+        if selection.account is None:
+            return None
+        return _detached_account_copy(selection.account)
+
     async def codex_control_request(
         self,
         path: str,

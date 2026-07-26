@@ -195,6 +195,7 @@ class _ProxyService(_RealtimeLiveMixin):
         self.owner_account_id = owner_account_id
         self.lease = lease
         self._load_balancer = _FakeLoadBalancer()
+        self.selection_calls: list[dict[str, object]] = []
         self.decrypt_calls: list[str] = []
         self._encryptor = SimpleNamespace(decrypt=self._decrypt)
         self._live_websocket_connector = live_websocket_connector
@@ -212,6 +213,7 @@ class _ProxyService(_RealtimeLiveMixin):
         return self.owner_account_id
 
     async def _select_account_with_budget_compatible(self, _deadline: float, **_kwargs):
+        self.selection_calls.append(_kwargs)
         return AccountSelection(self.account, None, lease=self.lease)
 
     async def _resolve_upstream_route_for_account(self, account, *, operation: str):
@@ -966,5 +968,6 @@ async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypt
     assert raised.value.status_code == 503
     assert raised.value.payload["error"]["code"] == "continuity_owner_unavailable"
     assert downstream.accepted is False
+    assert service.selection_calls[0]["redact_sensitive_details"] is True
     assert service.decrypt_calls == []
     assert service._load_balancer.released == [None]

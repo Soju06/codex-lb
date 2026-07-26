@@ -7458,7 +7458,9 @@ async def test_backend_http_bridge_canonical_quarantine_requires_durable_follow_
     assert events[0]["type"] == "response.created"
     assert events[-1]["type"] == "response.completed"
     lookup_request_targets.assert_awaited_once()
-    lookup_kwargs = lookup_request_targets.await_args.kwargs
+    lookup_await_args = lookup_request_targets.await_args
+    assert lookup_await_args is not None
+    lookup_kwargs = lookup_await_args.kwargs
     assert lookup_kwargs["turn_state"] is None
     assert lookup_kwargs["previous_response_id"] is None
     assert streamed_account_ids == [cast(str, owner_account.chatgpt_account_id)]

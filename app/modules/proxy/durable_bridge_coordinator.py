@@ -383,25 +383,32 @@ class DurableBridgeSessionCoordinator:
             return None
         return _to_lookup(snapshot)
 
-    async def rebind_session_account(
+    async def rebind_session_account_if_current(
         self,
         *,
         session_id: str,
-        api_key_id: str | None,
-        instance_id: str,
-        owner_epoch: int,
+        expected_owner_epoch: int,
+        expected_account_id: str | None,
+        expected_latest_response_id: str | None,
         account_id: str,
-        clear_continuity: bool = False,
-    ) -> bool:
-        del api_key_id
+        model: str | None,
+        service_tier: str | None,
+    ) -> DurableBridgeLookup | None:
+        """Move a session's continuity owner while the observed snapshot holds."""
+
         async with self._session() as session:
-            return await DurableBridgeRepository(session).rebind_session_account(
+            snapshot = await DurableBridgeRepository(session).rebind_session_account_if_current(
                 session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_account_id=expected_account_id,
+                expected_latest_response_id=expected_latest_response_id,
                 account_id=account_id,
-                clear_continuity=clear_continuity,
+                model=model,
+                service_tier=service_tier,
             )
+        if snapshot is None:
+            return None
+        return _to_lookup(snapshot)
 
     async def release_live_session(
         self,

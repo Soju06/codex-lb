@@ -1006,6 +1006,14 @@ class _CompactMixin:
             last_exc: ProxyResponseError | None = None
             network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
+            # Account-neutral replay off a pinned previous-response owner is only
+            # legal for owner loss the owner's quota state caused: either the owner
+            # was never usable at selection time, or it was excluded mid-request by
+            # a pre-visible quota / rate-limit failure. Post-selection
+            # authentication, refresh, transport, and transient failures also
+            # exclude the owner, and those keep their existing owner-bound handling
+            # instead of moving the history to another account.
+            owner_quota_failover_eligible = False
             require_security_work_authorized = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
@@ -1067,10 +1075,11 @@ class _CompactMixin:
                         and previous_response_preferred_account_id is not None
                         and turn_state_owner_account_id is None
                         and rewritten_file_account_id is None
+                        and (preferred_account_id not in excluded_account_ids or owner_quota_failover_eligible)
                     ):
                         # The pinned previous-response owner cannot be selected
                         # (e.g. quota-exhausted, or excluded after an in-request
-                        # failover). A locally verified account-neutral full
+                        # quota failover). A locally verified account-neutral full
                         # resend carries the complete history client-side, so
                         # the stale anchor can be dropped and the compact can
                         # move to a fresh account instead of wedging the
@@ -1715,6 +1724,14 @@ class _CompactMixin:
                             action,
                         )
                         if action == "failover_next":
+                            if account.id == preferred_account_id and classified["failure_class"] in (
+                                "rate_limit",
+                                "quota",
+                            ):
+                                # Only a quota / rate-limit exclusion of the pinned
+                                # owner makes account-neutral replay recovery
+                                # eligible for the remaining attempts.
+                                owner_quota_failover_eligible = True
                             last_exc = exc
                             excluded_account_ids.add(account.id)
                             await record_or_defer_stream_health(

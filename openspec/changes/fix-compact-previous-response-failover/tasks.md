@@ -21,3 +21,9 @@
   the same way; non-neutral payload keeps today's failure and never crosses accounts.
 - [x] 5. Run `uv run ruff check`, `uv run ty check`, and the unit + integration proxy test
   suites; validate the change with strict OpenSpec validation.
+- [x] 6. Gate recovery on quota-caused owner loss only: allow it when the pinned owner was
+  never used for the request at selection time, or when a pre-visible quota / rate-limit
+  failover excluded the owner mid-request. Post-selection authentication, refresh, transport,
+  and transient exclusions of the pinned owner keep their existing owner-bound handling, with
+  an integration regression test at `POST /backend-api/codex/responses/compact` for the
+  repeated-401 path.

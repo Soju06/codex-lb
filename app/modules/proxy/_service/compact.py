@@ -476,16 +476,28 @@ def _compact_account_neutral_replay_payload(
     account-neutral: the upstream-bound payload without the anchor must pass
     the shared fresh-replay validation, so no encrypted, compaction, file, or
     other account-scoped state can reach the replacement account.
+
+    Both checks run against the serialized upstream-bound payload, never the
+    request model. ``to_payload`` still drops items on the wire (poisoned
+    local-compact fallback messages take their trailing encrypted compaction
+    item with them), so a multi-item request can serialize down to a single
+    message. Replaying that would compact only the latest message on the
+    replacement account and silently lose the conversation, so the wire input
+    itself must keep more than one item.
     """
     previous_response_id = getattr(payload, "previous_response_id", None)
     if not isinstance(previous_response_id, str) or not previous_response_id.strip():
         return None
-    if not isinstance(payload.input, list) or len(payload.input) <= 1:
+    if not isinstance(payload.input, list):
         return None
     replay_source = payload.model_dump(mode="json", exclude_none=True)
     replay_source.pop("previous_response_id", None)
     replay_payload = ResponsesCompactRequest.model_validate(replay_source)
-    if not responses_payload_is_account_neutral_fresh_replay(replay_payload.to_payload()):
+    replay_wire_payload = replay_payload.to_payload()
+    replay_wire_input = replay_wire_payload.get("input")
+    if not isinstance(replay_wire_input, list) or len(replay_wire_input) <= 1:
+        return None
+    if not responses_payload_is_account_neutral_fresh_replay(replay_wire_payload):
         return None
     return replay_payload
 

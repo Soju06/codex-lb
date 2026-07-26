@@ -1,0 +1,42 @@
+## Context
+
+Dashboard authentication currently distinguishes `admin` and `guest`, but every authenticated GET route shares the same broad read gate. Conversation archives contain full request and response bodies, while request-log rows expose client IP, full User-Agent, conversation ID, and the archive lookup ID. Guests still need the non-identifying operational fields and aggregates that make the read-only dashboard useful.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Deny every conversation-archive API request unless the dashboard principal is an admin.
+- Preserve request-log rows and aggregate metrics for guests while replacing raw identifying request metadata with null values.
+- Keep the admin API and request-detail experience unchanged.
+- Avoid presenting archive controls or redacted identifying fields in the guest UI.
+
+**Non-Goals:**
+
+- Changing persistence, retention, archive creation, or proxy routing.
+- Redacting low-cardinality `useragentGroup`, request metrics, status, model, token, latency, or cost fields.
+- Redesigning the wider dashboard guest-access model.
+
+## Decisions
+
+### Use an explicit admin dependency for sensitive read routes
+
+Add `require_dashboard_admin_access` beside the existing dashboard session and write dependencies. It validates the session, then rejects non-admin principals with a stable `admin_access_required` permission error. The conversation-archive router uses this dependency for all endpoints.
+
+Using the write-access dependency was rejected because archive reads are not mutations and its `read_only_access` message would describe the failure incorrectly.
+
+### Redact at the request-log response mapping boundary
+
+The request-log endpoint passes the resolved principal into the service as an explicit `include_sensitive_metadata` decision. The mapper emits null for `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` for guests while retaining persisted values and all non-sensitive fields.
+
+Repository filtering and persistence remain unchanged. Redacting at the response mapping boundary gives one typed enforcement point and keeps aggregate queries identical for admins and guests.
+
+### Hide sensitive request-detail UI by role
+
+The request-detail component reads the authenticated dashboard role. Admins retain the existing User Agent, Client IP, Conversation ID, and archive panel. Guests do not mount or render those elements. Backend redaction remains authoritative; the UI change prevents misleading placeholders and avoidable denied archive requests.
+
+## Risks / Trade-offs
+
+- [Risk] A future request-log identifying field could be added without joining the redaction set. → Keep the sensitive-field list explicit in the role-aware mapper test and OpenSpec requirement.
+- [Risk] Client-side role state could be stale. → Backend response redaction and archive authorization are authoritative and do not rely on the UI.
+- [Trade-off] Guests lose conversation drill-down and archive inspection. → They retain request rows, model/status/token/cost/latency fields, `useragentGroup`, and aggregate dashboard/report statistics.

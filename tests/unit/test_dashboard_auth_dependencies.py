@@ -7,8 +7,9 @@ import pytest
 from starlette.requests import Request
 
 import app.core.auth.dependencies as auth_dependencies
+from app.core.auth.dashboard_access import admin_principal, guest_principal
 from app.core.auth.dashboard_mode import DashboardAuthMode
-from app.core.exceptions import DashboardAuthError
+from app.core.exceptions import DashboardAuthError, DashboardPermissionError
 
 pytestmark = pytest.mark.unit
 
@@ -58,3 +59,31 @@ async def test_validate_dashboard_session_blocks_passwordless_guest_fallback_in_
 
     assert exc_info.value.code == "proxy_auth_required"
     assert getattr(request.state, "dashboard_principal", None) is None
+
+
+@pytest.mark.asyncio
+async def test_require_dashboard_admin_access_rejects_guest(monkeypatch):
+    request = _build_request("/api/conversation-archive/files")
+    monkeypatch.setattr(
+        auth_dependencies,
+        "validate_dashboard_session",
+        AsyncMock(return_value=guest_principal()),
+    )
+
+    with pytest.raises(DashboardPermissionError, match="Admin dashboard access is required") as exc_info:
+        await auth_dependencies.require_dashboard_admin_access(request)
+
+    assert exc_info.value.code == "admin_access_required"
+
+
+@pytest.mark.asyncio
+async def test_require_dashboard_admin_access_allows_admin(monkeypatch):
+    request = _build_request("/api/conversation-archive/files")
+    principal = admin_principal(auth_mode=DashboardAuthMode.STANDARD)
+    monkeypatch.setattr(
+        auth_dependencies,
+        "validate_dashboard_session",
+        AsyncMock(return_value=principal),
+    )
+
+    assert await auth_dependencies.require_dashboard_admin_access(request) is principal

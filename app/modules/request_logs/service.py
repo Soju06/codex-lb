@@ -68,6 +68,8 @@ class RequestLogsService:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         status: list[str] | None = None,
+        *,
+        include_sensitive_metadata: bool,
     ) -> RequestLogsPage:
         status_filter = _map_status_filter(status)
         normalized_model_options = (
@@ -105,6 +107,7 @@ class RequestLogsService:
             to_request_log_entry(
                 log,
                 api_key_name=api_key_name_by_id.get(log.api_key_id or ""),
+                include_sensitive_metadata=include_sensitive_metadata,
             )
             for log in logs
         ]

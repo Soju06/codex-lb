@@ -4,6 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 
+from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
@@ -51,6 +52,7 @@ async def list_request_logs(
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogsResponse:
     parsed_options: list[ServiceRequestLogModelOption] | None = None
@@ -70,6 +72,7 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        include_sensitive_metadata=principal.role == DashboardRole.ADMIN,
     )
     return RequestLogsResponse(
         requests=page.requests,

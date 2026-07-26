@@ -27,3 +27,8 @@
   and transient exclusions of the pinned owner keep their existing owner-bound handling, with
   an integration regression test at `POST /backend-api/codex/responses/compact` for the
   repeated-401 path.
+- [x] 7. Verify the replay history against the serialized upstream-bound payload, not the
+  request model: require the wire `input` to keep more than one item after every compact
+  serializer transformation (poisoned local-compact fallback stripping can collapse a
+  multi-item history to one message) and run the account-neutral rules on the same serialized
+  payload, with unit and compact-route regression tests.

@@ -6,10 +6,12 @@ When a compact request is pinned to a previous-response owner account, that pin 
 continuity pin (no client-supplied turn-state owner and no input-file owner), and account
 selection cannot return the pinned owner, the proxy MUST attempt account-neutral fresh-replay
 recovery before surfacing the failure, provided the compact payload is a locally verified
-account-neutral full resend. Local verification MUST require a list-shaped `input` with more
-than one item and MUST validate the exact upstream-bound compact payload without
-`previous_response_id` against the shared account-neutral fresh-replay rules: self-contained
-tool call/output pairing, no server-assigned item ids, no encrypted or compaction state, no
+account-neutral full resend. Local verification MUST run against the exact upstream-bound
+compact payload without `previous_response_id`, after every wire transformation the compact
+serializer applies. It MUST require that serialized payload to carry a list-shaped `input` with
+more than one item, so a request whose wire input collapses to a single message never replays a
+truncated history on another account. It MUST validate that same serialized payload against the
+shared account-neutral fresh-replay rules: self-contained tool call/output pairing, no server-assigned item ids, no encrypted or compaction state, no
 nonblank conversation or prompt handles, no account-scoped file/container/vector handles, no
 hosted/MCP call state, and only recognized account-neutral fields and shapes.
 
@@ -54,6 +56,13 @@ failover.
 - **THEN** the request fails with the existing selection or upstream error
 - **AND** no part of the payload is sent to another account
 - **AND** the continuity fail-closed counter records the compact-surface outcome
+
+#### Scenario: History that serializes to a single wire item stays fail-closed
+
+- **GIVEN** a pinned compact request whose multi-item `input` serializes to a single upstream item because the compact serializer drops items
+- **WHEN** the pinned owner cannot be selected
+- **THEN** the request fails with the existing selection or upstream error
+- **AND** the proxy does not replay the truncated history on another account
 
 #### Scenario: Post-selection authentication failure on the pinned owner stays owner-bound
 

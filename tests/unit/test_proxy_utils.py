@@ -3810,6 +3810,25 @@ def test_compact_account_neutral_replay_payload_strips_anchor_for_verified_full_
             "account-scoped file handle",
         ),
         ({"conversation": "conv_123"}, "conversation handle"),
+        (
+            {
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": ("Local compact fallback preserved the latest encrypted reasoning state."),
+                            }
+                        ],
+                    },
+                    {"type": "compaction", "encrypted_content": "bad-local-summary"},
+                    {"role": "user", "content": "continue"},
+                ]
+            },
+            "multi-item input that serializes to a single wire item",
+        ),
     ],
 )
 def test_compact_account_neutral_replay_payload_rejects_unsafe_histories(

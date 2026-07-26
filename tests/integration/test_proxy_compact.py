@@ -879,6 +879,64 @@ async def test_proxy_compact_pinned_owner_unavailable_non_neutral_payload_stays_
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_wire_truncated_history_stays_fail_closed(
+    async_client, monkeypatch
+):
+    """A history that serializes to one wire item must not cross accounts.
+
+    ``to_payload`` drops poisoned local-compact fallback messages together with
+    their trailing encrypted compaction item, so a multi-item request can reach
+    upstream as a single message. Replaying that on another account would
+    compact only the latest message and lose the conversation.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-truncated-owner@example.com", raw_account_id="acc_truncated_owner"
+    )
+    await _import_account(async_client, email="compact-truncated-alt@example.com", raw_account_id="acc_truncated_alt")
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Local compact fallback preserved the latest encrypted reasoning state.",
+                    }
+                ],
+            },
+            {"type": "compaction", "encrypted_content": "bad-local-summary"},
+            {"role": "user", "content": "continue"},
+        ],
+        "previous_response_id": "resp_truncated_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_pinned_owner_post_selection_401_stays_owner_bound(async_client, monkeypatch):
     """A pinned owner excluded by a repeated 401 must not replay on another account.
 

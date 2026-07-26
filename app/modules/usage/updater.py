@@ -1026,30 +1026,21 @@ async def _free_plan_downgrade_is_confirmed(
         return False
     fingerprint = credential_fingerprint(account)
     store = _plan_downgrade_observation_store()
-    existing = await store.get(account.id)
-    if existing is not None and existing.credential_fingerprint != fingerprint:
-        # Account ids are deterministic, so a delete-and-re-import or an in-place
-        # reauthentication reuses this id with new token material. Evidence
-        # gathered from the previous credential says nothing about the new one,
-        # and inheriting it would let the new credential's very first ``free``
-        # payload land a downgrade on a single sample.
-        logger.info(
-            "Usage refresh discarding pending workspace-less downgrade evidence from a replaced "
-            "credential account_id=%s stored_plan_type=%s discarded_observations=%s request_id=%s",
-            account.id,
-            stored_plan_type,
-            existing.observations,
-            get_request_id(),
-        )
-        existing = None
-    observations = (existing.observations if existing is not None else 0) + 1
+    # One atomic step records the observation and returns the resulting count.
+    # Evidence whose credential fingerprint no longer matches is restarted at one
+    # inside the same operation: account ids are deterministic, so a
+    # delete-and-re-import or an in-place reauthentication reuses this id with new
+    # token material, and inheriting the old evidence would let the new
+    # credential's very first ``free`` payload land a downgrade on a single
+    # sample. Doing this as a read followed by a write would leave an await
+    # between the two halves, letting concurrent refreshes for one account lose an
+    # increment.
+    observations = await store.observe(
+        account.id,
+        credential_fingerprint=fingerprint,
+        observed_plan_type="free",
+    )
     if observations < _FREE_PLAN_DOWNGRADE_CONFIRMATIONS:
-        await store.record(
-            account.id,
-            observations=observations,
-            credential_fingerprint=fingerprint,
-            observed_plan_type="free",
-        )
         logger.info(
             "Usage refresh observed a workspace-less downgrade to free; awaiting confirmation "
             "account_id=%s stored_plan_type=%s observations=%s required=%s request_id=%s",

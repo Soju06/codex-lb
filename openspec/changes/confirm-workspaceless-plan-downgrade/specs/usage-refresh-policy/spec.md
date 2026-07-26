@@ -99,13 +99,18 @@ paid plan observed by one replica MUST discard the pending evidence for all of
 them. Persisted evidence MUST NOT reduce the confirmation threshold: a downgrade
 is still applied only on the second agreeing observation.
 
+Recording an observation MUST be atomic with respect to concurrent refreshes of
+the same account: two refreshes observing `free` MUST advance the count twice
+rather than both reading the same prior value and writing the same result.
+
 Pending observations MUST be invalidated when the account's credentials are
 replaced. Account identifiers are deterministic, so deleting and re-importing an
 account, or reauthenticating it in place, reuses the identifier with new token
 material; evidence gathered under the previous credential MUST NOT count toward a
 downgrade for the new one, which MUST begin its own count. Evidence MUST also be
 removed when the account itself is deleted. The stored evidence MUST NOT contain
-usable token material.
+usable token material, and comparison MUST be unaffected by re-encryption of an
+unchanged credential.
 
 This requirement applies to scheduled usage refresh and to the forced refresh
 performed after an operator's Force probe. The confirmation threshold MUST work
@@ -207,3 +212,17 @@ with zero configuration and MUST NOT require an operator setting.
 - **AND** the next workspace-less refresh reports `plan_type` `free`
 - **THEN** the stored `plan_type` remains `plus`
 - **AND** the account's stored `plan_type` becomes `free` only on a further `free` observation
+
+#### Scenario: Re-encrypting an unchanged credential does not discard evidence
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** the account's stored credential is re-encrypted without changing the underlying token
+- **AND** the next workspace-less refresh reports `plan_type` `free`
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: Concurrent observations each advance the count
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
+- **THEN** the recorded observation count reflects both observations rather than one

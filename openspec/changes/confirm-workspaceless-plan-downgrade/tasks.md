@@ -25,3 +25,7 @@
   foreign key remove evidence when the account is deleted.
 - [x] Cover the cross-replica and replaced-credential paths with unit regression
   tests and product-path integration tests, including durable-state assertions.
+- [x] Fingerprint the decrypted credential material so re-encrypting an unchanged
+  token does not read as a credential replacement.
+- [x] Record observations atomically so concurrent refreshes of one account cannot
+  lose an increment.

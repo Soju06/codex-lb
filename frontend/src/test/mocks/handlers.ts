@@ -715,6 +715,10 @@ export const handlers = [
     return HttpResponse.json({ status: "ok" });
   }),
 
+  http.get("/health/ready", () => {
+    return HttpResponse.json({ status: "ok" });
+  }),
+
   http.get("/api/runtime/version", () => {
     return HttpResponse.json({
       currentVersion: "1.19.0",

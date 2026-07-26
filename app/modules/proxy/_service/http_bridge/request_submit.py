@@ -1808,6 +1808,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session,
                     request_state=request_state,
                     require_same_account=True,
+                    **reconnect_reader_kwargs,
                 )
             elif require_preferred_reconnect:
                 await self._reconnect_http_bridge_session(

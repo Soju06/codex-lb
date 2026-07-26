@@ -365,6 +365,67 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def rebind_session_account_if_current(
+        self,
+        *,
+        session_id: str,
+        expected_owner_epoch: int,
+        expected_account_id: str | None,
+        expected_latest_response_id: str | None,
+        account_id: str,
+        model: str | None,
+        service_tier: str | None,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Move continuity ownership only while the observed snapshot is current.
+
+        Used when a surface proves a conversation's state has moved to another
+        account and the durable row must follow it.  The move clears the previous
+        owner's aliases and recorded turn state, so it is compare-and-set on the
+        owner epoch, account, and latest response the caller actually observed: a
+        turn that completed in the meantime keeps its own continuity instead of
+        being erased, and the caller learns the rebind did not apply.  Advancing
+        the epoch fences any writer still holding the observed one.
+        """
+
+        now = utcnow()
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_epoch == expected_owner_epoch,
+                    HttpBridgeSessionRecord.account_id.is_(None)
+                    if expected_account_id is None
+                    else HttpBridgeSessionRecord.account_id == expected_account_id,
+                    HttpBridgeSessionRecord.latest_response_id.is_(None)
+                    if expected_latest_response_id is None
+                    else HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id,
+                )
+                .values(
+                    owner_instance_id=None,
+                    owner_epoch=HttpBridgeSessionRecord.owner_epoch + 1,
+                    lease_expires_at=now,
+                    state=HttpBridgeSessionState.DRAINING,
+                    closed_at=None,
+                    account_id=account_id,
+                    model=model,
+                    service_tier=service_tier,
+                    latest_turn_state=None,
+                    latest_response_id=None,
+                    latest_input_item_count=None,
+                    latest_input_full_fingerprint=None,
+                    last_seen_at=now,
+                )
+                .returning(*_SNAPSHOT_COLUMNS)
+            )
+            updated_row = result.one_or_none()
+            if updated_row is None:
+                await self._session.rollback()
+                return None
+            await self._clear_aliases_for_session(session_id)
+            await self._session.commit()
+        return _returned_row_to_snapshot(updated_row)
+
     async def _execute_fenced_session_update(
         self,
         *,

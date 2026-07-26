@@ -3931,7 +3931,7 @@ async def test_compact_previous_response_owner_unavailable_recovers_with_account
     )
     lookup_anchor = AsyncMock(return_value=anchor_lookup)
     monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_target", lookup_anchor)
-    claim_session = AsyncMock(
+    rebind_session = AsyncMock(
         return_value=_compact_durable_anchor_lookup(
             account_id=replacement.id,
             stored_count=None,
@@ -3939,9 +3939,7 @@ async def test_compact_previous_response_owner_unavailable_recovers_with_account
             latest_response_id=None,
         )
     )
-    release_session = AsyncMock(return_value=None)
-    monkeypatch.setattr(service._durable_bridge, "claim_live_session", claim_session)
-    monkeypatch.setattr(service._durable_bridge, "release_live_session", release_session)
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account_if_current", rebind_session)
     selection_calls: list[dict[str, object]] = []
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
@@ -4006,18 +4004,17 @@ async def test_compact_previous_response_owner_unavailable_recovers_with_account
         replacement.id,
         kind=owner_affinity.kind,
     )
-    assert claim_session.await_count == 1
-    assert claim_session.await_args is not None
-    claim_kwargs = claim_session.await_args.kwargs
-    assert claim_kwargs["session_key_kind"] == anchor_lookup.canonical_kind
-    assert claim_kwargs["session_key_value"] == anchor_lookup.canonical_key
-    assert claim_kwargs["account_id"] == replacement.id
-    assert claim_kwargs["allow_takeover"] is True
-    assert claim_kwargs["latest_response_id"] is None
-    assert claim_kwargs["latest_turn_state"] is None
-    assert release_session.await_count == 1
-    assert release_session.await_args is not None
-    assert release_session.await_args.kwargs["draining"] is True
+    # The durable move is a compare-and-set on the snapshot that proved the
+    # history, so a turn that completed for the same session in the meantime
+    # keeps its own continuity instead of being force-taken over.
+    assert rebind_session.await_count == 1
+    assert rebind_session.await_args is not None
+    rebind_kwargs = rebind_session.await_args.kwargs
+    assert rebind_kwargs["session_id"] == anchor_lookup.session_id
+    assert rebind_kwargs["expected_owner_epoch"] == anchor_lookup.owner_epoch
+    assert rebind_kwargs["expected_account_id"] == owner.id
+    assert rebind_kwargs["expected_latest_response_id"] == "resp_compact_replay"
+    assert rebind_kwargs["account_id"] == replacement.id
 
 
 @pytest.mark.asyncio
@@ -4053,7 +4050,7 @@ async def test_compact_recovery_never_rebinds_a_hard_turn_state_sticky_row(
         ),
     )
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
-    claim_session = AsyncMock(
+    rebind_session = AsyncMock(
         return_value=_compact_durable_anchor_lookup(
             account_id=replacement.id,
             stored_count=None,
@@ -4061,8 +4058,7 @@ async def test_compact_recovery_never_rebinds_a_hard_turn_state_sticky_row(
             latest_response_id=None,
         )
     )
-    monkeypatch.setattr(service._durable_bridge, "claim_live_session", claim_session)
-    monkeypatch.setattr(service._durable_bridge, "release_live_session", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account_if_current", rebind_session)
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         if kwargs.get("preferred_account_id") == owner.id:
@@ -4095,9 +4091,77 @@ async def test_compact_recovery_never_rebinds_a_hard_turn_state_sticky_row(
 
     assert core_compact.await_count == 1
     sticky_sessions.upsert.assert_not_awaited()
-    assert claim_session.await_count == 1
-    assert claim_session.await_args is not None
-    assert claim_session.await_args.kwargs["account_id"] == replacement.id
+    assert rebind_session.await_count == 1
+    assert rebind_session.await_args is not None
+    assert rebind_session.await_args.kwargs["account_id"] == replacement.id
+
+
+@pytest.mark.asyncio
+async def test_compact_recovery_keeps_compaction_when_durable_rebind_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that moved on keeps its own continuity, and the client keeps its compaction.
+
+    A normal bridge turn for the same canonical session can complete between the
+    proof lookup and this post-success rebind. The compare-and-set then matches
+    nothing, so the newer turn's account, anchor, and aliases survive. The
+    compaction already succeeded upstream, so the refusal is logged only.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+    service = proxy_service.ProxyService(_repo_factory(request_logs, sticky_sessions=sticky_sessions))
+    owner = _make_account("acc_compact_cas_owner")
+    replacement = _make_account("acc_compact_cas_replacement")
+    request_logs.response_owner_by_id[("resp_compact_replay", None, "sid-replay")] = owner.id
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(
+            return_value=_compact_durable_anchor_lookup(
+                account_id=owner.id,
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+            )
+        ),
+    )
+    rebind_session = AsyncMock(return_value=None)
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account_if_current", rebind_session)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        if kwargs.get("preferred_account_id") == owner.id:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 60s",
+                error_code=None,
+            )
+        return AccountSelection(account=replacement, error_message=None)
+
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    response = await service.compact_responses(payload, {"session_id": "sid-replay"}, codex_session_affinity=True)
+
+    assert response.object == "response.compaction"
+    assert core_compact.await_count == 1
+    assert rebind_session.await_count == 1
+    sticky_sessions.upsert.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

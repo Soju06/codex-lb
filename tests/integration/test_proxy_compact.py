@@ -901,6 +901,109 @@ async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neut
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_recovery_keeps_a_concurrent_newer_turns_durable_continuity(
+    async_client, app_instance, monkeypatch
+):
+    """A bridge turn that lands before the rebind keeps its own continuity.
+
+    The durable move is a compare-and-set on the snapshot that proved the
+    anchored history. A normal turn for the same canonical session can complete
+    between that proof and the post-success rebind, and moving the row would
+    clear the aliases and recorded anchor that turn already returned to its
+    client, so the newer owner keeps the row while the client's sticky key still
+    follows the recovered compaction.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-cas-owner@example.com", raw_account_id="acc_cas_owner"
+    )
+    alt_account_id = await _import_account(
+        async_client, email="compact-cas-alt@example.com", raw_account_id="acc_cas_alt"
+    )
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_cas_anchor",
+        session_key="sid-durable-compact-cas",
+        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:1],
+    )
+    service = get_proxy_service_for_app(app_instance)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        calls.append(account_id)
+        if account_id == "acc_cas_owner":
+            raise ProxyResponseError(
+                429,
+                {
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "message": "limit reached",
+                        "plan_type": "plus",
+                        "resets_at": int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600,
+                    }
+                },
+            )
+        anchor = await service._durable_bridge.lookup_previous_response_target(
+            previous_response_id="resp_cas_anchor",
+            api_key_id=None,
+        )
+        assert anchor is not None
+        await service._durable_bridge.register_previous_response_id(
+            session_id=anchor.session_id,
+            api_key_id=None,
+            instance_id="instance-compact-test",
+            owner_epoch=anchor.owner_epoch,
+            response_id="resp_cas_newer",
+            lease_ttl_seconds=60.0,
+            input_item_count=2,
+            input_full_fingerprint=proxy_module._fingerprint_input_items(
+                cast(list[JsonValue], _NEUTRAL_FULL_RESEND_INPUT[:2])
+            ),
+        )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_cas_anchor",
+        },
+        headers={"session_id": "sid-compact-cas"},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["acc_cas_owner", "acc_cas_alt"]
+
+    async with SessionLocal() as session:
+        durable_rows = (await session.execute(select(HttpBridgeSessionRecord))).scalars().all()
+        assert [row.account_id for row in durable_rows] == [owner_account_id]
+        assert durable_rows[0].latest_response_id == "resp_cas_newer"
+        alias_values = {
+            row.alias_value for row in (await session.execute(select(HttpBridgeSessionAlias))).scalars().all()
+        }
+        assert "resp_cas_newer" in alias_values
+        sticky_rows = (
+            (await session.execute(select(StickySession).where(StickySession.kind == StickySessionKind.CODEX_SESSION)))
+            .scalars()
+            .all()
+        )
+        assert [row.account_id for row in sticky_rows] == [alt_account_id]
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_pinned_owner_rate_limited_at_selection_fails_over_with_account_neutral_full_resend(
     async_client, app_instance, monkeypatch
 ):

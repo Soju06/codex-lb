@@ -50,6 +50,15 @@ pointing it at another account would authorize the cross-account send the rebind
 Because the compaction already succeeded upstream and a retry would repeat the same recovery,
 a rebind failure MUST be logged and MUST NOT fail the returned compaction.
 
+The durable rebind MUST be conditional on the proving durable session still being the session
+that was observed: an ordinary turn for the same canonical session can complete between the
+proof and the post-success rebind, and the account change clears that session's aliases and
+recorded anchor, so an unconditional move would erase continuity the newer turn has already
+returned to its client. The proxy MUST therefore apply the durable move as a compare-and-set on
+the observed session's owner epoch, account, and latest response, MUST leave the row to its
+current owner when that comparison does not hold, MUST log that the rebind did not apply, and
+MUST still return the successful compaction.
+
 When the payload is not a verified account-neutral full resend, the proxy MUST keep the
 existing fail-closed failure for that request, MUST NOT send any of the payload to another
 account, and MUST record the fail-closed outcome on the continuity fail-closed observability
@@ -80,6 +89,15 @@ failover.
 - **THEN** the client's sticky session mapping resolves to account B
 - **AND** the durable continuity session names account B and no longer publishes account A's anchor alias or recorded turn state
 - **AND** a hard turn-state sticky key is left bound to account A
+
+#### Scenario: A concurrent newer turn keeps its durable continuity
+
+- **GIVEN** a compact request recovered on account B after the pinned owner account A was unavailable
+- **AND** an ordinary turn for the same canonical session completed after the anchored-history proof and before the post-success rebind
+- **WHEN** the proxy rebinds the durable continuity session
+- **THEN** the compare-and-set does not apply and the durable session keeps the newer turn's account, anchor, and aliases
+- **AND** the proxy logs that the durable rebind did not apply
+- **AND** the successful compaction is still returned to the client
 
 #### Scenario: Continuity rebind failure keeps the successful compaction
 

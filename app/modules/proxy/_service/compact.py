@@ -65,7 +65,6 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
-from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -146,7 +145,6 @@ class _CompactServiceProtocol(Protocol):
         account_id: str,
         affinity: _AffinityPolicy,
         durable_session: DurableBridgeLookup | None,
-        api_key: ApiKeyData | None,
         model: str | None,
         service_tier: str | None,
         request_id: str,
@@ -624,7 +622,6 @@ class _CompactMixin:
         account_id: str,
         affinity: _AffinityPolicy,
         durable_session: DurableBridgeLookup | None,
-        api_key: ApiKeyData | None,
         model: str | None,
         service_tier: str | None,
         request_id: str,
@@ -638,7 +635,9 @@ class _CompactMixin:
         next turn consults: the sticky mapping for the client's own affinity key
         (the same rebind the HTTP bridge performs when a session moves account)
         and the durable session that proved the anchored history, whose account,
-        stale aliases, and recorded turn state must move with it.
+        stale aliases, and recorded turn state must move with it.  The durable
+        move is compare-and-set on the proving snapshot, so a turn that completed
+        for the same session in the meantime keeps its own continuity.
 
         Hard turn-state sticky rows are never rebound: that key is the lost
         owner's opaque state, so pointing it at another account would authorize
@@ -680,38 +679,34 @@ class _CompactMixin:
         if durable_session is None or durable_session.account_id == account_id:
             return
         try:
-            # Takeover is intentional: the conversation's state now lives on the
-            # replacement account, so a lease still held for the lost owner is
-            # stale by definition and its fenced writes must not re-publish the
-            # abandoned owner. The account change also clears that session's
-            # aliases and recorded turn state, which describe the lost owner's
-            # upstream state and must never resolve to the new one.
-            claimed = await proxy._durable_bridge.claim_live_session(
-                session_key_kind=durable_session.canonical_kind,
-                session_key_value=durable_session.canonical_key,
-                api_key_id=api_key.id if api_key is not None else None,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                lease_ttl_seconds=float(RING_STALE_THRESHOLD_SECONDS),
+            # Compare-and-set on the snapshot that proved the history: a normal
+            # turn for the same session can complete between that proof and this
+            # rebind, and the account change clears the row's aliases and
+            # recorded turn state, so an unconditional move would erase
+            # continuity a newer turn has already returned to its client. When
+            # the row moved on, its current owner keeps it.
+            rebound = await proxy._durable_bridge.rebind_session_account_if_current(
+                session_id=durable_session.session_id,
+                expected_owner_epoch=durable_session.owner_epoch,
+                expected_account_id=durable_session.account_id,
+                expected_latest_response_id=durable_session.latest_response_id,
                 account_id=account_id,
                 model=model,
                 service_tier=service_tier,
-                latest_turn_state=None,
-                latest_response_id=None,
-                allow_takeover=True,
             )
-            # The claim only exists to publish the new owner; the compact surface
-            # runs no live bridge session, so hand the lease straight back instead
-            # of holding it until it expires and drawing owner-forwarded traffic.
-            await proxy._durable_bridge.release_live_session(
-                session_id=claimed.session_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=claimed.owner_epoch,
-                draining=True,
-            )
+            if rebound is None:
+                logger.warning(
+                    "Compact recovery left durable continuity owner unchanged; session moved on "
+                    "request_id=%s session_id=%s account_id=%s",
+                    request_id,
+                    durable_session.session_id,
+                    account_id,
+                )
+                return
             logger.info(
                 "Compact recovery rebound durable continuity owner request_id=%s session_id=%s account_id=%s",
                 request_id,
-                claimed.session_id,
+                rebound.session_id,
                 account_id,
             )
         except Exception:
@@ -1499,7 +1494,6 @@ class _CompactMixin:
                                 account_id=account.id,
                                 affinity=recovery_rebind_affinity,
                                 durable_session=recovery_rebind_durable_session,
-                                api_key=api_key,
                                 model=payload.model,
                                 service_tier=request_service_tier,
                                 request_id=request_id,

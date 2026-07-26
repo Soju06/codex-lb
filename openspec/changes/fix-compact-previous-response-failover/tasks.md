@@ -65,3 +65,11 @@
   logged and never fail the completed compaction. Cover it with unit tests (rebind targets and
   the turn-state exclusion) and a compact-route regression test asserting the persisted sticky
   and durable rows after recovery.
+- [x] 13. Guard the durable rebind against a turn that lands between the anchored-history proof
+  and the post-success rebind: add
+  `DurableBridgeRepository.rebind_session_account_if_current` (plus its coordinator wrapper) that
+  moves the account, bumps the owner epoch, clears the recorded anchor/turn state and the aliases
+  only while the observed owner epoch, account, and latest response still hold, and returns the
+  new snapshot or `None`. When it does not apply, log it and still return the compaction. Cover it
+  with a unit case for the refused compare-and-set and a compact-route regression test where a
+  newer response is registered on the proving durable session before the rebind runs.

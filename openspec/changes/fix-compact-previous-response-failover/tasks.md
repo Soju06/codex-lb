@@ -38,3 +38,11 @@
   replaying an incomplete conversation. Guard the speculative serialization against
   `ClientPayloadError` / `ValidationError`, and cover the trimmed case with unit and
   compact-route regression tests.
+- [x] 9. Require independently trusted proxy-side proof that the request still carries the
+  anchored conversation before dropping the anchor: add
+  `DurableBridgeSessionCoordinator.lookup_previous_response_target`, and gate recovery on a
+  durable record that names the pinned owner (or no account) and records an input prefix count
+  and fingerprint the request `input` strictly extends, reusing
+  `_input_prefix_matches_stored_context`. Missing records, missing prefixes, owner mismatches,
+  fingerprint mismatches, and failed lookups stay owner-bound, with unit and compact-route
+  regression tests for each.

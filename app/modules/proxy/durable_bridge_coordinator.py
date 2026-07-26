@@ -184,6 +184,29 @@ class DurableBridgeSessionCoordinator:
             )
             return _to_lookup(snapshot) if snapshot is not None else None
 
+    async def lookup_previous_response_target(
+        self,
+        *,
+        previous_response_id: str,
+        api_key_id: str | None,
+    ) -> DurableBridgeLookup | None:
+        """Resolve only a previously registered previous-response continuity anchor."""
+
+        api_key_scope = durable_bridge_api_key_scope(api_key_id)
+        async with self._session() as session:
+            repository = DurableBridgeRepository(session)
+            snapshot = await repository.resolve_alias(
+                alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
+                alias_value=previous_response_id,
+                api_key_scope=api_key_scope,
+            )
+            if snapshot is None:
+                snapshot = await repository.find_session_by_latest_response_id(
+                    response_id=previous_response_id,
+                    api_key_scope=api_key_scope,
+                )
+            return _to_lookup(snapshot) if snapshot is not None else None
+
     async def lookup_sessions(self, *, session_ids: Sequence[str]) -> list[DurableBridgeLookup]:
         """Batch-load durable session snapshots for ownership reconciliation."""
 

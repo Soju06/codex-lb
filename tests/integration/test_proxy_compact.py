@@ -16,9 +16,11 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
+from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -728,6 +730,48 @@ async def _import_account(async_client, *, email: str, raw_account_id: str) -> s
     return generate_unique_account_id(raw_account_id, email)
 
 
+async def _register_durable_previous_response_anchor(
+    app_instance,
+    *,
+    account_id: str,
+    response_id: str,
+    session_key: str,
+    recorded_prefix: list[dict[str, object]],
+) -> None:
+    """Persist the durable evidence that anchors a previous-response id.
+
+    Compact account-neutral replay only drops the anchor when the proxy's own
+    record of the anchored turn proves the request still opens with that turn's
+    history, so the recovery tests must register the same durable prefix count
+    and fingerprint the HTTP bridge writes when a response is created.
+    """
+
+    service = get_proxy_service_for_app(app_instance)
+    lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value=session_key,
+        api_key_id=None,
+        instance_id="instance-compact-test",
+        lease_ttl_seconds=60.0,
+        account_id=account_id,
+        model="gpt-5.1",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=response_id,
+        allow_takeover=True,
+    )
+    await service._durable_bridge.register_previous_response_id(
+        session_id=lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-compact-test",
+        owner_epoch=lookup.owner_epoch,
+        response_id=response_id,
+        lease_ttl_seconds=60.0,
+        input_item_count=len(recorded_prefix),
+        input_full_fingerprint=proxy_module._fingerprint_input_items(cast(list[JsonValue], recorded_prefix)),
+    )
+
+
 async def _mark_account_rate_limited(account_id: str) -> None:
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
@@ -740,12 +784,19 @@ async def _mark_account_rate_limited(account_id: str) -> None:
 
 @pytest.mark.asyncio
 async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neutral_full_resend(
-    async_client, monkeypatch
+    async_client, app_instance, monkeypatch
 ):
     owner_account_id = await _import_account(
         async_client, email="compact-replay-owner@example.com", raw_account_id="acc_replay_owner"
     )
     await _import_account(async_client, email="compact-replay-alt@example.com", raw_account_id="acc_replay_alt")
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_replay_anchor",
+        session_key="sid-durable-compact-replay",
+        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:2],
+    )
 
     async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
         del self, previous_response_id, api_key, session_id, surface
@@ -804,12 +855,19 @@ async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neut
 
 @pytest.mark.asyncio
 async def test_proxy_compact_pinned_owner_rate_limited_at_selection_fails_over_with_account_neutral_full_resend(
-    async_client, monkeypatch
+    async_client, app_instance, monkeypatch
 ):
     owner_account_id = await _import_account(
         async_client, email="compact-wedged-owner@example.com", raw_account_id="acc_wedged_owner"
     )
     await _import_account(async_client, email="compact-wedged-alt@example.com", raw_account_id="acc_wedged_alt")
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_wedged_anchor",
+        session_key="sid-durable-compact-wedged",
+        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:2],
+    )
     await _mark_account_rate_limited(owner_account_id)
 
     async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
@@ -838,6 +896,102 @@ async def test_proxy_compact_pinned_owner_rate_limited_at_selection_fails_over_w
     assert response.status_code == 200
     assert [account_id for account_id, _payload in calls] == ["acc_wedged_alt"]
     assert "previous_response_id" not in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_without_anchor_evidence_stays_fail_closed(
+    async_client, monkeypatch
+):
+    """A neutral wire payload with no durable anchor record must not cross accounts.
+
+    The client may have sent only the turns after ``previous_response_id`` and
+    relied on the owner to hold the earlier conversation. With no proxy-side
+    record of the anchored turn there is nothing that proves otherwise, so the
+    request stays owner-bound instead of compacting a partial history elsewhere.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-unproven-owner@example.com", raw_account_id="acc_unproven_owner"
+    )
+    await _import_account(async_client, email="compact-unproven-alt@example.com", raw_account_id="acc_unproven_alt")
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_unproven_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_diverging_history_stays_fail_closed(
+    async_client, app_instance, monkeypatch
+):
+    """A request that does not open with the anchored turn's history stays owner-bound.
+
+    The durable record exists here, but the request's leading items do not match
+    the prefix persisted for the anchored turn, so the request cannot be proven
+    to carry the conversation the anchor stands for.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-diverging-owner@example.com", raw_account_id="acc_diverging_owner"
+    )
+    await _import_account(async_client, email="compact-diverging-alt@example.com", raw_account_id="acc_diverging_alt")
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_diverging_anchor",
+        session_key="sid-durable-compact-diverging",
+        recorded_prefix=[{"role": "user", "content": "an earlier turn the request no longer sends"}],
+    )
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_diverging_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,15 @@ class _CompactServiceProtocol(Protocol):
         fail_on_missing: bool = True,
     ) -> str | None: ...
 
+    async def _compact_previous_response_carries_anchored_history(
+        self,
+        *,
+        previous_response_id: str,
+        api_key: ApiKeyData | None,
+        owner_account_id: str,
+        payload: ResponsesCompactRequest,
+    ) -> bool: ...
+
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
     ) -> Account: ...
@@ -508,6 +517,60 @@ def _compact_account_neutral_replay_payload(
 
 
 class _CompactMixin:
+    async def _compact_previous_response_carries_anchored_history(
+        self,
+        *,
+        previous_response_id: str,
+        api_key: ApiKeyData | None,
+        owner_account_id: str,
+        payload: ResponsesCompactRequest,
+    ) -> bool:
+        """Prove the compact request still carries the anchor's own history.
+
+        A self-contained wire payload is not by itself a full resend: the client
+        may send only the turns after the anchor and rely on the owner to hold
+        everything before it.  Dropping the anchor then compacts a partial
+        conversation on the replacement account.  Only the proxy's own record of
+        the anchored turn can settle this, so reuse the durable evidence the
+        HTTP bridge full-resend replay path already trusts: the input item count
+        and prefix fingerprint persisted when the anchored response was created.
+        Recovery requires the request's `input` to still open with exactly that
+        recorded prefix; anything else (no durable row, no recorded prefix, a
+        fingerprint mismatch, or a durable owner that disagrees with the pin)
+        keeps the request owner-bound.
+        """
+
+        proxy = cast(_CompactServiceProtocol, self)
+        try:
+            durable_lookup = await proxy._durable_bridge.lookup_previous_response_target(
+                previous_response_id=previous_response_id,
+                api_key_id=api_key.id if api_key is not None else None,
+            )
+        except Exception:
+            logger.warning(
+                "Compact previous-response durable anchor lookup failed; keeping the request owner-bound",
+                exc_info=True,
+            )
+            return False
+        if durable_lookup is None:
+            return False
+        durable_account_id = getattr(durable_lookup, "account_id", None)
+        if (
+            isinstance(durable_account_id, str)
+            and durable_account_id.strip()
+            and durable_account_id != owner_account_id
+        ):
+            return False
+        prefix_matches = cast(
+            Callable[..., bool],
+            _service_global("_input_prefix_matches_stored_context"),
+        )
+        return prefix_matches(
+            payload.input,
+            stored_count=durable_lookup.latest_input_item_count or 0,
+            stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
+        )
+
     async def _resolve_compact_turn_state_owner(
         self,
         *,
@@ -959,14 +1022,28 @@ class _CompactMixin:
                     ):
                         # The pinned previous-response owner cannot be selected
                         # (e.g. quota-exhausted, or excluded after an in-request
-                        # quota failover). A locally verified account-neutral full
-                        # resend carries the complete history client-side, so
-                        # the stale anchor can be dropped and the compact can
-                        # move to a fresh account instead of wedging the
-                        # session until the owner's quota window resets.
-                        # Turn-state and file pins never reach this branch and
-                        # stay owner-bound.
+                        # quota failover). A full resend that provably still
+                        # carries the anchored history and is account-neutral on
+                        # the wire needs nothing from the owner, so the stale
+                        # anchor can be dropped and the compact can move to a
+                        # fresh account instead of wedging the session until the
+                        # owner's quota window resets. Turn-state and file pins
+                        # never reach this branch and stay owner-bound.
                         replay_payload = _compact_account_neutral_replay_payload(payload)
+                        if replay_payload is not None and not (
+                            isinstance(previous_response_id, str)
+                            and await proxy._compact_previous_response_carries_anchored_history(
+                                previous_response_id=previous_response_id,
+                                api_key=api_key,
+                                owner_account_id=preferred_account_id,
+                                payload=payload,
+                            )
+                        ):
+                            # Self-contained wire state does not prove the
+                            # request carries the conversation the anchor stands
+                            # for; without that proof the replacement account
+                            # would compact a partial history.
+                            replay_payload = None
                         if replay_payload is None:
                             _record_continuity_fail_closed(
                                 surface="compact",

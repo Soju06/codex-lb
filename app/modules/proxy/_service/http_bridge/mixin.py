@@ -1670,12 +1670,11 @@ class _HTTPBridgeMixin(
             await self._unregister_http_bridge_turn_states(session)
             await self._unregister_http_bridge_previous_response_ids(session)
         account_lease = getattr(session, "account_lease", None)
+        session.account_lease = None
         try:
             await self._load_balancer.release_account_lease(account_lease)
         except Exception:
             logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-        finally:
-            session.account_lease = None
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
             try:
                 await self._durable_bridge.release_live_session(
@@ -2026,6 +2025,9 @@ class _HTTPBridgeMixin(
         )
         require_same_account = require_same_account or account_neutral_recovery
         old_account_id = session.account.id
+        if session.account_lease is None and request_state.websocket_stream_lease is not None:
+            session.account_lease = request_state.websocket_stream_lease
+            request_state.websocket_stream_lease = None
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         if old_reader is not None:
@@ -2332,6 +2334,8 @@ class _HTTPBridgeMixin(
             await self._load_balancer.release_account_lease(session.account_lease)
         session.account_lease = selected_account_lease
         session.account, session.headers, session.upstream = account, connect_headers, upstream
+        request_state.websocket_stream_lease = session.account_lease
+        session.account_lease = None
         session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False

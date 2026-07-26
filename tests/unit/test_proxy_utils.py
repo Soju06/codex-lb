@@ -32716,6 +32716,176 @@ async def test_try_open_websocket_connect_attempt_does_not_refresh_twice_after_f
     assert request_state.force_refresh_account_id is None
 
 
+def _make_request_stream_lease_test_bridge(
+    account: Account,
+    *,
+    account_lease: AccountLease | None,
+) -> proxy_service._HTTPBridgeSession:
+    return proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", f"bridge-{account.id}", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key=f"bridge-{account.id}"),
+        request_model="gpt-5.5",
+        account=account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=900.0,
+        account_lease=account_lease,
+    )
+
+
+def _make_request_stream_lease_test_state(request_id: str) -> proxy_service._WebSocketRequestState:
+    return proxy_service._WebSocketRequestState(
+        request_id=request_id,
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_stream_cap_failure_releases_response_create_gate_before_wait(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_stream_cap_gate_cleanup")
+    session = _make_request_stream_lease_test_bridge(account, account_lease=None)
+    request_state = _make_request_stream_lease_test_state("req_bridge_stream_cap_gate_cleanup")
+    response_create_lease = AccountLease(
+        lease_id="lease_response_create_gate_cleanup",
+        account_id=account.id,
+        kind="response_create",
+        acquired_at=10.0,
+    )
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "account_pressure_snapshot", AsyncMock(return_value=(0, 24, 0.0)))
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_acquire_account_response_create_lease_or_overload",
+        AsyncMock(return_value=response_create_lease),
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_stream_cap"
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.account_response_create_lease is None
+    assert session.response_create_gate.locked() is False
+    assert request_state.websocket_stream_lease is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_close_and_terminal_cleanup_release_transferred_lease_once(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_close_terminal_race")
+    session = _make_request_stream_lease_test_bridge(account, account_lease=None)
+    request_state = _make_request_stream_lease_test_state("req_bridge_close_terminal_race")
+    lease = AccountLease(
+        lease_id="lease_bridge_close_terminal_race",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=10.0,
+    )
+    request_state.websocket_stream_lease = lease
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    release = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    await asyncio.gather(
+        service._release_request_state_stream_lease(request_state),
+        service._close_http_bridge_session(session),
+    )
+
+    assert sum(call.args == (lease,) for call in release.await_args_list) == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_client_disconnect_closes_generator_and_releases_all_request_pressure(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_client_disconnect_cleanup")
+    session = _make_request_stream_lease_test_bridge(account, account_lease=None)
+    request_state = _make_request_stream_lease_test_state("req_bridge_client_disconnect_cleanup")
+    assert request_state.event_queue is not None
+    await request_state.event_queue.put(proxy_service.CODEX_KEEPALIVE_FRAME)
+
+    response_create_lease = AccountLease(
+        lease_id="lease_bridge_disconnect_response_create",
+        account_id=account.id,
+        kind="response_create",
+        acquired_at=10.0,
+    )
+    stream_lease = AccountLease(
+        lease_id="lease_bridge_disconnect_stream",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=10.0,
+    )
+    await session.response_create_gate.acquire()
+    request_state.response_create_gate = session.response_create_gate
+    request_state.response_create_gate_acquired = True
+    request_state.account_response_create_lease = response_create_lease
+    request_state.websocket_stream_lease = stream_lease
+    release = AsyncMock()
+    request_state.account_response_create_release = release
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_session)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release)
+
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    first = await asyncio.wait_for(events.__anext__(), timeout=1.0)
+    assert first == proxy_service.CODEX_KEEPALIVE_FRAME
+
+    await events.aclose()
+
+    assert cast(Any, events).ag_frame is None
+    assert not session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.event_queue is None
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert session.response_create_gate.locked() is False
+    assert request_state.account_response_create_lease is None
+    assert request_state.websocket_stream_lease is None
+    assert sum(call.args == (response_create_lease,) for call in release.await_args_list) == 1
+    assert sum(call.args == (stream_lease,) for call in release.await_args_list) == 1
+    close_session.assert_awaited_once_with(session, reason="retire_after_drain")
+
+
 @pytest.mark.asyncio
 async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepalive_close(monkeypatch):
     settings = _make_proxy_settings()
@@ -32970,6 +33140,7 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=10.0,
+        websocket_stream_lease=old_lease,
     )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
@@ -32985,13 +33156,13 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
         queued_request_count=1,
         last_used_at=0.0,
         idle_ttl_seconds=30.0,
-        account_lease=old_lease,
     )
 
     await service._reconnect_http_bridge_session(session, request_state=request_state)
 
     assert seen_lease_kinds == [None]
-    assert session.account_lease is old_lease
+    assert session.account_lease is None
+    assert request_state.websocket_stream_lease is old_lease
     assert session.account == account
     assert session.upstream is new_upstream
     assert session.catalog_omission_quota_admission is quota_admission
@@ -35609,6 +35780,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
     settings.http_responses_session_bridge_codex_prewarm_enabled = True
+    settings.proxy_account_stream_limit = 1
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_prewarm_timeout",
@@ -35687,6 +35859,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
                 "pending_request_ids": [state.request_id for state in reconnect_session.pending_requests],
                 "request_id": request_state.request_id,
                 "restart_reader": restart_reader,
+                "request_stream_lease_id": getattr(request_state.websocket_stream_lease, "lease_id", None),
             }
         )
         reconnect_session.upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -35722,10 +35895,14 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     observation = reconnect_observations[0]
     assert observation["request_id"] == "req_prewarm_timeout"
     assert observation["restart_reader"] is True
+    assert observation["request_stream_lease_id"] is not None
     pending_request_ids = cast(list[str], observation["pending_request_ids"])
     assert len(pending_request_ids) == 1
     assert pending_request_ids[0].startswith("http_prewarm_")
     assert not session.pending_requests
+    assert session.account_lease is None
+    assert request_state.websocket_stream_lease is None
+    assert await service._load_balancer.account_pressure_snapshot(session.account.id) == (0, 0, 0.0)
     assert session.upstream_control.reconnect_requested is False
     assert session.upstream_control.retire_after_drain is False
 

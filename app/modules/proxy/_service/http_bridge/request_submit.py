@@ -84,6 +84,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
     _count_external_image_urls,
     _enforce_response_create_size_limit,
+    _estimated_lease_tokens_from_request_usage_budget,
     _fingerprint_input_items,
     _inline_top_level_input_image_urls,
     _normalize_service_tier_value,
@@ -286,6 +287,52 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
 
 
 class _HTTPBridgeRequestSubmitMixin:
+    async def _acquire_http_bridge_request_stream_lease_or_overload(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+    ) -> None:
+        if request_state.websocket_stream_lease is not None:
+            return
+
+        session_lease = session.account_lease
+        if session_lease is not None:
+            session.account_lease = None
+            request_state.websocket_stream_lease = session_lease
+            return
+
+        settings = await _service_get_settings_cache().get()
+        lease = await self._load_balancer.acquire_account_lease(
+            session.account.id,
+            kind="stream",
+            estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(request_state.request_usage_budget),
+            concurrency_caps=effective_account_concurrency_caps(settings),
+        )
+        if lease is not None:
+            request_state.websocket_stream_lease = lease
+            return
+
+        inflight_create, inflight_stream, leased_tokens = await self._load_balancer.account_pressure_snapshot(
+            session.account.id
+        )
+        logger.warning(
+            "HTTP bridge account stream cap reached request_id=%s account_id=%s "
+            "inflight_create=%s inflight_stream=%s leased_tokens=%.3f",
+            request_state.request_id,
+            session.account.id,
+            inflight_create,
+            inflight_stream,
+            leased_tokens,
+        )
+        raise ProxyResponseError(
+            429,
+            openai_error(
+                "account_stream_cap",
+                "Account stream capacity is exhausted",
+                error_type="rate_limit_error",
+            ),
+        )
+
     def _prepare_http_bridge_request(
         self: Any,
         payload: ResponsesRequest,
@@ -720,6 +767,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 bridge_session=session,
             )
             gate_acquired = True
+            await self._acquire_http_bridge_request_stream_lease_or_overload(session, request_state)
             if request_state.bridge_queue_wait_started_at is not None:
                 request_state.latency_bridge_queue_wait_ms = int(
                     max(0.0, _service_time().monotonic() - request_state.bridge_queue_wait_started_at) * 1000
@@ -1039,6 +1087,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     bridge_session=session,
                 )
                 gate_acquired = True
+                await self._acquire_http_bridge_request_stream_lease_or_overload(session, warmup_state)
                 async with session.lifecycle_lock:
                     current_session = session
                     http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -1097,6 +1146,10 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.model,
                         )
                         session.prewarmed = False
+                        warmup_stream_lease = warmup_state.websocket_stream_lease
+                        if warmup_stream_lease is not None and request_state.websocket_stream_lease is None:
+                            warmup_state.websocket_stream_lease = None
+                            request_state.websocket_stream_lease = warmup_stream_lease
                         try:
                             # The warmup request has already been sent upstream.  Close/reconnect the
                             # socket while the warmup state is still attached so any late warmup
@@ -1123,6 +1176,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                     warmup_state,
                                     session.response_create_gate,
                                 )
+                            await self._release_request_state_stream_lease(warmup_state)
+                            await self._release_request_state_stream_lease(request_state)
+                            if session.closed:
+                                session_stream_lease = session.account_lease
+                                session.account_lease = None
+                                await self._load_balancer.release_account_lease(session_stream_lease)
                         return
                     if event_block is None:
                         break
@@ -1216,6 +1275,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
             retire_closed_session = session.closed and session.admission_waiter_count == 0
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+        await self._release_request_state_stream_lease(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:
                 await _release_websocket_response_create_gate(request_state, session.response_create_gate)
@@ -1262,6 +1322,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # already been delivered via _pop_terminal_websocket_request_state.
         # A late-arriving event on a nulled queue is a no-op.
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        await self._release_request_state_stream_lease(request_state)
         if not detached:
             return False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)

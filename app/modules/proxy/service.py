@@ -1764,8 +1764,10 @@ class ProxyService(
             else traffic_class
         )
         excluded_account_ids_set = set(exclude_account_ids or ())
+
         def log_account_id(account_id: str | None) -> str | None:
             return "<redacted>" if redact_sensitive_details and account_id is not None else account_id
+
         logger.info(
             "Proxy account selection start request_id=%s kind=%s request_stage=%s model=%s "
             "additional_limit=%s sticky=%s sticky_kind=%s reallocate_sticky=%s prefer_earlier_reset=%s "

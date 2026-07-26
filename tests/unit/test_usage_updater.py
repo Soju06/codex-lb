@@ -2404,6 +2404,76 @@ async def test_force_refresh_confirms_free_downgrade_with_access_token_override(
 
 
 @pytest.mark.asyncio
+async def test_free_downgrade_confirms_across_an_intervening_degraded_payload(monkeypatch) -> None:
+    """An unrecognized plan value is *absence* of evidence, not evidence that the
+    account is still paid, so it must not discard a pending downgrade. Otherwise a
+    flapping upstream could block a real expiry from ever converging. Only a
+    recognized paid plan resets the pending state."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "mystery", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_degraded_between", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.force_refresh(account)
+    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+
+    # The degraded payload neither confirms nor clears the pending observation.
+    await updater.force_refresh(account)
+    assert account.plan_type == "plus"
+    assert usage_updater_module._workspace_less_free_plan_observations.get(account.id) == 1
+
+    # The second real free observation therefore still confirms.
+    await updater.force_refresh(account)
+    assert account.plan_type == "free"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_plan_type", ["free", " free ", "FREE", "  FrEe\t"])
+async def test_free_downgrade_confirmation_normalizes_plan_casing_and_whitespace(
+    monkeypatch,
+    payload_plan_type: str,
+) -> None:
+    """Upstream casing/whitespace must not change the outcome: each variant needs
+    the same two observations, and none of them may confirm on the first."""
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory([payload_plan_type, payload_plan_type]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_case_variant", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.force_refresh(account)
+    assert account.plan_type == "plus"
+
+    await updater.force_refresh(account)
+    assert account.plan_type == "free"
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_never_confirms_free_downgrade_for_workspace_bound_account(monkeypatch) -> None:
     """Confirmation is scoped to workspace-less accounts. A workspace-bound seat
     must not be demoted to free by a payload that never names its workspace,

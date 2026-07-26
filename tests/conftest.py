@@ -316,6 +316,15 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        # Pending workspace-less plan-downgrade confirmations are process-local,
+        # so a test that leaves one behind would otherwise give the next test a
+        # head start toward a downgrade (issue #1456).
+        from app.modules.usage.updater import _workspace_less_free_plan_observations
+
+        _workspace_less_free_plan_observations.clear()
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()

@@ -73,3 +73,9 @@
   new snapshot or `None`. When it does not apply, log it and still return the compaction. Cover it
   with a unit case for the refused compare-and-set and a compact-route regression test where a
   newer response is registered on the proving durable session before the rebind runs.
+- [x] 14. Also require the durable row to be unowned in that compare-and-set, because a turn
+  already submitted upstream changes no completion-time field while holding the lease its own
+  response registration is fenced on. Leave a held session to its owner, log it, and still return
+  the compaction. Cover it with a repository unit test (held row refused, unowned matching row
+  moved, stale snapshot refused) and a compact-route regression test whose proving durable session
+  is still leased.

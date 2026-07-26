@@ -2598,9 +2598,10 @@ def _filter_accounts_for_model_with_catalog_evidence(
     normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
     effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
     if effective_service_tier is not None:
+        strict_service_tier_account_filter = bool(getattr(get_settings(), "strict_service_tier_account_filter", True))
         allowed_account_ids = (
             registry.account_ids_for_model_service_tier(model, effective_service_tier)
-            if account_indexes_cover_selection
+            if strict_service_tier_account_filter and account_indexes_cover_selection
             else None
         )
         if allowed_account_ids is not None:

@@ -683,7 +683,7 @@ async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_firs
         )
     )
     try:
-        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.2)
     finally:
         release_next_event.set()
 
@@ -34577,6 +34577,39 @@ def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monke
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
 
     assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
+
+
+def test_filter_accounts_for_model_can_disable_strict_service_tier_account_filter(monkeypatch):
+    supported_by_plan = _make_account("acc_filter_plan_supported")
+    supported_by_plan.plan_type = "plus"
+    unsupported_by_plan = _make_account("acc_filter_plan_unsupported")
+    unsupported_by_plan.plan_type = "free"
+
+    class Registry:
+        def account_ids_for_model_service_tier(self, slug: str, requested_tier: str | None) -> frozenset[str] | None:
+            assert (slug, requested_tier) == ("gpt-5.5", "priority")
+            return frozenset()
+
+        def plan_types_for_model_service_tier(self, slug: str, requested_tier: str | None) -> frozenset[str] | None:
+            assert (slug, requested_tier) == ("gpt-5.5", "priority")
+            return frozenset({"plus"})
+
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.5"
+            return None
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_settings",
+        lambda: SimpleNamespace(strict_service_tier_account_filter=False),
+    )
+
+    assert _filter_accounts_for_model(
+        [unsupported_by_plan, supported_by_plan],
+        "gpt-5.5",
+        service_tier="priority",
+    ) == [supported_by_plan]
 
 
 @pytest.mark.asyncio

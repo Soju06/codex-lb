@@ -47,6 +47,8 @@ def test_capacity_for_plan():
     assert capacity_for_plan("plus", "7d") is not None
     assert capacity_for_plan("prolite", "5h") == pytest.approx(1125.0)
     assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0)
+    assert capacity_for_plan("k12", "5h") == pytest.approx(225.0)
+    assert capacity_for_plan("k12", "7d") == pytest.approx(7560.0)
     assert capacity_for_plan("unknown", "5h") is None
 
 
@@ -140,6 +142,25 @@ def test_normalize_rate_limit_windows_promotes_monthly_primary_without_secondary
     assert normalized.primary is None
     assert normalized.secondary is None
     assert normalized.monthly is primary
+
+
+def test_normalize_rate_limit_windows_promotes_weekly_primary_over_empty_secondary() -> None:
+    primary = UsageWindow(
+        used_percent=58.0,
+        limit_window_seconds=604_800,
+        reset_at=1_800_000_000,
+    )
+    secondary = UsageWindow(
+        used_percent=0.0,
+        limit_window_seconds=0,
+        reset_at=None,
+    )
+
+    normalized = normalize_rate_limit_windows(primary, secondary)
+
+    assert normalized.primary is None
+    assert normalized.secondary is primary
+    assert normalized.monthly is None
 
 
 def _real_weekly_primary(now, *, used_percent: float = 74.0, reset_at: int = 1_800_000_000) -> UsageWindowRow:

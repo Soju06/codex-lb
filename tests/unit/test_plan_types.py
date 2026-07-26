@@ -12,6 +12,11 @@ def test_prolite_matches_pro_model_plan_entitlement():
     assert account_plan_matches_allowed("prolite", frozenset({"plus"})) is False
 
 
+def test_k12_matches_edu_model_plan_entitlement():
+    assert account_plan_matches_allowed("k12", frozenset({"edu"})) is True
+    assert account_plan_matches_allowed("k12", frozenset({"plus"})) is False
+
+
 def test_unknown_plan_passes_when_explicitly_allowed():
     assert account_plan_matches_allowed("future_plan", frozenset({"future_plan", "plus"})) is True
 

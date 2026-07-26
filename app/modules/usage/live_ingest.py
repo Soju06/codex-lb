@@ -153,10 +153,20 @@ class LiveUsageIngestor:
         primary = snapshot.primary
         secondary = snapshot.secondary
         monthly: LiveUsageWindow | None = None
+        if (
+            primary is not None
+            and secondary is not None
+            and usage_core.is_weekly_window_minutes(primary.window_minutes)
+            and usage_core.is_empty_quota_placeholder(
+                window_duration=secondary.window_minutes,
+                reset_at=secondary.reset_at,
+            )
+        ):
+            secondary, primary = primary, None
         # Mirror the poller's write-time normalization: a lone primary window
         # with the monthly duration is the monthly-only free-plan shape and
         # belongs in the monthly slot, not the primary one.
-        if (
+        elif (
             primary is not None
             and secondary is None
             and primary.window_minutes == usage_core.DEFAULT_WINDOW_MINUTES_MONTHLY

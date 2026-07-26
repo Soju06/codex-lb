@@ -23,6 +23,7 @@ PLAN_CAPACITY_CREDITS_PRIMARY = {
     "business": 225.0,
     "team": 225.0,
     "edu": 225.0,
+    "k12": 225.0,
     "pro": 1500.0,
     "prolite": 1125.0,
     "enterprise": 1500.0,
@@ -34,6 +35,7 @@ PLAN_CAPACITY_CREDITS_SECONDARY = {
     "business": 7560.0,
     "team": 7560.0,
     "edu": 7560.0,
+    "k12": 7560.0,
     "pro": 50400.0,
     "prolite": 37800.0,
     "enterprise": 50400.0,
@@ -81,11 +83,31 @@ def normalize_rate_limit_windows(
 ) -> NormalizedRateLimitWindows:
     if (
         primary_window is not None
+        and primary_window.limit_window_seconds == DEFAULT_WINDOW_MINUTES_SECONDARY * 60
+        and secondary_window is not None
+        and is_empty_quota_placeholder(
+            window_duration=secondary_window.limit_window_seconds,
+            reset_at=secondary_window.reset_at,
+            reset_after=secondary_window.reset_after_seconds,
+        )
+    ):
+        return NormalizedRateLimitWindows(primary=None, secondary=primary_window, monthly=None)
+    if (
+        primary_window is not None
         and primary_window.limit_window_seconds == DEFAULT_WINDOW_MINUTES_MONTHLY * 60
         and secondary_window is None
     ):
         return NormalizedRateLimitWindows(primary=None, secondary=None, monthly=primary_window)
     return NormalizedRateLimitWindows(primary=primary_window, secondary=secondary_window, monthly=None)
+
+
+def is_empty_quota_placeholder(
+    *,
+    window_duration: int | None,
+    reset_at: int | None,
+    reset_after: int | None = None,
+) -> bool:
+    return (window_duration is None or window_duration <= 0) and reset_at is None and reset_after is None
 
 
 def _empty_cost() -> UsageCostSummary:
@@ -307,8 +329,10 @@ def _is_no_data_placeholder(row: UsageWindowRow) -> bool:
     win via fetch ordering, which is intentional — the cross-fetch winner is
     rendered per existing placeholder rules.
     """
-    has_window = row.window_minutes is not None and row.window_minutes > 0
-    return not has_window and row.reset_at is None
+    return is_empty_quota_placeholder(
+        window_duration=row.window_minutes,
+        reset_at=row.reset_at,
+    )
 
 
 def _should_prefer_primary_row(primary_row: UsageWindowRow, secondary_row: UsageWindowRow) -> bool:

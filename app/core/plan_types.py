@@ -11,6 +11,7 @@ ACCOUNT_PLAN_TYPES: Final[set[str]] = {
     "business",
     "enterprise",
     "edu",
+    "k12",
 }
 
 RATE_LIMIT_PLAN_TYPES: Final[set[str]] = {
@@ -25,6 +26,7 @@ RATE_LIMIT_PLAN_TYPES: Final[set[str]] = {
 
 ACCOUNT_PLAN_EQUIVALENTS: Final[dict[str, frozenset[str]]] = {
     "prolite": frozenset({"pro"}),
+    "k12": frozenset({"edu"}),
 }
 
 

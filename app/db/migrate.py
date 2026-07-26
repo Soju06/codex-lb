@@ -104,6 +104,8 @@ _SQLITE_FLOAT_TYPE_COMPAT_COLUMNS = frozenset(
 _LEGACY_EXTRA_COLUMNS = frozenset(
     {
         ("request_logs", "slim_summary_json"),
+        ("accounts", "stream_limit_override"),
+        ("accounts", "response_create_limit_override"),
     }
 )
 

@@ -234,6 +234,45 @@ async def test_live_ingestor_normalizes_monthly_only_snapshots(db_setup) -> None
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_normalizes_weekly_primary_over_empty_secondary_placeholder(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_live_weekly", "live-weekly@example.com"))
+
+    now_epoch = int(utcnow().timestamp())
+    snapshot = LiveRateLimitSnapshot(
+        primary=LiveUsageWindow(used_percent=64.0, window_minutes=10080, reset_at=now_epoch + 5 * 24 * 3600),
+        secondary=LiveUsageWindow(used_percent=17.0, window_minutes=0, reset_at=None),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=6.5,
+    )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        ingestor.publish(snapshot, account_id="acc_live_weekly")
+        deadline = asyncio.get_event_loop().time() + 5.0
+        secondary = None
+        while secondary is None and asyncio.get_event_loop().time() < deadline:
+            async with SessionLocal() as session:
+                repo = UsageRepository(session)
+                primary = await repo.latest_entry_for_account("acc_live_weekly", window="primary")
+                secondary = await repo.latest_entry_for_account("acc_live_weekly", window="secondary")
+            if secondary is None:
+                await asyncio.sleep(0.05)
+    finally:
+        await ingestor.stop()
+
+    assert primary is None
+    assert secondary is not None
+    assert secondary.used_percent == pytest.approx(64.0)
+    assert secondary.window_minutes == 10080
+    assert secondary.credits_has is True
+    assert secondary.credits_balance == pytest.approx(6.5)
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

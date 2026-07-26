@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { StatusBar } from "@/components/layout/status-bar";
+import { StatusBar, type StatusBarProps } from "@/components/layout/status-bar";
 import i18n from "@/i18n";
 import {
   createDashboardOverview,
@@ -11,7 +11,7 @@ import {
 } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
-function renderStatusBar() {
+function renderStatusBar(props: StatusBarProps = {}) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
@@ -22,7 +22,7 @@ function renderStatusBar() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <StatusBar />
+      <StatusBar {...props} />
     </QueryClientProvider>,
   );
 }
@@ -102,6 +102,49 @@ describe("StatusBar", () => {
       resolveReadiness();
     });
     expect(await screen.findByText("Ready")).toBeInTheDocument();
+  });
+
+  it("reports its resized height so wrapped rows remain clear of page content", () => {
+    let resizeCallback: ResizeObserverCallback | undefined;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const offsetHeight = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockReturnValue(40);
+    const resizeObserver = vi
+      .spyOn(globalThis, "ResizeObserver")
+      .mockImplementation(
+        class {
+          constructor(callback: ResizeObserverCallback) {
+            resizeCallback = callback;
+          }
+
+          observe = observe;
+          unobserve = vi.fn();
+          disconnect = disconnect;
+        },
+      );
+    const onHeightChange = vi.fn();
+
+    try {
+      const { unmount } = renderStatusBar({ onHeightChange });
+
+      expect(onHeightChange).toHaveBeenLastCalledWith(40);
+      expect(observe).toHaveBeenCalledWith(screen.getByRole("contentinfo"));
+
+      offsetHeight.mockReturnValue(72);
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+
+      expect(onHeightChange).toHaveBeenLastCalledWith(72);
+
+      unmount();
+      expect(disconnect).toHaveBeenCalledOnce();
+    } finally {
+      resizeObserver.mockRestore();
+      offsetHeight.mockRestore();
+    }
   });
 
   it("links to the official GitHub repository", () => {

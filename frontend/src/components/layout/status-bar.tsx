@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowRightLeft, ArrowUpCircle, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -14,6 +14,11 @@ import { formatTimeLong } from "@/utils/formatters";
 const GITHUB_REPOSITORY_URL = "https://github.com/soju06/codex-lb";
 const STATUS_REFRESH_INTERVAL_MS = 60_000;
 const USAGE_FRESHNESS_THRESHOLD_MS = 60_000;
+export const STATUS_BAR_DEFAULT_HEIGHT_PX = 40;
+
+export interface StatusBarProps {
+  onHeightChange?: (height: number) => void;
+}
 
 type RoutingStrategy =
   | "usage_weighted"
@@ -83,8 +88,9 @@ function getRoutingLabel(
   return strategyLabel;
 }
 
-export function StatusBar() {
+export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
   const { t } = useTranslation();
+  const footerRef = useRef<HTMLElement>(null);
   const readinessQuery = useQuery({
     queryKey: ["health", "ready"],
     queryFn: getServiceReadiness,
@@ -148,8 +154,27 @@ export function StatusBar() {
     ? t("statusBar.updateAvailableWithVersion", { version: latestVersion })
     : t("statusBar.updateAvailable");
 
+  useLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!footer || !onHeightChange) {
+      return;
+    }
+
+    const reportHeight = () => {
+      onHeightChange(Math.max(STATUS_BAR_DEFAULT_HEIGHT_PX, footer.offsetHeight));
+    };
+    reportHeight();
+
+    const observer = new ResizeObserver(reportHeight);
+    observer.observe(footer);
+    return () => observer.disconnect();
+  }, [onHeightChange]);
+
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]">
+    <footer
+      ref={footerRef}
+      className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]"
+    >
       <div className="mx-auto flex w-full max-w-[1500px] items-center gap-4 text-xs text-muted-foreground">
         <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1">
           <span className="inline-flex items-center gap-1.5">

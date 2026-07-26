@@ -7041,7 +7041,7 @@ async def test_backend_http_bridge_quarantines_silent_session_then_uses_http_wit
     object.__setattr__(
         app_settings,
         "http_responses_session_bridge_quarantine_seconds",
-        0.1,
+        1.0,
     )
     object.__setattr__(app_settings, "sse_keepalive_interval_seconds", 0.0)
     _install_proxy_settings(
@@ -7166,7 +7166,7 @@ async def test_backend_http_bridge_quarantines_silent_session_then_uses_http_wit
     assert websocket_connect_count == 1
     assert http_request_count == 1
 
-    await asyncio.sleep(0.11)
+    await asyncio.sleep(1.05)
     third_events = await asyncio.wait_for(
         _collect_sse_events(
             async_client,

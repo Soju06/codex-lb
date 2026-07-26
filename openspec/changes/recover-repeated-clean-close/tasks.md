@@ -9,5 +9,6 @@
 - [x] Move the default pre-response recovery threshold ahead of the client timeout boundary.
 - [x] Bound anchored stuck-gate grace and evaluate staleness from upstream activity/response creation.
 - [x] Emit stuck-watchdog skip diagnostics with pending-state verdict inputs.
+- [x] Add a forward-only repair for databases stamped before request-usage rollups were connected to the merge head.
 - [x] Validate the OpenSpec change and run the focused and full test suites.
 - [x] Build and deploy the validated image, then verify production health and logs.

@@ -42,3 +42,6 @@ loop and require the Codex client to be restarted.
 - Adds the `http_bridge_retry_circuits` durable table and migration so retry
   cooldown state survives cross-replica clean-close and incomplete-stream
   failures.
+- Adds a forward-only request-usage rollup repair migration for deployments
+  already stamped at the previous merge head, so changing migration ancestry
+  cannot leave startup schema-drift checks failing.

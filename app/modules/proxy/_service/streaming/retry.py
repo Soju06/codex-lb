@@ -241,6 +241,7 @@ class _StreamingRetryMixin:
         suppress_text_done_events: bool,
         request_transport: str,
         rewritten_file_account_id: str | None = None,
+        required_preferred_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
@@ -871,11 +872,16 @@ class _StreamingRetryMixin:
             # be hidden by whichever source happened to run first. A hard turn
             # state is checked against this required owner by the balancer.
             preferred_account_id = resolve_required_account_id(
+                ("bridge continuity", required_preferred_account_id),
                 ("turn state", turn_state_owner_account_id),
                 ("previous response", preferred_account_id),
                 ("input file", rewritten_file_account_id),
             )
-            require_preferred_account = require_preferred_account or turn_state_owner_account_id is not None
+            require_preferred_account = (
+                require_preferred_account
+                or required_preferred_account_id is not None
+                or turn_state_owner_account_id is not None
+            )
             file_required_preferred_account = rewritten_file_account_id is not None
             for attempt in range(max_attempts):
                 remaining_budget = _facade()._remaining_budget_seconds(deadline)

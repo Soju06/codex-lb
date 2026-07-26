@@ -31,7 +31,7 @@ from app.core.utils.request_id import (
 )
 from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings
+from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionState
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
@@ -7331,6 +7331,139 @@ async def test_backend_http_bridge_quarantine_preserves_previous_response_accoun
     assert http_request_count == 1
     assert preferred_account_ids[-1] == account_id
     stream_error_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backend_http_bridge_canonical_quarantine_requires_durable_follow_up_owner(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    app_settings = _make_app_settings(enabled=True)
+    object.__setattr__(
+        app_settings,
+        "http_responses_session_bridge_quarantine_seconds",
+        10.0,
+    )
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quarantine_durable_owner",
+        "http-bridge-quarantine-durable-owner@example.com",
+    )
+    alternate_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quarantine_durable_alternate",
+        "http-bridge-quarantine-durable-alternate@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    alternate_account = await _get_account(alternate_account_id)
+    service = get_proxy_service_for_app(app_instance)
+    canonical_key = proxy_module._HTTPBridgeSessionKey(
+        "prompt_cache",
+        "quarantine-durable-owner-canonical",
+        None,
+    )
+    service._http_bridge_quarantine_until[canonical_key] = time.monotonic() + 10.0
+    durable_lookup = proxy_module.DurableBridgeLookup(
+        session_id="durable-quarantine-owner",
+        canonical_kind=canonical_key.affinity_kind,
+        canonical_key=canonical_key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id=owner_account.id,
+        owner_instance_id=None,
+        owner_epoch=1,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_quarantine_durable_owner",
+        latest_response_id="resp_quarantine_durable_owner",
+        model="gpt-5.1",
+    )
+    lookup_request_targets = AsyncMock(return_value=durable_lookup)
+    selection_calls: list[dict[str, object]] = []
+    streamed_account_ids: list[str] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        selection_calls.append(dict(kwargs))
+        if (
+            kwargs.get("preferred_account_id") == owner_account.id
+            and kwargs.get("fallback_on_preferred_account_unavailable") is False
+        ):
+            return AccountSelection(account=owner_account, error_message=None, error_code=None)
+        return AccountSelection(account=alternate_account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fail_connect_responses_websocket(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("canonical quarantine must bypass websocket bridge acquisition")
+
+    async def fake_core_stream(
+        payload,
+        headers,
+        access_token,
+        account_id_header,
+        **kwargs,
+    ):
+        del payload, headers, access_token
+        streamed_account_ids.append(account_id_header)
+        assert kwargs["upstream_stream_transport_override"] == "http"
+        yield format_sse_event(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_http_durable_owner", "status": "in_progress"},
+            }
+        )
+        yield format_sse_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_http_durable_owner",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_request_targets)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fail_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_core_stream)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue without a stored response id",
+            "prompt_cache_key": "quarantine-durable-owner-client-alias",
+            "stream": True,
+        },
+        headers={"x-codex-session-id": "quarantine-durable-owner-session"},
+    )
+
+    assert events[0]["type"] == "response.created"
+    assert events[-1]["type"] == "response.completed"
+    lookup_request_targets.assert_awaited_once()
+    lookup_kwargs = lookup_request_targets.await_args.kwargs
+    assert lookup_kwargs["turn_state"] is None
+    assert lookup_kwargs["previous_response_id"] is None
+    assert streamed_account_ids == [cast(str, owner_account.chatgpt_account_id)]
+    assert selection_calls[-1]["preferred_account_id"] == owner_account.id
+    assert selection_calls[-1]["fallback_on_preferred_account_unavailable"] is False
 
 
 @pytest.mark.asyncio

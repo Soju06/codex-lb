@@ -77,6 +77,15 @@ Confirmation applies only to `free`. An unrecognized plan value MUST NOT be
 confirmable, and a payload whose `workspace_id` conflicts with the account's
 bound workspace MUST remain rejected regardless of repetition.
 
+Only a recognized paid plan discards a pending downgrade. An unrecognized plan
+value is absence of evidence rather than evidence that the account is still paid,
+so it MUST NOT reset the pending state; otherwise a persistently degraded
+upstream could prevent a real expiry from ever converging.
+
+Plan values MUST be compared after normalization, so upstream differences in
+letter case or surrounding whitespace MUST NOT change whether an observation
+counts toward confirmation.
+
 Confirmation applies only to accounts that are not bound to a workspace. When
 the stored account has a `workspace_id`, a usage payload that omits
 `workspace_id` cannot establish that it describes that account's slot, so such a
@@ -112,6 +121,37 @@ with zero configuration and MUST NOT require an operator setting.
 - **GIVEN** an active account bound to `workspace_id` `ws_team` with stored `plan_type` `business`
 - **WHEN** repeated usage refreshes return payloads with `plan_type` `free` and no `workspace_id`
 - **THEN** the account's stored `plan_type` stays `business` for every observation and no usage mutation is applied
+
+#### Scenario: A degraded payload between two Free observations does not reset confirmation
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **AND** one workspace-less refresh has reported `plan_type` `free`
+- **WHEN** the next workspace-less refresh reports an unrecognized `plan_type`
+- **AND** a later workspace-less refresh reports `plan_type` `free` again
+- **THEN** the account's stored `plan_type` becomes `free`
+
+#### Scenario: Plan casing and surrounding whitespace do not change confirmation
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** two consecutive workspace-less refreshes report `plan_type` values that
+  normalize to `free` but differ in letter case or surrounding whitespace
+- **THEN** the first observation leaves the stored `plan_type` unchanged
+- **AND** the second observation persists the downgrade to `free`
+
+#### Scenario: Clearing one account's pending downgrade leaves another's intact
+
+- **GIVEN** two active workspace-less accounts with stored `plan_type` `plus`
+- **AND** each has recorded one workspace-less refresh reporting `plan_type` `free`
+- **WHEN** the first account's next workspace-less refresh reports a recognized paid plan
+- **THEN** the first account's pending downgrade is discarded
+- **AND** the second account still persists its downgrade on its own next `free` observation
+
+#### Scenario: Confirmation applies to a refresh performed with an access-token override
+
+- **GIVEN** an active workspace-less account with stored `plan_type` `plus`
+- **WHEN** two consecutive refreshes performed with an explicit access-token override
+  report `plan_type` `free` with no `workspace_id`
+- **THEN** the account's stored `plan_type` becomes `free`
 
 #### Scenario: Confirmation is tracked per account
 

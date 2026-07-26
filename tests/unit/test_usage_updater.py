@@ -2273,6 +2273,26 @@ async def test_usage_refresh_free_downgrade_confirmation_is_per_account(monkeypa
     assert second.plan_type == "plus"
 
 
+def test_shared_test_isolation_clears_pending_downgrade_state() -> None:
+    """The shared `_reset_global_state` helper must clear the pending-downgrade
+    dict.
+
+    That dict is process-global, so without this a suite that leaves an
+    observation behind would hand the next test a head start toward a downgrade.
+    Only this module's own autouse fixture used to clear it, which left every
+    other suite (notably the Force probe integration tests) exposed. Asserting it
+    here keeps the shared reset from being silently dropped.
+    """
+    from tests.conftest import _reset_global_state
+
+    usage_updater_module._workspace_less_free_plan_observations["leaked_account"] = 1
+    try:
+        _reset_global_state()
+        assert usage_updater_module._workspace_less_free_plan_observations == {}
+    finally:
+        usage_updater_module._workspace_less_free_plan_observations.clear()
+
+
 @pytest.mark.asyncio
 async def test_free_downgrade_reset_only_clears_the_reporting_account(monkeypatch) -> None:
     """Clearing one account's pending downgrade must not discard another's.

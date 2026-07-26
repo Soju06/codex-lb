@@ -51,3 +51,9 @@
   resend of the recorded input plus only a new user turn fails closed instead of compacting a
   conversation that is missing the anchored assistant output, with unit and compact-route
   regression tests.
+- [x] 11. Bind the prefix proof to the requested anchor: because the recorded prefix count and
+  fingerprint are session-level and every later response registration overwrites them, require
+  the durable snapshot's `latest_response_id` to equal the requested `previous_response_id`, so
+  an older alias resolving to a session that has moved on stays owner-bound. Cover it with a
+  unit case and a compact-route regression test that registers a later response on the same
+  durable session.

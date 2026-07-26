@@ -737,6 +737,8 @@ async def _register_durable_previous_response_anchor(
     response_id: str,
     session_key: str,
     recorded_prefix: list[dict[str, object]],
+    later_response_id: str | None = None,
+    later_recorded_prefix: list[dict[str, object]] | None = None,
 ) -> None:
     """Persist the durable evidence that anchors a previous-response id.
 
@@ -744,6 +746,11 @@ async def _register_durable_previous_response_anchor(
     record of the anchored turn proves the request still opens with that turn's
     history, so the recovery tests must register the same durable prefix count
     and fingerprint the HTTP bridge writes when a response is created.
+
+    ``later_response_id`` registers one more response on the same durable session
+    afterwards, which is how a real session moves on: the alias for the earlier
+    anchor still resolves, but the session-level prefix metadata now describes
+    the newer turn's ``later_recorded_prefix``.
     """
 
     service = get_proxy_service_for_app(app_instance)
@@ -770,6 +777,18 @@ async def _register_durable_previous_response_anchor(
         input_item_count=len(recorded_prefix),
         input_full_fingerprint=proxy_module._fingerprint_input_items(cast(list[JsonValue], recorded_prefix)),
     )
+    if later_response_id is not None:
+        later_prefix = later_recorded_prefix if later_recorded_prefix is not None else recorded_prefix
+        await service._durable_bridge.register_previous_response_id(
+            session_id=lookup.session_id,
+            api_key_id=None,
+            instance_id="instance-compact-test",
+            owner_epoch=lookup.owner_epoch,
+            response_id=later_response_id,
+            lease_ttl_seconds=60.0,
+            input_item_count=len(later_prefix),
+            input_full_fingerprint=proxy_module._fingerprint_input_items(cast(list[JsonValue], later_prefix)),
+        )
 
 
 async def _mark_account_rate_limited(account_id: str) -> None:
@@ -989,6 +1008,60 @@ async def test_proxy_compact_pinned_owner_unavailable_without_retained_output_st
         "instructions": "hi",
         "input": [*recorded_prefix, {"role": "user", "content": "please compact"}],
         "previous_response_id": "resp_outputless_anchor",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 503
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_unavailable_stale_anchor_alias_stays_fail_closed(
+    async_client, app_instance, monkeypatch
+):
+    """A durable snapshot that moved past the requested anchor proves nothing.
+
+    The recorded prefix count and fingerprint are session-level, so a later
+    response registration overwrites them. An older anchor alias still resolves
+    to that session, and matching the newer turn's prefix would let a request
+    that never carried the anchored history replay on another account.
+    """
+
+    owner_account_id = await _import_account(
+        async_client, email="compact-stale-owner@example.com", raw_account_id="acc_stale_owner"
+    )
+    await _import_account(async_client, email="compact-stale-alt@example.com", raw_account_id="acc_stale_alt")
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_stale_anchor",
+        session_key="sid-durable-compact-stale",
+        recorded_prefix=[{"role": "user", "content": "an earlier turn the request no longer sends"}],
+        later_response_id="resp_stale_newer",
+        later_recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:1],
+    )
+    await _mark_account_rate_limited(owner_account_id)
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    upstream_calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        upstream_calls.append(account_id)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_stale_anchor",
     }
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
 

@@ -3888,6 +3888,7 @@ def _compact_durable_anchor_lookup(
     account_id: str | None,
     stored_count: int | None,
     stored_fingerprint: str | None,
+    latest_response_id: str = "resp_compact_replay",
 ) -> proxy_service.DurableBridgeLookup:
     return proxy_service.DurableBridgeLookup(
         session_id="durable-compact-replay",
@@ -3900,7 +3901,7 @@ def _compact_durable_anchor_lookup(
         lease_expires_at=utcnow() + timedelta(seconds=60),
         state=HttpBridgeSessionState.ACTIVE,
         latest_turn_state=None,
-        latest_response_id="resp_compact_replay",
+        latest_response_id=latest_response_id,
         latest_input_item_count=stored_count,
         latest_input_full_fingerprint=stored_fingerprint,
     )
@@ -4022,6 +4023,15 @@ async def test_compact_previous_response_owner_unavailable_recovers_with_account
                 stored_fingerprint=_compact_neutral_prefix_fingerprint(2),
             ),
             "anchored response output is not retained after the recorded prefix",
+        ),
+        (
+            _compact_durable_anchor_lookup(
+                account_id="acc_compact_replay_owner",
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+                latest_response_id="resp_compact_replay_newer",
+            ),
+            "recorded prefix describes a newer response than the requested anchor",
         ),
     ],
 )

@@ -1212,7 +1212,11 @@ def _make_http_bridge_session_key(
             assert session_header_key is not None
             affinity_key = session_header_key.affinity_key
             affinity_kind = "session_header"
-            strength = "hard"
+            strength = (
+                "soft"
+                if affinity.codex_session_source == "session_header" and affinity.spill_on_account_cap
+                else "hard"
+            )
         else:
             affinity_key = affinity.key or request_id
             affinity_kind = affinity.kind.value if affinity.kind is not None else "request"

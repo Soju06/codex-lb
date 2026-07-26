@@ -4132,6 +4132,175 @@ def test_http_bridge_session_key_infers_strength_from_affinity_kind() -> None:
     assert proxy_service._HTTPBridgeSessionKey("request", "request", None).strength == "soft"
 
 
+@pytest.mark.parametrize(
+    ("case", "headers", "payload_overrides", "openai_cache_affinity", "expected_kind", "expected_strength"),
+    [
+        (
+            "bare_session_header",
+            {"session_id": "session-soft"},
+            {},
+            False,
+            "session_header",
+            "soft",
+        ),
+        (
+            "previous_response_owner",
+            {"session_id": "session-previous"},
+            {"previous_response_id": "resp-owner"},
+            False,
+            "session_header",
+            "hard",
+        ),
+        (
+            "conversation_owner",
+            {"session_id": "session-conversation"},
+            {"conversation": "conv-owner"},
+            False,
+            "session_header",
+            "hard",
+        ),
+        (
+            "input_file_owner",
+            {"session_id": "session-file"},
+            {"input": [{"type": "input_file", "file_id": "file-owner"}]},
+            False,
+            "session_header",
+            "hard",
+        ),
+        (
+            "turn_state_header",
+            {"x-codex-turn-state": "turn-owner"},
+            {},
+            False,
+            "turn_state_header",
+            "hard",
+        ),
+        (
+            "prompt_cache",
+            {},
+            {"prompt_cache_key": "cache-soft"},
+            True,
+            "prompt_cache",
+            "soft",
+        ),
+        (
+            "request",
+            {},
+            {},
+            False,
+            "request",
+            "soft",
+        ),
+    ],
+)
+def test_http_bridge_session_key_strength_follows_affinity_capability(
+    case: str,
+    headers: dict[str, str],
+    payload_overrides: dict[str, object],
+    openai_cache_affinity: bool,
+    expected_kind: str,
+    expected_strength: str,
+) -> None:
+    del case
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            **payload_overrides,
+        }
+    )
+    affinity = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers=headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=openai_cache_affinity,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers=headers,
+        affinity=affinity,
+        api_key=None,
+        request_id="request-strength",
+        explicit_prompt_cache_key=payload.prompt_cache_key,
+    )
+
+    assert key.affinity_kind == expected_kind
+    assert key.strength == expected_strength
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_hard_affinity_saturated_fails_fast_without_capacity_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+        }
+    )
+    hard_saturation = ProxyResponseError(
+        503,
+        openai_error(
+            "hard_affinity_saturated",
+            "Hard affinity owner account is unavailable",
+        ),
+    )
+    get_or_create = AsyncMock(side_effect=hard_saturation)
+    capacity_wait = Mock()
+    submit = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", capacity_wait)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-turn-state": "turn-hard-saturated"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert exc_info.value is hard_saturation
+    get_or_create.assert_awaited_once()
+    capacity_wait.assert_not_called()
+    submit.assert_not_awaited()
+
+
 def test_http_bridge_session_header_key_is_scoped_by_explicit_prompt_cache_key() -> None:
     headers = {"session_id": "process-session"}
     first = proxy_service.ResponsesRequest.model_validate(

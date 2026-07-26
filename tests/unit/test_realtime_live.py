@@ -144,7 +144,10 @@ async def test_close_once_live_websocket_bounds_cancellation_resistant_cleanup()
 
     assert upstream.close_cancelled.is_set()
     assert not upstream.cleanup_finished.is_set()
-    upstream.cleanup_release.set()
+    try:
+        await asyncio.wait_for(wrapped.close(timeout_seconds=1), timeout=0.1)
+    finally:
+        upstream.cleanup_release.set()
     await asyncio.wait_for(upstream.cleanup_finished.wait(), timeout=1)
     assert upstream.close_calls == [(1000, "")]
 

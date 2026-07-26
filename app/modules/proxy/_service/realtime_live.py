@@ -193,6 +193,7 @@ class _CloseOnceLiveWebSocket:
     def __init__(self, wrapped: UpstreamWebSocket) -> None:
         self._wrapped = wrapped
         self._close_task: asyncio.Task[None] | None = None
+        self._close_wait_exhausted = False
 
     async def send_text(self, text: str) -> None:
         await self._wrapped.send_text(text)
@@ -216,6 +217,8 @@ class _CloseOnceLiveWebSocket:
                 name="realtime-live-close-upstream",
             )
             self._close_task.add_done_callback(_consume_close_task_result)
+        if self._close_wait_exhausted:
+            return
         if self._close_task.cancelled():
             return
         if timeout_seconds is None:
@@ -224,6 +227,7 @@ class _CloseOnceLiveWebSocket:
         try:
             await asyncio.wait_for(asyncio.shield(self._close_task), timeout=timeout_seconds)
         except (TimeoutError, asyncio.CancelledError):
+            self._close_wait_exhausted = True
             self._close_task.cancel()
             try:
                 await asyncio.wait_for(

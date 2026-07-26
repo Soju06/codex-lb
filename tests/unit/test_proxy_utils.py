@@ -37124,6 +37124,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_http_bridge_request_stream_lease_or_overload", AsyncMock())
     monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
 
     token = set_request_id("ambient_old_session_request")
@@ -37199,6 +37200,7 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
     monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_http_bridge_request_stream_lease_or_overload", AsyncMock())
     monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)

@@ -1,7 +1,7 @@
 ## 1. Spec and Locale Coverage
 
 - [x] Add OpenSpec coverage for completing the Simplified Chinese dashboard locale.
-- [x] Verify `zh-CN` key coverage matches `en` and `ko` exactly (1311 keys, none missing, none extra).
+- [x] Verify `zh-CN` key coverage matches `en` and `ko` exactly (no missing or extra keys).
 
 ## 2. Translation
 

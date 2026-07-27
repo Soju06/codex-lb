@@ -37,6 +37,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
     CodexUpstreamWebSocket,
+    UpstreamWebSocket,
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
 )
@@ -33233,7 +33234,7 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
         affinity=proxy_service._AffinityPolicy(key="bridge-key"),
         request_model="gpt-5.5",
         account=account,
-        upstream=old_upstream,
+        upstream=cast(UpstreamWebSocket, old_upstream),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),

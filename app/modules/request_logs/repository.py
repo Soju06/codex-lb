@@ -230,25 +230,7 @@ class RequestLogsRepository:
         cached = self._conversation_cached_expr()
         summary_conditions = [*conditions]
         if since is not None:
-            pre_window_log = aliased(RequestLog)
-            has_pre_window_row = exists(
-                select(1)
-                .select_from(pre_window_log)
-                .where(
-                    pre_window_log.conversation_id == RequestLog.conversation_id,
-                    pre_window_log.deleted_at.is_(None),
-                    pre_window_log.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup")),
-                    pre_window_log.conversation_id.is_not(None),
-                    pre_window_log.conversation_id != "",
-                    pre_window_log.requested_at < since,
-                )
-            )
-            summary_conditions.extend(
-                [
-                    RequestLog.requested_at >= since,
-                    ~has_pre_window_row,
-                ]
-            )
+            summary_conditions.append(RequestLog.requested_at >= since)
         summary_stmt = (
             select(
                 conversation_id.label("conversation_id"),
@@ -264,21 +246,47 @@ class RequestLogsRepository:
             .group_by(conversation_id)
         )
         summary_subquery = summary_stmt.subquery()
+        if since is not None:
+            candidate = summary_subquery.c
+            pre_window_log = aliased(RequestLog)
+            has_pre_window_row = exists(
+                select(1)
+                .select_from(pre_window_log)
+                .where(
+                    pre_window_log.conversation_id == candidate.conversation_id,
+                    pre_window_log.deleted_at.is_(None),
+                    pre_window_log.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup")),
+                    pre_window_log.conversation_id.is_not(None),
+                    pre_window_log.conversation_id != "",
+                    pre_window_log.requested_at < since,
+                )
+            )
+            filtered_summary_stmt = select(candidate).select_from(summary_subquery).where(~has_pre_window_row)
+        else:
+            filtered_summary_stmt = select(summary_subquery)
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
-            total = int((await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one())
+            total = int(
+                (await self._session.execute(select(func.count()).select_from(filtered_summary_stmt.subquery())))
+                .scalar_one()
+            )
         else:
             cache_key = (search, since)
             total = _cached_recent_count(cache_key)
             if total is None:
                 total = int(
-                    (await self._session.execute(select(func.count()).select_from(summary_subquery))).scalar_one()
+                    (
+                        await self._session.execute(
+                            select(func.count()).select_from(filtered_summary_stmt.subquery())
+                        )
+                    ).scalar_one()
                 )
                 _store_recent_count(cache_key, total, ttl_seconds)
         page_rows = (
             await self._session.execute(
-                select(summary_subquery)
-                .order_by(summary_subquery.c.last_requested_at.desc(), summary_subquery.c.conversation_id.asc())
+                filtered_summary_stmt.order_by(
+                    summary_subquery.c.last_requested_at.desc(), summary_subquery.c.conversation_id.asc()
+                )
                 .offset(offset)
                 .limit(limit)
             )

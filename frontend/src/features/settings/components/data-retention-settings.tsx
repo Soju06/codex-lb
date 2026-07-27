@@ -2,7 +2,6 @@ import { useState } from "react";
 import { DatabaseZap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
@@ -80,7 +79,7 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
 
   const showRequestLogInheritedHint = requestLogDays.trim() === "";
   const showUsageHistoryInheritedHint = usageHistoryDays.trim() === "";
-  const showRequestLogDisabledWarning = settings.requestLogRetentionDays === 0;
+  const showRequestLogDisabledInfo = settings.requestLogRetentionDays === 0;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -97,11 +96,11 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
           </div>
         </div>
 
-        {showRequestLogDisabledWarning ? (
+        {showRequestLogDisabledInfo ? (
           <div className="space-y-2">
-            <AlertMessage variant="warning">
-              {t("settings.retention.requestLogs.disabledWarning")}
-            </AlertMessage>
+            <p className="text-xs text-muted-foreground">
+              {t("settings.retention.requestLogs.disabledInfo")}
+            </p>
             <div
               className="flex flex-wrap items-center gap-2"
               role="group"

@@ -10,7 +10,7 @@ const baseSettings = createDashboardSettings();
 const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("DataRetentionSettings", () => {
-  it("warns when effective request-log retention is disabled without changing policy", () => {
+  it("explains disabled request-log pruning neutrally without changing policy", () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
 
     render(
@@ -25,9 +25,10 @@ describe("DataRetentionSettings", () => {
       />,
     );
 
-    expect(
-      screen.getByText(/Request log pruning is disabled and logs will continue to accumulate/i),
-    ).toBeInTheDocument();
+    const disabledInfo = screen.getByText(
+      /Request log pruning is disabled; logs are retained indefinitely and storage will grow over time/i,
+    );
+    expect(disabledInfo).toHaveClass("text-muted-foreground");
     expect(screen.getByRole("button", { name: "Use 30 days" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use 90 days" })).toBeInTheDocument();
     expect(onSave).not.toHaveBeenCalled();
@@ -66,7 +67,7 @@ describe("DataRetentionSettings", () => {
     expect(onSave.mock.calls[0][0]).not.toHaveProperty("usageHistoryRetentionOverrideDays");
   });
 
-  it("does not show the disabled-state warning or presets for an enabled effective policy", () => {
+  it("does not show the disabled-state information or presets for an enabled effective policy", () => {
     render(
       <DataRetentionSettings
         settings={{
@@ -80,7 +81,7 @@ describe("DataRetentionSettings", () => {
     );
 
     expect(
-      screen.queryByText(/Request log pruning is disabled and logs will continue to accumulate/i),
+      screen.queryByText(/Request log pruning is disabled; logs are retained indefinitely/i),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Use 30 days" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Use 90 days" })).not.toBeInTheDocument();

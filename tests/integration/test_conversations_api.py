@@ -1148,14 +1148,15 @@ async def test_conversation_listing_total_cached_across_identical_signatures(asy
     t2 = second.json()["total"]
     assert t1 == 2
     assert t2 == t1
-    assert (None, wide_since) in logs_repository_module._recent_count_cache
+    assert ("conversation-count", None, ("since", wide_since)) in logs_repository_module._recent_count_cache
 
     logs_repository_module._clear_recent_count_cache()
+
     narrow_since = base - timedelta(days=1)
     narrow = await async_client.get(f"/api/conversations?since={narrow_since.isoformat()}")
     assert narrow.status_code == 200
     assert narrow.json()["total"] == 1
-    assert (None, narrow_since) in logs_repository_module._recent_count_cache
+    assert ("conversation-count", None, ("since", narrow_since)) in logs_repository_module._recent_count_cache
 
     matching_old = await async_client.get(
         "/api/conversations",
@@ -1169,7 +1170,264 @@ async def test_conversation_listing_total_cached_across_identical_signatures(asy
     assert matching_new.status_code == 200
     assert matching_old.json()["total"] == 1
     assert matching_new.json()["total"] == 1
-    assert ("cache-old", wide_since) in logs_repository_module._recent_count_cache
-    assert ("cache-new", wide_since) in logs_repository_module._recent_count_cache
+    assert ("conversation-count", "cache-old", ("since", wide_since)) in logs_repository_module._recent_count_cache
+    assert ("conversation-count", "cache-new", ("since", wide_since)) in logs_repository_module._recent_count_cache
 
     logs_repository_module._clear_recent_count_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timeframe", "expected_ids"),
+    [
+        ("1d", ["conv-one-day"]),
+        ("7d", ["conv-one-day", "conv-seven-days"]),
+        ("30d", ["conv-one-day", "conv-seven-days", "conv-thirty-days"]),
+    ],
+)
+async def test_conversation_timeframe_uses_server_window(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    timeframe: str,
+    expected_ids: list[str],
+):
+    fixed_now = datetime(2026, 1, 31, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.timeframes.utcnow", lambda: fixed_now)
+    monkeypatch.setattr("app.modules.request_logs.api.utcnow", lambda: fixed_now)
+
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    account_id=None,
+                    request_id="timeframe-one-day",
+                    requested_at=fixed_now - timedelta(hours=12),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-one-day",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="timeframe-seven-days",
+                    requested_at=fixed_now - timedelta(days=3),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-seven-days",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="timeframe-thirty-days",
+                    requested_at=fixed_now - timedelta(days=14),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-thirty-days",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="timeframe-outside",
+                    requested_at=fixed_now - timedelta(days=31),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-outside",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/conversations", params={"timeframe": timeframe})
+
+    assert response.status_code == 200
+    assert [row["conversationId"] for row in response.json()["conversations"]] == expected_ids
+
+
+@pytest.mark.asyncio
+async def test_conversation_timeframe_matches_dashboard_activity_under_fixed_clock(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 1, 31, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+    monkeypatch.setattr("app.modules.dashboard.timeframes.utcnow", lambda: fixed_now)
+    monkeypatch.setattr("app.modules.request_logs.api.utcnow", lambda: fixed_now)
+
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    account_id=None,
+                    request_id="parity-inside",
+                    requested_at=fixed_now - timedelta(days=1),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-inside",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="parity-outside",
+                    requested_at=fixed_now - timedelta(days=8),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-outside",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="parity-long-outside",
+                    requested_at=fixed_now - timedelta(days=8),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-long",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="parity-long-inside",
+                    requested_at=fixed_now - timedelta(hours=1),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-long",
+                ),
+            ]
+        )
+        await session.commit()
+
+    conversations_response = await async_client.get("/api/conversations", params={"timeframe": "7d"})
+    dashboard_response = await async_client.get("/api/dashboard/overview", params={"timeframe": "7d"})
+
+    assert conversations_response.status_code == 200
+    assert dashboard_response.status_code == 200
+    conversations = conversations_response.json()
+    dashboard = dashboard_response.json()
+    conversation_ids = {row["conversationId"] for row in conversations["conversations"]}
+    assert conversation_ids == {"conv-inside", "conv-long"}
+    assert conversations["total"] == 2
+    assert dashboard["summary"]["metrics"]["conversations"] == len(conversation_ids)
+    assert dashboard["summary"]["metrics"]["conversationRequests"] == 2
+
+
+@pytest.mark.asyncio
+async def test_conversation_unknown_timeframe_returns_validation_error(async_client):
+    response = await async_client.get("/api/conversations", params={"timeframe": "24h"})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_conversation_timeframe_and_since_are_mutually_exclusive(async_client):
+    response = await async_client.get(
+        "/api/conversations",
+        params={"timeframe": "7d", "since": "2025-01-01T00:00:00Z"},
+    )
+
+    assert response.status_code == 422
+    assert "timeframe and since cannot be supplied together" in response.text
+
+
+@pytest.mark.asyncio
+async def test_conversation_since_timezone_offset_is_normalized_to_utc(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2025, 1, 10, 12, 0, 0)
+    monkeypatch.setattr("app.modules.request_logs.api.utcnow", lambda: fixed_now)
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    account_id=None,
+                    request_id="offset-inside",
+                    requested_at=datetime(2025, 1, 1, 0, 30, 0),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-offset-inside",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="offset-before",
+                    requested_at=datetime(2024, 12, 31, 23, 30, 0),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-offset-before",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/conversations",
+        params={"since": "2025-01-01T02:00:00+02:00"},
+    )
+
+    assert response.status_code == 200
+    assert [row["conversationId"] for row in response.json()["conversations"]] == ["conv-offset-inside"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_since_older_than_30_days_is_clamped(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2025, 2, 10, 12, 0, 0)
+    monkeypatch.setattr("app.modules.request_logs.api.utcnow", lambda: fixed_now)
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    account_id=None,
+                    request_id="clamp-day-35",
+                    requested_at=fixed_now - timedelta(days=35),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-day-35",
+                ),
+                RequestLog(
+                    account_id=None,
+                    request_id="clamp-day-20",
+                    requested_at=fixed_now - timedelta(days=20),
+                    model="model",
+                    status="success",
+                    conversation_id="conv-day-20",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/conversations",
+        params={"since": (fixed_now - timedelta(days=90)).isoformat()},
+    )
+
+    assert response.status_code == 200
+    assert [row["conversationId"] for row in response.json()["conversations"]] == ["conv-day-20"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_since_future_timestamp_returns_empty_result(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2025, 2, 10, 12, 0, 0)
+    monkeypatch.setattr("app.modules.request_logs.api.utcnow", lambda: fixed_now)
+    async with SessionLocal() as session:
+        session.add(
+            RequestLog(
+                account_id=None,
+                request_id="future-existing-row",
+                requested_at=fixed_now - timedelta(hours=1),
+                model="model",
+                status="success",
+                conversation_id="conv-existing",
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/conversations",
+        params={"since": (fixed_now + timedelta(days=1)).isoformat()},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"conversations": [], "total": 0, "hasMore": False}

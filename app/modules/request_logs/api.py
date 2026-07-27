@@ -12,6 +12,7 @@ from app.core.auth.dependencies import (
 )
 from app.core.utils.time import to_utc_naive, utcnow
 from app.dependencies import RequestLogsContext, get_request_logs_context
+from app.modules.dashboard.timeframes import resolve_conversation_timeframe
 from app.modules.request_logs.schemas import (
     ConversationDetailsResponse,
     ConversationsResponse,
@@ -146,13 +147,27 @@ async def list_conversations(
     offset: int = Query(0, ge=0),
     search: str | None = Query(default=None),
     since: datetime | None = Query(default=None),
+    timeframe: str | None = Query(default=None, pattern="^(1d|7d|30d)$"),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> ConversationsResponse:
-    cutoff = utcnow() - _CONVERSATION_MAX_LOOKBACK
-    effective_since = to_utc_naive(since) if since is not None else cutoff
-    if effective_since < cutoff:
-        effective_since = cutoff
-    page = await context.service.list_conversations(limit=limit, offset=offset, search=search, since=effective_since)
+    if timeframe is not None and since is not None:
+        raise HTTPException(status_code=422, detail="timeframe and since cannot be supplied together")
+
+    if timeframe is not None:
+        _, effective_since = resolve_conversation_timeframe(timeframe)
+    else:
+        cutoff = utcnow() - _CONVERSATION_MAX_LOOKBACK
+        effective_since = to_utc_naive(since) if since is not None else cutoff
+        if effective_since < cutoff:
+            effective_since = cutoff
+    page = await context.service.list_conversations(
+        limit=limit,
+        offset=offset,
+        search=search,
+        since=effective_since,
+        cache_mode="timeframe" if timeframe else "since",
+        timeframe=timeframe,
+    )
     return ConversationsResponse(
         conversations=page.conversations,
         total=page.total,

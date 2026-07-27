@@ -73,16 +73,6 @@ function writeConversationFilterState(
   return params;
 }
 
-function timeframeToSinceIso(timeframe: ConversationFilterState["timeframe"]): string {
-  const now = Date.now();
-  const lookup: Record<ConversationFilterState["timeframe"], number> = {
-    "1d": 86400000,
-    "7d": 604800000,
-    "30d": 2592000000,
-  };
-  return new Date(now - lookup[timeframe]).toISOString();
-}
-
 export type UseConversationsOptions = {
   enabled?: boolean;
 };
@@ -101,7 +91,7 @@ export function useConversations(options: UseConversationsOptions = {}) {
       search: filters.search || undefined,
       limit: filters.limit,
       offset: filters.offset,
-      since: timeframeToSinceIso(filters.timeframe),
+      timeframe: filters.timeframe,
     }),
     [filters],
   );
@@ -126,11 +116,7 @@ export function useConversations(options: UseConversationsOptions = {}) {
     refetch,
   } = useQuery({
     queryKey: ["dashboard", "conversations", conversationQueryKey],
-    queryFn: () =>
-      getConversations({
-        ...listFilters,
-        since: timeframeToSinceIso(filters.timeframe),
-      }),
+    queryFn: () => getConversations(listFilters),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

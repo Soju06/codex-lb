@@ -8,6 +8,7 @@ import {
   DashboardProjectionsSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
+  type ConversationTimeframe,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 
@@ -108,6 +109,7 @@ export type ConversationListFilters = {
   limit?: number;
   offset?: number;
   search?: string;
+  timeframe?: ConversationTimeframe;
   since?: string;
 };
 
@@ -121,6 +123,9 @@ export function getConversations(params: ConversationListFilters = {}) {
   }
   if (params.search) {
     query.set("search", params.search);
+  }
+  if (params.timeframe) {
+    query.set("timeframe", params.timeframe);
   }
   if (params.since) {
     query.set("since", params.since);

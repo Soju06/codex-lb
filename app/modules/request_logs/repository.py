@@ -212,6 +212,8 @@ class RequestLogsRepository:
         offset: int = 0,
         search: str | None = None,
         since: datetime | None = None,
+        cache_mode: str = "since",
+        timeframe: str | None = None,
     ) -> ConversationListResult:
         conversation_id = RequestLog.conversation_id
         conditions = self._conversation_conditions()
@@ -260,7 +262,12 @@ class RequestLogsRepository:
                 ).scalar_one()
             )
         else:
-            cache_key = (search, since)
+            normalized_search = (search.strip() or None) if search else None
+            if cache_mode == "timeframe":
+                mode_token = ("timeframe", timeframe)
+            else:
+                mode_token = ("since", since)
+            cache_key = ("conversation-count", normalized_search, mode_token)
             total = _cached_recent_count(cache_key)
             if total is None:
                 total = int(

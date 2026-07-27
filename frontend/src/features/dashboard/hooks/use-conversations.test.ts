@@ -241,11 +241,11 @@ describe("useConversations", () => {
     expect(apiSearches.some((value) => value === "hello")).toBe(true);
   });
 
-  it("maps the conversation timeframe to the API since parameter", async () => {
-    const apiSince: string[] = [];
+  it("maps the conversation timeframe to the API timeframe parameter", async () => {
+    const apiRequests: URL[] = [];
     server.use(
       http.get("/api/conversations", ({ request }) => {
-        apiSince.push(new URL(request.url).searchParams.get("since") ?? "-missing-");
+        apiRequests.push(new URL(request.url));
         return HttpResponse.json({ conversations: [], total: 0, hasMore: false });
       }),
     );
@@ -260,24 +260,82 @@ describe("useConversations", () => {
     });
 
     await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
-    expect(apiSince.some((value) => value !== "-missing-")).toBe(true);
-    expect(apiSince.some((value) => {
-      const since = Date.parse(value);
-      return Number.isFinite(since) && since < Date.now() - 29 * 24 * 60 * 60 * 1000;
-    })).toBe(true);
+    expect(apiRequests).toHaveLength(1);
+    expect(apiRequests[0]?.searchParams.get("timeframe")).toBe("30d");
+    expect(apiRequests[0]?.searchParams.has("since")).toBe(false);
   });
 
-  it("recomputes the conversation timeframe when refetching", async () => {
-    const initialNow = Date.parse("2026-07-26T00:00:00.000Z");
-    const refreshedNow = initialNow + 2 * 60 * 60 * 1000;
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(initialNow);
-    const apiSince: string[] = [];
-    const dayMs = 24 * 60 * 60 * 1000;
+  it("refetches reuse the same timeframe parameter", async () => {
+    const apiRequests: URL[] = [];
+    server.use(
+      http.get("/api/conversations", ({ request }) => {
+        apiRequests.push(new URL(request.url));
+        return HttpResponse.json({ conversations: [], total: 0, hasMore: false });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?view=conversations&conversationTimeframe=7d",
+    );
+    const { result } = renderHook(() => useConversations({ enabled: true }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
+    await act(async () => {
+      await result.current.conversationsQuery.refetch();
+    });
+
+    expect(apiRequests).toHaveLength(2);
+    for (const request of apiRequests) {
+      expect(request.searchParams.get("timeframe")).toBe("7d");
+      expect(request.searchParams.has("since")).toBe(false);
+    }
+  });
+
+  it("changing timeframe refetches with the new key", async () => {
+    const apiRequests: URL[] = [];
+    server.use(
+      http.get("/api/conversations", ({ request }) => {
+        apiRequests.push(new URL(request.url));
+        return HttpResponse.json({ conversations: [], total: 0, hasMore: false });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?view=conversations&conversationTimeframe=7d",
+    );
+    const { result } = renderHook(() => useConversations({ enabled: true }), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
+    act(() => {
+      result.current.updateFilters({ timeframe: "30d" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.filters.timeframe).toBe("30d");
+      expect(apiRequests).toHaveLength(2);
+    });
+    expect(apiRequests[0]?.searchParams.get("timeframe")).toBe("7d");
+    expect(apiRequests[1]?.searchParams.get("timeframe")).toBe("30d");
+    expect(apiRequests.every((request) => !request.searchParams.has("since"))).toBe(true);
+  });
+
+  it("browser clock skew does not change the conversations request", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2036-07-26T00:00:00.000Z"));
 
     try {
+      const apiRequests: URL[] = [];
       server.use(
         http.get("/api/conversations", ({ request }) => {
-          apiSince.push(new URL(request.url).searchParams.get("since") ?? "-missing-");
+          apiRequests.push(new URL(request.url));
           return HttpResponse.json({ conversations: [], total: 0, hasMore: false });
         }),
       );
@@ -285,25 +343,18 @@ describe("useConversations", () => {
       const queryClient = createTestQueryClient();
       const wrapper = createWrapper(
         queryClient,
-        "/dashboard?view=conversations&conversationTimeframe=30d",
+        "/dashboard?view=conversations&conversationTimeframe=7d",
       );
       const { result } = renderHook(() => useConversations({ enabled: true }), {
         wrapper,
       });
 
       await waitFor(() => expect(result.current.conversationsQuery.isSuccess).toBe(true));
-      nowSpy.mockReturnValue(refreshedNow);
-
-      await act(async () => {
-        await result.current.conversationsQuery.refetch();
-      });
-
-      expect(apiSince).toEqual([
-        new Date(initialNow - 30 * dayMs).toISOString(),
-        new Date(refreshedNow - 30 * dayMs).toISOString(),
-      ]);
+      expect(apiRequests).toHaveLength(1);
+      expect(apiRequests[0]?.searchParams.get("timeframe")).toBe("7d");
+      expect(apiRequests[0]?.searchParams.has("since")).toBe(false);
     } finally {
-      nowSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

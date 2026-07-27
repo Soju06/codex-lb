@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -10,6 +10,7 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.utils.time import to_utc_naive, utcnow
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
     ConversationDetailsResponse,
@@ -34,6 +35,7 @@ conversations_router = APIRouter(
 )
 
 _MODEL_OPTION_DELIMITER = ":::"
+_CONVERSATION_MAX_LOOKBACK = timedelta(days=30)
 
 
 def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
@@ -145,7 +147,11 @@ async def list_conversations(
     since: datetime | None = Query(default=None),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> ConversationsResponse:
-    page = await context.service.list_conversations(limit=limit, offset=offset, search=search, since=since)
+    cutoff = utcnow() - _CONVERSATION_MAX_LOOKBACK
+    effective_since = to_utc_naive(since) if since is not None else cutoff
+    if effective_since < cutoff:
+        effective_since = cutoff
+    page = await context.service.list_conversations(limit=limit, offset=offset, search=search, since=effective_since)
     return ConversationsResponse(
         conversations=page.conversations,
         total=page.total,

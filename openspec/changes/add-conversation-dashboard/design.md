@@ -30,19 +30,26 @@ Capability ownership for this change is `frontend-architecture`; no
 
 - **Aggregation source is request-log rows only.** Both endpoints derive every
   aggregate from `request_logs`; no second store is introduced.
-- **One eligible-row scope is shared.** Rows are normalized to a trimmed,
-  non-empty conversation identity, exclude `warmup` and `limit_warmup` request
-  kinds, and exclude soft-deleted rows (`deleted_at IS NULL`). This keeps list
-  and detail totals consistent.
+- **Write-time identity normalization and indexed reads.** Production log writes
+  normalize ASCII padding and blank conversation IDs before persistence. The
+  conversation list, facets, and detail hot paths therefore predicate and group
+  on the raw `request_logs.conversation_id` column, preserving the
+  `idx_logs_conversation_id` access path while excluding null/blank production
+  IDs. Rows exclude `warmup` and `limit_warmup` request kinds and soft-deleted
+  rows (`deleted_at IS NULL`), keeping list and detail totals consistent.
 - **Search selects conversations before aggregation.** The list accepts `limit`,
   `offset`, `search`, and `since`. Search is case-insensitive and checks the
   normalized conversation ID and every eligible row's user-agent family. Once a
   conversation matches, all eligible rows in that conversation are aggregated;
   rows that did not contain the matching text remain included.
-- **`since` filters by the conversation's first message, not by every row.** The
-  conversation summary bounds its grouped input to rows at or after `since`
-  before grouping, while a separate distinct-ID subquery rejects conversations
-  with eligible rows before `since`. This preserves the operator-requested
+- **Bounded `since` and first-message semantics.** The API supplies a rolling
+  30-day default when `since` is omitted and caps explicitly older values at
+  that bound. Incoming timezone-aware values are converted to naive UTC. Within
+  that effective window, `since` filters by the conversation's first message,
+  not by every row. The conversation summary bounds its grouped input to rows at
+  or after `since` before grouping, while a correlated `NOT EXISTS` probe keyed
+  by the raw outer conversation ID rejects conversations with eligible rows
+  before `since`. This preserves the operator-requested
   "first message in range" semantic without forcing the database to group old
   history before discarding it. A selected conversation has no eligible
   pre-window rows, so the bounded input still includes every row contributing to

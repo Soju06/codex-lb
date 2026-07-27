@@ -6,10 +6,10 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, exists, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
@@ -188,7 +188,8 @@ class RequestLogsRepository:
         return [
             RequestLog.deleted_at.is_(None),
             self._exclude_warmup_clause(),
-            self._conversation_id_expr().is_not(None),
+            RequestLog.conversation_id.is_not(None),
+            RequestLog.conversation_id != "",
         ]
 
     def _reasoning_effort_sort_key(self) -> list[ColumnElement]:
@@ -207,7 +208,7 @@ class RequestLogsRepository:
         search: str | None = None,
         since: datetime | None = None,
     ) -> ConversationListResult:
-        conversation_id = self._conversation_id_expr()
+        conversation_id = RequestLog.conversation_id
         conditions = self._conversation_conditions()
         if search and search.strip():
             pattern = f"%{_escape_like(search.strip())}%"
@@ -229,16 +230,23 @@ class RequestLogsRepository:
         cached = self._conversation_cached_expr()
         summary_conditions = [*conditions]
         if since is not None:
-            pre_window_ids = (
-                select(conversation_id.label("conversation_id"))
-                .where(*conditions, RequestLog.requested_at < since)
-                .distinct()
-                .subquery()
+            pre_window_log = aliased(RequestLog)
+            has_pre_window_row = exists(
+                select(1)
+                .select_from(pre_window_log)
+                .where(
+                    pre_window_log.conversation_id == RequestLog.conversation_id,
+                    pre_window_log.deleted_at.is_(None),
+                    pre_window_log.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup")),
+                    pre_window_log.conversation_id.is_not(None),
+                    pre_window_log.conversation_id != "",
+                    pre_window_log.requested_at < since,
+                )
             )
             summary_conditions.extend(
                 [
                     RequestLog.requested_at >= since,
-                    conversation_id.not_in(select(pre_window_ids.c.conversation_id)),
+                    ~has_pre_window_row,
                 ]
             )
         summary_stmt = (
@@ -294,9 +302,12 @@ class RequestLogsRepository:
         api_key_facets: list[ConversationFacet] = []
         model_facets: list[ConversationFacet] = []
         if page_ids:
-            account_facets = await self._conversation_facets(conditions, page_ids, RequestLog.account_id)
-            api_key_facets = await self._conversation_facets(conditions, page_ids, RequestLog.api_key_id)
-            model_facets = await self._conversation_facets(conditions, page_ids, RequestLog.model)
+            facet_conditions = [*conditions]
+            if since is not None:
+                facet_conditions.append(RequestLog.requested_at >= since)
+            account_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.account_id)
+            api_key_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.api_key_id)
+            model_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.model)
         return ConversationListResult(
             summaries=summaries,
             account_facets=account_facets,
@@ -311,7 +322,7 @@ class RequestLogsRepository:
         page_ids: list[str],
         value_column: InstrumentedAttribute[str | None] | InstrumentedAttribute[str],
     ) -> list[ConversationFacet]:
-        conversation_id = self._conversation_id_expr()
+        conversation_id = RequestLog.conversation_id
         facet_conditions = [*conditions, conversation_id.in_(page_ids), value_column.is_not(None)]
         if getattr(value_column, "key", None) == RequestLog.api_key_id.key:
             facet_conditions.append(value_column.in_(select(ApiKey.id)))
@@ -344,7 +355,7 @@ class RequestLogsRepository:
         target = _normalize_conversation_id(conversation_id)
         if not target:
             return None
-        normalized_id = self._conversation_id_expr()
+        normalized_id = RequestLog.conversation_id
         conditions = [*self._conversation_conditions(), normalized_id == target]
         summary = (
             await self._session.execute(

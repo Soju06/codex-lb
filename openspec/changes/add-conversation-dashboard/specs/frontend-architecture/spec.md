@@ -4,9 +4,16 @@
 
 The authenticated dashboard MUST expose `GET /api/conversations`. The list
 endpoint MUST accept `limit`, `offset`, `search`, and `since` query parameters.
-It MUST aggregate eligible `request_logs` rows by normalized, non-empty
+When `since` is omitted, the server MUST apply a rolling 30-day lower bound;
+explicitly older `since` values MUST be capped at that same bound, and incoming
+timezone-aware datetimes MUST be normalized to naive UTC before querying. It
+MUST aggregate eligible `request_logs` rows by normalized, non-empty
 `conversation_id`, excluding rows whose request kind is `warmup` or
-`limit_warmup`, and rows with `deleted_at IS NOT NULL`.
+`limit_warmup`, and rows with `deleted_at IS NOT NULL`. Production request-log
+writes MUST normalize ASCII padding and blank conversation IDs before storage;
+conversation list, facet, and detail queries MUST use raw-column
+`conversation_id` predicates and grouping rather than function-wrapped
+expressions.
 
 Search MUST be case-insensitive and match the normalized conversation ID or any
 eligible row's user-agent family. Search MUST select whole conversations first:

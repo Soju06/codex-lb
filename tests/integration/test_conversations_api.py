@@ -155,14 +155,6 @@ async def _seed_conversations(base):
                 conversation_id=row.conversation_id,
                 cost_usd=row.cost_usd,
             )
-        await session.execute(
-            update(RequestLog).where(RequestLog.request_id == "a-1").values(conversation_id="  Conv-A  ")
-        )
-        await session.commit()
-        raw_conversation_id = await session.scalar(
-            select(RequestLog.conversation_id).where(RequestLog.request_id == "a-1")
-        )
-        assert raw_conversation_id == "  Conv-A  "
 
 
 async def _seed_conversation_rows(rows: list[_ConversationSeed]) -> None:
@@ -274,12 +266,7 @@ async def test_conversation_list_excludes_blank_warmup_limit_warmup_and_deleted(
                 conversation_id=conversation_id,
                 request_kind=request_kind,
             )
-        await session.execute(update(RequestLog).where(RequestLog.request_id == "blank").values(conversation_id="   "))
-        await session.commit()
-        raw_blank_conversation_id = await session.scalar(
-            select(RequestLog.conversation_id).where(RequestLog.request_id == "blank")
-        )
-        assert raw_blank_conversation_id == "   "
+        assert await session.scalar(select(RequestLog.conversation_id).where(RequestLog.request_id == "blank")) is None
         await session.execute(update(RequestLog).where(RequestLog.request_id == "deleted").values(deleted_at=base))
         await session.commit()
 
@@ -901,6 +888,58 @@ async def test_since_filter_excludes_conversation_started_before_window(async_cl
     entry = body["conversations"][0]
     assert entry["totalTokens"] == 85
     assert entry["totalCostUsd"] == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_bare_request_is_bounded_to_recent_30_days(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="bare-old",
+                account_id="bare-old-account",
+                model="bare-old-model",
+                reasoning_effort=None,
+                input_tokens=10,
+                output_tokens=1,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=0.1,
+                requested_at=base - timedelta(days=31),
+                conversation_id="bare-old-conversation",
+            ),
+            _ConversationSeed(
+                request_id="bare-recent",
+                account_id="bare-recent-account",
+                model="bare-recent-model",
+                reasoning_effort=None,
+                input_tokens=20,
+                output_tokens=2,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=0.2,
+                requested_at=base - timedelta(days=1),
+                conversation_id="bare-recent-conversation",
+            ),
+        ]
+    )
+
+    response = await async_client.get("/api/conversations")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert [row["conversationId"] for row in body["conversations"]] == ["bare-recent-conversation"]
+
+    ancient = await async_client.get(
+        "/api/conversations",
+        params={"since": (base - timedelta(days=365)).isoformat()},
+    )
+    assert ancient.status_code == 200
+    assert ancient.json()["total"] == 1
+    assert [row["conversationId"] for row in ancient.json()["conversations"]] == ["bare-recent-conversation"]
 
 
 @pytest.mark.asyncio

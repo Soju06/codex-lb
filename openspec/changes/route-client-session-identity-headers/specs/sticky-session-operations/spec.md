@@ -47,3 +47,10 @@ The account-neutral replay header filter MUST strip the recognized client identi
 - **WHEN** the request streams upstream over the direct HTTP path
 - **THEN** the persisted request log records the conversation id from the identity header
 - **AND** the recognized client identity headers are absent from the upstream request headers
+
+#### Scenario: Owner forwarding retains client identity
+
+- **GIVEN** a Responses request carrying client identity is forwarded to its HTTP bridge owner replica
+- **WHEN** the internal owner-forward headers are built
+- **THEN** the client identity headers are retained for affinity and request logging on the owner
+- **AND** the owner strips them only when building the Responses upstream request

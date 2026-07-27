@@ -187,7 +187,7 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
-    filtered = filter_inbound_headers(headers)
+    filtered = filter_inbound_headers(headers, preserve_client_session_identity=True)
     # Per the hop-by-hop contract, also drop any header named by the inbound
     # Connection header in addition to the fixed unsafe set.
     connection_value = next(

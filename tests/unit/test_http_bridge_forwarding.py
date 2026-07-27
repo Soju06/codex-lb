@@ -358,6 +358,28 @@ def test_build_owner_forward_headers_drops_client_supplied_bridge_headers() -> N
     assert headers["x-openai-client-version"] == "1.2.3"
 
 
+def test_build_owner_forward_headers_preserves_client_session_identity() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    headers = build_owner_forward_headers(
+        headers={
+            "x-session-id": "client-session",
+            "x-opencode-session": "opencode-session",
+        },
+        payload=payload,
+        context=context,
+    )
+
+    assert headers["x-session-id"] == "client-session"
+    assert headers["x-opencode-session"] == "opencode-session"
+
+
 def test_owner_forward_primary_signature_verifiable_by_pre_1203_owner() -> None:
     # ROLLOUT SHIM coverage (new origin -> pre-#1203 owner): an owner running
     # code that predates the tamper-proofing header recomputes the primary

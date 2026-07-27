@@ -23,3 +23,4 @@
 - [x] 4.3 One-shot predicate coverage: side calls bypass; tools, anchors, files, native Codex, forwarded, and anonymous requests keep the bridge.
 - [x] 4.4 Empty tool map coverage: `tools: {}` validates as tool-less at the `/responses` route and reaches the one-shot bypass; non-empty tool maps stay rejected.
 - [x] 4.5 Public Responses affinity coverage: client identity overrides shared prompt-cache affinity while Codex session affinity is disabled.
+- [x] 4.6 Replica forwarding coverage: internal owner-forward headers retain client identity until Responses upstream egress.

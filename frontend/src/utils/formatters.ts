@@ -276,21 +276,29 @@ export function formatConversationDuration(
     return "—";
   }
 
-  const totalMinutes = Math.max(0, Math.floor((last.getTime() - first.getTime()) / 60_000));
-  if (totalMinutes === 0) {
-    return t("formatters.duration.minutes", { count: 0 });
+  const totalSeconds = Math.max(0, Math.floor((last.getTime() - first.getTime()) / 1000));
+  if (totalSeconds === 0) {
+    return t("formatters.duration.seconds", { count: 0 });
   }
-  if (totalMinutes < 1440) {
+  if (totalSeconds < 60) {
+    return t("formatters.duration.seconds", { count: totalSeconds });
+  }
+  if (totalSeconds < 3600) {
+    return t("formatters.duration.minutesSeconds", {
+      minutes: Math.floor(totalSeconds / 60),
+      seconds: totalSeconds % 60,
+    });
+  }
+  if (totalSeconds < 86400) {
     return t("formatters.duration.hoursMinutes", {
-      hours: Math.floor(totalMinutes / 60),
-      minutes: totalMinutes % 60,
+      hours: Math.floor(totalSeconds / 3600),
+      minutes: Math.floor((totalSeconds % 3600) / 60),
     });
   }
 
-  const totalHours = Math.floor(totalMinutes / 60);
   return t("formatters.duration.daysHours", {
-    days: Math.floor(totalHours / 24),
-    hours: totalHours % 24,
+    days: Math.floor(totalSeconds / 86400),
+    hours: Math.floor((totalSeconds % 86400) / 3600),
   });
 }
 

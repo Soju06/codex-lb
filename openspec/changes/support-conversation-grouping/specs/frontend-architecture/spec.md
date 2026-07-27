@@ -142,3 +142,31 @@ points.
   $0.74`
 - **AND** the ID, count, and cost are separate styled inline-code values
 - **AND** literal backtick characters are absent
+
+### Requirement: Conversation membership windows stay live during polling
+
+The dashboard Conversations view MUST recompute the rolling `since` cutoff
+when its active query polls. A view left open across a cutoff boundary MUST
+not keep conversations that have aged out of the selected `1d`, `7d`, or `30d`
+window solely because its URL-backed filters are unchanged.
+
+#### Scenario: Polling refreshes a rolling conversation cutoff
+
+- **GIVEN** the Conversations view is open with a rolling timeframe
+- **WHEN** its 30-second poll runs after the cutoff has advanced
+- **THEN** the request sends a newly computed `since` value
+- **AND** the list membership uses the same current rolling-window basis as
+  the dashboard overview poll
+
+### Requirement: Conversation detail URLs preserve opaque identifiers
+
+The dashboard MUST construct conversation detail URLs so stored IDs equal to
+`.` or `..` cannot be normalized by the browser into collection or parent
+paths. The detail request MUST still resolve to the original conversation ID.
+
+#### Scenario: Dot-only IDs remain detail requests
+
+- **GIVEN** a conversation has the non-empty ID `.` or `..`
+- **WHEN** the operator opens its details
+- **THEN** the browser requests an opaque detail path
+- **AND** the API receives the original dot-only conversation ID

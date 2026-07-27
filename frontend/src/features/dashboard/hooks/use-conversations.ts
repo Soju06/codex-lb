@@ -106,6 +106,16 @@ export function useConversations(options: UseConversationsOptions = {}) {
     [filters],
   );
 
+  const conversationQueryKey = useMemo(
+    () => ({
+      search: filters.search || undefined,
+      limit: filters.limit,
+      offset: filters.offset,
+      timeframe: filters.timeframe,
+    }),
+    [filters],
+  );
+
   const {
     data,
     error,
@@ -115,8 +125,12 @@ export function useConversations(options: UseConversationsOptions = {}) {
     isSuccess,
     refetch,
   } = useQuery({
-    queryKey: ["dashboard", "conversations", listFilters],
-    queryFn: () => getConversations(listFilters),
+    queryKey: ["dashboard", "conversations", conversationQueryKey],
+    queryFn: () =>
+      getConversations({
+        ...listFilters,
+        since: timeframeToSinceIso(filters.timeframe),
+      }),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

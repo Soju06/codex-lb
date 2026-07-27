@@ -241,6 +241,20 @@ async def test_conversation_list_pagination_and_stable_order(async_client, db_se
 
 
 @pytest.mark.asyncio
+async def test_conversation_list_trailing_slash_preserves_collection_route(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    await _seed_conversations(base)
+    params = {"limit": 1, "since": (base - timedelta(days=1)).isoformat()}
+
+    without_slash = await async_client.get("/api/conversations", params=params)
+    with_slash = await async_client.get("/api/conversations/", params=params)
+
+    assert without_slash.status_code == 200
+    assert with_slash.status_code == 200
+    assert with_slash.json() == without_slash.json()
+
+
+@pytest.mark.asyncio
 async def test_conversation_list_excludes_blank_warmup_limit_warmup_and_deleted(async_client, db_setup):
     base = utcnow().replace(microsecond=0)
     await _seed_conversations(base)
@@ -654,6 +668,31 @@ async def test_conversation_details_accepts_slash_containing_ids(async_client, d
     assert listing.json()["conversations"][0]["conversationId"] == conversation_id
 
     details = await async_client.get(f"/api/conversations/{quote(conversation_id, safe='')}")
+    assert details.status_code == 200
+    assert details.json()["conversationId"] == conversation_id
+
+
+@pytest.mark.parametrize("conversation_id", [".", ".."])
+@pytest.mark.asyncio
+async def test_conversation_details_accepts_dot_only_ids(async_client, db_setup, conversation_id):
+    base = utcnow().replace(microsecond=0)
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        await logs.add_log(
+            account_id=None,
+            request_id=f"dot-conversation-{conversation_id}",
+            model="dot-model",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            requested_at=base,
+            conversation_id=conversation_id,
+        )
+
+    details = await async_client.get(f"/api/conversations/{quote(f' {conversation_id}', safe='')}")
+
     assert details.status_code == 200
     assert details.json()["conversationId"] == conversation_id
 

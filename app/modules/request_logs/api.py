@@ -139,6 +139,7 @@ async def list_request_log_filter_options(
     )
 
 
+@conversations_router.get("/", response_model=ConversationsResponse, include_in_schema=False)
 @conversations_router.get("", response_model=ConversationsResponse)
 async def list_conversations(
     limit: int = Query(50, ge=1, le=1000),

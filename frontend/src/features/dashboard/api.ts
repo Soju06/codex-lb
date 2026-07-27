@@ -130,6 +130,9 @@ export function getConversations(params: ConversationListFilters = {}) {
 }
 
 export function getConversationDetails(conversationId: string) {
-  const encoded = encodeURIComponent(conversationId);
+  const opaqueId = conversationId === "." || conversationId === ".."
+    ? ` ${conversationId}`
+    : conversationId;
+  const encoded = encodeURIComponent(opaqueId);
   return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema);
 }

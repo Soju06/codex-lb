@@ -73,12 +73,12 @@ describe("useConversations", () => {
       queryKey: ["dashboard", "conversations"],
     })[0];
     const key = query?.queryKey as
-      | [string, string, { search: string; limit: number; offset: number }]
+      | [string, string, { search: string; limit: number; offset: number; timeframe: string }]
       | undefined;
     expect(key?.[2].search).toBe("opencode");
     expect(key?.[2].limit).toBe(10);
     expect(key?.[2].offset).toBe(20);
-    expect(key?.[2]).toHaveProperty("since");
+    expect(key?.[2].timeframe).toBe("30d");
   });
 
   it("does not read request-log-only keys (search/limit/offset)", async () => {
@@ -267,7 +267,7 @@ describe("useConversations", () => {
     })).toBe(true);
   });
 
-  it("keeps the conversation timeframe stable when refetching", async () => {
+  it("recomputes the conversation timeframe when refetching", async () => {
     const initialNow = Date.parse("2026-07-26T00:00:00.000Z");
     const refreshedNow = initialNow + 2 * 60 * 60 * 1000;
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(initialNow);
@@ -300,7 +300,7 @@ describe("useConversations", () => {
 
       expect(apiSince).toEqual([
         new Date(initialNow - 30 * dayMs).toISOString(),
-        new Date(initialNow - 30 * dayMs).toISOString(),
+        new Date(refreshedNow - 30 * dayMs).toISOString(),
       ]);
     } finally {
       nowSpy.mockRestore();

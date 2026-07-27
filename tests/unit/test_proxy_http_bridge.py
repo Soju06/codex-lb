@@ -19559,44 +19559,59 @@ def test_unanchored_fork_cap_spill_predicate() -> None:
     assert http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
         error_code="account_stream_cap",
         affinity_kind="internal_unanchored_parallel",
+        original_request_unanchored=True,
         payload=self_contained,
         preferred_account_id="acct-1",
     )
     assert http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
         error_code="account_response_create_cap",
         affinity_kind="internal_unanchored_parallel",
+        original_request_unanchored=True,
         payload=self_contained,
         preferred_account_id="acct-1",
     )
     assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
         error_code="account_stream_cap",
         affinity_kind="internal_unanchored_parallel",
+        original_request_unanchored=True,
         payload=anchored,
         preferred_account_id="acct-1",
     )
     assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
         error_code="account_stream_cap",
         affinity_kind="session_header",
+        original_request_unanchored=True,
         payload=self_contained,
         preferred_account_id="acct-1",
     )
     assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
         error_code="upstream_unavailable",
         affinity_kind="internal_unanchored_parallel",
+        original_request_unanchored=True,
         payload=self_contained,
         preferred_account_id="acct-1",
     )
     assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
         error_code="account_stream_cap",
         affinity_kind="internal_unanchored_parallel",
+        original_request_unanchored=True,
         payload=self_contained,
         preferred_account_id=None,
+    )
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        original_request_unanchored=False,
+        payload=self_contained,
+        preferred_account_id="acct-1",
     )
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("turn_state_owned", [False, True])
 async def test_stream_http_bridge_or_retry_spills_unanchored_fork_from_capped_preferred_account(
     monkeypatch: pytest.MonkeyPatch,
+    turn_state_owned: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -19681,7 +19696,7 @@ async def test_stream_http_bridge_or_retry_spills_unanchored_fork_from_capped_pr
         owner_epoch=1,
         lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
         state=HttpBridgeSessionState.ACTIVE,
-        latest_turn_state=None,
+        latest_turn_state="http_turn_owned" if turn_state_owned else None,
         latest_response_id=None,
         model="gpt-5.6-sol",
     )
@@ -19693,6 +19708,7 @@ async def test_stream_http_bridge_or_retry_spills_unanchored_fork_from_capped_pr
     )
     monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: None)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
@@ -19701,24 +19717,30 @@ async def test_stream_http_bridge_or_retry_spills_unanchored_fork_from_capped_pr
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_http_bridge_or_retry(
-            payload,
-            {},
-            codex_session_affinity=False,
-            propagate_http_errors=True,
-            openai_cache_affinity=False,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            forwarded_request=True,
-            forwarded_original_request_unanchored=True,
-            forwarded_affinity_kind=fork_key.affinity_kind,
-            forwarded_affinity_key=fork_key.affinity_key,
-        )
-    ]
+    stream = service._stream_http_bridge_or_retry(
+        payload,
+        {"x-codex-turn-state": "http_turn_owned"} if turn_state_owned else {},
+        codex_session_affinity=turn_state_owned,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        forwarded_request=not turn_state_owned,
+        forwarded_original_request_unanchored=not turn_state_owned,
+        forwarded_affinity_kind=fork_key.affinity_kind if not turn_state_owned else None,
+        forwarded_affinity_key=fork_key.affinity_key if not turn_state_owned else None,
+    )
 
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
-    assert preferred_account_ids == ["acc-capped", None]
-    assert request_state.preferred_account_id is None
+    if turn_state_owned:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            async for _chunk in stream:
+                pass
+        assert exc_info.value is cap_error
+        assert preferred_account_ids == ["acc-capped"]
+        assert request_state.preferred_account_id == "acc-capped"
+    else:
+        chunks = [chunk async for chunk in stream]
+        assert chunks == ['data: {"type":"response.completed"}\n\n']
+        assert preferred_account_ids == ["acc-capped", None]
+        assert request_state.preferred_account_id is None

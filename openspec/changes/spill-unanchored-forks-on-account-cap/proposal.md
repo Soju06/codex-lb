@@ -7,7 +7,7 @@ Self-contained unanchored parallel forks have no continuity owner, but a preferr
 ## What Changes
 
 - When session creation rejects a self-contained `internal_unanchored_parallel` fork with a local account-cap error, drop its preferred-account hint once and retry selection.
-- Keep owner-bearing payloads pinned by requiring no previous response, conversation, or input file reference.
+- Keep owner-bearing requests pinned by requiring no previous response, conversation, input file reference, turn-state owner, or anchored forwarding context.
 - Record the retry with the stable `unanchored_fork_cap_spill` bridge event.
 
 ## Capabilities

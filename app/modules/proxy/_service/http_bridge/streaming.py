@@ -255,12 +255,14 @@ def _http_bridge_unanchored_fork_can_spill_on_cap(
     *,
     error_code: str | None,
     affinity_kind: str,
+    original_request_unanchored: bool,
     payload: ResponsesRequest,
     preferred_account_id: str | None,
 ) -> bool:
     return (
         _is_local_account_cap_code(error_code)
         and affinity_kind == "internal_unanchored_parallel"
+        and original_request_unanchored
         and preferred_account_id is not None
         and payload.previous_response_id is None
         and _request_allows_bare_session_cap_spillover(payload)
@@ -1330,6 +1332,7 @@ class _HTTPBridgeStreamingMixin:
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
                         error_code=exc_code,
                         affinity_kind=bridge_session_key.affinity_kind,
+                        original_request_unanchored=original_request_unanchored,
                         payload=effective_payload,
                         preferred_account_id=request_state.preferred_account_id,
                     ):

@@ -6,7 +6,7 @@ For `/v1/responses`, `/backend-api/codex/responses`, and compact Responses traff
 
 When an account is at either cap, new soft-affinity work MUST prefer another eligible account before returning local overload. A bare process-session mapping MAY supply soft locality only while the request is self-contained, pre-visible, and has no required owner. Account-cap spillover MUST be decided during account selection and MUST NOT switch an account after a request enters shared transport, replay, or durable bridge ownership. Hard-continuity work MUST remain on its required owner and MAY fail closed when that owner is saturated. Hard Codex ownership rows MUST bypass soft sticky fallback/reallocation so pressure cannot delete or rewrite them.
 
-An unanchored parallel fork bridge session whose payload is self-contained (no `previous_response_id`, no `conversation`, and no input file references) carries no continuity ownership. When its preferred account is rejected by a local account cap (`account_stream_cap` or `account_response_create_cap`) during session creation, the proxy MUST drop the preferred-account hint exactly once for that request and retry account selection among eligible accounts before entering the recoverable account-capacity wait. Payloads that carry any continuity owner signal MUST NOT spill and MUST keep the existing preferred-owner behavior.
+An unanchored parallel fork bridge session whose payload is self-contained (no `previous_response_id`, no `conversation`, and no input file references) and whose current request context has no turn-state owner or anchored forwarding provenance carries no continuity ownership. When its preferred account is rejected by a local account cap (`account_stream_cap` or `account_response_create_cap`) during session creation, the proxy MUST drop the preferred-account hint exactly once for that request and retry account selection among eligible accounts before entering the recoverable account-capacity wait. Requests that carry any continuity owner signal MUST NOT spill and MUST keep the existing preferred-owner behavior, even when durable alias lookup resolves to an `internal_unanchored_parallel` canonical key.
 
 #### Scenario: Soft work avoids saturated account
 
@@ -50,3 +50,10 @@ An unanchored parallel fork bridge session whose payload is self-contained (no `
 - **GIVEN** a parallel fork bridge session creation whose payload carries a `previous_response_id`
 - **WHEN** its preferred account is rejected with a local account cap
 - **THEN** the preferred-account hint is kept and the existing preferred-owner behavior applies
+
+#### Scenario: Turn-state aliases do not spill through an unanchored canonical key
+
+- **GIVEN** a request carries a turn-state alias whose durable row resolves to an `internal_unanchored_parallel` canonical key
+- **AND** that row has a latest turn state but no latest response ID
+- **WHEN** its owner account is rejected with a local account cap
+- **THEN** the preferred-account hint is kept and the request does not spill to another account

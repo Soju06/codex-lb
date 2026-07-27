@@ -29,6 +29,7 @@ from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
+    _record_api_key_assignment_cutover,
     _record_continuity_fail_closed,
     _record_upstream_transport_decision,
 )
@@ -60,7 +61,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import continuity_owner_unavailable_fields, resolve_required_account_id
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _is_account_model_unsupported_error,
@@ -78,6 +79,19 @@ _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT = "smart"
 _HTTP_DOWNSTREAM_TRANSPORT_POLICIES = frozenset({"smart", "always_http", "always_websocket", "pinned"})
 
 logger = logging.getLogger(__name__)
+
+
+def _cutover_owner_unavailable_fields(api_key: ApiKeyData | None) -> tuple[str, str]:
+    error_code, message = continuity_owner_unavailable_fields(api_key)
+    if error_code == "continuity_reset_required":
+        _record_api_key_assignment_cutover(
+            api_key=api_key,
+            affinity_source="continuity_owner",
+            sticky_kind=None,
+            hard_owner_required=True,
+            result="reset_required",
+        )
+    return error_code, message
 
 
 def _facade() -> Any:
@@ -833,7 +847,7 @@ class _StreamingRetryMixin:
                         account_ids=None,
                     )
                     if len(selection_inputs.accounts) != 1:
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code, message = _cutover_owner_unavailable_fields(api_key)
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -842,7 +856,7 @@ class _StreamingRetryMixin:
                             upstream_error_code="owner_lookup_miss",
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            error_code,
                             message,
                             response_id=request_id,
                         )
@@ -854,7 +868,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=error_code,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
@@ -1200,7 +1214,7 @@ class _StreamingRetryMixin:
                         )
                         return
                     if require_preferred_account and preferred_account_id is not None:
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code, message = _cutover_owner_unavailable_fields(api_key)
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1209,7 +1223,7 @@ class _StreamingRetryMixin:
                             upstream_error_code="no_accounts",
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            error_code,
                             message,
                             response_id=request_id,
                         )
@@ -1221,7 +1235,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=error_code,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
@@ -1333,7 +1347,7 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                     else:
-                        message = "Previous response owner account is unavailable; retry later."
+                        error_code, message = _cutover_owner_unavailable_fields(api_key)
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1342,7 +1356,7 @@ class _StreamingRetryMixin:
                             upstream_error_code="upstream_unavailable",
                         )
                         event = response_failed_event(
-                            "previous_response_owner_unavailable",
+                            error_code,
                             message,
                             response_id=request_id,
                         )
@@ -1354,7 +1368,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             status="error",
-                            error_code="previous_response_owner_unavailable",
+                            error_code=error_code,
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,

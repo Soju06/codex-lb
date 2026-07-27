@@ -51,7 +51,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import continuity_owner_unavailable_fields, resolve_required_account_id
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountConcurrencyCaps,
@@ -666,7 +666,15 @@ class _CompactMixin:
                     else None,
                 )
                 if len(selection_inputs.accounts) != 1:
-                    message = "Previous response owner account is unavailable; retry later."
+                    error_code, message = continuity_owner_unavailable_fields(api_key)
+                    if error_code == "continuity_reset_required":
+                        _service_global("_record_api_key_assignment_cutover")(
+                            api_key=api_key,
+                            affinity_source="continuity_owner",
+                            sticky_kind=None,
+                            hard_owner_required=True,
+                            result="reset_required",
+                        )
                     _record_continuity_fail_closed(
                         surface="compact",
                         reason="owner_account_unavailable",
@@ -677,7 +685,7 @@ class _CompactMixin:
                     raise ProxyResponseError(
                         502,
                         openai_error(
-                            "previous_response_owner_unavailable",
+                            error_code,
                             message,
                             error_type="server_error",
                         ),

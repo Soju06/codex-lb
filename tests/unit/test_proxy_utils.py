@@ -29998,6 +29998,58 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
 
 
 @pytest.mark.asyncio
+async def test_stream_cutover_owner_unavailable_returns_continuity_reset_required(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    request_logs.response_owner_by_id[("resp_cutover_owner", "key-cutover-stream", "sid-cutover-stream")] = (
+        "acc_retired_owner"
+    )
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = _make_api_key_data(
+        "key-cutover-stream",
+        account_assignment_generation=2,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=None, error_message="No active accounts available")),
+    )
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_cutover_owner",
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {"session_id": "sid-cutover-stream"},
+            api_key=api_key,
+        )
+    ]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "continuity_reset_required"
+    assert (
+        event["response"]["error"]["message"]
+        == "The previous upstream conversation is no longer available after the account-pool change."
+    )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["error_code"] == "continuity_reset_required"
+    assert request_logs.calls[0]["account_id"] == "acc_retired_owner"
+
+
+@pytest.mark.asyncio
 async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_selection(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -30054,6 +30106,50 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
             "value": 1.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_compact_cutover_missing_owner_returns_continuity_reset_required(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = _make_api_key_data(
+        "key-cutover-compact",
+        account_assignment_generation=2,
+    )
+    account_a = _make_account("acc_cutover_compact_a")
+    account_b = _make_account("acc_cutover_compact_b")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        AsyncMock(return_value=SimpleNamespace(accounts=[account_a, account_b])),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "summarize",
+            "input": [],
+            "previous_response_id": "resp_cutover_compact_missing",
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-cutover-compact"},
+            api_key=api_key,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "continuity_reset_required"
+    assert (
+        exc_info.value.payload["error"]["message"]
+        == "The previous upstream conversation is no longer available after the account-pool change."
+    )
 
 
 @pytest.mark.asyncio
@@ -32951,7 +33047,7 @@ async def test_http_bridge_close_and_terminal_cleanup_release_transferred_lease_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_client_disconnect_closes_generator_and_releases_all_request_pressure(monkeypatch):
+async def test_http_bridge_post_ack_cleanup_on_client_disconnect_releases_all_request_pressure(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_bridge_client_disconnect_cleanup")

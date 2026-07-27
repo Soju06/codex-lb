@@ -10,6 +10,10 @@ from app.core.errors import openai_error
 HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND = "internal_unanchored_parallel"
 HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX = "account-neutral-replay:v1:"
 HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS = frozenset({"prompt_cache", "session_header", "turn_state_header"})
+CONTINUITY_RESET_REQUIRED_CODE = "continuity_reset_required"
+CONTINUITY_RESET_REQUIRED_MESSAGE = (
+    "The previous upstream conversation is no longer available after the account-pool change."
+)
 _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS = frozenset(
     {
         "session_id",
@@ -38,6 +42,38 @@ def is_http_bridge_account_neutral_replay(*, kind: str, key: str) -> bool:
         kind == HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND
         and key.startswith(HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX)
         and len(key) > len(HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX)
+    )
+
+
+def api_key_assignment_cutover_active(api_key: object | None) -> bool:
+    """Return whether this key has crossed at least one assignment generation."""
+
+    if api_key is None:
+        return False
+    try:
+        generation = int(getattr(api_key, "account_assignment_generation", 1))
+    except (TypeError, ValueError):
+        return False
+    return generation > 1
+
+
+def continuity_owner_unavailable_fields(api_key: object | None) -> tuple[str, str]:
+    if api_key_assignment_cutover_active(api_key):
+        return CONTINUITY_RESET_REQUIRED_CODE, CONTINUITY_RESET_REQUIRED_MESSAGE
+    return (
+        "previous_response_owner_unavailable",
+        "Previous response owner account is unavailable; retry later.",
+    )
+
+
+def continuity_reset_required_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        502,
+        openai_error(
+            CONTINUITY_RESET_REQUIRED_CODE,
+            CONTINUITY_RESET_REQUIRED_MESSAGE,
+            error_type="server_error",
+        ),
     )
 
 

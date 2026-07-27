@@ -323,6 +323,7 @@ from app.modules.proxy._service.observability import _maybe_log_proxy_request_sh
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
+from app.modules.proxy._service.observability import _record_api_key_assignment_cutover
 from app.modules.proxy._service.observability import (
     _record_continuity_fail_closed as _record_continuity_fail_closed,
 )
@@ -1882,6 +1883,13 @@ class ProxyService(
                         concurrency_caps=concurrency_caps,
                     )
                     if preferred_selection.account is not None:
+                        _record_api_key_assignment_cutover(
+                            api_key=api_key,
+                            affinity_source=sticky_source,
+                            sticky_kind=sticky_kind,
+                            hard_owner_required=required_continuity_preferred_account,
+                            result=("hard_drain" if allow_required_owner_outside_account_ids else "new_pool"),
+                        )
                         logger.info(
                             "Selected preferred account request_id=%s kind=%s request_stage=%s account_id=%s",
                             request_id,
@@ -1891,6 +1899,14 @@ class ProxyService(
                         )
                         return preferred_selection
                     if not fallback_on_preferred_account_unavailable:
+                        if preferred_selection.error_code == "hard_affinity_saturated":
+                            _record_api_key_assignment_cutover(
+                                api_key=api_key,
+                                affinity_source=sticky_source,
+                                sticky_kind=sticky_kind,
+                                hard_owner_required=required_continuity_preferred_account,
+                                result="hard_saturated",
+                            )
                         logger.warning(
                             "Proxy preferred account unavailable request_id=%s kind=%s request_stage=%s "
                             "preferred_account_id=%s error_code=%s error=%s",
@@ -1949,6 +1965,22 @@ class ProxyService(
                         account=None,
                         error_message="No active accounts available",
                         error_code="no_accounts",
+                    )
+                if selection.account is not None:
+                    _record_api_key_assignment_cutover(
+                        api_key=api_key,
+                        affinity_source=sticky_source,
+                        sticky_kind=sticky_kind,
+                        hard_owner_required=False,
+                        result="new_pool",
+                    )
+                elif selection.error_code == "hard_affinity_saturated":
+                    _record_api_key_assignment_cutover(
+                        api_key=api_key,
+                        affinity_source=sticky_source,
+                        sticky_kind=sticky_kind,
+                        hard_owner_required=required_continuity_preferred_account,
+                        result="hard_saturated",
                     )
                 logger.info(
                     "Proxy account selection result request_id=%s kind=%s request_stage=%s model=%s "
@@ -2166,6 +2198,7 @@ _LOCAL_PROXY_ERROR_CODES = frozenset(
         "bridge_owner_unreachable",
         "preferred_account_unavailable",
         "previous_response_owner_unavailable",
+        "continuity_reset_required",
         "insufficient_image_quota",
         "ip_forbidden",
         "no_accounts",

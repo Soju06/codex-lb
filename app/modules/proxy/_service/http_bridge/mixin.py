@@ -217,7 +217,11 @@ from app.modules.proxy.continuity import (
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
 )
-from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, AccountLease
+from app.modules.proxy.load_balancer import (
+    CONTINUITY_OWNER_POLICY_CONFLICT,
+    CONTINUITY_OWNER_UNAVAILABLE,
+    AccountLease,
+)
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -1799,7 +1803,11 @@ class _HTTPBridgeMixin(
                     require_preferred_account
                     and preferred_account_id is not None
                     and preferred_account_is_continuity_owner
-                    and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE
+                    and selection.error_code
+                    in {
+                        CONTINUITY_OWNER_POLICY_CONFLICT,
+                        CONTINUITY_OWNER_UNAVAILABLE,
+                    }
                 ):
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 status_code = 429 if is_local_account_cap else 503

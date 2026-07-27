@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.clients.proxy import UpstreamProxyRouteTrace
 from app.db.models import Base, RequestLog
+from app.modules.proxy._service.observability import _assignment_cutover_log_fields
 from app.modules.proxy.service import (
     _record_websocket_route_metadata,
     _websocket_route_log_kwargs,
@@ -98,3 +99,27 @@ def test_route_trace_records_explicit_direct_egress_for_auditability() -> None:
     assert trace.pool_id is None
     assert trace.endpoint_id is None
     assert trace.fallback_used is None
+
+
+def test_assignment_cutover_observability_fields_are_bounded_and_secret_free() -> None:
+    api_key = SimpleNamespace(id="key-observability", account_assignment_generation=7)
+
+    fields = _assignment_cutover_log_fields(
+        api_key=api_key,
+        affinity_source="session_header",
+        sticky_kind="codex_session",
+        hard_owner_required=False,
+        result="new_pool",
+    )
+
+    assert fields == {
+        "api_key_id": "key-observability",
+        "api_key_assignment_generation": 7,
+        "affinity_source": "session_header",
+        "affinity_strength": "soft",
+        "assignment_cutover_result": "new_pool",
+    }
+    serialized = repr(fields)
+    assert "raw-session-value" not in serialized
+    assert "prompt-cache-secret" not in serialized
+    assert "previous-response-secret" not in serialized

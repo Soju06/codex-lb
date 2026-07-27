@@ -256,6 +256,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
+from app.modules.proxy._service.observability import _record_api_key_assignment_cutover
 from app.modules.proxy._service.observability import (
     _record_continuity_fail_closed as _record_continuity_fail_closed,
 )
@@ -380,6 +381,7 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.continuity import continuity_owner_unavailable_fields
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -488,6 +490,7 @@ def _rewrite_previous_response_stream_error(
     error_type: str | None,
     error_message: str | None,
     error_param: str | None,
+    api_key: object | None = None,
 ) -> tuple[str, str, str | None] | None:
     if previous_response_id is None:
         return None
@@ -531,11 +534,16 @@ def _rewrite_previous_response_stream_error(
             previous_response_id=previous_response_id,
             upstream_error_code=normalized_code,
         )
-        return (
-            "previous_response_owner_unavailable",
-            "Previous response owner account is unavailable; retry later.",
-            normalized_code,
-        )
+        rewritten_code, rewritten_message = continuity_owner_unavailable_fields(api_key)
+        if rewritten_code == "continuity_reset_required":
+            _record_api_key_assignment_cutover(
+                api_key=api_key,
+                affinity_source="continuity_owner",
+                sticky_kind=None,
+                hard_owner_required=True,
+                result="reset_required",
+            )
+        return rewritten_code, rewritten_message, normalized_code
     return None
 
 

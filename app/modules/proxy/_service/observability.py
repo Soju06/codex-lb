@@ -10,6 +10,7 @@ from typing import Any, Callable, cast
 from app.core.config.settings import get_settings
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
+    api_key_assignment_cutover_total,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
     upstream_transport_decisions_total,
@@ -25,6 +26,7 @@ from app.modules.proxy.affinity import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+_ASSIGNMENT_CUTOVER_RESULTS = frozenset({"new_pool", "hard_drain", "reset_required", "hard_saturated"})
 
 
 def _service_global(name: str, fallback: Any) -> Any:
@@ -36,6 +38,78 @@ def _service_global(name: str, fallback: Any) -> Any:
 
 def _service_get_settings() -> Any:
     return cast(Callable[[], Any], _service_global("get_settings", get_settings))()
+
+
+def _assignment_cutover_log_fields(
+    *,
+    api_key: object,
+    affinity_source: str | None,
+    sticky_kind: object | None,
+    hard_owner_required: bool,
+    result: str,
+) -> dict[str, object]:
+    if result not in _ASSIGNMENT_CUTOVER_RESULTS:
+        raise ValueError(f"Unsupported assignment cutover result: {result}")
+    generation = max(1, int(getattr(api_key, "account_assignment_generation", 1)))
+    normalized_kind = getattr(sticky_kind, "value", sticky_kind)
+    if hard_owner_required:
+        source = "continuity_owner"
+        strength = "hard"
+    elif affinity_source == "turn_state":
+        source = affinity_source
+        strength = "hard"
+    elif affinity_source == "session_header" or normalized_kind in {"prompt_cache", "sticky_thread"}:
+        source = affinity_source or str(normalized_kind)
+        strength = "soft"
+    elif affinity_source is not None or normalized_kind is not None:
+        source = affinity_source or str(normalized_kind)
+        strength = "hard"
+    else:
+        source = "none"
+        strength = "none"
+    return {
+        "api_key_id": str(getattr(api_key, "id")),
+        "api_key_assignment_generation": generation,
+        "affinity_source": source,
+        "affinity_strength": strength,
+        "assignment_cutover_result": result,
+    }
+
+
+def _record_api_key_assignment_cutover(
+    *,
+    api_key: object | None,
+    affinity_source: str | None,
+    sticky_kind: object | None,
+    hard_owner_required: bool,
+    result: str,
+) -> None:
+    if api_key is None or int(getattr(api_key, "account_assignment_generation", 1)) <= 1:
+        return
+    fields = _assignment_cutover_log_fields(
+        api_key=api_key,
+        affinity_source=affinity_source,
+        sticky_kind=sticky_kind,
+        hard_owner_required=hard_owner_required,
+        result=result,
+    )
+    prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
+    counter = _service_global("api_key_assignment_cutover_total", api_key_assignment_cutover_total)
+    if prometheus_available and counter is not None:
+        counter.labels(
+            result=str(fields["assignment_cutover_result"]),
+            affinity_source=str(fields["affinity_source"]),
+            affinity_strength=str(fields["affinity_strength"]),
+        ).inc()
+    logger.info(
+        "api_key_assignment_cutover api_key_id=%s api_key_assignment_generation=%s "
+        "affinity_source=%s affinity_strength=%s assignment_cutover_result=%s",
+        fields["api_key_id"],
+        fields["api_key_assignment_generation"],
+        fields["affinity_source"],
+        fields["affinity_strength"],
+        fields["assignment_cutover_result"],
+    )
 
 
 def _record_upstream_transport_decision(

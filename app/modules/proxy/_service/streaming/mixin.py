@@ -665,6 +665,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_type=raw_error_type,
                     error_message=raw_error_message,
                     error_param=raw_error_param,
+                    api_key=api_key,
                 )
                 status = "error"
                 if not (preserve_raw_sse_line and error is None):
@@ -843,6 +844,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             error_type=error.type if error else None,
                             error_message=error.message if error else None,
                             error_param=error.param if error else None,
+                            api_key=api_key,
                         )
                         if rewritten_error is not None:
                             response_id = (
@@ -957,6 +959,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 error_type=error.type if error else None,
                 error_message=error.message if error else None,
                 error_param=error.param if error else None,
+                api_key=api_key,
             )
             if rewritten_error is not None:
                 rewritten_code, rewritten_message, upstream_error_code = rewritten_error

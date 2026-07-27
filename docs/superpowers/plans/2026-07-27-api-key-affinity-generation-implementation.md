@@ -316,7 +316,7 @@ Expected: both files pass.
 - Modify: `tests/unit/test_proxy_http_bridge.py`
 - Modify: `tests/integration/test_http_responses_bridge.py`
 
-- [ ] Add failing tests proving:
+- [x] Add failing tests proving:
 
   - a portable pre-ack request may replay at most once on an in-pool account;
   - any request with `previous_response_id`, real turn state, file ownership, or post-ack side effects never crosses accounts;
@@ -324,13 +324,13 @@ Expected: both files pass.
   - `hard_affinity_saturated` is reserved for a healthy hard owner whose concurrency is genuinely exhausted;
   - client disconnect clears the bridge generator, pending request, response-create lease, stream lease, and gate.
 
-- [ ] Run the focused tests and confirm red.
+- [x] Run the focused tests and confirm red.
 
 ```powershell
 uv run pytest -q tests/unit/test_proxy_utils.py tests/unit/test_proxy_http_bridge.py tests/integration/test_http_responses_bridge.py -k "continuity_reset_required or portable_replay or post_ack_cleanup"
 ```
 
-- [ ] Keep replay decisions in the owning request surface. Add a single-attempt pre-ack guard and translate owner failures without stripping hard references:
+- [x] Keep replay decisions in the owning request surface. Add a single-attempt pre-ack guard and translate owner failures without stripping hard references:
 
 ```python
 if hard_owner_required and owner_unavailable:
@@ -344,9 +344,9 @@ if hard_owner_required and owner_unavailable:
     )
 ```
 
-- [ ] Preserve the previously restored five-second silent-bridge quarantine and HTTP fallback behavior. Current requests must not be replayed after `response.create` may have reached upstream.
+- [x] Preserve the previously restored five-second silent-bridge quarantine and HTTP fallback behavior. Current requests must not be replayed after `response.create` may have reached upstream.
 
-- [ ] Re-run the focused files.
+- [x] Re-run the focused files.
 
 ```powershell
 uv run pytest -q tests/unit/test_proxy_utils.py tests/unit/test_proxy_http_bridge.py tests/integration/test_http_responses_bridge.py
@@ -365,7 +365,7 @@ Expected: all three files pass.
 - Modify: `tests/unit/test_request_log_upstream_proxy_metadata.py`
 - Modify: `tests/unit/test_proxy_http_bridge.py`
 
-- [ ] Add failing tests for structured fields and counters:
+- [x] Add failing tests for structured fields and counters:
 
   - `api_key_assignment_generation`;
   - `affinity_source`;
@@ -373,15 +373,15 @@ Expected: all three files pass.
   - `assignment_cutover_result` with `new_pool`, `hard_drain`, `reset_required`, or `hard_saturated`;
   - no raw session header, prompt-cache key, turn state, or previous-response ID.
 
-- [ ] Run the focused tests and confirm red.
+- [x] Run the focused tests and confirm red.
 
 ```powershell
 uv run pytest -q tests/unit/test_metrics.py tests/unit/test_request_log_upstream_proxy_metadata.py tests/unit/test_proxy_http_bridge.py -k "assignment_cutover_observability"
 ```
 
-- [ ] Emit bounded labels and hashed/redacted identifiers only. Reuse existing request logging and metric helpers instead of creating a parallel telemetry subsystem.
+- [x] Emit bounded labels and hashed/redacted identifiers only. Reuse existing request logging and metric helpers instead of creating a parallel telemetry subsystem.
 
-- [ ] Re-run the focused tests.
+- [x] Re-run the focused tests.
 
 ```powershell
 uv run pytest -q tests/unit/test_metrics.py tests/unit/test_request_log_upstream_proxy_metadata.py tests/unit/test_proxy_http_bridge.py
@@ -397,9 +397,9 @@ Expected: both files pass.
 - Modify if required: `README.md`
 - Verify: all changed Python files and relevant test suites
 
-- [ ] Document `CODEX_LB_API_KEY_ACCOUNT_ASSIGNMENT_DRAIN_SECONDS=1800` in the existing configuration reference if that reference enumerates affinity settings.
+- [x] Document `CODEX_LB_API_KEY_ACCOUNT_ASSIGNMENT_DRAIN_SECONDS=1800` in the existing configuration reference if that reference enumerates affinity settings.
 
-- [ ] Run formatting, lint, type checking, migration checks, architecture checks, and the complete related test matrix.
+- [x] Run formatting, lint, type checking, migration checks, architecture checks, and the complete related test matrix.
 
 ```powershell
 uv run ruff format --check app tests
@@ -412,13 +412,13 @@ git diff --check
 
 Expected: every command exits `0`.
 
-- [ ] Start only the isolated candidate on `127.0.0.1:2456` using a verified copy of the production SQLite database and the production encryption key. Do not stop or modify port `2455`.
+- [x] Start only the isolated candidate on `127.0.0.1:2456` using a verified copy of the production SQLite database and the production encryption key. Do not stop or modify port `2455`.
 
 ```powershell
 .\start-codex-lb.ps1 -RepoRoot 'F:\agent workspace\codex-lb\repo-upstream-migration' -BindHost 127.0.0.1 -Port 2456 -SkipStopExisting -SkipCodex56ToolsProxy
 ```
 
-- [ ] Verify:
+- [x] Verify:
 
   - `/health/live` returns `200`;
   - `/dashboard` returns HTML `200`;
@@ -430,9 +430,9 @@ Expected: every command exits `0`.
   - an unavailable hard owner fails in seconds, not minutes;
   - no raw session or continuity values appear in logs.
 
-- [ ] Stop the isolated `2456` process and confirm production `2455` remained healthy throughout.
+- [x] Stop the isolated `2456` process and confirm production `2455` remained healthy throughout.
 
-- [ ] Run the final diff and worktree review. Exclude `.codegraph/` and `.temp-untracked-backup/` from commits.
+- [x] Run the final diff and worktree review. Exclude `.codegraph/` and `.temp-untracked-backup/` from commits.
 
 ```powershell
 git status --short --branch

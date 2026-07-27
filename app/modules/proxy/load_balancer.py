@@ -444,11 +444,16 @@ class LoadBalancer:
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
 
         async def load_selection_inputs() -> _SelectionInputs:
+            owner_account_ids = (
+                {required_account_id}
+                if required_owner_outside_scope and required_account_id is not None
+                else scoped_account_ids
+            )
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
-                account_ids={required_account_id} if required_owner_outside_scope else scoped_account_ids,
+                account_ids=owner_account_ids,
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even

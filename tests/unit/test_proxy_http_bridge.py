@@ -105,6 +105,44 @@ def _make_bridge_session(
     )
 
 
+def test_http_bridge_assignment_cutover_observability_records_reset_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = _make_api_key(
+        key_id="key-cutover-reset-observability",
+        assigned_account_ids=["acc-current"],
+        account_assignment_generation=2,
+        account_assignment_changed_at=datetime.now(timezone.utc),
+    )
+    recorder = Mock()
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_record_api_key_assignment_cutover",
+        recorder,
+    )
+    owner_unavailable = ProxyResponseError(
+        502,
+        openai_error(
+            "previous_response_owner_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+        ),
+    )
+
+    translated = http_bridge_streaming_module._http_bridge_cutover_owner_error(
+        owner_unavailable,
+        api_key=api_key,
+    )
+
+    assert translated.payload["error"]["code"] == "continuity_reset_required"
+    recorder.assert_called_once_with(
+        api_key=api_key,
+        affinity_source="continuity_owner",
+        sticky_kind=None,
+        hard_owner_required=True,
+        result="reset_required",
+    )
+
+
 def _make_eventless_http_bridge_owner(
     *,
     request_id: str = "req-eventless-owner",
@@ -5004,6 +5042,56 @@ async def test_select_account_with_budget_does_not_bypass_scope_after_assignment
     selection_call = select_account.await_args
     assert selection_call is not None
     assert selection_call.kwargs["allow_required_owner_outside_account_ids"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_maps_expired_owner_scope_conflict_to_owner_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    selection = proxy_service.AccountSelection(
+        account=None,
+        error_message="Required continuity owner is outside the eligible account policy",
+        error_code="continuity_owner_policy_conflict",
+    )
+    select_account = AsyncMock(return_value=selection)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    prefer_earlier_reset_window="primary",
+                    routing_strategy="usage_weighted",
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-expired-owner", "key-1"),
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="sid-expired-owner"),
+            api_key=_make_api_key(
+                key_id="key-1",
+                assigned_account_ids=["acc-new"],
+                account_assignment_generation=2,
+                account_assignment_changed_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            ),
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            request_stage="reattach",
+            preferred_account_id="acc-old",
+            require_preferred_account=True,
+            preferred_account_is_continuity_owner=True,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
 
 
 @pytest.mark.asyncio
@@ -16633,7 +16721,7 @@ async def test_get_or_create_http_bridge_session_soft_continuity_owner_blocks_st
         ("hard_affinity_saturated", True, 503, "hard_affinity_saturated"),
         ("account_stream_cap", True, 429, "account_stream_cap"),
         ("account_response_create_cap", True, 429, "account_response_create_cap"),
-        ("continuity_owner_policy_conflict", True, 503, "continuity_owner_policy_conflict"),
+        ("continuity_owner_policy_conflict", True, 502, "previous_response_owner_unavailable"),
         ("conversation_owner_unavailable", True, 503, "conversation_owner_unavailable"),
     ],
 )
@@ -16915,6 +17003,87 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_cutover_previous_response_owner_allows_authoritative_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    api_key = _make_api_key(
+        key_id="key-cutover-authoritative-rebind",
+        assigned_account_ids=["acc-new"],
+        account_assignment_generation=2,
+        account_assignment_changed_at=datetime.now(timezone.utc),
+    )
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp-owned-before-cutover",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        }
+    )
+    owner_unavailable = ProxyResponseError(
+        502,
+        openai_error(
+            "previous_response_owner_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+        ),
+    )
+    get_or_create = AsyncMock(side_effect=owner_unavailable)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_http_bridge_local_owner_account_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acc-owner"),
+    )
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=api_key,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert exc_info.value.payload["error"]["code"] == "continuity_reset_required"
+    assert get_or_create.await_count == 1
+    call = get_or_create.await_args
+    assert call is not None
+    assert call.kwargs["preferred_account_id"] == "acc-owner"
+    assert call.kwargs["preferred_account_has_continuity_provenance"] is True
+    assert call.kwargs["allow_previous_response_recovery_rebind"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("unsafe_replay_input", "replace_retired_gate", "stored_model"),
     [
@@ -16928,13 +17097,19 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         ("missing_owner", False, None),
     ],
 )
-async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_when_owner_is_unavailable(
+async def test_http_bridge_cutover_portable_replay_projects_plaintext_durable_full_resend_once(
     monkeypatch: pytest.MonkeyPatch,
     unsafe_replay_input: str | None,
     replace_retired_gate: bool,
     stored_model: str | None,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    api_key = _make_api_key(
+        key_id="key-cutover-portable-replay",
+        assigned_account_ids=["acc-fallback"],
+        account_assignment_generation=2,
+        account_assignment_changed_at=datetime.now(timezone.utc),
+    )
     account_neutral_classifier = Mock(
         wraps=http_bridge_streaming_module._http_bridge_payload_is_account_neutral_fresh_replay
     )
@@ -17040,7 +17215,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         session_id="durable-owner-unavailable",
         canonical_kind="session_header",
         canonical_key="sid-owner-unavailable",
-        api_key_scope="__anonymous__",
+        api_key_scope=api_key.id,
         account_id=None if unsafe_replay_input == "missing_owner" else "acc-owner",
         owner_instance_id=None,
         owner_epoch=1,
@@ -17160,7 +17335,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         codex_session_affinity=True,
         propagate_http_errors=True,
         openai_cache_affinity=True,
-        api_key=None,
+        api_key=api_key,
         api_key_reservation=None,
         suppress_text_done_events=False,
         idle_ttl_seconds=120.0,
@@ -17176,9 +17351,10 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
 
         if unsafe_replay_input == "missing_owner":
             assert exc_info.value.status_code == 502
-            assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+            assert exc_info.value.payload["error"]["code"] == "continuity_reset_required"
         else:
-            assert exc_info.value is owner_unavailable
+            assert exc_info.value.status_code == 502
+            assert exc_info.value.payload["error"]["code"] == "continuity_reset_required"
         assert get_or_create.await_count == (0 if unsafe_replay_input == "missing_owner" else 1)
         if unsafe_replay_input == "conversation":
             last_call = get_or_create.await_args
@@ -17209,6 +17385,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     )
     assert second_call.args[0] == third_call.args[0]
     assert second_call.args[0] != first_call.args[0]
+    assert second_call.kwargs["api_key"] is api_key
     assert second_call.kwargs["affinity"] == proxy_service._AffinityPolicy()
     assert second_call.kwargs["session_header_fallback_key"] is None
     assert second_call.kwargs["exclude_account_ids"] == {"acc-owner"}

@@ -140,6 +140,12 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert prometheus_module.continuity_owner_resolution_total.labelnames == ("surface", "source", "outcome")
     assert prometheus_module.continuity_fail_closed_total.name == "codex_lb_continuity_fail_closed_total"
     assert prometheus_module.continuity_fail_closed_total.labelnames == ("surface", "reason")
+    assert prometheus_module.api_key_assignment_cutover_total.name == "codex_lb_api_key_assignment_cutover_total"
+    assert prometheus_module.api_key_assignment_cutover_total.labelnames == (
+        "result",
+        "affinity_source",
+        "affinity_strength",
+    )
     assert prometheus_module.account_inflight_leases.name == "codex_lb_account_inflight_leases"
     assert prometheus_module.account_inflight_leases.labelnames == ("account_id", "kind")
     assert prometheus_module.image_requests_total.name == "codex_lb_image_requests_total"
@@ -158,6 +164,19 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
         "status",
         "outcome",
     )
+
+
+def test_assignment_cutover_observability_metric_uses_only_bounded_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prometheus_module, _ = _load_metrics_modules(
+        monkeypatch,
+        prometheus_client_module=_fake_prometheus_client_module(),
+    )
+
+    metric = prometheus_module.api_key_assignment_cutover_total
+    assert metric.name == "codex_lb_api_key_assignment_cutover_total"
+    assert metric.labelnames == ("result", "affinity_source", "affinity_strength")
 
 
 def test_cap_partition_replicas_gauge_uses_livemax_in_multiprocess_mode(

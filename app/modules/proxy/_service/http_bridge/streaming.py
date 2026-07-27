@@ -133,6 +133,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
 )
+from app.modules.proxy._service.observability import _record_api_key_assignment_cutover
 from app.modules.proxy._service.observability import (
     _tools_hash as _tools_hash,
 )
@@ -197,6 +198,8 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
+    api_key_assignment_cutover_active,
+    continuity_reset_required_error,
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
     resolve_required_account_id,
@@ -214,6 +217,25 @@ from app.modules.proxy.replay_safety import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
+
+
+def _http_bridge_cutover_owner_error(
+    exc: ProxyResponseError,
+    *,
+    api_key: ApiKeyData | None,
+) -> ProxyResponseError:
+    if api_key_assignment_cutover_active(api_key) and _http_bridge_is_previous_response_owner_unavailable(exc):
+        _record_api_key_assignment_cutover(
+            api_key=api_key,
+            affinity_source="continuity_owner",
+            sticky_kind=None,
+            hard_owner_required=True,
+            result="reset_required",
+        )
+        return continuity_reset_required_error()
+    return exc
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
@@ -1001,13 +1023,14 @@ class _HTTPBridgeStreamingMixin:
                     )
                 )
                 if durable_lookup_requires_owner and durable_lookup.account_id is None:
-                    raise ProxyResponseError(
+                    owner_unavailable = ProxyResponseError(
                         502,
                         openai_error(
                             "previous_response_owner_unavailable",
                             "Previous response owner account is unavailable; retry later.",
                         ),
                     )
+                    raise _http_bridge_cutover_owner_error(owner_unavailable, api_key=api_key)
                 async for line in stream_quarantined_request_via_http(
                     quarantined_bridge_session_key,
                     remaining_seconds=quarantine_remaining_seconds,
@@ -1068,13 +1091,14 @@ class _HTTPBridgeStreamingMixin:
                 else None
             )
             if durable_model_transition_requires_owner and model_transition_owner_account_id is None:
-                raise ProxyResponseError(
+                owner_unavailable = ProxyResponseError(
                     502,
                     openai_error(
                         "previous_response_owner_unavailable",
                         "Previous response owner account is unavailable; retry later.",
                     ),
                 )
+                raise _http_bridge_cutover_owner_error(owner_unavailable, api_key=api_key)
             async for line in stream_quarantined_request_via_http(
                 quarantined_bridge_session_key,
                 remaining_seconds=quarantine_remaining_seconds,
@@ -1342,7 +1366,7 @@ class _HTTPBridgeStreamingMixin:
                 session_id=request_state.session_id,
                 upstream_error_code="owner_lookup_miss",
             )
-            raise owner_unavailable
+            raise _http_bridge_cutover_owner_error(owner_unavailable, api_key=api_key)
 
         while True:
             try:
@@ -1373,6 +1397,9 @@ class _HTTPBridgeStreamingMixin:
                     request_stage=request_state.request_stage,
                     preferred_account_id=request_state.preferred_account_id,
                     preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
+                    allow_previous_response_recovery_rebind=bool(
+                        request_state.previous_response_id and preferred_account_has_continuity_provenance
+                    ),
                     fallback_on_preferred_account_unavailable=not file_required_preferred_account,
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
@@ -1403,7 +1430,10 @@ class _HTTPBridgeStreamingMixin:
                         if _service_time().monotonic() >= request_deadline:
                             raise
                         continue
-                    raise
+                    translated = _http_bridge_cutover_owner_error(exc, api_key=api_key)
+                    if translated is exc:
+                        raise
+                    raise translated from exc
                 switch_to_account_neutral_replay()
                 continue
             break
@@ -1504,7 +1534,10 @@ class _HTTPBridgeStreamingMixin:
                     and not should_attempt_bootstrap_rebind
                     and not should_attempt_turn_state_takeover
                 ):
-                    raise
+                    translated = _http_bridge_cutover_owner_error(exc, api_key=api_key)
+                    if translated is exc:
+                        raise
+                    raise translated from exc
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     if owner_forward_fresh_replay:
                         recover_path = "owner_forward_fresh_replay"
@@ -1588,7 +1621,10 @@ class _HTTPBridgeStreamingMixin:
                             continue
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
                         if wait_plan is None:
-                            raise
+                            translated = _http_bridge_cutover_owner_error(capacity_exc, api_key=api_key)
+                            if translated is capacity_exc:
+                                raise
+                            raise translated from capacity_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before retrying HTTP bridge recovery session creation "

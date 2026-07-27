@@ -19,7 +19,8 @@ eligible `requested_at` for the last request.
 ## Frontend presentation
 
 The frontend SHALL calculate the elapsed wall-clock duration as
-`lastRequest - firstRequest`. It SHALL display `0m` for zero duration, `xh ym`
+`lastRequest - firstRequest`. It SHALL display `0s` for zero duration, seconds
+for durations under one minute, `xm ys` for durations under one hour, `xh ym`
 for durations under one day, and `xd yh` for durations of at least one day.
 Conversation-ID cells SHALL be top-aligned so wrapped IDs remain readable.
 

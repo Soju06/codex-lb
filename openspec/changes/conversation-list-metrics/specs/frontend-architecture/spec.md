@@ -25,8 +25,9 @@ in that conversation, and `firstRequest` SHALL be the earliest eligible
 
 The dashboard SHALL render columns in this order: Last request, Lasted,
 Conversation, Accounts, API key, Models, Requests, Tokens, Cost, Details.
-The Lasted value SHALL use `lastRequest - firstRequest`, displaying `0m` for
-zero duration, `xh ym` for durations under one day, and `xd yh` for durations
+The Lasted value SHALL use `lastRequest - firstRequest`, displaying `0s` for
+zero duration, seconds for durations under one minute, `xm ys` for durations
+under one hour, `xh ym` for durations under one day, and `xd yh` for durations
 of at least one day. The conversation-ID cell SHALL be top-aligned.
 
 #### Scenario: Duration uses two units and preserves zero
@@ -36,4 +37,4 @@ of at least one day. The conversation-ID cell SHALL be top-aligned.
 - **WHEN** a row spans 2 days and 3 hours
 - **THEN** Lasted displays `2d 3h`
 - **WHEN** firstRequest equals lastRequest
-- **THEN** Lasted displays `0m`
+- **THEN** Lasted displays `0s`

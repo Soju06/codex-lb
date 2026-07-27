@@ -1,6 +1,5 @@
-from typing import cast
-
 from datetime import datetime, timedelta
+from typing import cast
 
 from app.core.utils.time import utcnow
 from app.modules.dashboard.builders import _OVERVIEW_TIMEFRAME_CONFIGS

@@ -735,8 +735,13 @@ def _build_upstream_headers(
     access_token: str,
     account_id: str | None,
     accept: str = "text/event-stream",
+    *,
+    preserve_client_session_identity: bool = True,
 ) -> dict[str, str]:
-    headers = filter_inbound_headers(inbound, preserve_client_session_identity=False)
+    headers = filter_inbound_headers(
+        inbound,
+        preserve_client_session_identity=preserve_client_session_identity,
+    )
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
@@ -2789,7 +2794,12 @@ async def _stream_responses_with_session(
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
         method = "GET"
     else:
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(
+            headers,
+            access_token,
+            account_id,
+            preserve_client_session_identity=False,
+        )
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
         method = "POST"
     upstream_headers = apply_codex_installation_headers(upstream_headers, codex_installation_id)
@@ -3057,7 +3067,12 @@ async def _stream_responses_with_session(
         transport = "http"
         payload_dict = http_payload_dict
         payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(
+            headers,
+            access_token,
+            account_id,
+            preserve_client_session_identity=False,
+        )
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
         upstream_headers = apply_codex_installation_headers(upstream_headers, codex_installation_id)
         method = "POST"
@@ -3595,6 +3610,7 @@ class _CompactCommandTransport:
             self.access_token,
             upstream_account_id,
             accept="application/json",
+            preserve_client_session_identity=False,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)

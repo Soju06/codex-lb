@@ -282,7 +282,7 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
         method="GET",
         payload=None,
         query_params={"limit": "1"},
-        headers={"accept": "application/json"},
+        headers={"accept": "application/json", "x-session-id": "control-session"},
         access_token="access",
         account_id="chatgpt_account",
         base_url="https://chatgpt.test",
@@ -295,6 +295,7 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
     assert response.body == b'{"ok": true}'
     assert client.calls[0]["url"] == "https://chatgpt.test/codex/sessions"
     assert client.calls[0]["route"] is route
+    assert client.calls[0]["headers"]["x-session-id"] == "control-session"
     assert trace.endpoint_id == "ep_1"
 
 

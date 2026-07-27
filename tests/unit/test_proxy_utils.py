@@ -1367,7 +1367,12 @@ def test_build_upstream_headers_strips_preserved_client_session_identity() -> No
         }
     )
 
-    headers = _build_upstream_headers(preserved, "token", "acc_2")
+    headers = _build_upstream_headers(
+        preserved,
+        "token",
+        "acc_2",
+        preserve_client_session_identity=False,
+    )
 
     lower_keys = {key.lower() for key in headers}
     assert "x-session-affinity" not in lower_keys

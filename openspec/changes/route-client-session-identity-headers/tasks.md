@@ -11,6 +11,7 @@
 - [x] 2.1 Strip the new headers in the account-neutral replay header filter.
 - [x] 2.2 Strip client session identity at Responses upstream egress only; internal filters preserve the headers so request-log conversation metadata and session affinity still observe them, while non-Responses protocol metadata remains unchanged.
 - [x] 2.3 Make generic inbound filtering preserve client identity by default; only Responses HTTP and WebSocket egress opt into stripping.
+- [x] 2.4 Keep the shared HTTP header builder preserving identity by default; Responses and compact callers explicitly opt into stripping.
 
 ## 3. One-shot side-call bypass
 

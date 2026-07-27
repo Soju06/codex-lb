@@ -156,3 +156,10 @@
 - [x] 9.4 Apply the shared eligible-row scope to dashboard conversation summary
   and trend aggregates, including soft-delete exclusion, and add an integration
   regression proving list and overview conversation counts agree.
+
+## 10. Review Follow-up: Preserve Conversation Pagination On Empty Pages
+
+- [x] 10.1 Keep pagination controls visible when a nonzero Conversations page
+  becomes empty, while preserving the established controls-free empty state at
+  offset zero; add a focused frontend regression test and validate the updated
+  OpenSpec change.

@@ -71,13 +71,37 @@ export function ConversationTable({
     return ids;
   }, [accounts]);
 
-  if (conversations.length === 0) {
-    return (
-      <EmptyState
-        icon={Inbox}
-        title={t("dashboard.conversations.emptyTitle")}
-        description={t("dashboard.conversations.emptyDescription")}
+  const emptyState = (
+    <EmptyState
+      icon={Inbox}
+      title={t("dashboard.conversations.emptyTitle")}
+      description={t("dashboard.conversations.emptyDescription")}
+    />
+  );
+
+  const paginationControls = (
+    <div className="flex justify-end">
+      <PaginationControls
+        total={total}
+        limit={limit}
+        offset={offset}
+        hasMore={hasMore}
+        onLimitChange={onLimitChange}
+        onOffsetChange={onOffsetChange}
       />
+    </div>
+  );
+
+  if (conversations.length === 0) {
+    if (offset === 0) {
+      return emptyState;
+    }
+
+    return (
+      <div className="space-y-3">
+        {emptyState}
+        {paginationControls}
+      </div>
     );
   }
 
@@ -180,16 +204,7 @@ export function ConversationTable({
           </Table>
         </div>
       </div>
-      <div className="flex justify-end">
-        <PaginationControls
-          total={total}
-          limit={limit}
-          offset={offset}
-          hasMore={hasMore}
-          onLimitChange={onLimitChange}
-          onOffsetChange={onOffsetChange}
-        />
-      </div>
+      {paginationControls}
     </div>
   );
 }

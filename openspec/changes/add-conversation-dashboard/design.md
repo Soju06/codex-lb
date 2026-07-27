@@ -137,6 +137,11 @@ cost. It starts at Reqs descending; every displayed column is sortable
 client-side over the single returned page. Conversation ID remains visible but
 does not render a copy action.
 
+An empty result on the initial Conversations page retains the established empty
+state without pagination controls. If a later page becomes empty because the
+rolling window changes or rows are removed, the empty state is shown together
+with pagination controls so the operator can return to an earlier page.
+
 ## Verification Decisions
 
 - Backend coverage targets the new API routes rather than only helper methods:
@@ -159,7 +164,8 @@ does not render a copy action.
   reordered list columns, shared request-log time presentation, human-readable
   account labels, subordinate cached tokens, absence of the conversation-ID copy
   action, detail loading/error/retry behavior, nullable aggregate fallbacks,
-  empty state, detail layout, and client-side-only sorting.
+  empty state, retained pagination controls for an empty later conversation
+  page, detail layout, and client-side-only sorting.
 - OpenSpec validation and whitespace validation must pass before this change is
   considered ready. Main capability specs are not synchronized by this change.
 

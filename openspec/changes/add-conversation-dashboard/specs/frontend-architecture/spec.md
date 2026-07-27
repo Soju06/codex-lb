@@ -360,6 +360,10 @@ standard detail API 404, MUST use the standard dashboard error display and retry
 behavior. Nullable optional aggregate values MUST render the established
 em-dash or other dashboard fallback value without breaking the row or dialog.
 An empty conversation list MUST render the established dashboard empty state.
+When an empty conversation list is returned for a nonzero pagination offset, the
+Conversations view MUST retain its pagination controls so the operator can
+navigate back to the first or previous page. The initial empty state at offset
+zero MUST NOT render pagination controls.
 
 #### Scenario: Request Logs is the default and selector switches views
 
@@ -452,6 +456,16 @@ An empty conversation list MUST render the established dashboard empty state.
 - **GIVEN** the conversation list response contains no rows
 - **WHEN** the operator opens the Conversations view
 - **THEN** the existing dashboard empty state is rendered
+
+#### Scenario: Empty later conversation pages retain pagination controls
+
+- **GIVEN** the operator is on a nonzero Conversations page and the list
+  response contains no rows
+- **WHEN** the Conversations view renders the response
+- **THEN** the existing dashboard empty state is rendered
+- **AND** pagination controls remain visible
+- **AND** the first-page and previous-page controls provide a path back to
+  earlier results
 
 #### Scenario: Details dialog has the approved layout and sorting
 

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { createAccountSummary, createConversationEntry } from "@/test/mocks/factories";
 import { ConversationTable } from "@/features/dashboard/components/conversation-table";
@@ -9,6 +10,57 @@ import { formatTimeLong } from "@/utils/formatters";
 describe("ConversationTable", () => {
   beforeEach(() => {
     usePrivacyStore.setState({ blurred: false });
+  });
+
+  it("keeps pagination controls when a later page becomes empty", async () => {
+    const user = userEvent.setup();
+    const onOffsetChange = vi.fn();
+
+    render(
+      <ConversationTable
+        conversations={[]}
+        accounts={[]}
+        total={0}
+        limit={25}
+        offset={25}
+        hasMore={false}
+        onLimitChange={vi.fn()}
+        onOffsetChange={onOffsetChange}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("No conversations yet")).toBeInTheDocument();
+
+    const firstPageButton = screen.getByRole("button", { name: "First page" });
+    const previousPageButton = screen.getByRole("button", { name: "Previous page" });
+    expect(firstPageButton).toBeEnabled();
+    expect(previousPageButton).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+
+    await user.click(firstPageButton);
+    await user.click(previousPageButton);
+    expect(onOffsetChange).toHaveBeenNthCalledWith(1, 0);
+    expect(onOffsetChange).toHaveBeenNthCalledWith(2, 0);
+  });
+
+  it("keeps the initial empty state free of pagination controls", () => {
+    render(
+      <ConversationTable
+        conversations={[]}
+        accounts={[]}
+        total={0}
+        limit={25}
+        offset={0}
+        hasMore={false}
+        onLimitChange={vi.fn()}
+        onOffsetChange={vi.fn()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("No conversations yet")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "First page" })).not.toBeInTheDocument();
   });
 
   it("blurs only email-derived account fallback labels", () => {

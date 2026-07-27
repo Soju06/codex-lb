@@ -1222,6 +1222,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "BrenticusMaximus",
+      "name": "BrenticusMaximus",
+      "avatar_url": "https://avatars.githubusercontent.com/u/32489248?v=4",
+      "profile": "https://github.com/BrenticusMaximus",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

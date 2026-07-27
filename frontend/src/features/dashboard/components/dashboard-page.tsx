@@ -2,10 +2,18 @@ import { useCallback, useEffect, useMemo } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { RefreshCw } from "lucide-react";
+import { Columns3, RefreshCw, RotateCcw } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
@@ -27,7 +35,9 @@ import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-cr
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
+import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { REQUEST_LOG_COLUMN_OPTIONS } from "@/features/dashboard/request-log-columns";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
@@ -48,6 +58,13 @@ const MODEL_OPTION_DELIMITER = ":::";
 
 export function DashboardPage() {
   const { t, i18n } = useTranslation();
+  const {
+    visibleColumns,
+    columnWidths,
+    toggleColumn,
+    setColumnWidth,
+    restoreDefaultLayout,
+  } = useRequestLogTablePreferences();
   const resolvedLanguage = i18n.resolvedLanguage;
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -439,7 +456,51 @@ export function DashboardPage() {
                 onChange={handleDashboardViewChange}
                 showConversations={isAdmin}
               />
-              <div className="h-px flex-1 bg-border" />
+              <div className="h-px min-w-8 flex-1 bg-border" />
+              {dashboardView === "request-logs" ? (
+                <>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button type="button" variant="outline" size="sm">
+                        <Columns3 className="mr-2 h-4 w-4" />
+                        {t("dashboard.requests.columnLayout.columns", {
+                          count: visibleColumns.length,
+                        })}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-52">
+                      <DropdownMenuLabel>
+                        {t("dashboard.requests.columnLayout.visibleColumns")}
+                      </DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      {REQUEST_LOG_COLUMN_OPTIONS.map((column) => {
+                        const isVisible = visibleColumns.includes(column.id);
+                        return (
+                          <DropdownMenuCheckboxItem
+                            key={column.id}
+                            checked={isVisible}
+                            disabled={isVisible && visibleColumns.length === 1}
+                            onCheckedChange={() => toggleColumn(column.id)}
+                            onSelect={(event) => event.preventDefault()}
+                          >
+                            {t(column.translationKey)}
+                          </DropdownMenuCheckboxItem>
+                        );
+                      })}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t("dashboard.requests.columnLayout.restoreDefault")}
+                    title={t("dashboard.requests.columnLayout.restoreDefault")}
+                    onClick={restoreDefaultLayout}
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </Button>
+                </>
+              ) : null}
             </div>
             {isAdmin && dashboardView === "conversations" ? <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} /> : logsQuery.isPending && !logPage ? (
               <div className="rounded-xl border bg-card py-8">
@@ -502,6 +563,9 @@ export function DashboardPage() {
                 requests={view.requestLogs}
                 accounts={overview?.accounts ?? []}
                 total={logPage?.total ?? 0}
+                visibleColumns={visibleColumns}
+                columnWidths={columnWidths}
+                onColumnWidthChange={setColumnWidth}
                 limit={filters.limit}
                 offset={filters.offset}
                 hasMore={logPage?.hasMore ?? false}

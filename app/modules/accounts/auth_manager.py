@@ -226,7 +226,10 @@ class _RefreshSingleflight:
                 else:
                     self._recent_failures.pop(key, None)
         except BaseException:
-            logger.exception("Refresh singleflight completion cleanup failed key=%s", key)
+            # A singleflight task may serve both ordinary and private requests.
+            # Its completion callback therefore has no request-local privacy
+            # policy and must keep diagnostics content-free.
+            logger.error("Refresh singleflight completion cleanup failed")
 
     def _purge_stale_versions(self, account_id: str, *, keep_key: _RefreshSingleflightKey) -> None:
         stale_failures = [key for key in self._recent_failures if key[0] == account_id and key != keep_key]
@@ -254,10 +257,12 @@ class AuthManager:
         acquire_refresh_admission: Callable[[], Awaitable[RefreshAdmissionLeasePort]] | None = None,
         refresh_repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepositoryPort]] | None = None,
         refresh_claims: RefreshClaimCoordinatorPort | None = None,
+        redact_sensitive_details: bool = False,
     ) -> None:
         self._repo = repo
         self._encryptor = TokenEncryptor()
         self._acquire_refresh_admission = acquire_refresh_admission
+        self._redact_sensitive_details = redact_sensitive_details
         # Optional factory yielding a *fresh* accounts repo (own DB session) for
         # the detached, shielded refresh task. When set, the singleflight body
         # runs against this session instead of the request-scoped `repo`, so a
@@ -295,15 +300,33 @@ class AuthManager:
         repo (callers whose session is not client-cancellable, e.g. the usage
         refresh scheduler).
         """
+        # The process-global singleflight can be joined by an ordinary request
+        # and a private realtime request in either order. Task-internal logging
+        # cannot safely inherit the first caller's policy, so shared refresh
+        # work always uses the strict, content-free diagnostic mode. Per-caller
+        # work after the shared task (for example the account-id metadata
+        # backfill) retains the caller's explicit policy.
         if self._refresh_repo_factory is None:
-            return await self.refresh_account(account)
+            owned = AuthManager(
+                self._repo,
+                acquire_refresh_admission=self._acquire_refresh_admission,
+                refresh_claims=self._refresh_claims,
+                redact_sensitive_details=True,
+            )
+            return await owned.refresh_account(account)
         async with self._refresh_repo_factory() as repo:
             owned = AuthManager(
                 repo,
                 acquire_refresh_admission=self._acquire_refresh_admission,
                 refresh_claims=self._refresh_claims,
+                redact_sensitive_details=True,
             )
             return await owned.refresh_account(account)
+
+    def _diagnostic_value(self, value: str | None) -> str | None:
+        if self._redact_sensitive_details and value is not None:
+            return "<redacted>"
+        return value
 
     async def refresh_account(self, account: Account) -> Account:
         claims = self._refresh_claims if self._refresh_claims is not None else get_refresh_claim_coordinator()
@@ -503,9 +526,9 @@ class AuthManager:
         logger.warning(
             "Failed to release refresh claim for account_id=%s after %d attempts; leaving it to "
             "expire by TTL (the committed refresh result is unaffected)",
-            account_id,
+            self._diagnostic_value(account_id),
             _CLAIM_RELEASE_MAX_ATTEMPTS,
-            exc_info=last_exc,
+            exc_info=None if self._redact_sensitive_details else last_exc,
         )
 
     async def _perform_refresh(
@@ -551,9 +574,9 @@ class AuthManager:
             logger.warning(
                 "Refresh payload reported workspace_id=%s for account_id=%s while existing "
                 "workspace_id=%s is already set; keeping slot identity",
-                incoming_workspace_id,
-                account.id,
-                current_workspace_id,
+                self._diagnostic_value(incoming_workspace_id),
+                self._diagnostic_value(account.id),
+                self._diagnostic_value(current_workspace_id),
             )
             next_workspace_id = current_workspace_id
         elif not current_workspace_id and incoming_workspace_id:
@@ -567,8 +590,8 @@ class AuthManager:
                 logger.warning(
                     "Refresh payload reported workspace_id=%s for legacy account_id=%s, but that slot "
                     "is already owned by another account; keeping unknown workspace",
-                    incoming_workspace_id,
-                    account.id,
+                    self._diagnostic_value(incoming_workspace_id),
+                    self._diagnostic_value(account.id),
                 )
             else:
                 next_workspace_id = incoming_workspace_id
@@ -740,7 +763,7 @@ class AuthManager:
                     "Token-refresh compare-and-set for account_id=%s missed and the stored "
                     "refresh-token plaintext could not be decrypted for comparison; surfacing a "
                     "transient error rather than risking a clobber",
-                    account.id,
+                    self._diagnostic_value(account.id),
                 )
                 raise RefreshError(
                     "token_persist_conflict",
@@ -901,7 +924,7 @@ class AuthManager:
                     "rotated token after the dedicated final-persist retries (%s); flagged the account "
                     "REAUTH_REQUIRED via the guarded status path so it is explicitly repaired rather "
                     "than left holding a consumed token that a blind retry would permanently knock out",
-                    account.id,
+                    self._diagnostic_value(account.id),
                     "claim/caller deadline elapsed" if deadline_elapsed else "same-plaintext storm exhausted",
                 )
                 return account
@@ -914,7 +937,7 @@ class AuthManager:
             "Token-refresh compare-and-set for account_id=%s could not persist the freshly rotated "
             "token nor flag REAUTH_REQUIRED after the dedicated final-persist retries; surfacing a "
             "transient conflict so the caller retries the whole refresh rather than risking a clobber",
-            account.id,
+            self._diagnostic_value(account.id),
         )
         raise RefreshError(
             "token_persist_conflict",
@@ -989,7 +1012,7 @@ class AuthManager:
                     "Permanent refresh-failure status CAS for account_id=%s code=%s exceeded the "
                     "claim/caller deadline after %d attempt(s); surfacing a transient conflict and "
                     "releasing the claim rather than looping past the budget",
-                    account.id,
+                    self._diagnostic_value(account.id),
                     exc.code,
                     attempt,
                 )
@@ -1067,7 +1090,7 @@ class AuthManager:
             "unchanged token material after %d attempts; surfacing a transient error so the caller "
             "retries rather than running the unguarded permanent-failure mark that could clobber a "
             "concurrent peer rotation",
-            account.id,
+            self._diagnostic_value(account.id),
             exc.code,
             _TOKEN_CAS_MAX_ATTEMPTS,
         )
@@ -1230,7 +1253,11 @@ class AuthManager:
                 chatgpt_account_id=raw_account_id,
             )
         except Exception:
-            logger.warning("Failed to persist chatgpt_account_id account_id=%s", account.id, exc_info=True)
+            logger.warning(
+                "Failed to persist chatgpt_account_id account_id=%s",
+                self._diagnostic_value(account.id),
+                exc_info=None if self._redact_sensitive_details else True,
+            )
         return account
 
 

@@ -16,8 +16,8 @@ import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
@@ -524,7 +524,13 @@ _CLAIM_CONTENTION_UNPENALIZED_ATTR = "_codex_lb_claim_contention_unpenalized"
 
 class _RefreshFailoverProxy(Protocol):
     async def _handle_stream_error(
-        self, account: Account, error: Any, code: str, http_status: int | None = None
+        self,
+        account: Account,
+        error: Any,
+        code: str,
+        http_status: int | None = None,
+        *,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Any: ...
 
 
@@ -563,6 +569,7 @@ async def failover_after_previsible_refresh_error(
     select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
     request_id: str,
     kind: str,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> Account:
     """Pick the next account after a previsible-unary freshness/connect failure.
 
@@ -598,8 +605,8 @@ async def failover_after_previsible_refresh_error(
             kind,
             getattr(exc, "code", None),
             request_id,
-            current.id,
-            exc_info=True,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else current.id,
+            exc_info=None if privacy_policy.redacts_sensitive_details else True,
         )
     else:
         logger.warning(
@@ -607,8 +614,8 @@ async def failover_after_previsible_refresh_error(
             kind,
             "claim contention" if claim else "failed",
             request_id,
-            current.id,
-            exc_info=True,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else current.id,
+            exc_info=None if privacy_policy.redacts_sensitive_details else True,
         )
     if not claim and not _should_retry_transient_stream_error("upstream_unavailable", message):
         _raise_proxy_unavailable_for_account(message, current)
@@ -629,7 +636,15 @@ async def failover_after_previsible_refresh_error(
     if not claim:
         # Genuine transport / connect failure: penalize the skipped account so a
         # persistently broken account backs off. Claim contention never penalizes.
-        await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
+        if privacy_policy.redacts_sensitive_details:
+            await proxy._handle_stream_error(
+                current,
+                {"message": message},
+                "upstream_unavailable",
+                privacy_policy=privacy_policy,
+            )
+        else:
+            await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
     return selected_account
 
 
@@ -832,6 +847,8 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    added_tool_call_types: dict[str, str] = field(default_factory=dict)
+    tool_call_manifest_invalid: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -887,7 +904,7 @@ class _HTTPBridgeSession:
     affinity: _AffinityPolicy
     request_model: str | None
     account: Account
-    upstream: UpstreamResponsesWebSocket
+    upstream: UpstreamWebSocket
     upstream_control: _WebSocketUpstreamControl
     pending_requests: deque[_WebSocketRequestState]
     pending_lock: anyio.Lock
@@ -1171,7 +1188,7 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
 def _record_websocket_route_metadata(
     request_state: _WebSocketRequestState,
     *,
-    upstream: UpstreamResponsesWebSocket | None = None,
+    upstream: UpstreamWebSocket | None = None,
     route: ResolvedUpstreamRoute | None = None,
     fallback_used: bool | None = None,
 ) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,6 +41,7 @@ class DurableBridgeLookup:
     latest_input_item_count: int | None = None
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
+    latest_pending_tool_calls: dict[str, str] | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -239,6 +240,7 @@ class DurableBridgeSessionCoordinator:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
+        latest_pending_tool_calls: Mapping[str, str] | None = None,
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeLookup | None:
         del api_key_id
@@ -252,6 +254,7 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=latest_response_id,
                 latest_input_item_count=latest_input_item_count,
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
+                latest_pending_tool_calls=latest_pending_tool_calls,
                 state=state,
             )
         if snapshot is None:
@@ -358,6 +361,7 @@ class DurableBridgeSessionCoordinator:
         lease_ttl_seconds: float,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
+        pending_tool_calls: Mapping[str, str] | None = None,
     ) -> DurableBridgeAliasRegistration:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -372,6 +376,7 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=response_id,
                 latest_input_item_count=input_item_count,
                 latest_input_full_fingerprint=input_full_fingerprint,
+                latest_pending_tool_calls=pending_tool_calls,
             )
 
     async def register_session_header(
@@ -415,4 +420,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
+        latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
     )

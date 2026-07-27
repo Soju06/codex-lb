@@ -311,6 +311,82 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
 
 
 @pytest.mark.asyncio
+async def test_sticky_sessions_api_hides_and_protects_reserved_live_bindings(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+    reserved_keys = {
+        name: f"\ncodex_live_call:{name}" for name in ("listed", "single-delete", "bulk-delete", "filtered-delete")
+    }
+    for key in reserved_keys.values():
+        await _insert_sticky_session(
+            key=key,
+            account_id=accounts[0].id,
+            kind=StickySessionKind.CODEX_SESSION,
+            updated_at_offset_seconds=5,
+        )
+    await _insert_sticky_session(
+        key="visible-codex-session",
+        account_id=accounts[1].id,
+        kind=StickySessionKind.CODEX_SESSION,
+        updated_at_offset_seconds=5,
+    )
+    # An LF-prefixed key outside the Live-call namespace (the pre-existing
+    # selection-affinity shape) is NOT reserved: it stays operator-visible
+    # and operator-deletable.
+    affinity_key = "\ncodex-lb-affinity-v1:regression"
+    await _insert_sticky_session(
+        key=affinity_key,
+        account_id=accounts[1].id,
+        kind=StickySessionKind.CODEX_SESSION,
+        updated_at_offset_seconds=5,
+    )
+
+    listed = await async_client.get("/api/sticky-sessions", params={"kind": "codex_session"})
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 2
+    assert {entry["key"] for entry in listed.json()["entries"]} == {"visible-codex-session", affinity_key}
+
+    affinity_delete = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={"sessions": [{"key": affinity_key, "kind": "codex_session"}]},
+    )
+    assert affinity_delete.status_code == 200
+    assert affinity_delete.json()["deletedCount"] == 1
+    assert affinity_delete.json()["failed"] == []
+
+    single_delete = await async_client.delete(
+        f"/api/sticky-sessions/codex_session/{quote(reserved_keys['single-delete'], safe='')}"
+    )
+    assert single_delete.status_code == 404
+
+    bulk_delete = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={"sessions": [{"key": reserved_keys["bulk-delete"], "kind": "codex_session"}]},
+    )
+    assert bulk_delete.status_code == 200
+    assert bulk_delete.json() == {
+        "deletedCount": 0,
+        "deleted": [],
+        "failed": [{"key": reserved_keys["bulk-delete"], "kind": "codex_session", "reason": "not_found"}],
+    }
+
+    filtered_delete = await async_client.post("/api/sticky-sessions/delete-filtered", json={})
+    assert filtered_delete.status_code == 200
+    assert filtered_delete.json() == {"deletedCount": 1}
+
+    async with SessionLocal() as session:
+        remaining_reserved = set(
+            (
+                await session.execute(
+                    text("SELECT key FROM sticky_sessions WHERE key LIKE :prefix"),
+                    {"prefix": "\ncodex_live_call:%"},
+                )
+            ).scalars()
+        )
+    assert remaining_reserved == set(reserved_keys.values())
+
+
+@pytest.mark.asyncio
 async def test_sticky_sessions_api_filters_by_account_and_key(async_client):
     accounts = await _create_accounts()
     await _set_affinity_ttl(60)

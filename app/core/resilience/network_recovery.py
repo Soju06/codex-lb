@@ -139,6 +139,7 @@ class ProcessNetworkRecovery:
     transport: str
     request_id: str | None
     account_id: str | None = None
+    redact_sensitive_details: bool = False
     attempts: int = 0
     _shared_rotation_requested: bool = False
     _recovered_logged: bool = False
@@ -203,8 +204,8 @@ class ProcessNetworkRecovery:
                     "process_network_recovery stage=rotation_failed transport=%s request_id=%s account_id=%s",
                     self.transport,
                     self.request_id,
-                    self.account_id,
-                    exc_info=True,
+                    "<redacted>" if self.redact_sensitive_details else self.account_id,
+                    exc_info=None if self.redact_sensitive_details else True,
                 )
                 return "not_applicable"
             self._shared_rotation_requested = True
@@ -249,7 +250,7 @@ class ProcessNetworkRecovery:
             stage,
             self.transport,
             self.request_id,
-            self.account_id,
+            "<redacted>" if self.redact_sensitive_details else self.account_id,
             self.attempts,
             delay_seconds,
         )

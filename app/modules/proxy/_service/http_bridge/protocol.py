@@ -77,6 +77,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
         *,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
+        pending_tool_calls: Mapping[str, str] | None = None,
     ) -> bool: ...
     def _schedule_http_bridge_session_closes(
         self,

@@ -56,7 +56,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
-    UpstreamResponsesWebSocket,
+    UpstreamWebSocket,
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
 )
@@ -556,7 +556,7 @@ def _websocket_archive_request_context(request_id: str | None) -> Iterator[None]
 
 
 def _archive_received_websocket_message(
-    upstream: UpstreamResponsesWebSocket,
+    upstream: UpstreamWebSocket,
     message: Any,
     *,
     archive_request_id: str | None,
@@ -764,7 +764,7 @@ class _WebSocketMixin:
         pending_lock = anyio.Lock()
         client_send_lock = anyio.Lock()
         response_create_gate = asyncio.Semaphore(1)
-        upstream: UpstreamResponsesWebSocket | None = None
+        upstream: UpstreamWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
         continuity_state = proxy._websocket_continuity_state_for_request(
@@ -1417,7 +1417,10 @@ class _WebSocketMixin:
                             upstream_control=upstream_control,
                             response_create_gate=response_create_gate,
                             continuity_state=continuity_state,
-                            proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                            proxy_request_budget_seconds=_facade()._stream_request_budget_seconds(
+                                runtime_settings,
+                                request_transport="websocket",
+                            ),
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                             downstream_activity=downstream_activity,
                             codex_session_affinity=codex_session_affinity,
@@ -2009,7 +2012,7 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None = None,
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
-    ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
+    ) -> tuple[Account | None, UpstreamWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         if (
@@ -2022,8 +2025,14 @@ class _WebSocketMixin:
                 request_state.useragent_group,
                 request_state.conversation_id,
             ) = _request_log_client_fields(headers)
-        deadline = _websocket_connect_deadline(request_state, _facade().get_settings().proxy_request_budget_seconds)
         base_settings = _facade().get_settings()
+        deadline = _websocket_connect_deadline(
+            request_state,
+            _facade()._stream_request_budget_seconds(
+                base_settings,
+                request_transport="websocket",
+            ),
+        )
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None
@@ -2517,7 +2526,7 @@ class _WebSocketMixin:
         websocket: WebSocket,
         force_refresh: bool = False,
         can_transient_failover: bool = False,
-    ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
+    ) -> tuple[Account, UpstreamWebSocket] | None:
         recovery = ProcessNetworkRecovery(
             transport="websocket",
             request_id=request_state.request_log_id or request_state.request_id,
@@ -2562,7 +2571,7 @@ class _WebSocketMixin:
         websocket: WebSocket,
         force_refresh: bool = False,
         can_transient_failover: bool = False,
-    ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
+    ) -> tuple[Account, UpstreamWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
@@ -2729,7 +2738,7 @@ class _WebSocketMixin:
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
         can_transient_failover: bool = False,
-    ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
+    ) -> tuple[Account, UpstreamWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
@@ -2923,7 +2932,7 @@ class _WebSocketMixin:
         *,
         timeout_seconds: float,
         request_state: "_WebSocketRequestState | None" = None,
-    ) -> UpstreamResponsesWebSocket:
+    ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         started_at = time.monotonic()
@@ -2964,7 +2973,7 @@ class _WebSocketMixin:
         headers: dict[str, str],
         *,
         request_state: "_WebSocketRequestState | None" = None,
-    ) -> UpstreamResponsesWebSocket:
+    ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
@@ -3208,7 +3217,7 @@ class _WebSocketMixin:
     async def _relay_upstream_websocket_messages(
         self,
         websocket: WebSocket,
-        upstream: UpstreamResponsesWebSocket,
+        upstream: UpstreamWebSocket,
         *,
         account: Account,
         account_id_value: str,

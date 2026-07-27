@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, cast
 
 import pytest
@@ -202,6 +203,55 @@ async def test_bulkhead_websocket_denies_with_http_response_when_lane_full():
     assert sent_events[1]["type"] == "websocket.http.response.body"
     payload = json.loads(cast(bytes, sent_events[1]["body"]).decode("utf-8"))
     assert payload["error"]["code"] == "proxy_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_bulkhead_websocket_rejection_redacts_realtime_live_call_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bulkhead = _bulkhead()
+    private_call_id = "rtc_private_admission"
+    path = f"/backend-api/codex/{private_call_id}"
+    lane_name, sem = bulkhead.get_semaphore("websocket", path)
+    assert lane_name == "proxy_websocket"
+    assert sem is not None
+    await sem.acquire()
+
+    async def inner_app(scope, receive, send):
+        del scope, receive, send
+        raise AssertionError("overloaded request must not reach the application")
+
+    middleware = BulkheadMiddleware(cast(Any, inner_app), bulkhead=bulkhead)
+    connect_delivered = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal connect_delivered
+        if not connect_delivered:
+            connect_delivered = True
+            return {"type": "websocket.connect"}
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message: dict[str, object]) -> None:
+        del message
+
+    try:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=bulkhead_module.__name__):
+            await middleware(
+                {"type": "websocket", "path": path},
+                cast(Any, receive),
+                cast(Any, send),
+            )
+    finally:
+        sem.release()
+
+    rejection_records = [
+        record for record in caplog.records if record.getMessage().startswith("proxy_admission_rejected ")
+    ]
+    assert len(rejection_records) == 1
+    message = rejection_records[0].getMessage()
+    assert private_call_id not in message
+    assert "path=/backend-api/codex/<redacted>" in message
 
 
 @pytest.mark.asyncio

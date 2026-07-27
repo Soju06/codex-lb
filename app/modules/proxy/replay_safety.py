@@ -182,6 +182,8 @@ def _project_account_neutral_replay_item(item: JsonValue) -> JsonValue | None:
         return item
 
     item_type = item.get("type")
+    if item_type is not None and not isinstance(item_type, str):
+        return item
     if item_type == "reasoning" or (
         item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
     ):
@@ -309,6 +311,42 @@ def responses_input_suffix_retains_prior_output(
     return retained_output_seen and fresh_followup_seen and not pending_suffix_calls
 
 
+def responses_input_suffix_matches_pending_tool_calls(
+    input_items: list[JsonValue],
+    *,
+    stored_count: int,
+    pending_tool_calls: Mapping[str, str],
+) -> bool:
+    """Prove the suffix exactly settles the durable prior-response call manifest."""
+
+    if stored_count <= 0 or len(input_items) <= stored_count or not pending_tool_calls:
+        return False
+    prefix_state = _direct_tool_call_prefix_state(input_items[:stored_count])
+    if prefix_state is None or prefix_state[1] & pending_tool_calls.keys():
+        return False
+    suffix = input_items[stored_count:]
+    if not all(
+        isinstance(item, dict)
+        and isinstance(item.get("type"), str)
+        and item.get("type") in (_TOOL_CALL_TYPES | _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.keys())
+        for item in suffix
+    ):
+        return False
+    if not responses_input_items_are_self_contained_fresh_replay(suffix):
+        return False
+    suffix_calls: dict[str, str] = {}
+    suffix_outputs: dict[str, str] = {}
+    for item in cast(list[dict[str, JsonValue]], suffix):
+        item_type = cast(str, item["type"])
+        call_id = cast(str, item["call_id"])
+        if item_type in _TOOL_CALL_TYPES:
+            suffix_calls[call_id] = item_type
+        else:
+            suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
+    expected = dict(pending_tool_calls)
+    return suffix_calls == expected and suffix_outputs == expected
+
+
 def _direct_tool_call_prefix_state(
     input_items: list[JsonValue],
 ) -> tuple[deque[tuple[str, str]], set[str]] | None:
@@ -318,6 +356,8 @@ def _direct_tool_call_prefix_state(
         if not isinstance(item, dict):
             return None
         item_type_value = item.get("type")
+        if item_type_value is not None and not isinstance(item_type_value, str):
+            return None
         item_type = item_type_value if isinstance(item_type_value, str) else None
         if item_type in _TOOL_CALL_TYPES:
             if item.get("status") not in (None, "completed"):
@@ -344,6 +384,13 @@ def _direct_tool_call_prefix_state(
             or item_type in {"input_file", "input_image", "input_text"}
         ):
             return None
+        # Call-like items outside the supported direct tool-call vocabulary
+        # (e.g. computer_call) are tolerated in the prefix but must still
+        # surface their IDs for collision checks: a pending call that reuses
+        # one of them cannot be proven fresh.
+        fallthrough_call_id = item.get("call_id")
+        if isinstance(fallthrough_call_id, str) and fallthrough_call_id:
+            seen_call_ids.add(fallthrough_call_id)
     return pending_calls, seen_call_ids
 
 

@@ -110,6 +110,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _PENDING_TOOL_CALL_ITEM_TYPES,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
@@ -187,6 +188,95 @@ _MODEL_OUTPUT_EVENT_TYPES = frozenset(
         "response.output_tool_call.delta",
     }
 )
+_UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES = frozenset(
+    {
+        "computer_call",
+        "mcp_approval_request",
+    }
+)
+
+
+def _record_http_bridge_tool_call_lifecycle(
+    request_state: _WebSocketRequestState,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> None:
+    if event_type not in {"response.output_item.added", "response.output_item.done"}:
+        return
+    item = payload.get("item") if isinstance(payload, dict) else None
+    if not isinstance(item, dict):
+        request_state.tool_call_manifest_invalid = True
+        return
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        request_state.tool_call_manifest_invalid = True
+        return
+    if item_type in _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES:
+        # These calls require client-provided continuation state but are not
+        # representable by the direct function/custom/apply-patch replay proof.
+        # Persisting only a parallel supported call would make a partial suffix
+        # look complete, so keep the whole durable manifest unknown.
+        request_state.tool_call_manifest_invalid = True
+        return
+    if item_type not in _PENDING_TOOL_CALL_ITEM_TYPES:
+        return
+    call_id = item.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        request_state.tool_call_manifest_invalid = True
+        return
+    target = (
+        request_state.added_tool_call_types
+        if event_type == "response.output_item.added"
+        else request_state.pending_tool_call_types
+    )
+    existing = target.get(call_id)
+    if existing is not None:
+        request_state.tool_call_manifest_invalid = True
+        return
+    target[call_id] = item_type
+
+
+def _response_completed_tool_call_types(payload: dict[str, JsonValue] | None) -> dict[str, str] | None:
+    response = payload.get("response") if isinstance(payload, dict) else None
+    output = response.get("output") if isinstance(response, dict) else None
+    if not isinstance(output, list):
+        return None
+    result: dict[str, str] = {}
+    for item in output:
+        if not isinstance(item, dict):
+            return None
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            return None
+        if item_type in _UNSUPPORTED_DURABLE_TOOL_CALL_ITEM_TYPES:
+            return None
+        if item_type not in _PENDING_TOOL_CALL_ITEM_TYPES:
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return None
+        existing = result.get(call_id)
+        if existing is not None:
+            return None
+        result[call_id] = item_type
+    return result
+
+
+def _durable_pending_tool_call_manifest(
+    request_state: _WebSocketRequestState,
+    payload: dict[str, JsonValue] | None,
+) -> dict[str, str] | None:
+    terminal_calls = _response_completed_tool_call_types(payload)
+    if request_state.tool_call_manifest_invalid or terminal_calls is None:
+        return None
+    if request_state.added_tool_call_types != request_state.pending_tool_call_types:
+        return None
+    if terminal_calls and terminal_calls != request_state.pending_tool_call_types:
+        return None
+    return dict(request_state.pending_tool_call_types)
+
+
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
@@ -641,6 +731,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
+                _record_http_bridge_tool_call_lifecycle(
+                    matched_request_state,
+                    event_type=event_type,
+                    payload=payload,
+                )
                 completed_tool_call = _response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -1105,6 +1200,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 input_full_fingerprint=(
                     matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
                 ),
+                pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
             )
             if not alias_registered and is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,

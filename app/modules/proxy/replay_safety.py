@@ -384,6 +384,13 @@ def _direct_tool_call_prefix_state(
             or item_type in {"input_file", "input_image", "input_text"}
         ):
             return None
+        # Call-like items outside the supported direct tool-call vocabulary
+        # (e.g. computer_call) are tolerated in the prefix but must still
+        # surface their IDs for collision checks: a pending call that reuses
+        # one of them cannot be proven fresh.
+        fallthrough_call_id = item.get("call_id")
+        if isinstance(fallthrough_call_id, str) and fallthrough_call_id:
+            seen_call_ids.add(fallthrough_call_id)
     return pending_calls, seen_call_ids
 
 

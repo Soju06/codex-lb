@@ -730,6 +730,36 @@ def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_stored_prefi
     )
 
 
+def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_unsupported_prefix_item() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "computer_call",
+            "call_id": "call_1",
+            "action": {"type": "screenshot"},
+            "status": "completed",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "new"},
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_1": "function_call"},
+        )
+        is False
+    )
+
+
 @pytest.mark.parametrize(
     "payload",
     [

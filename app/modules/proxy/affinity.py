@@ -29,6 +29,7 @@ _CodexSessionSource = Literal["session_header", "turn_state"]
 # structurally unreachable by every legacy raw header, even if its digest is
 # disclosed.
 _CODEX_SELECTION_KEY_PREFIX = "\ncodex-lb-affinity-v1"
+_SOFT_AFFINITY_KEY_PREFIX = "\ncodex-lb-affinity-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,13 +42,29 @@ class _AffinityPolicy:
     spill_on_account_cap: bool = False
     max_age_seconds: int | None = None
     codex_session_source: _CodexSessionSource | None = None
+    api_key_id: str | None = None
+    account_assignment_generation: int = 1
     # ``conversation`` has no dedicated owner index. Preserve that provenance
     # until selection can prove one hard owner or a one-account pool.
     require_unambiguous_account: bool = False
 
     @property
     def selection_key(self) -> str | None:
-        if self.key is None or self.codex_session_source != "session_header":
+        if self.key is None:
+            return None
+        is_soft_source = self.codex_session_source == "session_header" or self.kind in (
+            StickySessionKind.PROMPT_CACHE,
+            StickySessionKind.STICKY_THREAD,
+        )
+        if is_soft_source and self.account_assignment_generation > 1:
+            return _soft_affinity_selection_key(
+                self.key,
+                kind=self.kind,
+                source=self.codex_session_source,
+                api_key_id=self.api_key_id,
+                account_assignment_generation=self.account_assignment_generation,
+            )
+        if self.codex_session_source != "session_header":
             return self.key
         # CODEX_SESSION historically mixed raw session and turn-state values.
         # Namespace only the newly soft source; raw legacy rows stay hard so a
@@ -59,7 +76,9 @@ class _AffinityPolicy:
         # Old replicas persisted bare session headers as raw CODEX_SESSION
         # keys. Always consult this alongside the soft row: any raw hit may be
         # hard turn-state ownership and therefore takes precedence.
-        return self.key if self.codex_session_source == "session_header" else None
+        if self.codex_session_source != "session_header" or self.account_assignment_generation > 1:
+            return None
+        return self.key
 
     @staticmethod
     def cap_spillover_allowed(
@@ -78,6 +97,8 @@ class _AffinityPolicy:
         sticky_max_age_seconds: int | None,
         sticky_source: _CodexSessionSource | None,
         legacy_sticky_key: str | None,
+        *,
+        authoritative_continuity_owner: bool = False,
     ) -> tuple[
         str | None,
         StickySessionKind | None,
@@ -99,7 +120,14 @@ class _AffinityPolicy:
         # the raw compatibility row still has to be checked for conflicting
         # legacy hard ownership. Selection receives no writable sticky key, so
         # a raw miss cannot manufacture or rebind a mapping.
-        return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
+        return (
+            None,
+            StickySessionKind.CODEX_SESSION,
+            False,
+            sticky_max_age_seconds,
+            sticky_source,
+            None if authoritative_continuity_owner else legacy_sticky_key,
+        )
 
 
 def _codex_session_selection_key(key: str) -> str:
@@ -107,6 +135,33 @@ def _codex_session_selection_key(key: str) -> str:
     # sentinel above—not secrecy—provides source separation from raw rows.
     digest = sha256(key.encode()).hexdigest()
     return f"{_CODEX_SELECTION_KEY_PREFIX}:session_header:{digest}"
+
+
+def _soft_affinity_selection_key(
+    key: str,
+    *,
+    kind: StickySessionKind | None,
+    source: _CodexSessionSource | None,
+    api_key_id: str | None,
+    account_assignment_generation: int,
+) -> str:
+    raw_digest = sha256(key.encode()).hexdigest()
+    identity = "\0".join(
+        (
+            api_key_id or "anonymous",
+            str(account_assignment_generation),
+            kind.value if kind is not None else "none",
+            source or "none",
+            raw_digest,
+        )
+    )
+    return f"{_SOFT_AFFINITY_KEY_PREFIX}:{sha256(identity.encode()).hexdigest()}"
+
+
+def _api_key_affinity_scope(api_key: ApiKeyData | None) -> tuple[str | None, int]:
+    if api_key is None:
+        return None, 1
+    return api_key.id, max(1, int(getattr(api_key, "account_assignment_generation", 1)))
 
 
 def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
@@ -277,17 +332,21 @@ def _bare_codex_session_affinity(
     *,
     enabled: bool,
     allow_cap_spillover: bool,
+    api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy | None:
     if not enabled:
         return None
     session_key = _sticky_key_from_session_header(headers)
     if session_key is None:
         return None
+    api_key_id, generation = _api_key_affinity_scope(api_key)
     return _AffinityPolicy(
         key=session_key,
         kind=StickySessionKind.CODEX_SESSION,
         spill_on_account_cap=allow_cap_spillover,
         codex_session_source="session_header",
+        api_key_id=api_key_id,
+        account_assignment_generation=generation,
     )
 
 
@@ -329,6 +388,7 @@ def _sticky_key_for_codex_control_request(
     headers: Mapping[str, str],
     *,
     codex_session_affinity: bool,
+    api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
@@ -341,6 +401,7 @@ def _sticky_key_for_codex_control_request(
         headers,
         enabled=codex_session_affinity,
         allow_cap_spillover=False,
+        api_key=api_key,
     )
     if session_affinity is not None:
         return session_affinity
@@ -443,6 +504,7 @@ def _sticky_key_for_responses_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
+    api_key_id, generation = _api_key_affinity_scope(api_key)
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key and turn_state_key != synthesized_turn_state:
         policy = _AffinityPolicy(
@@ -455,6 +517,7 @@ def _sticky_key_for_responses_request(
             headers,
             enabled=codex_session_affinity,
             allow_cap_spillover=_request_allows_bare_session_cap_spillover(payload),
+            api_key=api_key,
         )
     ) is not None:
         policy = session_affinity
@@ -463,12 +526,16 @@ def _sticky_key_for_responses_request(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            api_key_id=api_key_id,
+            account_assignment_generation=generation,
         )
     elif sticky_threads_enabled:
         policy = _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            api_key_id=api_key_id,
+            account_assignment_generation=generation,
         )
     elif turn_state_key is not None and turn_state_key == synthesized_turn_state:
         policy = _AffinityPolicy(

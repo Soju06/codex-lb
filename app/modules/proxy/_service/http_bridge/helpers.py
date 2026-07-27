@@ -162,7 +162,9 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _api_key_affinity_scope,
     _extract_model_class,
+    _soft_affinity_selection_key,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
@@ -185,6 +187,8 @@ from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
 )
+
+_HTTP_BRIDGE_SOFT_AFFINITY_V2_PREFIX = "codex-lb-bridge-affinity-v2:"
 
 logger = logging.getLogger("app.modules.proxy.service")
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
@@ -1179,6 +1183,7 @@ def _make_http_bridge_session_key(
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
 ) -> _HTTPBridgeSessionKey:
+    api_key_id, account_assignment_generation = _api_key_affinity_scope(api_key)
     forwarded_key = (
         _forwarded_http_bridge_session_key(
             headers,
@@ -1224,8 +1229,9 @@ def _make_http_bridge_session_key(
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
         affinity_key=affinity_key,
-        api_key_id=api_key.id if api_key is not None else None,
+        api_key_id=api_key_id,
         strength=strength,
+        account_assignment_generation=account_assignment_generation,
     )
 
 
@@ -1238,16 +1244,40 @@ def _make_http_bridge_session_header_fallback_key(
     session_key = _sticky_key_from_session_header(headers)
     if session_key is None:
         return None
-    affinity_key = (
+    raw_affinity_key = (
         sha256(f"{session_key}\0{explicit_prompt_cache_key.strip()}".encode()).hexdigest()
         if isinstance(explicit_prompt_cache_key, str) and explicit_prompt_cache_key.strip()
         else session_key
     )
+    api_key_id, generation = _api_key_affinity_scope(api_key)
+    if generation > 1:
+        canonical_key = _soft_affinity_selection_key(
+            raw_affinity_key,
+            kind=StickySessionKind.CODEX_SESSION,
+            source="session_header",
+            api_key_id=api_key_id,
+            account_assignment_generation=generation,
+        )
+        affinity_key = f"{_HTTP_BRIDGE_SOFT_AFFINITY_V2_PREFIX}{canonical_key.rsplit(':', 1)[-1]}"
+    else:
+        affinity_key = raw_affinity_key
     return _HTTPBridgeSessionKey(
         "session_header",
         affinity_key,
-        api_key.id if api_key is not None else None,
+        api_key_id,
+        strength="soft" if generation > 1 else None,
+        account_assignment_generation=generation,
     )
+
+
+def _http_bridge_session_header_lookup_value(
+    *,
+    session_header_fallback_key: _HTTPBridgeSessionKey | None,
+    incoming_session_header: str | None,
+) -> str | None:
+    if session_header_fallback_key is not None:
+        return session_header_fallback_key.affinity_key
+    return incoming_session_header
 
 
 async def _http_bridge_should_wait_for_registration(
@@ -1865,15 +1895,19 @@ def _forwarded_http_bridge_session_key(
     if affinity_kind is None or affinity_key is None:
         return None
     strength: Literal["hard", "soft"]
-    if affinity_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS:
+    if affinity_kind == "session_header" and affinity_key.startswith(_HTTP_BRIDGE_SOFT_AFFINITY_V2_PREFIX):
+        strength = "soft"
+    elif affinity_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS:
         strength = "hard"
     else:
         strength = "soft"
+    api_key_id, account_assignment_generation = _api_key_affinity_scope(api_key)
     return _HTTPBridgeSessionKey(
         affinity_kind=affinity_kind,
         affinity_key=affinity_key,
-        api_key_id=api_key.id if api_key is not None else None,
+        api_key_id=api_key_id,
         strength=strength,
+        account_assignment_generation=account_assignment_generation,
     )
 
 

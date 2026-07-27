@@ -865,6 +865,7 @@ class _HTTPBridgeSessionKey:
     affinity_key: str
     api_key_id: str | None
     strength: Literal["hard", "soft"] | None = None
+    account_assignment_generation: int = 1
 
     def __post_init__(self) -> None:
         strength = self.strength

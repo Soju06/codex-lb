@@ -22,14 +22,14 @@
 - Test: `tests/unit/test_api_keys_service.py`
 - Test: `tests/unit/test_settings_reference.py`
 
-- [ ] Add failing migration and conversion tests proving existing keys receive generation `1`, a nullable change timestamp, and `ApiKeyData` exposes both fields.
+- [x] Add failing migration and conversion tests proving existing keys receive generation `1`, a nullable change timestamp, and `ApiKeyData` exposes both fields.
 
 ```python
 assert data.account_assignment_generation == 1
 assert data.account_assignment_changed_at is None
 ```
 
-- [ ] Run the focused tests and confirm they fail because the columns and dataclass fields do not exist.
+- [x] Run the focused tests and confirm they fail because the columns and dataclass fields do not exist.
 
 ```powershell
 uv run pytest -q tests/integration/test_migrations.py tests/unit/test_api_keys_service.py -k "assignment_generation"
@@ -37,7 +37,7 @@ uv run pytest -q tests/integration/test_migrations.py tests/unit/test_api_keys_s
 
 Expected: failing assertions or constructor errors naming `account_assignment_generation`.
 
-- [ ] Add the ORM columns and migration:
+- [x] Add the ORM columns and migration:
 
 ```python
 account_assignment_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
@@ -46,20 +46,20 @@ account_assignment_changed_at: Mapped[datetime | None] = mapped_column(DateTime,
 
 The migration must revise `20260726_000000_merge_account_concurrency_overrides_and_main`, add both columns idempotently, and remove them in reverse order during downgrade.
 
-- [ ] Add immutable runtime fields to `ApiKeyData` and copy them through `_to_api_key_data` and `_to_created_data`:
+- [x] Add immutable runtime fields to `ApiKeyData` and copy them through `_to_api_key_data` and `_to_created_data`:
 
 ```python
 account_assignment_generation: int = 1
 account_assignment_changed_at: datetime | None = None
 ```
 
-- [ ] Add the bounded drain setting near the existing affinity settings:
+- [x] Add the bounded drain setting near the existing affinity settings:
 
 ```python
 api_key_account_assignment_drain_seconds: int = Field(default=1800, ge=0)
 ```
 
-- [ ] Re-run the focused tests.
+- [x] Re-run the focused tests.
 
 ```powershell
 uv run pytest -q tests/integration/test_migrations.py tests/unit/test_api_keys_service.py tests/unit/test_settings_reference.py -k "assignment_generation or assignment_drain"
@@ -76,7 +76,7 @@ Expected: all selected tests pass.
 - Modify: `tests/unit/test_api_keys_service.py`
 - Modify: `tests/integration/test_api_keys_api.py`
 
-- [ ] Add failing tests for:
+- [x] Add failing tests for:
 
   - reordered or duplicate account IDs do not increment;
   - changing another API-key field does not increment;
@@ -89,13 +89,13 @@ assert updated.account_assignment_generation == original.account_assignment_gene
 assert updated.account_assignment_changed_at is not None
 ```
 
-- [ ] Run the focused tests and confirm red.
+- [x] Run the focused tests and confirm red.
 
 ```powershell
 uv run pytest -q tests/unit/test_api_keys_service.py tests/integration/test_api_keys_api.py -k "assignment_generation or concurrent_assignment"
 ```
 
-- [ ] Add a repository transaction entry point that serializes the compare-and-replace operation:
+- [x] Add a repository transaction entry point that serializes the compare-and-replace operation:
 
 ```python
 async def replace_account_assignments_if_changed(
@@ -120,9 +120,9 @@ async def replace_account_assignments_if_changed(
 
 On PostgreSQL, select the `ApiKey` row with `FOR UPDATE`. On SQLite, hold the existing `sqlite_writer_section()` for the complete read/compare/replace/update transaction. Compare sorted unique ID sets, increment `account_assignment_generation`, set `account_assignment_changed_at`, replace assignments, and commit once.
 
-- [ ] Change `ApiKeysService.update_key` to call this method only when `assigned_account_ids` was supplied, retain the surrounding rollback behavior, and invalidate the local/distributed API-key caches only after commit.
+- [x] Change `ApiKeysService.update_key` to call this method only when `assigned_account_ids` was supplied, retain the surrounding rollback behavior, and invalidate the local/distributed API-key caches only after commit.
 
-- [ ] Re-run both focused test files.
+- [x] Re-run both focused test files.
 
 ```powershell
 uv run pytest -q tests/unit/test_api_keys_service.py tests/integration/test_api_keys_api.py
@@ -139,7 +139,7 @@ Expected: both files pass.
 - Modify: `tests/unit/test_proxy_utils.py`
 - Modify: `tests/unit/test_load_balancer_concurrency.py`
 
-- [ ] Add failing tests proving:
+- [x] Add failing tests proving:
 
   - generation `1` session-header requests preserve the current v1 selection key and raw legacy lookup;
   - generation `2+` session-header requests use a key containing the API-key ID and generation and do not expose a raw legacy key;
@@ -153,13 +153,13 @@ assert generation_two.legacy_selection_key is None
 assert generation_two.codex_session_source == "session_header"
 ```
 
-- [ ] Run the selected tests and confirm red.
+- [x] Run the selected tests and confirm red.
 
 ```powershell
 uv run pytest -q tests/unit/test_proxy_utils.py tests/unit/test_load_balancer_concurrency.py -k "assignment_generation or legacy_session_header or soft_affinity"
 ```
 
-- [ ] Add one canonical soft-key builder:
+- [x] Add one canonical soft-key builder:
 
 ```python
 def api_key_soft_affinity_key(
@@ -178,11 +178,11 @@ def api_key_soft_affinity_key(
 
 For generation `2+`, hash a stable payload containing schema version, API-key ID (or the anonymous scope), generation, affinity kind, source, and the raw-key digest. Keep real turn-state and previous-response ownership outside this function.
 
-- [ ] Update `_sticky_key_for_responses_request`, bare session-header handling, prompt-cache handling, and `preferred_owner_sticky_inputs` so generation `2+` session-header traffic cannot consult the old raw `CODEX_SESSION` row.
+- [x] Update `_sticky_key_for_responses_request`, bare session-header handling, prompt-cache handling, and `preferred_owner_sticky_inputs` so generation `2+` session-header traffic cannot consult the old raw `CODEX_SESSION` row.
 
-- [ ] Integrate the existing continuity-owner conflict fix from commit `4a0984f5` by behavior, not by blind cherry-pick: stale soft affinity must not reject a separately proven hard owner.
+- [x] Integrate the existing continuity-owner conflict fix from commit `4a0984f5` by behavior, not by blind cherry-pick: stale soft affinity must not reject a separately proven hard owner.
 
-- [ ] Re-run the full focused files.
+- [x] Re-run the full focused files.
 
 ```powershell
 uv run pytest -q tests/unit/test_proxy_utils.py tests/unit/test_load_balancer_concurrency.py
@@ -201,7 +201,7 @@ Expected: both files pass.
 - Modify: `tests/unit/test_proxy_http_bridge.py`
 - Modify: `tests/integration/test_http_responses_bridge.py`
 
-- [ ] Add failing tests proving:
+- [x] Add failing tests proving:
 
   - generation `2+` bridge fallback keys differ from generation `1`;
   - forwarded bridge affinity preserves the already-versioned key;
@@ -209,13 +209,13 @@ Expected: both files pass.
   - `previous_response_id` and turn-state aliases still resolve the old hard owner;
   - two API keys with the same session header remain isolated.
 
-- [ ] Run the focused tests and confirm red.
+- [x] Run the focused tests and confirm red.
 
 ```powershell
 uv run pytest -q tests/unit/test_proxy_http_bridge.py tests/integration/test_http_responses_bridge.py -k "assignment_generation or durable_session_header_alias"
 ```
 
-- [ ] Add the generation to `_HTTPBridgeSessionKey` and build the session-header alias from the same canonical soft-key helper used by direct routing:
+- [x] Add the generation to `_HTTPBridgeSessionKey` and build the session-header alias from the same canonical soft-key helper used by direct routing:
 
 ```python
 _HTTPBridgeSessionKey(
@@ -227,11 +227,11 @@ _HTTPBridgeSessionKey(
 )
 ```
 
-- [ ] Register and resolve only the versioned session-header alias for generation `2+`. Retain the unversioned alias path exclusively for generation `1`; do not version turn-state or previous-response aliases.
+- [x] Register and resolve only the versioned session-header alias for generation `2+`. Retain the unversioned alias path exclusively for generation `1`; do not version turn-state or previous-response aliases.
 
-- [ ] Ensure forwarded bridge requests carry the full versioned affinity key unchanged and cannot silently reconstruct a different generation on the destination instance.
+- [x] Ensure forwarded bridge requests carry the full versioned affinity key unchanged and cannot silently reconstruct a different generation on the destination instance.
 
-- [ ] Re-run both focused files.
+- [x] Re-run both focused files.
 
 ```powershell
 uv run pytest -q tests/unit/test_proxy_http_bridge.py tests/integration/test_http_responses_bridge.py

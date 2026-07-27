@@ -40,6 +40,7 @@ from app.modules.proxy._service.support import _request_log_client_fields, _Requ
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
     _AffinityPolicy,
+    _api_key_affinity_scope,
     _bare_codex_session_affinity,
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
@@ -419,6 +420,7 @@ def _sticky_key_for_compact_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
+    api_key_id, generation = _api_key_affinity_scope(api_key)
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
         policy = _AffinityPolicy(
@@ -431,6 +433,7 @@ def _sticky_key_for_compact_request(
             headers,
             enabled=codex_session_affinity,
             allow_cap_spillover=_request_allows_bare_session_cap_spillover(payload),
+            api_key=api_key,
         )
     ) is not None:
         policy = session_affinity
@@ -439,12 +442,16 @@ def _sticky_key_for_compact_request(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            api_key_id=api_key_id,
+            account_assignment_generation=generation,
         )
     elif sticky_threads_enabled:
         policy = _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            api_key_id=api_key_id,
+            account_assignment_generation=generation,
         )
     else:
         policy = _AffinityPolicy()

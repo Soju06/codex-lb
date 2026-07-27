@@ -242,6 +242,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_has_visible_requests as _http_bridge_session_has_visible_requests,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_session_header_lookup_value as _http_bridge_session_header_lookup_value,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_matches_preferred_account as _http_bridge_session_matches_preferred_account,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -980,6 +983,7 @@ class ProxyService(
         affinity = _sticky_key_for_codex_control_request(
             headers,
             codex_session_affinity=codex_session_affinity,
+            api_key=api_key,
         )
         selection_model = api_key.enforced_model if api_key is not None else None
         routing_strategy = _routing_strategy(settings)
@@ -1830,6 +1834,7 @@ class ProxyService(
                         sticky_max_age_seconds,
                         sticky_source,
                         legacy_sticky_key,
+                        authoritative_continuity_owner=required_continuity_preferred_account,
                     )
                     preferred_selection = await self._load_balancer.select_account(
                         sticky_key=preferred_sticky_inputs[0],

@@ -77,6 +77,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
+    _http_bridge_session_header_lookup_value,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
@@ -866,10 +867,9 @@ class _HTTPBridgeStreamingMixin:
                     session_key_value=bridge_session_key.affinity_key,
                     api_key_id=bridge_session_key.api_key_id,
                     turn_state=durable_lookup_turn_state,
-                    session_header=(
-                        session_header_fallback_key.affinity_key
-                        if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
-                        else incoming_session_header
+                    session_header=_http_bridge_session_header_lookup_value(
+                        session_header_fallback_key=session_header_fallback_key,
+                        incoming_session_header=incoming_session_header,
                     ),
                     previous_response_id=payload.previous_response_id,
                 )
@@ -1483,10 +1483,9 @@ class _HTTPBridgeStreamingMixin:
                                 session_key_value=bridge_session_key.affinity_key,
                                 api_key_id=bridge_session_key.api_key_id,
                                 turn_state=takeover_turn_state,
-                                session_header=(
-                                    session_header_fallback_key.affinity_key
-                                    if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
-                                    else incoming_session_header
+                                session_header=_http_bridge_session_header_lookup_value(
+                                    session_header_fallback_key=session_header_fallback_key,
+                                    incoming_session_header=incoming_session_header,
                                 ),
                                 previous_response_id=effective_payload.previous_response_id,
                             )

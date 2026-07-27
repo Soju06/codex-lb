@@ -2250,6 +2250,7 @@ def _make_api_key(
     key_id: str,
     assigned_account_ids: list[str],
     account_assignment_scope_enabled: bool | None = None,
+    account_assignment_generation: int = 1,
 ) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id=key_id,
@@ -2266,6 +2267,7 @@ def _make_api_key(
         account_assignment_scope_enabled=(
             bool(assigned_account_ids) if account_assignment_scope_enabled is None else account_assignment_scope_enabled
         ),
+        account_assignment_generation=account_assignment_generation,
         assigned_account_ids=assigned_account_ids,
     )
 
@@ -4357,6 +4359,92 @@ def test_http_bridge_session_header_key_without_prompt_cache_key_stays_legacy_co
     assert key == proxy_service._HTTPBridgeSessionKey("session_header", "legacy-session", None)
 
 
+def test_http_bridge_generation_two_session_header_key_is_versioned_and_forwardable() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.6-sol", "instructions": "", "input": []})
+    api_key = _make_api_key(
+        key_id="bridge-generation-key",
+        assigned_account_ids=["acc-a"],
+        account_assignment_generation=2,
+    )
+    affinity = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "shared-bridge-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=api_key,
+    )
+
+    key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers={"session_id": "shared-bridge-session"},
+        affinity=affinity,
+        api_key=api_key,
+        request_id="request-generation-two",
+    )
+    other_api_key = _make_api_key(
+        key_id="other-bridge-generation-key",
+        assigned_account_ids=["acc-a"],
+        account_assignment_generation=2,
+    )
+    other_key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers={"session_id": "shared-bridge-session"},
+        affinity=proxy_service._sticky_key_for_responses_request(
+            payload,
+            headers={"session_id": "shared-bridge-session"},
+            codex_session_affinity=True,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=300,
+            sticky_threads_enabled=False,
+            api_key=other_api_key,
+        ),
+        api_key=other_api_key,
+        request_id="request-other-generation-two",
+    )
+    forwarded = proxy_service._forwarded_http_bridge_session_key(
+        {
+            "x-codex-bridge-affinity-kind": key.affinity_kind,
+            "x-codex-bridge-affinity-key": key.affinity_key,
+        },
+        api_key,
+    )
+
+    assert key.affinity_key.startswith("codex-lb-bridge-affinity-v2:")
+    assert "\r" not in key.affinity_key
+    assert "\n" not in key.affinity_key
+    assert "shared-bridge-session" not in key.affinity_key
+    assert other_key.affinity_key != key.affinity_key
+    assert key.account_assignment_generation == 2
+    assert forwarded == key
+
+
+def test_http_bridge_durable_session_header_lookup_uses_versioned_fallback_without_prompt_cache() -> None:
+    fallback_key = proxy_service._HTTPBridgeSessionKey(
+        "session_header",
+        "codex-lb-bridge-affinity-v2:digest",
+        "key-1",
+        strength="soft",
+        account_assignment_generation=2,
+    )
+
+    assert (
+        proxy_service._http_bridge_session_header_lookup_value(
+            session_header_fallback_key=fallback_key,
+            incoming_session_header="legacy-raw-session",
+        )
+        == fallback_key.affinity_key
+    )
+    assert (
+        proxy_service._http_bridge_session_header_lookup_value(
+            session_header_fallback_key=None,
+            incoming_session_header="legacy-raw-session",
+        )
+        == "legacy-raw-session"
+    )
+
+
 def test_http_bridge_owner_check_required_keeps_prompt_cache_soft() -> None:
     key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache", None)
 
@@ -5695,6 +5783,63 @@ async def test_select_account_with_budget_rejects_continuity_owner_outside_singl
     assert selection_call.kwargs["required_account_is_ownership_constraint"] is True
     assert selection_call.kwargs["required_continuity_owner"] is True
     assert selection_call.kwargs["routing_strategy"] == "single_account"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferred_account_is_continuity_owner", "expected_legacy_sticky_key"),
+    [
+        (True, None),
+        (False, "legacy-session"),
+    ],
+)
+async def test_select_account_with_budget_only_continuity_owner_ignores_legacy_raw_session_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    preferred_account_is_continuity_owner: bool,
+    expected_legacy_sticky_key: str | None,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    selected_account = cast(Any, SimpleNamespace(id="acc-preferred-owner"))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=selected_account,
+            error_message=None,
+            error_code=None,
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(sticky_reallocation_budget_threshold_pct=95.0))
+        ),
+    )
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-preferred-owner-legacy-session-hint",
+        kind="http_bridge",
+        request_stage="follow_up",
+        sticky_key="\ncodex-lb-affinity-v1:session_header:test-preferred-owner",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key="legacy-session",
+        preferred_account_id=selected_account.id,
+        preferred_account_is_continuity_owner=preferred_account_is_continuity_owner,
+        lease_kind="stream",
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    assert selection.account is selected_account
+    select_account.assert_awaited_once()
+    selection_call = select_account.await_args
+    assert selection_call is not None
+    assert selection_call.kwargs["sticky_key"] is None
+    assert selection_call.kwargs["sticky_source"] == "session_header"
+    assert selection_call.kwargs["legacy_sticky_key"] == expected_legacy_sticky_key
+    assert selection_call.kwargs["required_account_id"] == selected_account.id
+    assert selection_call.kwargs["required_continuity_owner"] is preferred_account_is_continuity_owner
 
 
 @pytest.mark.asyncio

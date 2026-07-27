@@ -4809,6 +4809,7 @@ def _make_api_key_data(
     key_id: str,
     *,
     transport_policy_override: str | None = None,
+    account_assignment_generation: int = 1,
 ) -> ApiKeyData:
     return ApiKeyData(
         id=key_id,
@@ -4823,6 +4824,7 @@ def _make_api_key_data(
         created_at=utcnow(),
         last_used_at=None,
         transport_policy_override=transport_policy_override,
+        account_assignment_generation=account_assignment_generation,
     )
 
 
@@ -9796,6 +9798,29 @@ def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
     assert policy.max_age_seconds is None
 
 
+def test_generation_two_compact_session_header_uses_versioned_soft_affinity() -> None:
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_compact_request(
+        payload,
+        headers={"session_id": "compact-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=_make_api_key_data("compact-key", account_assignment_generation=2),
+    )
+
+    assert cast(str, policy.selection_key).startswith("\ncodex-lb-affinity-v2:")
+    assert policy.legacy_selection_key is None
+
+
 @pytest.mark.parametrize("codex_session_affinity", [False, True])
 def test_sticky_key_for_compact_request_prefers_turn_state_over_session_and_cache(
     codex_session_affinity: bool,
@@ -9897,6 +9922,110 @@ def test_codex_session_selection_keys_are_namespaced_by_source() -> None:
         )
         != session_policy.selection_key
     )
+
+
+def test_generation_one_session_header_preserves_legacy_lookup() -> None:
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "session-generation-one"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=_make_api_key_data("key-generation-one", account_assignment_generation=1),
+    )
+
+    assert cast(str, policy.selection_key).startswith("\ncodex-lb-affinity-v1:session_header:")
+    assert policy.legacy_selection_key == "session-generation-one"
+
+
+def test_generation_two_session_header_uses_api_key_generation_namespace_without_legacy_lookup() -> None:
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+    first_key = _make_api_key_data("key-a", account_assignment_generation=2)
+    second_key = _make_api_key_data("key-b", account_assignment_generation=2)
+
+    first = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "shared-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=first_key,
+    )
+    second = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "shared-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=second_key,
+    )
+
+    assert cast(str, first.selection_key).startswith("\ncodex-lb-affinity-v2:")
+    assert first.selection_key != second.selection_key
+    assert "shared-session" not in cast(str, first.selection_key)
+    assert first.legacy_selection_key is None
+    assert second.legacy_selection_key is None
+
+
+def test_generation_two_prompt_cache_affinity_changes_when_assignment_generation_changes() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "prompt_cache_key": "shared-cache",
+        }
+    )
+    generation_two = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=_make_api_key_data("key-cache", account_assignment_generation=2),
+    )
+    generation_three = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+        api_key=_make_api_key_data("key-cache", account_assignment_generation=3),
+    )
+
+    assert generation_two.key == "shared-cache"
+    assert generation_two.selection_key != generation_three.selection_key
+    assert cast(str, generation_two.selection_key).startswith("\ncodex-lb-affinity-v2:")
+
+
+def test_assignment_generation_does_not_change_real_turn_state_owner_key() -> None:
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"x-codex-turn-state": "turn-owner"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+        api_key=_make_api_key_data("key-turn", account_assignment_generation=7),
+    )
+
+    assert policy.selection_key == "turn-owner"
+    assert policy.legacy_selection_key is None
+    assert policy.codex_session_source == "turn_state"
 
 
 def test_sticky_key_from_session_header_accepts_aliases_in_priority_order():

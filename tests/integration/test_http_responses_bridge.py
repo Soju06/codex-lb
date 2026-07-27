@@ -4819,10 +4819,14 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
         original_affinity_key=canonical_key.affinity_key,
     )
     forward_headers = build_owner_forward_headers(
-        headers={"x-request-id": "forwarded-priority-request"},
+        headers={
+            "x-request-id": "forwarded-priority-request",
+            "x-opencode-session": "forwarded-opencode-session",
+        },
         payload=priority_payload,
         context=forward_context,
     )
+    assert forward_headers["x-opencode-session"] == "forwarded-opencode-session"
 
     try:
         creator_response = await async_client.post(

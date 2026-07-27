@@ -31,3 +31,19 @@ already translated SHALL render in Simplified Chinese as well.
 
 - **WHEN** a filter group or table header contains several labels and some already render in Simplified Chinese (e.g. 状态, 类型)
 - **THEN** the remaining labels in that group render in Simplified Chinese (e.g. 触发方式) instead of falling back to English
+
+### Requirement: Dashboard numeric units stay locale-independent
+
+Dashboard quantities that use compact formatting SHALL use `K`, `M`, and `B`
+suffixes regardless of the selected interface locale so requests, tokens,
+balances, pool totals, projections, and configured thresholds remain directly
+comparable. Dashboard USD values SHALL use the `$` prefix across locales.
+
+#### Scenario: Simplified Chinese compact quantity display
+
+- **WHEN** a user selects `zh-CN`
+- **AND** views compact request, token, or credit quantities
+- **THEN** 10,200 renders as `10.2K`
+- **AND** 1,500,000 renders as `1.5M`
+- **AND** 1,500,000,000 renders as `1.5B`
+- **AND** 12 USD renders as `$12.00`

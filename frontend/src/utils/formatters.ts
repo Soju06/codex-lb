@@ -18,8 +18,16 @@ function getIntlLocale(): string {
 }
 
 const numberFormatters = new Map<string, Intl.NumberFormat>();
-const compactFormatters = new Map<string, Intl.NumberFormat>();
-const currencyFormatters = new Map<string, Intl.NumberFormat>();
+const compactFormatter = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 2,
+});
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 const dateFormatters = new Map<string, Intl.DateTimeFormat>();
 const timeFormatters = new Map<string, Intl.DateTimeFormat>();
 const chartDateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
@@ -41,24 +49,6 @@ function getCachedFormatter<TFormatter>(
 function getNumberFormatter(): Intl.NumberFormat {
   const locale = getIntlLocale();
   return getCachedFormatter(numberFormatters, locale, () => new Intl.NumberFormat(locale));
-}
-
-function getCompactFormatter(): Intl.NumberFormat {
-  const locale = getIntlLocale();
-  return getCachedFormatter(compactFormatters, locale, () => new Intl.NumberFormat(locale, {
-    notation: "compact",
-    maximumFractionDigits: 2,
-  }));
-}
-
-function getCurrencyFormatter(): Intl.NumberFormat {
-  const locale = getIntlLocale();
-  return getCachedFormatter(currencyFormatters, locale, () => new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }));
 }
 
 function getDateFormatter(): Intl.DateTimeFormat {
@@ -157,12 +147,12 @@ export function formatNumber(value: unknown): string {
 
 export function formatCompactNumber(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : getCompactFormatter().format(numeric);
+  return numeric === null ? "--" : compactFormatter.format(numeric);
 }
 
 export function formatCurrency(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : getCurrencyFormatter().format(numeric);
+  return numeric === null ? "--" : currencyFormatter.format(numeric);
 }
 
 export function formatPercent(value: unknown): string {

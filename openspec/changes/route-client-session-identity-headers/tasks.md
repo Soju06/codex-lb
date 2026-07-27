@@ -16,6 +16,7 @@
 
 - [x] 3.1 Bypass the bridge (raw HTTP upstream) for session-identified, tool-less, self-contained one-shots; exclude forwarded requests, native Codex clients, anonymous requests, and explicit `websocket` transport.
 - [x] 3.2 Normalize the `tools: {}` wire shape (OpenCode title/compaction side calls) to `tools: []` on both `/responses` validation paths so empty tool maps reach the bypass; keep non-empty tool maps rejected.
+- [x] 3.3 Keep account-scoped hosted input on the bridge and disable bare-session cap spillover for it.
 
 ## 4. Tests
 
@@ -25,3 +26,4 @@
 - [x] 4.4 Empty tool map coverage: `tools: {}` validates as tool-less at the `/responses` route and reaches the one-shot bypass; non-empty tool maps stay rejected.
 - [x] 4.5 Public Responses affinity coverage: client identity overrides shared prompt-cache affinity while Codex session affinity is disabled.
 - [x] 4.6 Replica forwarding coverage: internal owner-forward headers retain client identity until Responses upstream egress.
+- [x] 4.7 Account-scoped hosted-input coverage: such requests neither bypass the bridge nor spill across accounts.

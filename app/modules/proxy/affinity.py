@@ -18,8 +18,10 @@ from uuid import uuid4
 
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.types import JsonValue
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy.replay_safety import responses_input_items_are_self_contained_fresh_replay
 
 # This typed provenance is a routing capability: callers must never recover it
 # from key text, because a client-controlled turn state can mimic any prefix.
@@ -355,6 +357,10 @@ def _request_allows_bare_session_cap_spillover(
         or (conversation is not None and not isinstance(conversation, str))
         or (isinstance(conversation, str) and bool(conversation.strip()))
         or extract_input_file_ids(payload.input)
+        or (
+            isinstance(payload.input, list)
+            and not responses_input_items_are_self_contained_fresh_replay(cast(list[JsonValue], payload.input))
+        )
     )
 
 

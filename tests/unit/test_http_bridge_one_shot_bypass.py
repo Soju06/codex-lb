@@ -89,6 +89,13 @@ def test_file_pinned_requests_are_not_one_shot() -> None:
     assert not _is_one_shot(payload, _OPENCODE_HEADERS)
 
 
+@pytest.mark.parametrize("item_type", ["item_reference", "file_search_call"])
+def test_account_scoped_hosted_items_are_not_one_shot(item_type: str) -> None:
+    payload = _payload(input=[{"type": item_type, "id": "hosted-item"}])
+
+    assert not _is_one_shot(payload, _OPENCODE_HEADERS)
+
+
 def test_native_codex_clients_are_excluded() -> None:
     headers = {**_OPENCODE_HEADERS, "originator": "codex_cli_rs"}
     assert not _is_one_shot(_payload(), headers)

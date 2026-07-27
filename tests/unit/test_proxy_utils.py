@@ -10026,6 +10026,29 @@ def test_bare_session_cap_spillover_is_revoked_by_account_scoped_payload(
     assert policy.require_unambiguous_account is ("conversation" in owner_payload)
 
 
+@pytest.mark.parametrize("item_type", ["item_reference", "file_search_call"])
+def test_bare_session_cap_spillover_is_revoked_by_account_scoped_hosted_input(item_type: str) -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [{"type": item_type, "id": "hosted-item"}],
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"x-session-id": "client-session"},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert policy.spill_on_account_cap is False
+
+
 def test_codex_session_selection_keys_are_namespaced_by_source() -> None:
     session_policy = proxy_service._AffinityPolicy(
         key="same-raw-value",

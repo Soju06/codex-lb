@@ -562,7 +562,7 @@ def _should_drop_inbound_header(name: str, *, preserve_client_session_identity: 
 def filter_inbound_headers(
     headers: Mapping[str, str],
     *,
-    preserve_client_session_identity: bool = False,
+    preserve_client_session_identity: bool = True,
 ) -> dict[str, str]:
     return {
         key: value
@@ -736,7 +736,7 @@ def _build_upstream_headers(
     account_id: str | None,
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
-    headers = filter_inbound_headers(inbound)
+    headers = filter_inbound_headers(inbound, preserve_client_session_identity=False)
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
@@ -793,7 +793,7 @@ def _build_upstream_websocket_headers(
             token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
-    filtered = filter_inbound_headers(inbound)
+    filtered = filter_inbound_headers(inbound, preserve_client_session_identity=False)
     headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}

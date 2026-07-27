@@ -1337,7 +1337,7 @@ def test_filter_inbound_headers_strips_internal_capability_header():
     assert filtered["X-Custom"] == "preserved"
 
 
-def test_filter_inbound_headers_strips_client_session_identity_only_at_egress() -> None:
+def test_filter_inbound_headers_preserves_client_session_identity_by_default() -> None:
     headers = {
         "X-Session-Affinity": "affinity",
         "X-Session-Id": "session",
@@ -1347,11 +1347,11 @@ def test_filter_inbound_headers_strips_client_session_identity_only_at_egress() 
         "User-Agent": "opencode/1.18.3",
     }
 
-    filtered = filter_inbound_headers(headers)
-    preserved = filter_inbound_headers(headers, preserve_client_session_identity=True)
+    preserved = filter_inbound_headers(headers)
+    stripped = filter_inbound_headers(headers, preserve_client_session_identity=False)
 
-    assert {key.lower() for key in filtered} == {"user-agent"}
     assert preserved == headers
+    assert {key.lower() for key in stripped} == {"user-agent"}
 
 
 def test_build_upstream_headers_strips_preserved_client_session_identity() -> None:
@@ -1364,8 +1364,7 @@ def test_build_upstream_headers_strips_preserved_client_session_identity() -> No
             "X-Session-Id": "session",
             "X-OpenCode-Session": "opencode",
             "User-Agent": "opencode/1.18.3",
-        },
-        preserve_client_session_identity=True,
+        }
     )
 
     headers = _build_upstream_headers(preserved, "token", "acc_2")
@@ -5532,12 +5531,14 @@ async def test_codex_control_request_persists_conversation_id_and_passes_dashboa
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_codex_control")
     selection_kwargs: list[dict[str, object]] = []
+    upstream_headers: dict[str, str] = {}
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         selection_kwargs.append(kwargs)
         return AccountSelection(account=account, error_message=None)
 
-    async def codex_control_request(*_args: object, **_kwargs: object) -> proxy_module.CodexControlResponse:
+    async def codex_control_request(*_args: object, **kwargs: object) -> proxy_module.CodexControlResponse:
+        upstream_headers.update(cast(dict[str, str], kwargs["headers"]))
         return proxy_module.CodexControlResponse(status_code=200, body=b'{"ok":true}', headers={})
 
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
@@ -5549,13 +5550,18 @@ async def test_codex_control_request_persists_conversation_id_and_passes_dashboa
         method="POST",
         payload=None,
         query_params={},
-        headers={"User-Agent": "codex/1.2", "thread-id": "conv-control"},
+        headers={
+            "User-Agent": "codex/1.2",
+            "thread-id": "conv-control",
+            "x-session-id": "control-session-metadata",
+        },
     )
 
     assert response.status_code == 200
     assert response.body == b'{"ok":true}'
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+    assert upstream_headers["x-session-id"] == "control-session-metadata"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["conversation_id"] == "conv-control"
 

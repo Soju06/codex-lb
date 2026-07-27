@@ -815,7 +815,7 @@ async def test_conversation_details_reasoning_effort_tie_uses_explicit_rank(asyn
 
 
 @pytest.mark.asyncio
-async def test_since_filter_excludes_conversation_started_before_window(async_client, db_setup):
+async def test_since_filter_includes_conversation_active_in_window(async_client, db_setup):
     base = utcnow().replace(microsecond=0)
     await _seed_conversation_rows(
         [
@@ -883,11 +883,58 @@ async def test_since_filter_excludes_conversation_started_before_window(async_cl
 
     assert response.status_code == 200
     body = response.json()
-    assert [row["conversationId"] for row in body["conversations"]] == ["conv-new"]
-    assert body["total"] == 1
-    entry = body["conversations"][0]
-    assert entry["totalTokens"] == 85
-    assert entry["totalCostUsd"] == pytest.approx(0.7)
+    assert [row["conversationId"] for row in body["conversations"]] == ["conv-new", "conv-old"]
+    assert body["total"] == 2
+    entry = body["conversations"][1]
+    assert entry["totalTokens"] == 330
+    assert entry["totalCostUsd"] == pytest.approx(3.0)
+    assert entry["firstRequest"].startswith((base - timedelta(days=10)).isoformat())
+
+
+@pytest.mark.asyncio
+async def test_since_filter_preserves_true_earliest_conversation_start(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="started-before-window",
+                account_id="started-before-window-account",
+                model="started-before-window-model",
+                reasoning_effort=None,
+                input_tokens=10,
+                output_tokens=1,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=0.1,
+                requested_at=base - timedelta(days=60),
+                conversation_id="conv-long-running",
+            ),
+            _ConversationSeed(
+                request_id="active-in-window",
+                account_id="active-in-window-account",
+                model="active-in-window-model",
+                reasoning_effort=None,
+                input_tokens=20,
+                output_tokens=2,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=0.2,
+                requested_at=base - timedelta(days=1),
+                conversation_id="conv-long-running",
+            ),
+        ]
+    )
+
+    since = base - timedelta(days=30)
+    response = await async_client.get(f"/api/conversations?since={since.isoformat()}")
+
+    assert response.status_code == 200
+    entries = response.json()["conversations"]
+    assert len(entries) == 1
+    assert entries[0]["conversationId"] == "conv-long-running"
+    assert datetime.fromisoformat(entries[0]["firstRequest"]).replace(tzinfo=None) < since.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio

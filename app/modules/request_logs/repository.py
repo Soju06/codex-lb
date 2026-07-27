@@ -6,10 +6,10 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, exists, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, aliased
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
@@ -229,8 +229,6 @@ class RequestLogsRepository:
         output = self._conversation_output_expr()
         cached = self._conversation_cached_expr()
         summary_conditions = [*conditions]
-        if since is not None:
-            summary_conditions.append(RequestLog.requested_at >= since)
         summary_stmt = (
             select(
                 conversation_id.label("conversation_id"),
@@ -245,25 +243,10 @@ class RequestLogsRepository:
             .where(*summary_conditions)
             .group_by(conversation_id)
         )
-        summary_subquery = summary_stmt.subquery()
         if since is not None:
-            candidate = summary_subquery.c
-            pre_window_log = aliased(RequestLog)
-            has_pre_window_row = exists(
-                select(1)
-                .select_from(pre_window_log)
-                .where(
-                    pre_window_log.conversation_id == candidate.conversation_id,
-                    pre_window_log.deleted_at.is_(None),
-                    pre_window_log.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup")),
-                    pre_window_log.conversation_id.is_not(None),
-                    pre_window_log.conversation_id != "",
-                    pre_window_log.requested_at < since,
-                )
-            )
-            filtered_summary_stmt = select(summary_subquery).where(~has_pre_window_row)
-        else:
-            filtered_summary_stmt = select(summary_subquery)
+            summary_stmt = summary_stmt.having(func.count().filter(RequestLog.requested_at >= since) > 0)
+        summary_subquery = summary_stmt.subquery()
+        filtered_summary_stmt = select(summary_subquery)
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
             total = int(
@@ -364,6 +347,7 @@ class RequestLogsRepository:
             return None
         normalized_id = RequestLog.conversation_id
         conditions = [*self._conversation_conditions(), normalized_id == target]
+        # Details intentionally remain window-agnostic; only list membership uses since.
         summary = (
             await self._session.execute(
                 select(

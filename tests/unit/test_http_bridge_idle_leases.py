@@ -65,6 +65,38 @@ async def test_idle_session_releases_stream_lease() -> None:
 
 
 @pytest.mark.asyncio
+async def test_idle_session_release_defers_reader_cancellation() -> None:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    lease = _make_lease("l-idle-cancel")
+    session.account_lease = lease
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    async def release_account_lease(released_lease: proxy_service.AccountLease) -> None:
+        assert released_lease is lease
+        release_started.set()
+        await finish_release.wait()
+
+    fake_self = SimpleNamespace(
+        _load_balancer=SimpleNamespace(release_account_lease=AsyncMock(side_effect=release_account_lease))
+    )
+    release_task = asyncio.create_task(mixin._maybe_release_idle_http_bridge_session_lease(fake_self, session))
+    await release_started.wait()
+    release_task.cancel()
+    release_task.cancel()
+    await asyncio.sleep(0)
+    assert not release_task.done()
+
+    finish_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    assert session.account_lease is None
+    fake_self._load_balancer.release_account_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
 async def test_busy_or_closed_session_keeps_stream_lease() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     lease = _make_lease("l2")

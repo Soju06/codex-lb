@@ -33194,6 +33194,8 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
     )
     allow_reacquire = asyncio.Event()
     reacquire_started = asyncio.Event()
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
 
     async def acquire_account_lease(*_args: object, **_kwargs: object) -> proxy_service.AccountLease:
         reacquire_started.set()
@@ -33215,7 +33217,13 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
         ),
     )
     monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
-    release_account_lease = AsyncMock()
+
+    async def release_account_lease_side_effect(released_lease: proxy_service.AccountLease) -> None:
+        assert released_lease is reacquired_lease
+        release_started.set()
+        await finish_release.wait()
+
+    release_account_lease = AsyncMock(side_effect=release_account_lease_side_effect)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=new_upstream))
@@ -33256,7 +33264,16 @@ async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquis
     allow_old_upstream_close.set()
     await asyncio.sleep(0)
     allow_reacquire.set()
-    await asyncio.gather(reconnect_task, reacquire_task)
+    await reacquire_task
+    await release_started.wait()
+    reconnect_task.cancel()
+    reconnect_task.cancel()
+    await asyncio.sleep(0)
+    assert not reconnect_task.done()
+
+    finish_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reconnect_task
 
     assert session.account_lease is reconnect_lease
     assert session.upstream is new_upstream

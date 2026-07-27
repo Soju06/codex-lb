@@ -5,7 +5,7 @@ import json
 import logging
 from collections import deque
 from dataclasses import replace
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
 import anyio
@@ -68,6 +68,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
@@ -187,7 +188,6 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
-T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
@@ -196,21 +196,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
-
-
-async def _await_task_deferring_cancellation(
-    task: asyncio.Task[T],
-) -> tuple[T, asyncio.CancelledError | None]:
-    """Finish critical cleanup while preserving the caller's cancellation."""
-
-    cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            return await asyncio.shield(task), cancellation
-        except asyncio.CancelledError as exc:
-            if task.cancelled():
-                raise
-            cancellation = cancellation or exc
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -1372,10 +1357,17 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.account_lease = None
         if lease is None:
             return
-        try:
-            await load_balancer.release_account_lease(lease)
-        except Exception:
-            logger.warning("Failed to release idle HTTP bridge account lease", exc_info=True)
+
+        async def release_idle_lease() -> None:
+            try:
+                await load_balancer.release_account_lease(lease)
+            except Exception:
+                logger.warning("Failed to release idle HTTP bridge account lease", exc_info=True)
+
+        release_task = asyncio.create_task(release_idle_lease())
+        _, cancellation = await _await_task_deferring_cancellation(release_task)
+        if cancellation is not None:
+            raise cancellation
 
     async def _detach_http_bridge_request(
         self: Any,

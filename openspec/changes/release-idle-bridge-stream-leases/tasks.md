@@ -18,6 +18,7 @@
 - [x] 2.8 Cover the final lease check with failed-submit cleanup so exceptions cannot leak admission waiters.
 - [x] 2.9 Serialize reconnect lease replacement with idle-session reacquisition and release the losing lease.
 - [x] 2.10 Defer cancellation until a detached lease acquired during a close race is released.
+- [x] 2.11 Defer cancellation through idle and reconnect-replacement lease settlement after session ownership is cleared.
 
 ## 3. Tests
 
@@ -32,3 +33,4 @@
 - [x] 3.9 Reconnect racing reacquisition retains one lease and releases the other.
 - [x] 3.10 HTTP bridge terminal completion releases a capped account slot so a second warm session is admitted before idle TTL expiry.
 - [x] 3.11 Cancellation during close-race settlement cannot interrupt detached lease release.
+- [x] 3.12 Reader cancellation cannot interrupt idle release, and reconnect cancellation cannot interrupt replaced-lease settlement.

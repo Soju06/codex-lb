@@ -148,6 +148,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_local_account_cap_code,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _ttft_event_visible_at,
@@ -190,6 +191,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
     _prompt_cache_key_from_request_model,
+    _request_allows_bare_session_cap_spillover,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
@@ -246,6 +248,22 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     return _account_selection_recovery_sleep_seconds_from_message(
         message,
         error_code=code,
+    )
+
+
+def _http_bridge_unanchored_fork_can_spill_on_cap(
+    *,
+    error_code: str | None,
+    affinity_kind: str,
+    payload: ResponsesRequest,
+    preferred_account_id: str | None,
+) -> bool:
+    return (
+        _is_local_account_cap_code(error_code)
+        and affinity_kind == "internal_unanchored_parallel"
+        and preferred_account_id is not None
+        and payload.previous_response_id is None
+        and _request_allows_bare_session_cap_spillover(payload)
     )
 
 
@@ -1143,6 +1161,7 @@ class _HTTPBridgeStreamingMixin:
             without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        unanchored_fork_spill_attempted = False
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             nonlocal durable_full_resend_fresh_payload
@@ -1307,6 +1326,28 @@ class _HTTPBridgeStreamingMixin:
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    exc_code, _exc_message = _proxy_error_code_message(exc)
+                    if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
+                        error_code=exc_code,
+                        affinity_kind=bridge_session_key.affinity_kind,
+                        payload=effective_payload,
+                        preferred_account_id=request_state.preferred_account_id,
+                    ):
+                        unanchored_fork_spill_attempted = True
+                        _log_http_bridge_event(
+                            "unanchored_fork_cap_spill",
+                            bridge_session_key,
+                            account_id=request_state.preferred_account_id,
+                            model=effective_payload.model,
+                            detail=f"reason={exc_code}, outcome=retry_without_preferred_account",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(effective_payload.model)
+                            if effective_payload.model
+                            else None,
+                        )
+                        request_state.preferred_account_id = None
+                        preferred_account_has_continuity_provenance = False
+                        continue
                     wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan

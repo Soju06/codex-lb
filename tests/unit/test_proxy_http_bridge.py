@@ -19548,3 +19548,177 @@ async def test_cancel_api_key_reservation_heartbeat_task_does_not_wait_for_task_
     await asyncio.sleep(0)
 
     assert task.cancelled()
+
+
+def test_unanchored_fork_cap_spill_predicate() -> None:
+    self_contained = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+    )
+    anchored = self_contained.model_copy(update={"previous_response_id": "resp_123"})
+
+    assert http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    assert http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_response_create_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=anchored,
+        preferred_account_id="acct-1",
+    )
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="session_header",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="upstream_unavailable",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id="acct-1",
+    )
+    assert not http_bridge_streaming_module._http_bridge_unanchored_fork_can_spill_on_cap(
+        error_code="account_stream_cap",
+        affinity_kind="internal_unanchored_parallel",
+        payload=self_contained,
+        preferred_account_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_spills_unanchored_fork_from_capped_preferred_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+    )
+    fork_key = proxy_service._HTTPBridgeSessionKey(
+        "internal_unanchored_parallel",
+        "fork-request-scope",
+        None,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-fork-cap-spill",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    replacement_session = _make_bridge_session(key=fork_key, key_value=fork_key.affinity_key)
+    replacement_session.account = cast(
+        Any,
+        SimpleNamespace(id="acc-available", status=AccountStatus.ACTIVE),
+    )
+    cap_error = ProxyResponseError(
+        429,
+        openai_error(
+            "account_stream_cap",
+            "Account stream capacity is exhausted",
+            error_type="rate_limit_error",
+        ),
+    )
+    preferred_account_ids: list[str | None] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del prepared_payload, api_key, api_key_reservation, request_id, client_ip
+        return request_state, '{"type":"response.create"}'
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: object,
+    ) -> proxy_service._HTTPBridgeSession:
+        assert key == fork_key
+        preferred_account_ids.append(cast(str | None, kwargs["preferred_account_id"]))
+        if len(preferred_account_ids) == 1:
+            raise cap_error
+        return replacement_session
+
+    async def fake_stream_events(*args: object, **kwargs: object):
+        del args, kwargs
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    dashboard_settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+    )
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+        gateway_safe_mode=False,
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-fork",
+        canonical_kind=fork_key.affinity_kind,
+        canonical_key=fork_key.affinity_key,
+        api_key_scope="__anonymous__",
+        account_id="acc-capped",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=None,
+        model="gpt-5.6-sol",
+    )
+
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard_settings)),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_http_bridge_or_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            forwarded_request=True,
+            forwarded_original_request_unanchored=True,
+            forwarded_affinity_kind=fork_key.affinity_kind,
+            forwarded_affinity_key=fork_key.affinity_key,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert preferred_account_ids == ["acc-capped", None]
+    assert request_state.preferred_account_id is None

@@ -17,6 +17,7 @@
 - [x] 2.7 Defer cancellation until prewarm-failure cleanup removes the admission waiter and settles the lease.
 - [x] 2.8 Cover the final lease check with failed-submit cleanup so exceptions cannot leak admission waiters.
 - [x] 2.9 Serialize reconnect lease replacement with idle-session reacquisition and release the losing lease.
+- [x] 2.10 Defer cancellation until a detached lease acquired during a close race is released.
 
 ## 3. Tests
 
@@ -29,3 +30,5 @@
 - [x] 3.7 Repeated cancellation during prewarm cannot interrupt waiter and lease cleanup.
 - [x] 3.8 Final lease-check failure removes the admission waiter and releases the idle lease.
 - [x] 3.9 Reconnect racing reacquisition retains one lease and releases the other.
+- [x] 3.10 HTTP bridge terminal completion releases a capped account slot so a second warm session is admitted before idle TTL expiry.
+- [x] 3.11 Cancellation during close-race settlement cannot interrupt detached lease release.

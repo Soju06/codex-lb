@@ -1325,13 +1325,19 @@ class _HTTPBridgeRequestSubmitMixin:
             # would leak the slot: close already settled, and the idle
             # release helper skips closed sessions. Return the slot and fail
             # the turn like any other submit on a closed bridge.
-            try:
-                await load_balancer.release_account_lease(lease)
-            except Exception:
-                logger.warning(
-                    "Failed to release stream lease acquired for closed HTTP bridge session",
-                    exc_info=True,
-                )
+            async def release_detached_lease() -> None:
+                try:
+                    await load_balancer.release_account_lease(lease)
+                except Exception:
+                    logger.warning(
+                        "Failed to release stream lease acquired for closed HTTP bridge session",
+                        exc_info=True,
+                    )
+
+            release_task = asyncio.create_task(release_detached_lease())
+            _, cancellation = await _await_task_deferring_cancellation(release_task)
+            if cancellation is not None:
+                raise cancellation
             raise ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),

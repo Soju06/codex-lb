@@ -191,6 +191,49 @@ async def test_reacquire_racing_close_releases_fresh_lease() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reacquire_racing_close_defers_cancellation_until_release() -> None:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    lease = _make_lease("l-close-cancel")
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    async def acquire_and_close(*_args: object, **_kwargs: object) -> proxy_service.AccountLease:
+        session.closed = True
+        return lease
+
+    async def release_account_lease(released_lease: proxy_service.AccountLease) -> None:
+        assert released_lease is lease
+        release_started.set()
+        await finish_release.wait()
+
+    fake_self = SimpleNamespace(
+        _load_balancer=SimpleNamespace(
+            acquire_account_lease=AsyncMock(side_effect=acquire_and_close),
+            release_account_lease=AsyncMock(side_effect=release_account_lease),
+        )
+    )
+
+    async def reacquire() -> None:
+        async with session.pending_lock:
+            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+
+    reacquire_task = asyncio.create_task(reacquire())
+    await release_started.wait()
+    reacquire_task.cancel()
+    reacquire_task.cancel()
+    await asyncio.sleep(0)
+    assert not reacquire_task.done()
+
+    finish_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reacquire_task
+
+    assert session.account_lease is None
+    fake_self._load_balancer.release_account_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
 async def test_reacquire_noop_when_lease_already_held() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     session = _make_bridge_session()

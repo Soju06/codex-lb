@@ -1051,6 +1051,13 @@ class ApiKey(Base):
         server_default=false(),
         nullable=False,
     )
+    account_assignment_generation: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+    account_assignment_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     source_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

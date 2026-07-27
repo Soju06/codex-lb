@@ -115,6 +115,14 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def replace_account_assignments(
         self, key_id: str, account_ids: list[str], *, commit: bool = True
     ) -> None: ...
+    async def replace_account_assignments_if_changed(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        changed_at: datetime,
+        commit: bool = True,
+    ) -> bool: ...
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
 
     async def increment_limit_usage(
@@ -334,6 +342,8 @@ class ApiKeyData:
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
+    account_assignment_generation: int = 1
+    account_assignment_changed_at: datetime | None = None
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
     assigned_source_ids: list[str] = field(default_factory=list)
@@ -478,6 +488,8 @@ class ApiKeysService:
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
             account_assignment_scope_enabled=bool(assigned_account_ids),
+            account_assignment_generation=1,
+            account_assignment_changed_at=None,
             source_assignment_scope_enabled=bool(assigned_source_ids),
             traffic_class=traffic_class,
             transport_policy_override=transport_policy_override,
@@ -669,9 +681,6 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-            if payload.assigned_account_ids_set:
-                assert assigned_account_ids is not None
-                await self._repository.replace_account_assignments(key_id, assigned_account_ids, commit=False)
             if payload.assigned_source_ids_set:
                 assert assigned_source_ids is not None
                 await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
@@ -679,7 +688,16 @@ class ApiKeysService:
             if limit_rows is not None:
                 await self._repository.upsert_limits(key_id, limit_rows, commit=False)
 
-            await self._repository.commit()
+            if payload.assigned_account_ids_set:
+                assert assigned_account_ids is not None
+                await self._repository.replace_account_assignments_if_changed(
+                    key_id,
+                    assigned_account_ids,
+                    changed_at=utcnow(),
+                    commit=True,
+                )
+            else:
+                await self._repository.commit()
         except Exception:
             await self._repository.rollback()
             raise
@@ -1638,6 +1656,8 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         limits=data.limits,
         usage_summary=data.usage_summary,
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
+        account_assignment_generation=data.account_assignment_generation,
+        account_assignment_changed_at=data.account_assignment_changed_at,
         source_assignment_scope_enabled=data.source_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
         assigned_source_ids=data.assigned_source_ids,
@@ -1675,6 +1695,8 @@ def _to_api_key_data(
         limits=limits,
         usage_summary=usage_summary,
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
+        account_assignment_generation=int(getattr(row, "account_assignment_generation", 1) or 1),
+        account_assignment_changed_at=getattr(row, "account_assignment_changed_at", None),
         source_assignment_scope_enabled=getattr(row, "source_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
         assigned_source_ids=[assignment.source_id for assignment in source_assignments],

@@ -18,9 +18,9 @@
 - Create: `app/db/alembic/versions/20260727_000000_add_api_key_assignment_generation.py`
 - Modify: `app/modules/api_keys/service.py`
 - Modify: `app/core/config/settings.py`
-- Test: `tests/unit/test_migrations.py`
+- Test: `tests/integration/test_migrations.py`
 - Test: `tests/unit/test_api_keys_service.py`
-- Test: `tests/unit/test_settings.py`
+- Test: `tests/unit/test_settings_reference.py`
 
 - [ ] Add failing migration and conversion tests proving existing keys receive generation `1`, a nullable change timestamp, and `ApiKeyData` exposes both fields.
 
@@ -32,7 +32,7 @@ assert data.account_assignment_changed_at is None
 - [ ] Run the focused tests and confirm they fail because the columns and dataclass fields do not exist.
 
 ```powershell
-uv run pytest -q tests/unit/test_migrations.py tests/unit/test_api_keys_service.py -k "assignment_generation"
+uv run pytest -q tests/integration/test_migrations.py tests/unit/test_api_keys_service.py -k "assignment_generation"
 ```
 
 Expected: failing assertions or constructor errors naming `account_assignment_generation`.
@@ -62,7 +62,7 @@ api_key_account_assignment_drain_seconds: int = Field(default=1800, ge=0)
 - [ ] Re-run the focused tests.
 
 ```powershell
-uv run pytest -q tests/unit/test_migrations.py tests/unit/test_api_keys_service.py tests/unit/test_settings.py -k "assignment_generation or assignment_drain"
+uv run pytest -q tests/integration/test_migrations.py tests/unit/test_api_keys_service.py tests/unit/test_settings_reference.py -k "assignment_generation or assignment_drain"
 ```
 
 Expected: all selected tests pass.
@@ -361,7 +361,8 @@ Expected: all three files pass.
 - Modify: `app/modules/proxy/observability.py`
 - Modify: `app/modules/proxy/service.py`
 - Modify: `app/modules/proxy/_service/http_bridge/helpers.py`
-- Modify: `tests/unit/test_proxy_observability.py`
+- Modify: `tests/unit/test_metrics.py`
+- Modify: `tests/unit/test_request_log_upstream_proxy_metadata.py`
 - Modify: `tests/unit/test_proxy_http_bridge.py`
 
 - [ ] Add failing tests for structured fields and counters:
@@ -375,7 +376,7 @@ Expected: all three files pass.
 - [ ] Run the focused tests and confirm red.
 
 ```powershell
-uv run pytest -q tests/unit/test_proxy_observability.py tests/unit/test_proxy_http_bridge.py -k "assignment_cutover_observability"
+uv run pytest -q tests/unit/test_metrics.py tests/unit/test_request_log_upstream_proxy_metadata.py tests/unit/test_proxy_http_bridge.py -k "assignment_cutover_observability"
 ```
 
 - [ ] Emit bounded labels and hashed/redacted identifiers only. Reuse existing request logging and metric helpers instead of creating a parallel telemetry subsystem.
@@ -383,7 +384,7 @@ uv run pytest -q tests/unit/test_proxy_observability.py tests/unit/test_proxy_ht
 - [ ] Re-run the focused tests.
 
 ```powershell
-uv run pytest -q tests/unit/test_proxy_observability.py tests/unit/test_proxy_http_bridge.py
+uv run pytest -q tests/unit/test_metrics.py tests/unit/test_request_log_upstream_proxy_metadata.py tests/unit/test_proxy_http_bridge.py
 ```
 
 Expected: both files pass.
@@ -404,7 +405,7 @@ Expected: both files pass.
 uv run ruff format --check app tests
 uv run ruff check app tests
 uv run ty check --python-platform linux
-uv run pytest -q tests/unit/test_migrations.py tests/unit/test_api_keys_service.py tests/integration/test_api_keys_api.py tests/unit/test_proxy_utils.py tests/unit/test_load_balancer_concurrency.py tests/unit/test_proxy_http_bridge.py tests/integration/test_http_responses_bridge.py tests/unit/test_proxy_observability.py
+uv run pytest -q tests/integration/test_migrations.py tests/unit/test_api_keys_service.py tests/integration/test_api_keys_api.py tests/unit/test_proxy_utils.py tests/unit/test_load_balancer_concurrency.py tests/unit/test_proxy_http_bridge.py tests/integration/test_http_responses_bridge.py tests/unit/test_metrics.py tests/unit/test_request_log_upstream_proxy_metadata.py
 uv run python scripts/check_proxy_architecture.py
 git diff --check
 ```

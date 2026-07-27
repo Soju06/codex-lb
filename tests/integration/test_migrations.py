@@ -71,6 +71,27 @@ def _make_account(account_id: str, email: str, plan_type: str) -> Account:
 
 
 @pytest.mark.asyncio
+async def test_api_key_assignment_generation_columns_exist_at_head(tmp_path):
+    db_path = tmp_path / "api-key-assignment-generation.sqlite"
+    db_url = f"sqlite+aiosqlite:///{db_path}"
+
+    result = await run_startup_migrations(db_url)
+
+    engine = create_async_engine(db_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            column_rows = (await session.execute(text("PRAGMA table_info(api_keys)"))).fetchall()
+            columns = {str(row[1]): row for row in column_rows}
+            assert result.current_revision == _HEAD_REVISION
+            assert columns["account_assignment_generation"][3] == 1
+            assert columns["account_assignment_generation"][4] in ("1", 1)
+            assert columns["account_assignment_changed_at"][3] == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

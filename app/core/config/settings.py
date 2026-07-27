@@ -289,6 +289,7 @@ class Settings(BaseSettings):
     live_usage_ingestion_enabled: bool = True
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
+    api_key_account_assignment_drain_seconds: int = Field(default=1800, ge=0)
     warmup_model: str = "gpt-5.4-mini"
     openai_prompt_cache_key_derivation_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True

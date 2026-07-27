@@ -259,6 +259,28 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         if row is not None:
             row.account_assignments = assignments
 
+    async def replace_account_assignments_if_changed(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        changed_at: datetime,
+        commit: bool = True,
+    ) -> bool:
+        row = self.rows.get(key_id)
+        if row is None:
+            return False
+        existing_ids = {assignment.account_id for assignment in self._account_assignments.get(key_id, [])}
+        incoming_ids = set(account_ids)
+        changed = existing_ids != incoming_ids
+        if changed:
+            row.account_assignment_generation = int(row.account_assignment_generation or 1) + 1
+            row.account_assignment_changed_at = changed_at
+            await self.replace_account_assignments(key_id, account_ids, commit=False)
+        if commit:
+            await self.commit()
+        return changed
+
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None:
         del commit
         assignments = [ApiKeyModelSourceAssignment(api_key_id=key_id, source_id=source_id) for source_id in source_ids]
@@ -598,12 +620,16 @@ async def test_create_key_stores_hash_and_prefix() -> None:
     assert created.key_prefix == created.key[:15]
     assert created.allowed_models == ["o3-pro"]
     assert created.traffic_class == "foreground"
+    assert created.account_assignment_generation == 1
+    assert created.account_assignment_changed_at is None
 
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.key_hash != created.key
     assert stored.key_prefix == created.key[:15]
     assert stored.traffic_class == "foreground"
+    assert stored.account_assignment_generation == 1
+    assert stored.account_assignment_changed_at is None
 
 
 @pytest.mark.asyncio
@@ -821,6 +847,60 @@ async def test_update_key_tracks_assignment_scope_after_clear() -> None:
     )
     assert cleared.account_assignment_scope_enabled is False
     assert cleared.assigned_account_ids == []
+
+
+@pytest.mark.asyncio
+async def test_update_key_increments_assignment_generation_only_when_normalized_set_changes() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    repo._accounts = {
+        account_id: Account(
+            id=account_id,
+            chatgpt_account_id=None,
+            email=f"{account_id}@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access",
+            refresh_token_encrypted=b"refresh",
+            id_token_encrypted=b"id",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        for account_id in ("acc-a", "acc-b")
+    }
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assignment-generation",
+            allowed_models=None,
+            assigned_account_ids=["acc-a", "acc-b"],
+        )
+    )
+
+    reordered = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=["acc-b", "acc-a", "acc-b"],
+            assigned_account_ids_set=True,
+        ),
+    )
+    assert reordered.account_assignment_generation == 1
+    assert reordered.account_assignment_changed_at is None
+
+    changed = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=["acc-b"],
+            assigned_account_ids_set=True,
+        ),
+    )
+    assert changed.account_assignment_generation == 2
+    assert changed.account_assignment_changed_at is not None
+
+    renamed = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(name="assignment-generation-renamed", name_set=True),
+    )
+    assert renamed.account_assignment_generation == 2
+    assert renamed.account_assignment_changed_at == changed.account_assignment_changed_at
 
 
 @pytest.mark.asyncio

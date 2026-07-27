@@ -311,6 +311,42 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_account_assignment_changes_increment_generation_without_lost_updates(async_client):
+    first_account_id = await _import_account(async_client, "acc-generation-a", "generation-a@example.com")
+    second_account_id = await _import_account(async_client, "acc-generation-b", "generation-b@example.com")
+    third_account_id = await _import_account(async_client, "acc-generation-c", "generation-c@example.com")
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "assignment-generation-race",
+            "assignedAccountIds": [first_account_id],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+
+    async def rotate_to(account_id: str) -> None:
+        async with SessionLocal() as session:
+            await ApiKeysRepository(session).replace_account_assignments_if_changed(
+                key_id,
+                [account_id],
+                changed_at=utcnow(),
+            )
+
+    await asyncio.gather(rotate_to(second_account_id), rotate_to(third_account_id))
+
+    async with SessionLocal() as session:
+        row = await ApiKeysRepository(session).get_by_id(key_id)
+        assert row is not None
+        assert row.account_assignment_generation == 3
+        assert row.account_assignment_changed_at is not None
+        assert {assignment.account_id for assignment in row.account_assignments} in (
+            {second_account_id},
+            {third_account_id},
+        )
+
+
+@pytest.mark.asyncio
 async def test_api_key_create_persists_assigned_account_ids(async_client):
     first_account_id = await _import_account(async_client, "acc-create-a", "create-a@example.com")
     second_account_id = await _import_account(async_client, "acc-create-b", "create-b@example.com")

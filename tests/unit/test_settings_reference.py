@@ -46,7 +46,7 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # number when fields are removed; never raise it without a simplicity-budget
 # discussion — every new CODEX_LB_* setting needs a why-not-a-default
 # justification per CONTRIBUTING.md's simplicity gates.
-MAX_SETTINGS_FIELDS = 118
+MAX_SETTINGS_FIELDS = 119
 
 
 def test_generated_settings_reference_matches_code() -> None:
@@ -68,6 +68,13 @@ def test_settings_surface_ratchet() -> None:
         "New settings need a simplicity-budget discussion (PRINCIPLES.md P2, issue #1340); "
         "lower MAX_SETTINGS_FIELDS when fields are removed."
     )
+
+
+def test_api_key_account_assignment_drain_defaults_to_thirty_minutes() -> None:
+    settings = _isolated_settings()
+
+    assert settings.api_key_account_assignment_drain_seconds == 1800
+    assert _isolated_settings(api_key_account_assignment_drain_seconds=0).api_key_account_assignment_drain_seconds == 0
 
 
 def _uncommented_assignments(text: str) -> list[tuple[str, str]]:

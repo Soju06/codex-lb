@@ -110,15 +110,7 @@ export function DashboardPage() {
 
   const handleConversationTimeframeChange = useCallback(
     (timeframe: ConversationTimeframe) => {
-      conversationsState.updateFilters({ timeframe, offset: 0 }, (params) => {
-        // Mirror the conversation timeframe to the overview timeframe so the
-        // stat boxes (driven by useDashboard(overviewTimeframe)) refetch too.
-        if (timeframe === DEFAULT_OVERVIEW_TIMEFRAME) {
-          params.delete("overviewTimeframe");
-        } else {
-          params.set("overviewTimeframe", timeframe);
-        }
-      });
+      conversationsState.updateFilters({ timeframe, offset: 0 });
     },
     [conversationsState],
   );

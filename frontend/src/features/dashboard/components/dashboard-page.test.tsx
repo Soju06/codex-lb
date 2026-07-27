@@ -385,18 +385,7 @@ describe("DashboardPage", () => {
         timeframe: "30d",
         offset: 0,
       },
-      expect.any(Function),
     );
-
-    // The callback keeps the independently retained overview timeframe in sync
-    // after an explicit conversation selector change; the active query also
-    // follows conversationTimeframe directly on initial URL restoration.
-    const mutateParams = useConversationsMock.mock.results[0]?.value.updateFilters.mock.calls.at(-1)?.[1] as (
-      params: URLSearchParams,
-    ) => void;
-    const params = new URLSearchParams("overviewTimeframe=7d&conversationTimeframe=7d");
-    mutateParams(params);
-    expect(params.get("overviewTimeframe")).toBe("30d");
   });
 
   it("uses the restored conversation timeframe for dashboard stats", () => {

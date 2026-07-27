@@ -356,7 +356,7 @@ describe("dashboard flow integration", () => {
       ),
     );
 
-    window.history.pushState({}, "", "/dashboard?view=conversations");
+    window.history.pushState({}, "", "/dashboard?view=conversations&overviewTimeframe=1d");
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
@@ -377,6 +377,14 @@ describe("dashboard flow integration", () => {
     });
     expect(overviewTimeframes.at(-1)).toBe("30d");
     expect(window.location.search).toContain("conversationTimeframe=30d");
-    expect(window.location.search).toContain("overviewTimeframe=30d");
+    expect(window.location.search).toContain("overviewTimeframe=1d");
+    expect(window.location.search).not.toContain("overviewTimeframe=30d");
+
+    await user.click(screen.getByRole("button", { name: "Conversations" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: "Request Logs" }));
+
+    await waitFor(() => {
+      expect(overviewTimeframes.at(-1)).toBe("1d");
+    });
   });
 });

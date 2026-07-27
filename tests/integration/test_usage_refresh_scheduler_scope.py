@@ -133,8 +133,10 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
     assert query_scopes == [
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
         ("monthly", (selected.id,)),

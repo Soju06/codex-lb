@@ -1072,17 +1072,20 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     assert query_scopes == [
         ("primary", ("acc_a",)),
         ("secondary", ("acc_a",)),
+        ("monthly", ("acc_a",)),
     ]
     assert warmup_calls == []
     assert invalidations == 0
 
     assert await scheduler._refresh_once() == 30.0
     assert updater_calls == ["acc_a", "acc_b"]
-    assert query_scopes[-4:] == [
+    assert query_scopes[-6:] == [
         ("primary", ("acc_b",)),
         ("secondary", ("acc_b",)),
+        ("monthly", ("acc_b",)),
         ("primary", ("acc_b",)),
         ("secondary", ("acc_b",)),
+        ("monthly", ("acc_b",)),
     ]
     assert len(warmup_calls) == 1
     assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_b"]

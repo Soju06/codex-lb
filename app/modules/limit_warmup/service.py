@@ -698,7 +698,8 @@ def _build_candidate(
     # refresh cycles; only treat a jump of at least 60 seconds as a real reset.
     if after.reset_at - before.reset_at < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
         return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=window)
+    candidate_window = "monthly" if after.window == "monthly" else window
+    return _WarmupCandidate(reset_at=after.reset_at, window=candidate_window)
 
 
 def _build_staggered_idle_candidate(

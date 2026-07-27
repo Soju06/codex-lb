@@ -4,6 +4,7 @@
 
 - [x] 1.1 Add `x-session-affinity`, `x-session-id`, `x-opencode-session`, `x-claude-code-agent-id`, and `x-claude-remote-session-id` to the session-affinity header list, after the Codex names.
 - [x] 1.2 Document the parent-header and request-id exclusions at the definition site.
+- [x] 1.3 Recognize client-specific session identity on every Responses API entry point independently of the Codex-only affinity switch.
 
 ## 2. Replay hygiene
 
@@ -21,3 +22,4 @@
 - [x] 4.2 Account-neutral replay strip coverage for the new headers.
 - [x] 4.3 One-shot predicate coverage: side calls bypass; tools, anchors, files, native Codex, forwarded, and anonymous requests keep the bridge.
 - [x] 4.4 Empty tool map coverage: `tools: {}` validates as tool-less at the `/responses` route and reaches the one-shot bypass; non-empty tool maps stay rejected.
+- [x] 4.5 Public Responses affinity coverage: client identity overrides shared prompt-cache affinity while Codex session affinity is disabled.

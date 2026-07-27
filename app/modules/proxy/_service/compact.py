@@ -429,7 +429,7 @@ def _sticky_key_for_compact_request(
     elif (
         session_affinity := _bare_codex_session_affinity(
             headers,
-            enabled=codex_session_affinity,
+            include_codex_names=codex_session_affinity,
             allow_cap_spillover=_request_allows_bare_session_cap_spillover(payload),
         )
     ) is not None:

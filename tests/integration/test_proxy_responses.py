@@ -523,6 +523,56 @@ async def test_backend_responses_direct_stream_persists_opencode_conversation_id
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_uses_client_session_identity_for_affinity(async_client, monkeypatch):
+    raw_account_id = "acc_v1_client_session_affinity"
+    auth_json = _make_auth_json(raw_account_id, "v1-client-session-affinity@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    observed_affinity: dict[str, object] = {}
+    original_affinity = streaming_retry_module._sticky_key_for_responses_request
+
+    def recording_affinity(*args, **kwargs):
+        policy = original_affinity(*args, **kwargs)
+        observed_affinity["key"] = policy.key
+        observed_affinity["kind"] = policy.kind
+        return policy
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_v1_client_affinity",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(streaming_retry_module, "_sticky_key_for_responses_request", recording_affinity)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6",
+        "instructions": "hi",
+        "input": "hello",
+        "prompt_cache_key": "shared-cache-key",
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json=request_payload,
+        headers={"x-session-id": "client-session"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    assert _extract_first_event(lines)["type"] == "response.completed"
+    assert observed_affinity == {
+        "key": "client-session",
+        "kind": proxy_module.StickySessionKind.CODEX_SESSION,
+    }
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
     raw_account_id = "acc_future_directive"
     auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")

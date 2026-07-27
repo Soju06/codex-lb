@@ -9880,6 +9880,24 @@ def test_sticky_key_for_responses_request_uses_bounded_cache_affinity():
     assert policy.max_age_seconds == 300
 
 
+def test_sticky_key_for_responses_request_uses_client_identity_when_codex_affinity_is_disabled():
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    payload.prompt_cache_key = "shared-cache-key"
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "ignored-codex-session", "x-session-id": "client-session"},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.key == "client-session"
+    assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
+    assert policy.spill_on_account_cap is True
+
+
 def test_sticky_key_for_responses_request_keeps_sticky_threads_durable():
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
     payload.prompt_cache_key = "thread_123"

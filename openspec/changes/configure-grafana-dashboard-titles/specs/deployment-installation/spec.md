@@ -22,3 +22,4 @@ dashboard titles.
 - **WHEN** the chart renders the Grafana dashboard ConfigMap
 - **THEN** the overview title remains `codex-lb`
 - **AND** the TTFT title remains `codex-lb TTFT Breakdown`
+- **AND** each ConfigMap value remains byte-identical to the chart's raw-file rendering

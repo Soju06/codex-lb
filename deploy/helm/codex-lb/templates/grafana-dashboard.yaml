@@ -11,11 +11,15 @@ metadata:
     grafana_folder: {{ .Values.metrics.grafanaDashboard.folder | quote }}
 data:
   {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{- $filename := base $path }}
+  {{- if hasKey $.Values.metrics.grafanaDashboard.titles $filename }}
   {{- $dashboard := $.Files.Get $path | fromJson }}
-  {{- with index $.Values.metrics.grafanaDashboard.titles (base $path) }}
-  {{- $_ := set $dashboard "title" . }}
-  {{- end }}
-  {{ base $path }}: |-
+  {{- $_ := set $dashboard "title" (index $.Values.metrics.grafanaDashboard.titles $filename) }}
+  {{ $filename }}: |-
     {{ $dashboard | toPrettyJson | nindent 4 }}
+  {{- else }}
+  {{ $filename }}: |-
+    {{ $.Files.Get $path | nindent 4 }}
+  {{- end }}
   {{- end }}
 {{- end }}

@@ -417,9 +417,7 @@ metrics:
     # @param metrics.grafanaDashboard.folder Grafana dashboard folder label
     folder: codex-lb
     # @param metrics.grafanaDashboard.titles Dashboard title overrides keyed by JSON filename
-    titles:
-      codex-lb.json: codex-lb
-      ttft-breakdown.json: codex-lb TTFT Breakdown
+    titles: {}
 
 # @section Tracing parameters
 tracing:

@@ -261,14 +261,15 @@ class RequestLogsRepository:
                     pre_window_log.requested_at < since,
                 )
             )
-            filtered_summary_stmt = select(candidate).select_from(summary_subquery).where(~has_pre_window_row)
+            filtered_summary_stmt = select(summary_subquery).where(~has_pre_window_row)
         else:
             filtered_summary_stmt = select(summary_subquery)
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
             total = int(
-                (await self._session.execute(select(func.count()).select_from(filtered_summary_stmt.subquery())))
-                .scalar_one()
+                (
+                    await self._session.execute(select(func.count()).select_from(filtered_summary_stmt.subquery()))
+                ).scalar_one()
             )
         else:
             cache_key = (search, since)
@@ -276,9 +277,7 @@ class RequestLogsRepository:
             if total is None:
                 total = int(
                     (
-                        await self._session.execute(
-                            select(func.count()).select_from(filtered_summary_stmt.subquery())
-                        )
+                        await self._session.execute(select(func.count()).select_from(filtered_summary_stmt.subquery()))
                     ).scalar_one()
                 )
                 _store_recent_count(cache_key, total, ttl_seconds)

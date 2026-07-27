@@ -328,4 +328,55 @@ describe("dashboard flow integration", () => {
     expect(window.location.search).toContain("conversationLimit=15");
     expect(window.location.search).toContain("conversationOffset=7");
   });
+
+  it("refetches the overview (stat boxes) when the conversation timeframe changes", async () => {
+    const user = userEvent.setup({ delay: null });
+
+    let overviewCalls = 0;
+    const overviewTimeframes: string[] = [];
+
+    server.use(
+      http.get("/api/dashboard/overview", ({ request }) => {
+        overviewCalls += 1;
+        const timeframe = (new URL(request.url).searchParams.get("timeframe") ?? "7d") as string;
+        overviewTimeframes.push(timeframe);
+        return HttpResponse.json(createDashboardOverview({
+          timeframe:
+            timeframe === "1d"
+              ? { key: "1d", windowMinutes: 1440, bucketSeconds: 3600, bucketCount: 24 }
+              : timeframe === "30d"
+                ? { key: "30d", windowMinutes: 43200, bucketSeconds: 86400, bucketCount: 30 }
+                : { key: "7d", windowMinutes: 10080, bucketSeconds: 21600, bucketCount: 28 },
+        }));
+      }),
+      http.get("/api/conversations", () =>
+        HttpResponse.json(createConversationsResponse([
+          createConversationEntry({ conversationId: "opencode_conversation" }),
+        ], 1, false)),
+      ),
+    );
+
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    await waitFor(() => expect(overviewCalls).toBeGreaterThan(0));
+    expect(overviewTimeframes.at(-1)).toBe("7d");
+
+    const overviewAfterLoad = overviewCalls;
+
+    // Change the date range from the conversations-mode selector (top right).
+    const timeframeSelect = screen.getByRole("combobox", { name: "Conversation timeframe" });
+    await user.click(timeframeSelect);
+    await user.click(await screen.findByRole("option", { name: "30d" }));
+
+    // Regression: the overview query MUST refetch with the new timeframe so the
+    // stat boxes (requests/tokens/cost/etc.) update alongside the conversation list.
+    await waitFor(() => {
+      expect(overviewCalls).toBeGreaterThan(overviewAfterLoad);
+    });
+    expect(overviewTimeframes.at(-1)).toBe("30d");
+    expect(window.location.search).toContain("conversationTimeframe=30d");
+    expect(window.location.search).toContain("overviewTimeframe=30d");
+  });
 });

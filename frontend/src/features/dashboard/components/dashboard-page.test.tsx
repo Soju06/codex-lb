@@ -380,10 +380,22 @@ describe("DashboardPage", () => {
 
     fireEvent.click(screen.getByTestId("conversation-timeframe-select"));
 
-    expect(useConversationsMock.mock.results[0]?.value.updateFilters).toHaveBeenCalledWith({
-      timeframe: "30d",
-      offset: 0,
-    });
+    expect(useConversationsMock.mock.results[0]?.value.updateFilters).toHaveBeenCalledWith(
+      {
+        timeframe: "30d",
+        offset: 0,
+      },
+      expect.any(Function),
+    );
+
+    // The callback mirrors the conversation timeframe to overviewTimeframe so
+    // the stat boxes (driven by useDashboard(overviewTimeframe)) refetch too.
+    const mutateParams = useConversationsMock.mock.results[0]?.value.updateFilters.mock.calls.at(-1)?.[1] as (
+      params: URLSearchParams,
+    ) => void;
+    const params = new URLSearchParams("overviewTimeframe=7d&conversationTimeframe=7d");
+    mutateParams(params);
+    expect(params.get("overviewTimeframe")).toBe("30d");
   });
 
   it("restores the retained conversation timeframe after switching views", async () => {

@@ -134,12 +134,17 @@ export function useConversations(options: UseConversationsOptions = {}) {
     refetch,
   };
 
-  const updateFilters = (patch: Partial<ConversationFilterState>) => {
+  const updateFilters = (
+    patch: Partial<ConversationFilterState>,
+    mutateParams?: (params: URLSearchParams) => void,
+  ) => {
     const nextState: ConversationFilterState = {
       ...filters,
       ...patch,
     };
-    setSearchParams(writeConversationFilterState(nextState, searchParams));
+    const params = writeConversationFilterState(nextState, searchParams);
+    mutateParams?.(params);
+    setSearchParams(params);
   };
 
   return {

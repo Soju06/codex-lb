@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.exceptions import DashboardPermissionError
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
     RequestLogApiKeyOption,
@@ -55,6 +56,12 @@ async def list_request_logs(
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogsResponse:
+    if conversation_id is not None and principal.role != DashboardRole.ADMIN:
+        raise DashboardPermissionError(
+            "Admin dashboard access is required to view sensitive data",
+            code="admin_access_required",
+        )
+
     parsed_options: list[ServiceRequestLogModelOption] | None = None
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]

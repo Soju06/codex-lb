@@ -8,6 +8,7 @@ Dashboard authentication currently distinguishes `admin` and `guest`, but every 
 
 - Deny every conversation-archive API request unless the dashboard principal is an admin.
 - Preserve request-log rows and aggregate metrics for guests while replacing raw identifying request metadata with null values.
+- Deny guest use of the dedicated conversation-ID filter so redacted conversation membership and aggregates cannot be queried.
 - Keep the admin API and request-detail experience unchanged.
 - Avoid presenting archive controls or redacted identifying fields in the guest UI.
 
@@ -33,6 +34,12 @@ The service threads the same decision into repository filter construction. Guest
 
 Persistence remains unchanged. Keeping the role decision explicit across filter construction and response mapping provides typed enforcement points while preserving non-sensitive filters and aggregates for both roles.
 
+### Fail closed when a guest supplies the dedicated conversation filter
+
+The request-log API rejects a guest request that supplies `conversation_id` with HTTP 403 and the stable `admin_access_required` error code before querying the request-log service. Admins retain the existing filter, matching rows, request count, and aggregated cost response.
+
+Ignoring the guest parameter was rejected because it would silently return a broader dataset than requested. Passing it through was rejected because the filtered row count and conversation aggregate would disclose whether a redacted conversation identifier exists.
+
 ### Hide sensitive request-detail UI by role
 
 The request-detail component reads the authenticated dashboard role. Admins retain the existing User Agent, Client IP, Conversation ID, and archive panel. Guests do not mount or render those elements. Backend redaction remains authoritative; the UI change prevents misleading placeholders and avoidable denied archive requests.
@@ -41,5 +48,6 @@ The request-detail component reads the authenticated dashboard role. Admins reta
 
 - [Risk] A future request-log identifying field could be added without joining the redaction set. → Keep the sensitive-field list explicit in the role-aware mapper test and OpenSpec requirement.
 - [Risk] A redacted request-log field could remain searchable and become a membership oracle. → Pass the role decision into filter construction and test guest and admin search behavior at the API boundary.
+- [Risk] A dedicated identifying filter could expose membership or aggregates even when row fields are redacted. → Reject guest `conversation_id` filtering at the API boundary and cover both roles in a public API regression test.
 - [Risk] Client-side role state could be stale. → Backend response redaction and archive authorization are authoritative and do not rely on the UI.
 - [Trade-off] Guests lose conversation drill-down and archive inspection. → They retain request rows, model/status/token/cost/latency fields, `useragentGroup`, and aggregate dashboard/report statistics.

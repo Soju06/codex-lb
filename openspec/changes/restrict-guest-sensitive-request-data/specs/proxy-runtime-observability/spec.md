@@ -44,7 +44,7 @@ Request-log search MUST match persisted `client_ip` values for an admin principa
 
 ### Requirement: Guest request logs redact raw identifying metadata
 
-The dashboard request-log API MUST return request rows and non-identifying operational metrics to a guest principal, but MUST serialize `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` as null and MUST NOT use those redacted values to match guest text searches. It MUST retain those values for an admin principal. The lower-cardinality `useragentGroup`, status, model, token, latency, and cost fields MAY remain available to guests.
+The dashboard request-log API MUST return request rows and non-identifying operational metrics to a guest principal, but MUST serialize `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` as null and MUST NOT use those redacted values to match guest text searches. It MUST reject a guest request that supplies the dedicated `conversation_id` filter with HTTP 403 and error code `admin_access_required`. It MUST retain the identifying values and existing conversation filtering and aggregate response for an admin principal. The lower-cardinality `useragentGroup`, status, model, token, latency, and cost fields MAY remain available to guests outside a dedicated conversation filter.
 
 #### Scenario: Guest reads operational request rows without raw identifiers
 
@@ -58,3 +58,17 @@ The dashboard request-log API MUST return request rows and non-identifying opera
 - **GIVEN** a persisted request log contains a client IP, full User-Agent, conversation ID, and archive lookup ID
 - **WHEN** an admin principal requests `GET /api/request-logs`
 - **THEN** the response contains the persisted values
+
+#### Scenario: Guest conversation filter fails closed
+
+- **GIVEN** persisted request logs contain a redacted conversation ID
+- **WHEN** a guest principal requests `GET /api/request-logs` with that `conversation_id`
+- **THEN** the response is HTTP 403 with error code `admin_access_required`
+- **AND** no filtered row count or aggregated conversation cost is returned
+
+#### Scenario: Admin retains conversation filtering and aggregates
+
+- **GIVEN** persisted request logs contain a conversation ID
+- **WHEN** an admin principal requests `GET /api/request-logs` with that `conversation_id`
+- **THEN** only matching request rows are returned
+- **AND** the response retains the matching request count and aggregated conversation cost

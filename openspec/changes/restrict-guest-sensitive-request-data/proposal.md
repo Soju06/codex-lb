@@ -6,6 +6,7 @@ Dashboard guests currently inherit broad read access that includes full conversa
 
 - Require an admin dashboard principal for every conversation-archive endpoint.
 - Keep request-log rows readable by guests, but redact raw client IP, user-agent, conversation ID, and archive lookup ID values.
+- Reject the dedicated request-log `conversation_id` filter for guests while preserving admin filtering and conversation aggregates.
 - Hide archive controls and raw identifying request metadata from guest dashboard views while preserving aggregate statistics.
 
 ## Capabilities
@@ -22,4 +23,4 @@ None.
 
 ## Impact
 
-Affected areas are dashboard authorization dependencies, conversation-archive routes, the request-log API response mapping, request-log detail UI, and focused backend/frontend authorization tests. Persistence, proxy routing, retention, and aggregate statistics are unchanged.
+Affected areas are dashboard authorization dependencies, conversation-archive routes, the request-log API response mapping and filtering boundary, request-log detail UI, and focused backend/frontend authorization tests. Persistence, proxy routing, retention, and admin aggregate statistics are unchanged.

@@ -352,6 +352,56 @@ async def test_request_logs_api_excludes_client_ip_from_guest_search_and_preserv
 
 
 @pytest.mark.asyncio
+async def test_request_logs_api_rejects_guest_conversation_filter_and_preserves_admin_aggregates(
+    app_instance,
+    async_client,
+    db_setup,
+):
+    del db_setup
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_conversation_filter_target",
+            conversation_id="conversation-filter-target",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=20,
+            latency_ms=250,
+            status="success",
+            error_code=None,
+            cost_usd=4.25,
+        )
+
+    app_instance.dependency_overrides[validate_dashboard_session] = guest_principal
+    try:
+        guest_response = await async_client.get(
+            "/api/request-logs",
+            params={"conversation_id": "conversation-filter-target"},
+        )
+    finally:
+        app_instance.dependency_overrides.pop(validate_dashboard_session, None)
+
+    assert guest_response.status_code == 403
+    assert guest_response.json()["error"]["code"] == "admin_access_required"
+
+    admin_response = await async_client.get(
+        "/api/request-logs",
+        params={"conversation_id": "conversation-filter-target"},
+    )
+    assert admin_response.status_code == 200
+    admin_payload = admin_response.json()
+    assert [entry["requestId"] for entry in admin_payload["requests"]] == [
+        "req_conversation_filter_target",
+    ]
+    assert admin_payload["total"] == 1
+    assert admin_payload["conversation"] == {
+        "requestCount": 1,
+        "aggregatedCostUsd": 4.25,
+    }
+
+
+@pytest.mark.asyncio
 async def test_request_logs_api_lists_limit_warmup_rows(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

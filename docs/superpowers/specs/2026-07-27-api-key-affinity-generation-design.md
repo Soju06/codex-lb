@@ -8,6 +8,8 @@ Operators use the Dashboard to assign a bounded account pool to an API key, let 
 
 Today, updating `assigned_account_ids` changes the API key scope and invalidates the API key cache, but existing `sticky_sessions` rows remain reachable. The sticky-session primary key does not include the API key identity or an account-assignment version. A Codex window can therefore keep resolving to an account that has been removed from the key's current pool.
 
+HTTP bridge session-header keys and durable session-header aliases are also not assignment-generation aware. Versioning only `sticky_sessions` would therefore leave a second path that can resolve the removed account.
+
 The resulting selection failure is misleadingly reported as `hard_affinity_saturated`, even when the request is a first turn with no authoritative response, file, or bridge owner. Production request `05904fd2-0f1b-4b46-a65b-14e7478282da` demonstrated this shape:
 
 - `request_stage=first_turn`
@@ -26,6 +28,7 @@ The system needs an explicit cutover boundary between account-pool generations i
 - Avoid overwriting the previous soft mapping when a request temporarily spills to another account.
 - Keep unrelated API keys and their sessions unaffected by a pool change.
 - Make unavoidable continuity loss explicit and fast instead of returning a generic 502 or waiting on a gate.
+- Retire session-header-based bridge affinity at the same generation boundary as ordinary soft affinity.
 
 ## Non-goals
 
@@ -46,9 +49,14 @@ Add the following persisted fields to `api_keys`:
 - `account_assignment_generation`: monotonically increasing integer, default `1`
 - `account_assignment_changed_at`: timestamp of the most recent effective account-pool change
 
-An update increments the generation only when the normalized account assignment set or its enabled/disabled scope state actually changes. Submitting the same assignment set in another order does not increment the generation.
+An update increments the generation only when the normalized account assignment set actually changes. The account-assignment scope remains derived from whether the normalized set is empty. Submitting the same assignment set in another order does not increment the generation.
 
-The API key row update, assignment replacement, generation increment, and changed timestamp are committed in one transaction. Cache invalidation and the cross-replica invalidation poller run only after the transaction commits.
+The API key row update, assignment replacement, generation increment, and changed timestamp are committed in one serialized transaction. The repository must prevent lost updates:
+
+- PostgreSQL locks the API key row with `SELECT ... FOR UPDATE` before comparing and replacing assignments.
+- SQLite enters the existing serialized writer section before reading the current assignments and keeps it through commit or rollback.
+
+Cache invalidation and the cross-replica invalidation poller run only after the transaction commits.
 
 ### Versioned soft-affinity keys
 
@@ -79,7 +87,30 @@ The raw API key secret and raw client affinity values are never persisted.
 
 After a Dashboard pool change, old soft mappings remain in the database until normal expiry or cleanup, but they become unreachable because the generation changes. The first request in the new generation selects from the new account pool and creates a new soft mapping.
 
-Legacy raw `CODEX_SESSION` rows must not impose hard ownership on a v2 session-header request that has no independently proven continuity owner.
+### Legacy compatibility activation
+
+Existing raw `CODEX_SESSION` rows are ambiguous: older builds stored both bare session-header affinity and hard turn-state ownership in the same key space. They cannot be safely reclassified in bulk.
+
+The compatibility transition is therefore source- and generation-gated:
+
+- generation `1` preserves the existing raw-row compatibility behavior;
+- the first effective Dashboard account-pool change increments the key to generation `2`;
+- a generation `2+` request whose affinity source is `session_header` does not consult raw legacy `CODEX_SESSION` rows;
+- a request whose source is a real client `turn_state` continues to consult the legacy hard key space until turn-state ownership has a dedicated typed store;
+- independently resolved response, file, or bridge ownership always outranks soft session-header affinity;
+- mixed-version writers are prohibited once generation `2+` assignment cutovers are enabled.
+
+This is the activation boundary that restores mobility without guessing the provenance of existing raw rows. Legacy cleanup begins only after every supported process writes v2 keys and the maximum legacy retention window has elapsed.
+
+### Versioned bridge session-header affinity
+
+HTTP bridge session keys and durable session-header aliases use the same API key assignment generation as soft sticky keys.
+
+- New bridge session-header keys include API key ID and assignment generation.
+- Durable `session_header` aliases include the generation and cannot be resolved by a later generation.
+- Old unversioned session-header bridge aliases are consulted only for generation `1`.
+- Generation `2+` requests may still resolve the old bridge through authoritative `previous_response_id`, file, or verified turn-state ownership during the drain window.
+- Assignment cutover does not delete the old bridge immediately; it removes session-header reachability for new soft work while preserving typed hard aliases for draining.
 
 ### Hard-continuity evidence
 
@@ -106,6 +137,8 @@ When an API key account pool changes:
 - drain access never creates a new soft mapping to the removed account;
 - drain access is limited to the API key whose assignment changed.
 
+Drain reuses the existing required-continuity-owner selection path. Only a proven hard owner may set `required_continuity_owner=True`. The assignment timestamp and drain deadline gate whether that owner may bypass the current `assigned_account_ids`; soft affinity never sets this flag.
+
 This makes Dashboard changes take effect immediately for new work while allowing existing stateful operations to finish.
 
 The drain duration is configured by:
@@ -121,8 +154,9 @@ Zero disables draining and produces an immediate hard cutover.
 If a proven hard owner is unavailable, removed after the drain deadline, or rate-limited:
 
 1. Fail selection immediately without waiting on account-cap or response-create gates.
-2. If the request is demonstrably portable and the upstream has not acknowledged or executed it, retry once as a fresh request in the current generation.
-3. Otherwise return the typed result `continuity_reset_required`.
+2. The request surface determines whether the request is demonstrably portable and whether the upstream has acknowledged or executed it.
+3. If that surface proves portability before acknowledgement, retry once as a fresh request in the current generation.
+4. Otherwise return the typed result `continuity_reset_required`.
 
 A request is portable only when it contains no:
 
@@ -131,6 +165,8 @@ A request is portable only when it contains no:
 - durable bridge dependency
 - unverified opaque turn state
 - upstream output reference that requires the old owner
+
+Replay is not a generic load-balancer responsibility. Direct streaming, compact, and HTTP bridge paths each map their existing owner-unavailable outcome into the shared selection result and apply their own current acknowledgement and projection rules. Existing exact-code replay gates, including the HTTP bridge `previous_response_owner_unavailable` path, remain valid until that surface is explicitly migrated and covered by regression tests.
 
 The 15956 shim may translate `continuity_reset_required` into a client-safe reconnect or new-session signal. It must not silently remove hard references or replay a request after upstream acknowledgement, because that could duplicate tools or create divergent responses.
 
@@ -143,10 +179,11 @@ The system cannot guarantee semantic preservation when the only copy of conversa
 1. Dashboard updates the API key assignments.
 2. The transaction increments `account_assignment_generation`.
 3. API key caches are invalidated after commit.
-4. The next request builds a v2 soft-affinity key using the new generation.
-5. No mapping exists for that generation.
-6. The load balancer selects a healthy account from the new pool.
-7. A new soft mapping is persisted.
+4. Other replicas observe the new generation through the existing invalidation poller, bounded by its configured poll interval.
+5. The next request builds a v2 soft-affinity and bridge session-header key using the new generation.
+6. No mapping exists for that generation.
+7. The load balancer selects a healthy account from the new pool.
+8. A new soft mapping is persisted.
 
 ### Existing hard request during drain
 
@@ -168,12 +205,13 @@ The system cannot guarantee semantic preservation when the only copy of conversa
 
 The schema migration adds the two API key columns with backward-compatible defaults. Existing keys start at generation `1`.
 
-No bulk rewrite of `sticky_sessions` is required. V2 keys naturally coexist with existing rows. A later bounded cleanup can delete expired legacy rows after all supported builds generate v2 keys.
+No bulk rewrite of `sticky_sessions` or bridge aliases is required. V2 keys naturally coexist with existing rows. A later bounded cleanup can delete expired legacy rows and aliases only after all supported builds generate v2 keys and the maximum retention interval has elapsed.
 
 Rolling deployment requirements:
 
-- all writers must understand the generation before the Dashboard is allowed to change assignments;
+- all writers and bridge registries must understand the generation before the Dashboard is allowed to change assignments;
 - readers that do not understand generation must not run after the migration is activated;
+- generation `2+` cutovers remain disabled until the deployment coordinator confirms that no mixed-version writer is live;
 - production startup scripts must continue to target `repo-upstream-migration` so older ORM and migration code cannot open the upgraded database.
 
 ## Observability
@@ -184,6 +222,7 @@ Account-selection logs and metrics must include:
 - assignment generation
 - affinity source
 - affinity strength (`none`, `soft`, `hard`)
+- affinity namespace version
 - authoritative owner evidence type
 - whether the owner is inside the current pool
 - whether drain access was used
@@ -196,6 +235,7 @@ New counters:
 - portable fresh replays
 - continuity resets required
 - legacy raw affinity rows ignored
+- legacy bridge session-header aliases ignored
 
 These fields must not include raw API keys, session headers, turn states, or prompt-cache values.
 
@@ -215,20 +255,23 @@ These fields must not include raw API keys, session headers, turn states, or pro
 At minimum, regression coverage must prove:
 
 1. An effective assignment change increments generation atomically.
-2. Reordering or resubmitting the same assignment set does not increment generation.
-3. An old soft mapping is unreachable after generation changes.
-4. A first-turn session-header request immediately selects from the new pool.
-5. A legacy raw sticky row cannot turn a v2 soft request into hard affinity.
-6. Another API key using the same client session ID remains unaffected.
-7. A proven hard owner outside the new pool remains usable during the drain window.
-8. New first turns cannot use removed drain-only accounts.
-9. Drain access ends after 30 minutes.
-10. A rate-limited hard owner fails immediately without gate waiting.
-11. A portable, pre-acknowledgement request can retry once in the new pool.
-12. `previous_response_id`, file, durable bridge, and opaque turn-state requests never cross accounts without a verified portable reconstruction.
-13. Temporary soft spill does not overwrite the stable mapping.
-14. Client disconnect cleans pending requests, leases, generators, and gates.
-15. API key cache invalidation exposes the new generation across replicas.
+2. Concurrent assignment changes serialize without a lost generation increment or incorrect drain timestamp.
+3. Reordering or resubmitting the same assignment set does not increment generation.
+4. An old soft mapping is unreachable after generation changes.
+5. A first-turn session-header request selects from the new pool after invalidation propagation.
+6. A generation `2+` session-header request ignores a legacy raw row, while generation `1` and real turn-state requests preserve compatibility behavior.
+7. A generation `2+` bridge session-header alias cannot resolve an old-generation bridge.
+8. An old bridge remains reachable through a proven hard alias during the drain window.
+9. Another API key using the same client session ID remains unaffected.
+10. A proven hard owner outside the new pool remains usable during the drain window through the required-continuity-owner path.
+11. New first turns cannot use removed drain-only accounts.
+12. Drain access ends after 30 minutes.
+13. A rate-limited hard owner fails immediately without gate waiting.
+14. Each request surface proves portable pre-acknowledgement replay independently and retries at most once.
+15. `previous_response_id`, file, durable bridge, and opaque turn-state requests never cross accounts without a verified portable reconstruction.
+16. Temporary soft spill does not overwrite the stable mapping.
+17. Client disconnect cleans pending requests, leases, generators, and gates.
+18. API key cache invalidation exposes the new generation across replicas within the configured poll bound.
 
 Verification before production:
 
@@ -244,19 +287,21 @@ Verification before production:
 ## Rollout
 
 1. Add observability and the generation schema behind an inactive code path.
-2. Enable generation-aware soft keys in the isolated 2456 environment.
-3. Validate a Dashboard pool change while an ordinary Codex window remains open.
-4. Validate hard drain using a synthetic authoritative owner.
-5. Validate owner-unavailable behavior and shim handling.
-6. Deploy to 2455 only after all automated and isolated smoke checks pass.
-7. Monitor cutover, drain, reset, and hard-affinity metrics through at least one real pool rotation.
+2. Add generation-aware sticky and bridge session-header namespaces while preserving generation `1` compatibility.
+3. Confirm every live writer and bridge registry understands v2 before enabling generation `2+` cutovers.
+4. Enable generation-aware cutover in the isolated 2456 environment.
+5. Validate a Dashboard pool change while an ordinary Codex window remains open.
+6. Validate hard drain using a synthetic authoritative owner.
+7. Validate owner-unavailable behavior separately for direct streaming, compact, HTTP bridge, and shim handling.
+8. Deploy to 2455 only after all automated and isolated smoke checks pass.
+9. Monitor cutover, drain, reset, legacy-ignore, and hard-affinity metrics through at least one real pool rotation.
 
 ## Success Criteria
 
-- Changing a Key's assigned accounts makes ordinary open Codex windows use the new pool on their next soft request.
+- Changing a Key's assigned accounts makes ordinary open Codex windows use the new pool on their next soft request after bounded cache-invalidation propagation.
 - The reproduced first-turn image request does not return `hard_affinity_saturated`.
+- Old-generation sticky and bridge session-header aliases cannot pin new soft work to removed accounts.
 - Existing hard sessions can finish on a healthy old owner for up to 30 minutes.
 - A removed or exhausted hard owner never causes an unbounded wait.
 - No request carrying a proven account-local object is silently sent to another account.
 - Other API keys experience no affinity change.
-

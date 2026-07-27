@@ -28,6 +28,7 @@ from app.core.cache.invalidation import (
     NAMESPACE_MODEL_REGISTRY,
     NAMESPACE_RESET_CREDITS,
     NAMESPACE_SETTINGS,
+    NAMESPACE_UPSTREAM_ROUTE,
     CacheInvalidationPoller,
     get_cache_invalidation_poller,
     set_cache_invalidation_poller,
@@ -325,6 +326,7 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
             NAMESPACE_SETTINGS,
             NAMESPACE_RESET_CREDITS,
             NAMESPACE_MODEL_REGISTRY,
+            NAMESPACE_UPSTREAM_ROUTE,
         )
     }
 

@@ -6,6 +6,10 @@ import {
   type MultiSelectOption,
 } from "@/features/dashboard/components/filters/multi-select-filter";
 import { isReportDateRangeValid, localDateISO } from "../date";
+import {
+  REPORT_CHART_DEFINITIONS,
+  type ReportChartId,
+} from "../hooks/use-report-chart-visibility";
 
 export type ReportsFiltersState = {
   startDate: string;
@@ -21,8 +25,10 @@ export type ReportsFiltersProps = {
   accountOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
   useragentOptions: MultiSelectOption[];
+  visibleChartIds: ReportChartId[];
   onPresetSelect: (days: number) => void;
   onFiltersChange: (filters: ReportsFiltersState) => void;
+  onVisibleChartIdsChange: (ids: string[]) => void;
 };
 
 const PRESETS = [
@@ -37,10 +43,16 @@ export function ReportsFilters({
   accountOptions,
   modelOptions,
   useragentOptions,
+  visibleChartIds,
   onPresetSelect,
   onFiltersChange,
+  onVisibleChartIdsChange,
 }: ReportsFiltersProps) {
   const { t } = useTranslation();
+  const chartOptions = REPORT_CHART_DEFINITIONS.map(({ id, labelKey }) => ({
+    value: id,
+    label: t(labelKey),
+  }));
   const maxDate = localDateISO();
   const dateRangeErrorId = useId();
   const isDateRangeInvalid = !isReportDateRangeValid(
@@ -89,6 +101,13 @@ export function ReportsFilters({
         onChange={(useragents) =>
           onFiltersChange({ ...filters, useragent: useragents.at(-1) ?? "" })
         }
+      />
+
+      <MultiSelectFilter
+        label={t("reports.filters.charts")}
+        values={visibleChartIds}
+        options={chartOptions}
+        onChange={onVisibleChartIdsChange}
       />
 
       <div className="ml-auto flex flex-col items-end gap-1">

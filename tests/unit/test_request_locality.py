@@ -26,6 +26,7 @@ def _request(*, client_host: str, host: str) -> Request:
         "path": "/",
         "headers": [(b"host", host.encode("utf-8"))],
         "client": (client_host, 50000),
+        "_codex_lb_raw_socket_peer": (client_host, 50000),
         "server": (host.split(":", 1)[0], 80),
         "scheme": "http",
         "query_string": b"",
@@ -92,6 +93,7 @@ def test_trusted_proxy_mode_accepts_loopback_with_forwarded_hint(monkeypatch: py
         "path": "/",
         "headers": [(b"host", b"localhost"), (b"x-forwarded-for", b"127.0.0.1")],
         "client": ("127.0.0.1", 50000),
+        "_codex_lb_raw_socket_peer": ("127.0.0.1", 50000),
         "server": ("localhost", 80),
         "scheme": "http",
         "query_string": b"",
@@ -261,6 +263,7 @@ def test_trusted_proxy_mode_rejects_forwarded_hint_from_untrusted_loopback_peer(
         "path": "/",
         "headers": [(b"host", b"localhost"), (b"x-forwarded-for", b"203.0.113.24")],
         "client": ("127.0.0.1", 50000),
+        "_codex_lb_raw_socket_peer": ("127.0.0.1", 50000),
         "server": ("localhost", 80),
         "scheme": "http",
         "query_string": b"",
@@ -290,9 +293,117 @@ def test_direct_locality_checks_every_duplicate_forwarded_header_value(
             (b"x-forwarded-for", b"203.0.113.24"),
         ],
         "client": ("127.0.0.1", 50000),
+        "_codex_lb_raw_socket_peer": ("127.0.0.1", 50000),
         "server": ("localhost", 80),
         "scheme": "http",
         "query_string": b"",
     }
 
     assert is_local_request(Request(scope)) is False
+
+
+def _resolve_consensus(
+    headers: dict[str, str] | Headers,
+    *,
+    socket_ip: str = "127.0.0.1",
+    trusted_cidrs: list[str] | None = None,
+    allowed_header_names: frozenset[str] | None = None,
+) -> str | None:
+    return request_locality.resolve_connection_client_ip(
+        headers,
+        socket_ip,
+        trust_proxy_headers=True,
+        trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(trusted_cidrs or ["127.0.0.1/32"]),
+        allowed_proxy_header_names=allowed_header_names,
+        require_proxy_header_consensus=True,
+    )
+
+
+def test_connection_resolver_defaults_to_existing_family_precedence() -> None:
+    assert (
+        request_locality.resolve_connection_client_ip(
+            {
+                "x-forwarded-for": "198.51.100.10",
+                "forwarded": "for=203.0.113.24",
+            },
+            "127.0.0.1",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=request_locality.parse_trusted_proxy_networks(["127.0.0.1/32"]),
+        )
+        == "198.51.100.10"
+    )
+
+
+@pytest.mark.parametrize(
+    ("other_name", "other_value"),
+    [
+        ("forwarded", "for=203.0.113.24, for=10.0.0.2"),
+        ("x-real-ip", "203.0.113.24"),
+        ("true-client-ip", "203.0.113.24"),
+        ("cf-connecting-ip", "203.0.113.24"),
+    ],
+)
+def test_consensus_accepts_every_agreeing_identity_family(
+    other_name: str,
+    other_value: str,
+) -> None:
+    assert (
+        _resolve_consensus(
+            {
+                "x-forwarded-for": "203.0.113.24, 10.0.0.2",
+                other_name: other_value,
+            },
+            socket_ip="10.0.0.3",
+            trusted_cidrs=["10.0.0.0/8"],
+        )
+        == "203.0.113.24"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_headers",
+    [
+        [(b"x-real-ip", b"198.51.100.10"), (b"forwarded", b"for=203.0.113.24")],
+        [(b"x-forwarded-for", b"127.0.0.1"), (b"forwarded", b"for=not-an-ip")],
+        [
+            (b"x-forwarded-for", b"127.0.0.1"),
+            (b"x-real-ip", b"127.0.0.1"),
+            (b"x-real-ip", b"127.0.0.1"),
+        ],
+        [
+            (b"x-forwarded-for", b""),
+            (b"x-forwarded-for", b"127.0.0.1"),
+            (b"forwarded", b"for=203.0.113.24"),
+        ],
+    ],
+)
+def test_consensus_rejects_conflict_malformed_or_ambiguous_family(
+    raw_headers: list[tuple[bytes, bytes]],
+) -> None:
+    assert _resolve_consensus(Headers(raw=raw_headers)) is None
+
+
+def test_consensus_ignores_empty_only_family() -> None:
+    headers = Headers(
+        raw=[
+            (b"x-forwarded-for", b"203.0.113.24"),
+            (b"x-real-ip", b""),
+            (b"x-real-ip", b"   "),
+        ]
+    )
+
+    assert _resolve_consensus(headers) == "203.0.113.24"
+
+
+def test_consensus_compares_canonical_ipv6_addresses() -> None:
+    assert (
+        _resolve_consensus(
+            {
+                "x-forwarded-for": "2001:0db8:0:0:0:0:0:1",
+                "forwarded": 'for="[2001:db8::1]"',
+            },
+            socket_ip="::1",
+            trusted_cidrs=["::1/128"],
+        )
+        == "2001:0db8:0:0:0:0:0:1"
+    )

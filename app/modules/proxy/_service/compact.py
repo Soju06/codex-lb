@@ -36,7 +36,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
     _AffinityPolicy,
@@ -46,6 +46,7 @@ from app.modules.proxy.affinity import (
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _resolve_prompt_cache_key,
+    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -576,7 +577,7 @@ class _CompactMixin:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_kind = _request_kind_from_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
@@ -612,9 +613,12 @@ class _CompactMixin:
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = (
-                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
-            )
+            if _sticky_key_from_turn_state_header(headers) is not None:
+                sticky_key_source = "turn_state_header"
+            elif _sticky_key_from_session_header(headers) is not None:
+                sticky_key_source = "session_header"
+            else:
+                sticky_key_source = "payload"
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
         _maybe_log_proxy_request_shape(
@@ -1567,6 +1571,7 @@ class _CompactMixin:
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
                 client_ip=client_ip,
                 request_kind=request_kind,
             )

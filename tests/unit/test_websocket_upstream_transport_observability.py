@@ -235,6 +235,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "upstream_proxy_fail_closed_reason": None,
             "useragent": None,
             "useragent_group": None,
+            "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
         }
@@ -316,6 +317,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "upstream_proxy_fail_closed_reason": None,
             "useragent": None,
             "useragent_group": None,
+            "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
         }
@@ -384,6 +386,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "upstream_proxy_fail_closed_reason": None,
             "useragent": None,
             "useragent_group": None,
+            "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
         }

@@ -42,6 +42,7 @@ async def list_request_logs(
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     search: str | None = Query(default=None),
+    conversation_id: str | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
     api_key_id: list[str] | None = Query(default=None, alias="apiKeyId"),
     status: list[str] | None = Query(default=None),
@@ -60,6 +61,7 @@ async def list_request_logs(
         limit=limit,
         offset=offset,
         search=search,
+        conversation_id=conversation_id,
         since=since,
         until=until,
         account_ids=account_id,
@@ -73,6 +75,7 @@ async def list_request_logs(
         requests=page.requests,
         total=page.total,
         has_more=page.has_more,
+        conversation=page.conversation,
     )
 
 

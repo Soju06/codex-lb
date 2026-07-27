@@ -8,23 +8,31 @@ and creates operational problems.
 
 ## Decision
 
-Purge owned and stale ownerless rows on startup, before the first request
-is served. The purge is fenced by `instance_id` - it only deletes rows
-owned by this instance or ownerless rows with expired leases. Other
+Purge ordinary owned and stale ownerless rows on startup, before the first
+request is served. The purge is fenced by `instance_id` - it only deletes
+rows owned by this instance or ownerless rows with expired leases that also
+predate the abandoned-row retention cutoff. A recent server-namespaced
+account-neutral recovery row is instead made ownerless DRAINING with an
+expired lease while preserving its aliases and original `last_seen_at`.
+This keeps restart proof available without making it immortal. Other
 replicas' active rows are not affected.
 
 ## What is preserved
 
 - `sticky_sessions` - lightweight account-affinity mappings, no stream
   leases, useful for prompt-cache continuity
+- Recent server-namespaced account-neutral recovery rows and their aliases,
+  demoted to ownerless DRAINING until normal abandoned-row retention expires
 - Other replicas' durable bridge rows - multi-instance safe
 - `bridge_ring_members` - ring membership is managed separately
 
 ## What is removed
 
-- `http_bridge_sessions` rows where `owner_instance_id == this_instance`
+- Ordinary `http_bridge_sessions` rows where
+  `owner_instance_id == this_instance`
 - `http_bridge_sessions` rows where `owner_instance_id IS NULL` and
-  state IN (active, draining) and `lease_expires_at < now`
+  state IN (active, draining), `lease_expires_at < now`, and activity predates
+  the abandoned-row retention cutoff
 - Associated `http_bridge_session_aliases` for deleted rows
 
 ## Multi-instance safety
@@ -36,6 +44,8 @@ shutdown, B may have already taken over (via `claim_session` with
 `allow_takeover=True`), updating `owner_instance_id` to B - A's purge
 won't touch them.
 
-The only edge case: A crashes and restarts before B takes over. A purges
-its own rows, and B cannot recover them. But A is back and can serve
-requests directly, and the client sends `previous_response_id` itself.
+If A crashes and restarts before B takes over, A purges its ordinary rows.
+Recent verified recovery rows are the narrow exception because their aliases
+are the durable proof that a recovered task must remain on its replacement
+account. They are ownerless and immediately claimable, and normal retention
+still bounds their lifetime.

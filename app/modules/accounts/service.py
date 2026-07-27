@@ -33,6 +33,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -663,6 +664,10 @@ class AccountsService:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
+            # Deletion cascades the account_proxy_bindings row away, and account
+            # ids are deterministic (delete-then-re-import regenerates the same
+            # id), so the cached route outcome must not survive the deletion.
+            await get_upstream_route_cache().invalidate()
             await propagate_account_routing_change()
             poller = get_cache_invalidation_poller()
             if poller is not None:
@@ -738,14 +743,23 @@ class AccountsService:
             model=probe_model,
         )
 
+        usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
-            await self._usage_updater.force_refresh(probe_account, ignore_refresh_disabled=True)
+            usage_refresh_result = await self._usage_updater.force_refresh_result(
+                probe_account,
+                ignore_refresh_disabled=True,
+            )
+            usage_refresh_fetch_succeeded = usage_refresh_result.fetch_succeeded
+            # Forced refresh can still persist fresh OAuth credentials before a
+            # later upstream usage fetch fails. Selection-cache rows carry
+            # cloned encrypted tokens, so every forced attempt must invalidate
+            # cached accounts, not only attempts that wrote usage rows.
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
         primary_after, secondary_after = await self._latest_usage_percents(account_id)
 
-        return AccountProbeResponse(
+        response = AccountProbeResponse(
             status="probed",
             account_id=account_id,
             probe_status_code=probe_status,
@@ -756,6 +770,8 @@ class AccountsService:
             account_status_before=status_before,
             account_status_after=refreshed.status.value,
         )
+        response._usage_refresh_fetch_succeeded = usage_refresh_fetch_succeeded
+        return response
 
     async def _latest_usage_percents(self, account_id: str) -> tuple[float | None, float | None]:
         if self._usage_repo is None:

@@ -5,14 +5,22 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
+	tests/integration/test_migration_serialization.py::test_concurrent_upgrades_on_fresh_postgresql_database_apply_head_exactly_once \
+	tests/integration/test_migration_serialization.py::test_postgresql_run_upgrade_times_out_when_advisory_lock_is_held \
 	tests/integration/test_usage_repository.py::test_latest_by_account_primary_query_plan_uses_normalized_window_index_postgresql \
+	tests/integration/test_automations_history_queries.py \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_email \
 	tests/integration/test_sticky_sessions_api.py::test_durable_bridge_owned_alias_registration_is_epoch_fenced \
 	tests/integration/test_proxy_api_extended.py::test_proxy_stream_usage_limit_returns_http_error \
+	tests/integration/test_codex_usage_api.py::test_codex_usage_aggregates_windows \
+	tests/integration/test_proxy_compact.py::test_proxy_compact_headers_include_monthly_only_credits \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql \
 	tests/integration/test_db_session_timezone.py \
 	tests/test_request_logs_options_api.py \
 	tests/integration/test_account_usage_rollup.py \
+	tests/integration/test_request_usage_time_rollup.py \
+	tests/integration/test_request_usage_rollup_parity.py \
+	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py
 SHELL := /bin/bash
 
@@ -24,13 +32,15 @@ help:
 	  '  make architecture-check      proxy architecture fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make frontend-test           vitest coverage, same as CI' \
+	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package' \
 	  '  make ci                      full local CI gate'
 
-.PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build
+.PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build \
+	frontend-playwright-chromium test-dashboard-browser-smoke
 frontend-install:
 	cd frontend && bun install --frozen-lockfile
 
@@ -49,10 +59,17 @@ frontend-test-fast: frontend-install
 frontend-build: frontend-install
 	cd frontend && bun run build
 
+frontend-playwright-chromium: frontend-install
+	cd frontend && bun run playwright install chromium
+
+test-dashboard-browser-smoke: frontend-build frontend-playwright-chromium
+	uv sync --dev --frozen
+	uv run python scripts/run_dashboard_browser_smoke.py
+
 .PHONY: lint typecheck architecture-check
 lint: architecture-check
-	uvx ruff check .
-	uvx ruff format --check .
+	uv run ruff check .
+	uv run ruff format --check .
 
 architecture-check:
 	python scripts/check_proxy_architecture.py

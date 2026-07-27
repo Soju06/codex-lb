@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -8,6 +10,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.config.settings import get_settings
 from app.core.exceptions import DashboardSettingsConflictError
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import DashboardSettings
 
 _SETTINGS_ID = 1
@@ -146,6 +149,10 @@ class SettingsRepository:
             raise DashboardSettingsConflictError(
                 "Settings were modified since this form was loaded; reload and retry",
             )
+        upstream_route_inputs_changed = (
+            upstream_proxy_routing_enabled is not None
+            and upstream_proxy_routing_enabled != settings.upstream_proxy_routing_enabled
+        ) or (upstream_proxy_default_pool_id or None) != settings.upstream_proxy_default_pool_id
         if sticky_threads_enabled is not None:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if upstream_stream_transport is not None:
@@ -255,10 +262,20 @@ class SettingsRepository:
         # `UPDATE ... SET version = version + 1 WHERE version = :expected`, so a
         # stale no-op save still surfaces the conflict.
         flag_modified(settings, "sticky_threads_enabled")
-        await self.commit_refresh(settings)
+        # The route cache must be cleared synchronously between the commit and
+        # the refresh await: the committed row is visible to concurrent
+        # requests as soon as the commit returns, and any await before the
+        # clear would let them resolve from the stale per-account route cache
+        # (e.g. cached direct egress immediately after routing was enabled).
+        await self.commit_refresh(
+            settings,
+            on_committed=get_upstream_route_cache().clear if upstream_route_inputs_changed else None,
+        )
         return settings
 
-    async def commit_refresh(self, settings: DashboardSettings) -> None:
+    async def commit_refresh(
+        self, settings: DashboardSettings, *, on_committed: Callable[[], None] | None = None
+    ) -> None:
         try:
             await self._session.commit()
         except StaleDataError as exc:
@@ -266,4 +283,9 @@ class SettingsRepository:
             # zero rows: another writer (replica or request) committed first.
             await self._session.rollback()
             raise DashboardSettingsConflictError() from exc
+        if on_committed is not None:
+            # Runs synchronously between the commit and the refresh await so
+            # concurrent requests cannot observe the committed row alongside
+            # stale state the hook is meant to reset.
+            on_committed()
         await self._session.refresh(settings)

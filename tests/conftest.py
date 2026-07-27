@@ -22,6 +22,9 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+# Route-resolution caching is opt-in per test (cache-specific tests set a TTL
+# explicitly); keeping it off preserves fresh-read semantics everywhere else.
+os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"
 # The app-level automations scheduler ticks on the real clock; with leader
 # election enabled its startup tick runs as a background task and can land
 # inside a test that stages its own due-now jobs, racing the test's
@@ -307,6 +310,12 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.core.upstream_proxy.cache import get_upstream_route_cache
+
+        get_upstream_route_cache().clear()
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()
@@ -326,3 +335,13 @@ def _reset_hot_path_caches():
     _reset_global_state()
     yield
     _reset_global_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_shutdown_task_admission():
+    """Keep the process-global shutdown admission barrier test-local."""
+    from app.core import shutdown as shutdown_state
+
+    shutdown_state.reset()
+    yield
+    shutdown_state.reset()

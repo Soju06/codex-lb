@@ -103,6 +103,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Alpha",
             apiKeyId: "key-alpha",
             requestId: "req-1",
+            conversationId: null,
             archiveRequestId: "archive-req-1",
             requestKind: "normal",
             model: "gpt-5.1",
@@ -187,6 +188,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Speed",
             apiKeyId: "key-speed",
             requestId: "req-speed",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -236,6 +238,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Reasoning",
             apiKeyId: "key-reasoning",
             requestId: "req-reasoning",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -292,6 +295,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-normal",
+            conversationId: null,
             requestKind: "normal",
             source: null,
             ...NULL_FAILURE_METADATA,
@@ -323,6 +327,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-warmup",
+            conversationId: null,
             requestKind: "warmup",
             source: null,
             ...NULL_FAILURE_METADATA,
@@ -368,6 +373,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-legacy",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -414,6 +420,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-error-code",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -461,6 +468,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Cost",
             apiKeyId: "key-cost",
             requestId: "req-cost",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -517,6 +525,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Agent",
             apiKeyId: "key-agent",
             requestId: "req-useragent",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -579,6 +588,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-no-useragent",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -635,6 +645,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-no-cost",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -686,6 +697,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Partial",
             apiKeyId: "key-partial",
             requestId: "req-partial-cost",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -742,6 +754,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Partial No Total",
             apiKeyId: "key-partial-no-total",
             requestId: "req-partial-no-total",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -798,6 +811,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Agent",
             apiKeyId: "key-agent",
             requestId: "req-useragent",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -858,6 +872,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: null,
             apiKeyId: null,
             requestId: "req-no-useragent",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -914,6 +929,7 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Total Only",
             apiKeyId: "key-total-only",
             requestId: "req-total-only-cost",
+            conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
             source: null,
@@ -952,5 +968,221 @@ describe("RecentRequestsTable", () => {
     const dialog = openRequestDetails();
 
     expect(within(dialog).queryByText("Cost")).not.toBeInTheDocument();
+  });
+
+  it("closes the dialog when conversation ID button is clicked and fires handler", () => {
+    const onConversationClick = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        onConversationClick={onConversationClick}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-conv-click",
+            planType: "plus",
+            apiKeyName: "Key Conv",
+            apiKeyId: "key-conv",
+            requestId: "req-conv-click",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: null,
+            clientIp: "10.0.0.1",
+            conversationId: "conv_dialog_close_test",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("conv_dialog_close_test")).toBeInTheDocument();
+
+    const convButton = within(dialog).getByRole("button", { name: /Filter by conversation/i });
+    fireEvent.click(convButton);
+
+    expect(onConversationClick).toHaveBeenCalledWith("conv_dialog_close_test");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("renders conversation ID as plain text when no handler is provided", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-conv-text",
+            planType: "plus",
+            apiKeyName: "Key Text",
+            apiKeyId: "key-text",
+            requestId: "req-conv-text",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: null,
+            clientIp: null,
+            conversationId: "conv_plain_text_render",
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const textEl = within(dialog).getByText("conv_plain_text_render");
+    expect(textEl).toBeInTheDocument();
+    // Must be a <p>, not a button
+    expect(textEl.tagName).toBe("P");
+    expect(textEl).toHaveClass("truncate");
+    expect(
+      within(dialog).queryByRole("button", { name: /Filter by conversation/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("truncates long conversation IDs with title attribute in dialog", () => {
+    const longId = "conv_this_is_a_very_very_very_very_long_conversation_id_that_would_overflow_a_half_width_column";
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        onConversationClick={vi.fn()}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-long-cid",
+            planType: "plus",
+            apiKeyName: "Key Long",
+            apiKeyId: "key-long",
+            requestId: "req-long-cid",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: null,
+            clientIp: null,
+            conversationId: longId,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const convButton = within(dialog).getByRole("button", { name: /Filter by conversation/i });
+    expect(convButton).toHaveAttribute("title", longId);
+    expect(convButton).toHaveClass("truncate");
+    expect(convButton.className).toMatch(/max-w-\[200px\]/);
+  });
+
+  it("truncates long no-handler conversation IDs with title attribute", () => {
+    const longId = "conv_this_is_a_very_very_long_id_with_no_handler_that_would_overflow";
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-long-cid-nh",
+            planType: "plus",
+            apiKeyName: "Key Long NH",
+            apiKeyId: "key-long-nh",
+            requestId: "req-long-cid-nh",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: null,
+            clientIp: null,
+            conversationId: longId,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: null,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+            cachedInputTokens: null,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const textEl = within(dialog).getByText(longId);
+    expect(textEl.tagName).toBe("P");
+    expect(textEl).toHaveClass("truncate");
+    expect(textEl).toHaveAttribute("title", longId);
   });
 });

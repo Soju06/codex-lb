@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -27,6 +28,21 @@ _FUTURE_REVISION = "20991231_000000_revision_from_a_newer_build"
 _REPO_ROOT = Path(migrate_module.__file__).resolve().parents[2]
 _LOCK_HOLD_TIMEOUT_SECONDS = 60.0
 
+_EMPTY_DB_URL_COMMANDS = (
+    pytest.param(("upgrade", "head"), id="upgrade"),
+    pytest.param(("stamp", "head"), id="stamp"),
+    pytest.param(("current",), id="current"),
+    pytest.param(
+        ("wait-for-connection", "--timeout-seconds", "0.2", "--interval-seconds", "0.05"),
+        id="wait-for-connection",
+    ),
+    pytest.param(("check",), id="check"),
+    pytest.param(
+        ("wait-for-head", "--timeout-seconds", "0.1", "--interval-seconds", "0.05"),
+        id="wait-for-head",
+    ),
+)
+
 
 def _is_postgresql_database_url(url: str) -> bool:
     return url.startswith("postgresql+")
@@ -36,6 +52,28 @@ def _sqlite_alembic_revisions(db_path: Path) -> list[str]:
     with sqlite3.connect(str(db_path)) as connection:
         rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
     return sorted(str(row[0]) for row in rows)
+
+
+def _sqlite_table_count(db_path: Path) -> int:
+    with sqlite3.connect(str(db_path)) as connection:
+        rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    return len(rows)
+
+
+def _run_migration_cli(
+    *arguments: str,
+    database_url: str,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["CODEX_LB_DATABASE_URL"] = database_url
+    return subprocess.run(
+        [sys.executable, "-m", "app.db.migrate", *arguments],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=_REPO_ROOT,
+        env=env,
+    )
 
 
 def test_concurrent_upgrades_on_fresh_sqlite_database_apply_head_exactly_once(tmp_path: Path) -> None:
@@ -170,6 +208,43 @@ def test_concurrent_cli_upgrades_share_one_sqlite_database(tmp_path: Path) -> No
         assert process.returncode == 0, f"stdout={process.stdout}\nstderr={process.stderr}"
         assert f"current_revision={_HEAD_REVISION}" in process.stdout
     assert _sqlite_alembic_revisions(db_path) == [_HEAD_REVISION]
+
+
+@pytest.mark.parametrize("command_arguments", _EMPTY_DB_URL_COMMANDS)
+def test_migration_cli_rejects_explicit_empty_db_url_before_settings_fallback(
+    tmp_path: Path,
+    command_arguments: tuple[str, ...],
+) -> None:
+    fallback_path = tmp_path / "settings-fallback.sqlite"
+    fallback_url = f"sqlite+aiosqlite:///{fallback_path}"
+
+    process = _run_migration_cli(
+        "--db-url",
+        "",
+        *command_arguments,
+        database_url=fallback_url,
+    )
+
+    created_paths = sorted(path.name for path in tmp_path.iterdir())
+    table_count = _sqlite_table_count(fallback_path) if fallback_path.exists() else 0
+    assert (
+        process.returncode,
+        created_paths,
+        table_count,
+        "argument --db-url: database URL must not be empty" in process.stderr,
+    ) == (2, [], 0, True), f"stdout={process.stdout}\nstderr={process.stderr}"
+
+
+def test_migration_cli_uses_settings_database_when_db_url_is_omitted(tmp_path: Path) -> None:
+    database_path = tmp_path / "configured.sqlite"
+    database_url = f"sqlite+aiosqlite:///{database_path}"
+
+    process = _run_migration_cli("upgrade", "head", database_url=database_url)
+
+    assert process.returncode == 0, f"stdout={process.stdout}\nstderr={process.stderr}"
+    assert f"current_revision={_HEAD_REVISION}" in process.stdout
+    assert _sqlite_alembic_revisions(database_path) == [_HEAD_REVISION]
+    assert _sqlite_table_count(database_path) > 1
 
 
 @pytest.mark.asyncio

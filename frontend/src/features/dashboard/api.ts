@@ -22,6 +22,7 @@ export type RequestLogsListFilters = {
   modelOptions?: string[];
   since?: string;
   until?: string;
+  conversationId?: string;
 };
 
 export type RequestLogFacetFilters = {
@@ -72,6 +73,9 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
   appendMany(query, "apiKeyId", params.apiKeyIds);
   appendMany(query, "status", params.statuses);
   appendMany(query, "modelOption", params.modelOptions);
+  if (params.conversationId) {
+    query.set("conversation_id", params.conversationId);
+  }
   if (params.since) {
     query.set("since", params.since);
   }

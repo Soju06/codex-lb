@@ -5,9 +5,9 @@
 codex-lb ships first-class multi-replica machinery — the HTTP bridge instance ring with owner
 forwarding, DB-backed leader election, the cache-invalidation bus, DB-backed sticky sessions and
 rate limiting — but the prerequisites for actually running more than one replica were scattered
-across code comments and the Helm README. This capability is the single normative home for the
-topology contract: what an operator must provision, which failure modes are guarded at startup,
-and which cross-replica behaviors are best-effort.
+across code comments and the Helm README. The adjacent [specification](spec.md) is the normative
+topology contract; this context explains what an operator must provision, which failure modes are
+guarded at startup, and which cross-replica behaviors are best-effort.
 
 ## Topology overview
 
@@ -19,21 +19,31 @@ A supported multi-replica deployment looks like:
   (bridge session ownership), `cache_invalidation` (settings/selection cache bus),
   `sticky_sessions`, `rate_limit_attempts`, and `runtime_sentinels` (startup consistency
   sentinels such as the encryption-key fingerprint).
-- **Leader election opt-in** — `CODEX_LB_LEADER_ELECTION_ENABLED=true`. Without it every replica
-  self-elects and singleton schedulers (usage refresh, automations, retention, quota planner,
-  api-key reset, sticky-session cleanup, auth guardian) run N-fold. The auth guardian is the one
-  scheduler that self-disables in that configuration, and it logs a startup WARNING when it does.
+- **Leader election at its default** — `CODEX_LB_LEADER_ELECTION_ENABLED` defaults to `true`, so
+  shared-database replicas arbitrate one leader without extra configuration. Explicitly setting it
+  to `false` is a single-instance escape hatch: every replica self-elects and singleton schedulers
+  (usage refresh, automations, retention, quota planner, api-key reset, sticky-session cleanup,
+  auth guardian) can run N-fold. The auth guardian self-disables in that configuration and logs a
+  startup WARNING.
 - **Bridge ring identity** — a unique `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID` per
-  replica, the full ring in `..._INSTANCE_RING`, and a reachable replica-specific advertise URL
-  so hard-continuity requests landing on the wrong replica can be forwarded to the owner (see
-  `sticky-session-operations` and `responses-api-compat` for the forwarding mechanics).
+  replica and a reachable replica-specific advertise URL so hard-continuity requests landing on
+  the wrong replica can be forwarded to the owner (see `sticky-session-operations` and
+  `responses-api-compat` for the forwarding mechanics). Live membership and advertise endpoints
+  are registered and discovered through the shared database. In the normal runtime that live,
+  endpoint-bearing database set determines routing; `..._INSTANCE_RING` does not override or
+  restrict it. The static list remains a legacy fallback for internal/test paths constructed
+  without a membership reader and a configuration hint for multi-replica validation. Empty live
+  discovery uses only the current instance, and lookup failures fail closed rather than falling
+  back to the static list.
 - **Shared encryption key** — the same `encryption.key` file mounted on every replica. Verified
   at startup against the `runtime_sentinels` fingerprint (below).
 
-SQLite remains fully supported for exactly one application process. The leader lease is bypassed
-on SQLite (every process self-elects), so `uvicorn --workers N` or two containers sharing one
-SQLite file duplicate every singleton scheduler and risk `database is locked` failures — and
-corruption on network filesystems. Scaling out means moving to PostgreSQL.
+SQLite remains fully supported for exactly one application process. The leader lease is
+database-arbitrated on SQLite through the same conditional lease update used for PostgreSQL; it
+is not bypassed. Multi-process SQLite is still unsupported because concurrent writers risk
+`database is locked` failures and network filesystems add corruption risk. Do not use
+`uvicorn --workers N` or share one SQLite file between containers; scaling out means moving to
+PostgreSQL.
 
 ## Why the encryption-key fingerprint sentinel
 
@@ -80,16 +90,19 @@ retry once on conflict because their mutations are idempotent absolute writes.
 
 ## Known limitations (triaged follow-ups)
 
-- **Websocket turns are not drained on shutdown, and detached request-log writes may be lost at
-  teardown** — drain rejects new HTTP work but neither rejects new websocket scopes nor waits
-  for in-flight websocket turns, and pending request-log tasks are not flushed before the DB
-  closes. Follow-up: `graceful-drain-lifecycle`.
+- **Websocket turns are not drained on shutdown** — drain rejects new HTTP work but neither
+  rejects new websocket scopes nor waits for in-flight websocket turns. HTTP and bridge teardown
+  waits up to the configured drain timeout for tracked proxy-persistence tasks, including request
+  logs enqueued while bridge sessions close. If that bounded wait times out or raises, shutdown
+  continues to database close, so the last request logs or settlements can still be lost.
+  Follow-up: `graceful-drain-lifecycle`.
 - **`file_id` → account pins are process-local best-effort** — file finalize/input_file requests
   landing on another replica can route to an account that does not own the file. Follow-up:
   `persist-file-account-pins`.
 - **Concurrent cross-replica usage refresh can transiently tear `additional_usage_history`** —
   the per-account delete+insert rewrite is non-transactional across refreshers; the tear
   self-heals within one refresh interval. Documented limitation; no follow-up scheduled.
-- **Selection/settings caches converge within their TTLs** — cross-replica cache invalidation is
-  bus + TTL bounded; see `query-caching` and the in-flight `extend-cache-invalidation-bus`
-  change for tightened convergence.
+- **Invalidation-bus failure is non-fatal** — normal cross-replica mutations use the shipped
+  invalidation bus. If a bump or poll fails, the mutation still succeeds and each affected cache
+  follows its documented fallback behavior. See `query-caching` for namespaces, timing, failure
+  metrics, and cache-specific backstops.

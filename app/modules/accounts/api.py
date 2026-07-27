@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
+import logging
+
+from fastapi import APIRouter, Depends, Request, Response
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import (
@@ -16,8 +18,11 @@ from app.core.exceptions import (
     DashboardNotFoundError,
     DashboardUpstreamError,
 )
+from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
+from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipart_form, read_bounded_upload
+from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
-from app.dependencies import AccountsContext, get_accounts_context
+from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
@@ -51,11 +56,45 @@ from app.modules.accounts.service import (
     InvalidAuthJsonError,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/api/accounts",
     tags=["dashboard"],
     dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
 )
+
+_ACCOUNT_IMPORT_OPENAPI_EXTRA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "title": "Body_import_account_api_accounts_import_post",
+                    "required": ["auth_json"],
+                    "properties": {
+                        "auth_json": {
+                            "type": "string",
+                            "contentMediaType": "application/octet-stream",
+                            "title": "Auth Json",
+                        }
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "422": {
+            "description": "Validation Error",
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/HTTPValidationError"},
+                }
+            },
+        }
+    },
+}
 
 
 @router.get("", response_model=AccountsResponse)
@@ -207,14 +246,28 @@ async def export_account_opencode_auth(
     return result
 
 
-@router.post("/import", response_model=AccountImportResponse)
+@router.post(
+    "/import",
+    response_model=AccountImportResponse,
+    openapi_extra=_ACCOUNT_IMPORT_OPENAPI_EXTRA,
+)
 async def import_account(
     request: Request,
-    auth_json: UploadFile = File(...),
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountImportResponse:
-    raw = await auth_json.read()
+    raise_for_unsupported_multipart_content_encoding(request)
+    async with bounded_multipart_form(
+        request,
+        ACCOUNT_IMPORT_MULTIPART_POLICY,
+        typed_upload_fields=("auth_json",),
+    ) as form:
+        auth_json = required_upload(form, "auth_json")
+        raw = await read_bounded_upload(
+            auth_json,
+            max_bytes=ACCOUNT_IMPORT_MULTIPART_POLICY.max_file_bytes,
+            param="auth_json",
+        )
     try:
         response = await context.service.import_account(raw)
         AuditService.log_async(
@@ -292,6 +345,26 @@ async def probe_account(
         ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    probe_succeeded = 200 <= result.probe_status_code < 300
+    if not probe_succeeded or result.usage_refresh_ready_for_probe_settlement():
+        try:
+            await get_proxy_service_for_app(request.app).record_account_probe_result(
+                account_id=result.account_id,
+                http_status=result.probe_status_code,
+            )
+        except Exception:
+            logger.exception(
+                "Force Probe advisory settlement failed account_id=%s probe_status_code=%s",
+                result.account_id,
+                result.probe_status_code,
+            )
+    else:
+        logger.warning(
+            "Force Probe success skipped advisory settlement before successful usage refresh fetch "
+            "account_id=%s probe_status_code=%s",
+            result.account_id,
+            result.probe_status_code,
+        )
     AuditService.log_async(
         "account_probed",
         actor_ip=request.client.host if request.client else None,

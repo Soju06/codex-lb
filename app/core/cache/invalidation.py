@@ -28,6 +28,7 @@ NAMESPACE_ACCOUNT_SELECTION = "account_selection"
 NAMESPACE_SETTINGS = "settings"
 NAMESPACE_RESET_CREDITS = "reset_credits"
 NAMESPACE_MODEL_REGISTRY = "model_registry"
+NAMESPACE_UPSTREAM_ROUTE = "upstream_route"
 # Callback return values are ignored; awaitables are awaited for their side
 # effects only, so callbacks may return a status (e.g. bool) for other callers.
 type InvalidationCallback = Callable[[], object | Awaitable[object]]
@@ -45,6 +46,7 @@ _NAMESPACE_LOG_LABELS: dict[str, str] = {
     "settings": "settings",
     "reset_credits": "reset_credits",
     "model_registry": "model_registry",
+    "upstream_route": "upstream_route",
 }
 
 _BUMP_RETRY_ATTEMPTS = 3

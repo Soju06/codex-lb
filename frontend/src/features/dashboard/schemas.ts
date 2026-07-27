@@ -56,6 +56,8 @@ const DashboardMetricsSchema = z.object({
   errorRate: z.number().nullable(),
   errorCount: z.number().nullable(),
   topError: z.string().nullable(),
+  conversations: z.number().int().nullable().optional().default(null),
+  conversationRequests: z.number().int().nonnegative().optional().default(0),
 });
 
 const DashboardMetricsComparisonPreviousSchema = z.object({
@@ -79,6 +81,7 @@ const MetricsTrendsSchema = z.object({
   tokens: z.array(TrendPointSchema),
   cost: z.array(TrendPointSchema),
   errorRate: z.array(TrendPointSchema),
+  conversations: z.array(TrendPointSchema).optional().default([]),
 });
 
 export const DepletionSchema = z.object({
@@ -173,6 +176,7 @@ export const RequestLogSchema = z.object({
   useragent: z.string().nullable().optional().default(null),
   useragentGroup: z.string().nullable().optional().default(null),
   clientIp: z.string().nullable().optional().default(null),
+  conversationId: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),
   requestedServiceTier: z.string().nullable().optional().default(null),
   actualServiceTier: z.string().nullable().optional().default(null),
@@ -203,6 +207,10 @@ export const RequestLogsResponseSchema = z.object({
   requests: z.array(RequestLogSchema),
   total: z.number().int().nonnegative(),
   hasMore: z.boolean(),
+  conversation: z.object({
+    requestCount: z.number().int().nonnegative(),
+    aggregatedCostUsd: z.number(),
+  }).nullable().optional().default(null),
 });
 
 const RequestLogModelOptionSchema = z.object({
@@ -230,6 +238,7 @@ export const FilterStateSchema = z.object({
   apiKeyIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
   statuses: z.array(z.string()),
+  conversationId: z.string().nullable().optional().default(null),
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),
 });

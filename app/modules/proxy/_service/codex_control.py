@@ -31,7 +31,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
@@ -158,7 +158,7 @@ class _CodexControlMixin:
     ) -> CodexControlResponse:
         proxy = cast(_CodexControlServiceProtocol, self)
         filtered = filter_inbound_headers(headers)
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -443,4 +443,5 @@ class _CodexControlMixin:
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
             )

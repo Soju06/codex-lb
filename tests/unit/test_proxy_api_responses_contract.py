@@ -368,9 +368,11 @@ async def test_normalize_public_responses_stream_appends_response_failed_on_inva
     created_payload = proxy_api_module._parse_sse_payload(blocks[0])
     assert created_payload is not None
     assert created_payload["type"] == "response.created"
+    assert created_payload["sequence_number"] == 0
     payload = proxy_api_module._parse_sse_payload(blocks[1])
     assert payload is not None
     assert payload["type"] == "response.failed"
+    assert payload["sequence_number"] == 1
     response = payload["response"]
     assert isinstance(response, dict)
     error = response["error"]
@@ -395,6 +397,7 @@ async def test_normalize_public_responses_stream_preserves_initial_error_details
     payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
     payloads = [payload for payload in payloads if payload is not None]
     assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    assert [payload["sequence_number"] for payload in payloads] == [0, 1]
     response = payloads[1]["response"]
     assert isinstance(response, dict)
     error = response["error"]
@@ -871,6 +874,120 @@ async def test_normalize_public_responses_stream_synthesizes_response_created_on
     assert created_response["output"] == []
     # But the upstream id is preserved so downstream consumers can correlate.
     assert created_response["id"] == "resp_err"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sequences_created_before_unsequenced_leading_failure() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    created = next(payload for payload in payloads if payload and payload.get("type") == "response.created")
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert created["sequence_number"] == 0
+    assert failed["sequence_number"] == 1
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_replaces_non_integer_failure_sequence() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":7,'
+                    '"response":{"id":"resp_err","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.failed","sequence_number":"error",'
+                    '"response":{"id":"resp_err","object":"response","status":"failed",'
+                    '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 8
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sequences_failure_after_reasoning() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    'data: {"type":"response.created","sequence_number":7,'
+                    '"response":{"id":"resp_err","object":"response","status":"in_progress","output":[]}}\n\n'
+                ),
+                (
+                    'data: {"type":"response.reasoning_summary_text.delta","sequence_number":8,'
+                    '"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Checking."}\n\n'
+                ),
+                (
+                    'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                    '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                ),
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert failed["sequence_number"] == 9
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure_sequence", "created_sequence"), [(12, 11), (0, -1)])
+async def test_normalize_public_responses_stream_preserves_failure_sequence(
+    failure_sequence: int,
+    created_sequence: int,
+) -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                (
+                    f'data: {{"type":"response.failed","sequence_number":{failure_sequence},'
+                    '"response":{"id":"resp_err","object":"response","status":"failed",'
+                    '"error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+                )
+            )
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    created = next(payload for payload in payloads if payload and payload.get("type") == "response.created")
+    failed = next(payload for payload in payloads if payload and payload.get("type") == "response.failed")
+    assert created["sequence_number"] == created_sequence
+    assert failed["sequence_number"] == failure_sequence
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_codex_route_preserves_unsequenced_failure() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(
+                'data: {"type":"response.failed","response":{"id":"resp_err","object":"response",'
+                '"status":"failed","error":{"code":"stream_incomplete","message":"closed"}}}\n\n'
+            ),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    failed = proxy_api_module._parse_sse_payload(blocks[0])
+    assert failed is not None
+    assert "sequence_number" not in failed
 
 
 @pytest.mark.asyncio

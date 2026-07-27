@@ -38,6 +38,7 @@ describe("CostPerDayChart", () => {
           {
             date: "2026-06-05",
             requests: 150,
+            conversations: 0,
             inputTokens: 5_400_000,
             outputTokens: 59_000,
             cachedInputTokens: 0,
@@ -61,6 +62,7 @@ describe("CostPerDayChart", () => {
           {
             date: "2026-06-05",
             requests: 150,
+            conversations: 0,
             inputTokens: 5_400_000,
             outputTokens: 59_000,
             cachedInputTokens: 0,
@@ -71,6 +73,7 @@ describe("CostPerDayChart", () => {
           {
             date: "2026-06-07",
             requests: 179,
+            conversations: 0,
             inputTokens: 6_800_000,
             outputTokens: 73_000,
             cachedInputTokens: 0,

@@ -368,6 +368,7 @@ def select_account(
     routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
+    recovery_probe_only: bool = False,
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
     relative_availability_top_k: int = DEFAULT_RELATIVE_AVAILABILITY_TOP_K,
     usage_weighted_order: UsageWeightedOrder = "secondary_first",
@@ -405,6 +406,9 @@ def select_account(
             account exists.
         deterministic_probe: Whether weighted strategies should use a
             deterministic probe order instead of random weighted choice.
+        recovery_probe_only: Whether to return only a due probing-account
+            recovery admission and otherwise return no selection. Health-tier
+            bypass strategies ignore this internal mode.
         relative_availability_power: Exponent applied to normalized relative
             availability weights.
         relative_availability_top_k: Maximum number of highest-weight
@@ -617,7 +621,13 @@ def select_account(
     healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
     probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
     draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
-    health_pool = healthy or probing or draining or available
+    # Recovery is a liveness admission inside the already-eligible pool. Pick
+    # it before routing-policy preferences so burn/preserve policy cannot make
+    # PROBING permanent, but never before quota/cooldown/security filtering.
+    due_probe = _oldest_due_probing_account(probing, current=current) if healthy or recovery_probe_only else None
+    if recovery_probe_only and due_probe is None:
+        return SelectionResult(None, None)
+    health_pool = [due_probe] if due_probe is not None else healthy or probing or draining or available
     burn_first = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
     normal = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_NORMAL]
     preserve = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
@@ -672,6 +682,27 @@ def select_account(
                 key=_reset_first_sort_key if effective_prefer_earlier_reset else _usage_sort_key_with_cost,
             )
     return SelectionResult(selected, None)
+
+
+def _oldest_due_probing_account(
+    probing: Iterable[AccountState],
+    *,
+    current: float,
+) -> AccountState | None:
+    due = [
+        state
+        for state in probing
+        if state.last_selected_at is None or current - state.last_selected_at >= PROBE_QUIET_SECONDS
+    ]
+    if not due:
+        return None
+    return min(
+        due,
+        key=lambda state: (
+            state.last_selected_at if state.last_selected_at is not None else float("-inf"),
+            state.account_id,
+        ),
+    )
 
 
 def _remaining_secondary_credits(state: AccountState) -> float:

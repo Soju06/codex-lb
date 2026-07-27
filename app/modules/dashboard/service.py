@@ -100,11 +100,16 @@ class DashboardService:
             bucket_query_since,
             overview_timeframe.bucket_seconds,
         )
+        conversation_bucket_rows = await self._repo.aggregate_conversations_by_bucket(
+            bucket_query_since,
+            overview_timeframe.bucket_seconds,
+        )
         trends, _, _ = build_trends_from_buckets(
             bucket_rows,
             bucket_since,
             bucket_seconds=overview_timeframe.bucket_seconds,
             bucket_count=overview_timeframe.bucket_count,
+            conversation_rows=conversation_bucket_rows,
         )
         previous_window_start = bucket_since - timedelta(minutes=overview_timeframe.window_minutes)
         activity_aggregate = await self._repo.aggregate_activity_between(bucket_since, now)

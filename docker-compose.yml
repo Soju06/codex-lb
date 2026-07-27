@@ -17,6 +17,7 @@ services:
       # websocket ingress budget that app.cli applies in production.
       - uvicorn
       - app.main:app
+      - --no-proxy-headers
       - --host
       - 0.0.0.0
       - --port
@@ -108,7 +109,7 @@ services:
     restart: unless-stopped
 
   postgres-upgrade:
-    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:55e168827ad48713ebc415bfefea83330a80ca7e81a1bcc11cc0bb7a3a531bde
+    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:01136fdc26ce0234df32e09f1dd7a43e9a1012c5055c9d04a2f7c789c833ba90
     profiles: ["postgres-upgrade"]
     environment:
       POSTGRES_USER: codex_lb

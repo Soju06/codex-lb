@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -88,6 +88,51 @@ class StickySessionsRepository:
         )
         async with sqlite_writer_section():
             result = await self._session.execute(statement.returning(StickySession.key))
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def restore_if_current(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str | None,
+        restore_account_id: str | None,
+    ) -> bool:
+        """Restore a sticky owner only if the provisional owner is still current."""
+
+        if not key:
+            return False
+        if expected_account_id is None:
+            if restore_account_id is None:
+                return True
+            statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind).returning(
+                StickySession.key
+            )
+        elif restore_account_id is None:
+            statement = (
+                delete(StickySession)
+                .where(
+                    StickySession.key == key,
+                    StickySession.kind == kind,
+                    StickySession.account_id == expected_account_id,
+                )
+                .returning(StickySession.key)
+            )
+        else:
+            statement = (
+                update(StickySession)
+                .where(
+                    StickySession.key == key,
+                    StickySession.kind == kind,
+                    StickySession.account_id == expected_account_id,
+                )
+                .values(account_id=restore_account_id, updated_at=func.now())
+                .returning(StickySession.key)
+            )
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement)
             await self._session.commit()
         return result.scalar_one_or_none() is not None
 
@@ -219,6 +264,17 @@ class StickySessionsRepository:
                 "updated_at": func.now(),
             },
         )
+
+    def _build_insert_do_nothing_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            insert_fn = pg_insert
+        elif dialect == "sqlite":
+            insert_fn = sqlite_insert
+        else:
+            raise RuntimeError(f"StickySession insert unsupported for dialect={dialect!r}")
+        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        return statement.on_conflict_do_nothing(index_elements=[StickySession.key, StickySession.kind])
 
     @staticmethod
     def _apply_filters(

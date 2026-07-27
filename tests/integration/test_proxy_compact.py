@@ -196,6 +196,67 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_before_ordinary_tail(
+    async_client, monkeypatch
+):
+    email = "compact-side-effect@example.com"
+    raw_account_id = "acc_compact_side_effect"
+    files = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    side_effect_call = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call-code-mode-exec",
+        "input": json.dumps({"command": "git status --short"}),
+    }
+    side_effect_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call-code-mode-exec",
+        "output": "clean",
+    }
+    ordinary_tail = {"role": "assistant", "content": "ordinary tail " + "x" * 500_000}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "perform a code-mode action"},
+            {"role": "assistant", "content": "prefix " + "y" * 260_000},
+            side_effect_call,
+            side_effect_output,
+            ordinary_tail,
+            {"role": "user", "content": "continue after compaction"},
+        ],
+    }
+
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    upstream_input = seen_payloads[0]["input"]
+    assert isinstance(upstream_input, list)
+    assert side_effect_call in upstream_input
+    assert side_effect_output in upstream_input
+    assert all(
+        not (
+            isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and item.get("content") == [{"type": "output_text", "text": ordinary_tail["content"]}]
+        )
+        for item in upstream_input
+    )
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_surfaces_additional_quota_exhausted(async_client):
     email = "compact-gated@example.com"
     raw_account_id = "acc_compact_gated"

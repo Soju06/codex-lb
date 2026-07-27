@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
@@ -34,7 +34,8 @@ import {
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore } from "@/hooks/use-theme";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
-import { formatModelLabel, formatSlug } from "@/utils/formatters";
+import { formatModelLabel, formatCurrency, formatSlug } from "@/utils/formatters";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 
 const MODEL_OPTION_DELIMITER = ":::";
 
@@ -114,6 +115,17 @@ export function DashboardPage() {
     [canWrite, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation],
   );
 
+  const handleConversationClick = useCallback(
+    (conversationId: string) => {
+      updateFilters({ conversationId, offset: 0 });
+    },
+    [updateFilters],
+  );
+
+  const handleConversationDismiss = useCallback(() => {
+    updateFilters({ conversationId: null, offset: 0 });
+  }, [updateFilters]);
+
   const overview = dashboardQuery.data;
   const logPage = logsQuery.data;
 
@@ -167,6 +179,88 @@ export function DashboardPage() {
       })),
     [optionsQuery.data?.modelOptions],
   );
+
+  const blurred = usePrivacyStore((s) => s.blurred);
+
+  const conversationSummary = useMemo(() => {
+    const conv = logPage?.conversation;
+    if (!conv || !filters.conversationId) {
+      return null;
+    }
+    const cost = formatCurrency(conv.aggregatedCostUsd);
+    const count = conv.requestCount;
+    const suffixParts: string[] = [];
+
+    if (filters.timeframe !== "all") {
+      suffixParts.push(filters.timeframe);
+    }
+    if (filters.statuses.length > 0) {
+      const labels = filters.statuses.map(
+        (s) => t(`dashboard.requestStatus.${s}`, { defaultValue: REQUEST_STATUS_LABELS[s] ?? s }),
+      );
+      suffixParts.push(labels.join(", "));
+    }
+    if (filters.modelOptions.length > 0) {
+      const labels = filters.modelOptions.map((raw) => {
+        const decoded = modelOptions.find((o) => o.value === raw);
+        if (decoded) return decoded.label;
+        // Decode from the filter value itself when options are stale/missing
+        const [model, ...rest] = raw.split(MODEL_OPTION_DELIMITER);
+        const effort = rest.join(MODEL_OPTION_DELIMITER);
+        return formatModelLabel(model, effort || null);
+      });
+      suffixParts.push(labels.join(", "));
+    }
+    if (filters.accountIds.length > 0) {
+      const labels = filters.accountIds.map((id) => {
+        const opt = accountOptions.find((o) => o.value === id);
+        if (!opt) return t("dashboard.filters.accounts"); // safe fallback: localized label
+        const raw = opt.label;
+        if (blurred && opt.isEmail) {
+          return id.slice(0, 8);
+        }
+        return raw;
+      });
+      suffixParts.push(labels.join(", "));
+    }
+    if (filters.apiKeyIds.length > 0) {
+      const labels = filters.apiKeyIds.map((id) => {
+        const opt = apiKeyOptions.find((o) => o.value === id);
+        return opt?.label ?? t("dashboard.filters.apiKeys"); // safe fallback
+      });
+      suffixParts.push(labels.join(", "));
+    }
+    if (filters.search) {
+      suffixParts.push(`"${filters.search}"`);
+    }
+
+    const codeClass = "rounded bg-muted px-1 py-0.5 text-xs font-mono";
+
+    if (suffixParts.length > 0) {
+      return (
+        <Trans
+          i18nKey="dashboard.conversation.summaryWithFilters"
+          values={{ id: filters.conversationId, count, cost, filters: suffixParts.join(", ") }}
+          components={[
+            <code key="id" className={codeClass} />,
+            <code key="count" className={codeClass} />,
+            <code key="cost" className={codeClass} />,
+          ]}
+        />
+      );
+    }
+    return (
+      <Trans
+        i18nKey="dashboard.conversation.summary"
+        values={{ id: filters.conversationId, count, cost }}
+        components={[
+          <code key="id" className={codeClass} />,
+          <code key="count" className={codeClass} />,
+          <code key="cost" className={codeClass} />,
+        ]}
+      />
+    );
+  }, [logPage?.conversation, filters, t, accountOptions, apiKeyOptions, modelOptions, blurred]);
 
   const statusOptions = useMemo(
     () =>
@@ -308,6 +402,7 @@ export function DashboardPage() {
                 updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
               }
               onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
+              onConversationDismiss={handleConversationDismiss}
               onReset={() =>
                 updateFilters({
                   search: "",
@@ -316,10 +411,16 @@ export function DashboardPage() {
                   apiKeyIds: [],
                   modelOptions: [],
                   statuses: [],
+                  conversationId: null,
                   offset: 0,
                 })
               }
             />
+            {conversationSummary ? (
+              <div className="rounded-xl border bg-card p-4">
+                <p className="text-sm text-muted-foreground">{conversationSummary}</p>
+              </div>
+            ) : null}
             <div className="transition-opacity duration-200">
               <RecentRequestsTable
                 requests={view.requestLogs}
@@ -330,6 +431,7 @@ export function DashboardPage() {
                 hasMore={logPage?.hasMore ?? false}
                 onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
                 onOffsetChange={(offset) => updateFilters({ offset })}
+                onConversationClick={handleConversationClick}
               />
             </div>
               </>

@@ -64,3 +64,4 @@ class MetricsTrends(DashboardModel):
     tokens: list[TrendPoint] = Field(default_factory=list)
     cost: list[TrendPoint] = Field(default_factory=list)
     error_rate: list[TrendPoint] = Field(default_factory=list)
+    conversations: list[TrendPoint] = Field(default_factory=list)

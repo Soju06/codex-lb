@@ -16,6 +16,7 @@ _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
 UNKNOWN_USERAGENT_GROUP = "Unknown"
 MISSING_USERAGENT_GROUP = "Missing User-Agent"
+_CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 
 
 class DailyReportRangeTooLargeError(ValueError):
@@ -35,6 +36,7 @@ class DailyReportAggregateRow:
     median_ttft_ms: float
     median_tps: float
     median_queue_ms: float
+    conversation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class SummaryAggregateRow:
     total_requests: int
     total_errors: int
     active_accounts: int
+    conversation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,14 @@ class UserAgentAggregateRow:
 class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    @staticmethod
+    def _conversation_id_expr():
+        trimmed = func.ltrim(
+            func.rtrim(RequestLog.conversation_id, _CONVERSATION_WHITESPACE),
+            _CONVERSATION_WHITESPACE,
+        )
+        return func.nullif(trimmed, "")
 
     async def aggregate_daily_rows(
         self,
@@ -121,6 +132,7 @@ class ReportsRepository:
                     median_ttft_ms=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[0],
                     median_tps=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[1],
                     median_queue_ms=speed_values.get(row.report_date, (0.0, 0.0, 0.0))[2],
+                    conversation_count=int(row.conversation_count or 0),
                 )
                 for row in result.all()
             )
@@ -148,6 +160,7 @@ class ReportsRepository:
                     0,
                 ).label("total_errors"),
                 func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
+                func.count(func.distinct(self._conversation_id_expr())).label("conversation_count"),
             ).where(and_(*conditions))
         )
         row = result.one()
@@ -159,6 +172,7 @@ class ReportsRepository:
             total_requests=int(row.total_requests),
             total_errors=int(row.total_errors),
             active_accounts=int(row.active_accounts),
+            conversation_count=int(row.conversation_count or 0),
         )
 
     async def aggregate_by_model(
@@ -528,6 +542,7 @@ def _daily_rows_stmt(
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
+            func.count(func.distinct(ReportsRepository._conversation_id_expr())).label("conversation_count"),
             func.coalesce(
                 func.sum(case((RequestLog.status != "success", 1), else_=0)),
                 0,

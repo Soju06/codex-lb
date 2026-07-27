@@ -91,7 +91,7 @@ async def _invoke_stickiness(
     lb = LoadBalancer(mock_repo_factory)
     account_map = {s.account_id: cast(Account, AsyncMock()) for s in states}
 
-    return await lb._select_with_stickiness(
+    outcome = await lb._select_with_stickiness(
         states=states,
         account_map=account_map,
         sticky_key=sticky_key,
@@ -108,6 +108,14 @@ async def _invoke_stickiness(
         sticky_repo=sticky_repo,
         routing_costs_by_account_id=routing_costs_by_account_id,
     )
+    if outcome.mutation is not None:
+        await lb._persist_sticky_mutation(
+            sticky_repo=sticky_repo,
+            sticky_key=sticky_key,
+            sticky_kind=sticky_kind,
+            mutation=outcome.mutation,
+        )
+    return outcome.selection
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +185,7 @@ async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once()
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.STICKY_THREAD)
 
 
@@ -218,9 +226,8 @@ async def test_sticky_preserved_then_returns_to_original_on_recovery():
 
 
 @pytest.mark.asyncio
-async def test_sticky_deleted_when_pinned_account_removed_from_pool():
-    """When the pinned account is no longer in the account pool (deleted),
-    the sticky session IS deleted and a new mapping IS persisted."""
+async def test_sticky_rebound_when_pinned_account_removed_from_pool():
+    """When the pinned account leaves the pool, one upsert replaces its mapping."""
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
 
@@ -233,8 +240,27 @@ async def test_sticky_deleted_when_pinned_account_removed_from_pool():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
+async def test_stale_sticky_owner_is_deleted_when_no_replacement_exists():
+    repo = _make_sticky_repo(existing_account_id="removed")
+
+    result = await _invoke_stickiness(
+        [],
+        "key-without-replacement",
+        repo,
+        reallocate_sticky=False,
+    )
+
+    assert result.account is None
+    repo.delete.assert_called_once_with(
+        "key-without-replacement",
+        kind=StickySessionKind.PROMPT_CACHE,
+    )
+    repo.upsert.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +304,7 @@ async def test_pool_exhausted_but_better_candidate_exists_reallocates():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
@@ -300,7 +326,7 @@ async def test_round_robin_pool_health_check_prefers_budget_safe_candidate():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key-round-robin", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key-round-robin", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
@@ -363,7 +389,7 @@ async def test_capacity_weighted_pool_health_check_prefers_budget_safe_candidate
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key-capacity-weighted", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key-capacity-weighted", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
@@ -420,7 +446,7 @@ async def test_pool_exhausted_candidate_with_none_usage_triggers_reallocation():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
@@ -594,7 +620,8 @@ async def test_grace_period_not_applied_for_reallocate_sticky():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once()
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.STICKY_THREAD)
 
 
 @pytest.mark.asyncio
@@ -774,7 +801,7 @@ async def test_budget_exhaustion_triggers_reallocation():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
@@ -794,7 +821,7 @@ async def test_budget_threshold_80_triggers_at_85_percent():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 
@@ -836,7 +863,7 @@ async def test_budget_threshold_reallocates_codex_session_affinity():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
 
 
@@ -862,7 +889,7 @@ async def test_budget_threshold_reallocates_sticky_thread_affinity():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("thread-X", kind=StickySessionKind.STICKY_THREAD)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("thread-X", "b", kind=StickySessionKind.STICKY_THREAD)
 
 
@@ -884,7 +911,7 @@ async def test_budget_threshold_reallocates_to_primary_safe_secondary_pressured_
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
 
 
@@ -1010,7 +1037,7 @@ async def test_secondary_budget_threshold_controls_sticky_reallocation():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("codex-session-123", kind=StickySessionKind.CODEX_SESSION)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("codex-session-123", "b", kind=StickySessionKind.CODEX_SESSION)
 
 
@@ -1032,7 +1059,7 @@ async def test_rate_limit_far_away_triggers_reallocation():
 
     assert result.account is not None
     assert result.account.account_id == "b"
-    repo.delete.assert_called_once_with("key1", kind=StickySessionKind.PROMPT_CACHE)
+    repo.delete.assert_not_called()
     repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
 
 

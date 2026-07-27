@@ -18,6 +18,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 150,
+            conversations: 0,
             inputTokens: 5_400_000,
             outputTokens: 59_000,
             cachedInputTokens: 0,
@@ -28,6 +29,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-07",
             requests: 179,
+            conversations: 0,
             inputTokens: 6_800_000,
             outputTokens: 73_000,
             cachedInputTokens: 0,
@@ -59,6 +61,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 150,
+            conversations: 0,
             inputTokens: 5_400_000,
             outputTokens: 59_000,
             cachedInputTokens: 0,
@@ -85,6 +88,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 1,
+            conversations: 0,
             inputTokens: 100,
             outputTokens: 20,
             cachedInputTokens: 0,
@@ -95,6 +99,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-07",
             requests: 3,
+            conversations: 0,
             inputTokens: 300,
             outputTokens: 40,
             cachedInputTokens: 50,
@@ -126,6 +131,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 8,
+            conversations: 0,
             inputTokens: 100,
             outputTokens: 20,
             cachedInputTokens: 0,
@@ -136,6 +142,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-06",
             requests: 2,
+            conversations: 0,
             inputTokens: 200,
             outputTokens: 30,
             cachedInputTokens: 0,
@@ -146,6 +153,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-07",
             requests: 5,
+            conversations: 0,
             inputTokens: 300,
             outputTokens: 40,
             cachedInputTokens: 0,
@@ -197,6 +205,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 8,
+            conversations: 0,
             inputTokens: 100,
             outputTokens: 20,
             cachedInputTokens: 1,
@@ -207,6 +216,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-06",
             requests: 2,
+            conversations: 0,
             inputTokens: 200,
             outputTokens: 30,
             cachedInputTokens: 2,
@@ -217,6 +227,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-07",
             requests: 5,
+            conversations: 0,
             inputTokens: 300,
             outputTokens: 40,
             cachedInputTokens: 3,
@@ -236,10 +247,10 @@ describe("DailyDetailTable", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:daily-breakdown");
     await expect(blobText()).resolves.toBe(
       [
-        "Date,Requests,Input Tokens,Output Tokens,Cached Tokens,Cost USD,Active Accounts,Errors",
-        "2026-06-05,8,100,20,1,1.0000,3,0",
-        "2026-06-06,2,200,30,2,2.0000,1,0",
-        "2026-06-07,5,300,40,3,3.0000,2,0",
+        "Date,Requests,Conversations,Input Tokens,Output Tokens,Cached Tokens,Cost USD,Active Accounts,Errors",
+        "2026-06-05,8,0,100,20,1,1.0000,3,0",
+        "2026-06-06,2,0,200,30,2,2.0000,1,0",
+        "2026-06-07,5,0,300,40,3,3.0000,2,0",
       ].join("\n"),
     );
   });
@@ -263,6 +274,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 8,
+            conversations: 0,
             inputTokens: 100,
             outputTokens: 20,
             cachedInputTokens: 0,
@@ -273,6 +285,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-06",
             requests: 2,
+            conversations: 0,
             inputTokens: 200,
             outputTokens: 30,
             cachedInputTokens: 0,
@@ -283,6 +296,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-07",
             requests: 5,
+            conversations: 0,
             inputTokens: 300,
             outputTokens: 40,
             cachedInputTokens: 0,
@@ -313,6 +327,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 1,
+            conversations: 0,
             inputTokens: 100,
             outputTokens: 20,
             cachedInputTokens: 0,
@@ -323,6 +338,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-06",
             requests: 2,
+            conversations: 0,
             inputTokens: 200,
             outputTokens: 30,
             cachedInputTokens: 0,
@@ -333,6 +349,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-07",
             requests: 3,
+            conversations: 0,
             inputTokens: 300,
             outputTokens: 40,
             cachedInputTokens: 0,
@@ -389,6 +406,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 1,
+            conversations: 0,
             inputTokens: 1_200_000,
             outputTokens: 20,
             cachedInputTokens: 960_000,
@@ -414,6 +432,7 @@ describe("DailyDetailTable", () => {
           {
             date: "2026-06-05",
             requests: 1,
+            conversations: 0,
             inputTokens: 0,
             outputTokens: 20,
             cachedInputTokens: 0,
@@ -426,7 +445,88 @@ describe("DailyDetailTable", () => {
     );
 
     const row = screen.getByTestId("daily-breakdown-row-2026-06-05");
-    expect(within(row).getByText("0")).toBeInTheDocument();
     expect(within(row).getByText("(0)")).toBeInTheDocument();
+  });
+
+  it("renders conversations between Reqs and Input Tokens with sorting and CSV", async () => {
+    const user = userEvent.setup();
+    const blobText = vi.fn(async () => "");
+    vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      if (!(blob instanceof Blob)) throw new TypeError("expected Blob");
+      blobText.mockImplementation(() => blob.text());
+      return "blob:daily-conv";
+    });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    render(
+      <DailyDetailTable
+        startDate="2026-06-05"
+        endDate="2026-06-07"
+        data={[
+          { date: "2026-06-05", requests: 8, conversations: 1, inputTokens: 100, outputTokens: 20, cachedInputTokens: 0, costUsd: 1, activeAccounts: 1, errorCount: 0 },
+          { date: "2026-06-06", requests: 2, conversations: 5, inputTokens: 200, outputTokens: 30, cachedInputTokens: 1, costUsd: 2, activeAccounts: 1, errorCount: 0 },
+          { date: "2026-06-07", requests: 5, conversations: 3, inputTokens: 300, outputTokens: 40, cachedInputTokens: 2, costUsd: 3, activeAccounts: 1, errorCount: 0 },
+        ]}
+      />,
+    );
+
+    // Sort by conversations ascending
+    await user.click(screen.getByRole("button", { name: /conversations/i }));
+    const rows = screen.getAllByTestId(/daily-breakdown-row-/);
+    expect(rows.map((r) => r.getAttribute("data-testid"))).toEqual([
+      "daily-breakdown-row-2026-06-05",
+      "daily-breakdown-row-2026-06-07",
+      "daily-breakdown-row-2026-06-06",
+    ]);
+
+    // Verify conversations column between Reqs and Input Tokens in header
+    const headerRow = screen.getAllByRole("row")[0];
+    const headerCells = Array.from(headerRow?.querySelectorAll("th") ?? []);
+    const labels = headerCells.map((c) => c.textContent?.trim() ?? "");
+    expect(labels).toEqual(["Day", "Reqs", "Conversations", "Input Tokens", "Output Tokens", "Cost", "Accounts"]);
+
+    // CSV: full header + first data row with Conversations between Requests and Input Tokens
+    await user.click(screen.getByRole("button", { name: /csv/i }));
+    const csv = await blobText();
+    const csvLines = csv.split("\n");
+    expect(csvLines[0]).toBe("Date,Requests,Conversations,Input Tokens,Output Tokens,Cached Tokens,Cost USD,Active Accounts,Errors");
+    // First data row in CSV (chronological: 06-05 first, conversations=1)
+    expect(csvLines[1]).toMatch(/2026-06-05,8,1,100,20,0,1\.0000,1,0/);
+  });
+
+  it("zero-filled gap rows have conversations=0 in column 2", () => {
+    render(
+      <DailyDetailTable
+        startDate="2026-06-05"
+        endDate="2026-06-07"
+        data={[
+          { date: "2026-06-05", requests: 99, conversations: 3, inputTokens: 100, outputTokens: 20, cachedInputTokens: 0, costUsd: 1, activeAccounts: 1, errorCount: 0 },
+        ]}
+      />,
+    );
+
+    const gapRow = screen.getByTestId("daily-breakdown-row-2026-06-06");
+    // Column 2 (0-indexed) = Conversations
+    const gapCells = gapRow.querySelectorAll("td");
+    expect(gapCells.length).toBeGreaterThanOrEqual(3);
+    expect(gapCells[2]?.textContent?.trim()).toBe("0");
+
+    const dataRow = screen.getByTestId("daily-breakdown-row-2026-06-05");
+    const dataCells = dataRow.querySelectorAll("td");
+    expect(dataCells[2]?.textContent?.trim()).toBe("3");
+  });
+
+  it("both header and body tables share min-width for mobile overflow", () => {
+    render(
+      <DailyDetailTable
+        startDate="2026-06-05"
+        endDate="2026-06-05"
+        data={[{ date: "2026-06-05", requests: 1, conversations: 0, inputTokens: 100, outputTokens: 20, cachedInputTokens: 0, costUsd: 1, activeAccounts: 1, errorCount: 0 }]}
+      />,
+    );
+
+    const tables = document.querySelectorAll("table.min-w-\\[700px\\]");
+    expect(tables.length).toBe(2);
   });
 });

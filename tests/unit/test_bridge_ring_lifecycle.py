@@ -30,7 +30,11 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
+from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeAliasRegistration,
+    DurableBridgeRepository,
+)
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit
@@ -459,6 +463,39 @@ async def test_owned_renewal_keeps_local_session_open(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+async def test_recovery_renewal_outage_evicts_local_session_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
+    replay_kind, replay_key = make_http_bridge_account_neutral_replay_key("renew-outage")
+    session = _make_bridge_session()
+    session.key = proxy_service._HTTPBridgeSessionKey(replay_kind, replay_key, None)
+    session.durable_session_id = "durable-recovery-renew-outage"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+    service._load_balancer = cast(Any, SimpleNamespace(release_account_lease=AsyncMock()))
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            renew_live_session=AsyncMock(side_effect=RuntimeError("database unavailable")),
+            release_live_session=AsyncMock(return_value=None),
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._refresh_durable_http_bridge_session(session)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert session.closed is True
+    assert session.key not in service._http_bridge_sessions
+    await service._drain_http_bridge_background_cleanup_tasks(reason="test")
+    cast(Any, session.upstream).close.assert_awaited()
+    service._load_balancer.release_account_lease.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_fenced_out_alias_write_evicts_local_session(monkeypatch: pytest.MonkeyPatch) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
@@ -470,7 +507,7 @@ async def test_fenced_out_alias_write_evicts_local_session(monkeypatch: pytest.M
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
-            register_turn_state=AsyncMock(return_value=False),
+            register_turn_state=AsyncMock(return_value=DurableBridgeAliasRegistration.OWNER_FENCED),
             release_live_session=AsyncMock(return_value=None),
         ),
     )
@@ -495,9 +532,9 @@ async def test_alias_fence_rejection_after_same_session_epoch_refresh_does_not_e
     session.durable_owner_epoch = 3
     service._http_bridge_sessions[session.key] = session
 
-    async def reject_turn_state(**_kwargs: Any) -> bool:
+    async def reject_turn_state(**_kwargs: Any) -> DurableBridgeAliasRegistration:
         session.durable_owner_epoch = 4
-        return False
+        return DurableBridgeAliasRegistration.OWNER_FENCED
 
     service._durable_bridge = cast(Any, SimpleNamespace(register_turn_state=reject_turn_state))
 

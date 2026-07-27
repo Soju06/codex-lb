@@ -14,6 +14,9 @@ from app.core.openai.images import is_supported_image_model
 logger = logging.getLogger("app.modules.proxy.api")
 
 ImageRoute = Literal["generations", "edits"]
+IMAGE_ROUTE_STARTED_AT_STATE = "_codex_lb_image_route_started_at"
+IMAGE_ROUTE_MODEL_STATE = "_codex_lb_image_route_model"
+IMAGE_ROUTE_STREAM_STATE = "_codex_lb_image_route_stream"
 
 
 def _bounded_model_label(model: str | None) -> str:

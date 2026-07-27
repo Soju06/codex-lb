@@ -49,10 +49,15 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       }),
       comparison: buildComparison(summary.totalRequests, comparison.previous.totalRequests, comparison.canCompare),
     },
+    {
+      id: "conversations",
+      label: t("reports.summary.conversations"),
+      value: formatNumber(summary.totalConversations),
+    },
   ];
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
       {cards.map((card) => (
         <div
           key={card.id}
@@ -72,7 +77,7 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
               </div>
             ) : null}
           </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">{card.sub}</div>
+          {card.sub ? <div className="mt-0.5 text-xs text-muted-foreground">{card.sub}</div> : null}
         </div>
       ))}
     </div>

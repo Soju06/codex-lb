@@ -2,18 +2,47 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncIterator
+from tempfile import SpooledTemporaryFile
 
 import pytest
+import starlette.formparsers as starlette_formparsers
+from httpx import AsyncByteStream
 from sqlalchemy import update
 
+import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.errors import openai_error
+from app.core.multipart import TRANSCRIPTION_MULTIPART_POLICY
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.db.models import ApiKeyLimit
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
+
+
+class _CountingBody(AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.iterations = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.iterations += 1
+        yield self.body
+
+
+def _record_spools(monkeypatch: pytest.MonkeyPatch) -> list[SpooledTemporaryFile[bytes]]:
+    original = starlette_formparsers.SpooledTemporaryFile
+    spools: list[SpooledTemporaryFile[bytes]] = []
+
+    def create_spool(*, max_size: int) -> SpooledTemporaryFile[bytes]:
+        spool = original(max_size=max_size)
+        spools.append(spool)
+        return spool
+
+    monkeypatch.setattr(starlette_formparsers, "SpooledTemporaryFile", create_spool)
+    return spools
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -45,6 +74,19 @@ async def _import_account(async_client, account_id: str, email: str) -> None:
     assert response.status_code == 200
 
 
+async def _enable_api_key_auth(async_client) -> None:
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert response.status_code == 200
+
+
 def _make_upstream_model(slug: str) -> UpstreamModel:
     return UpstreamModel(
         slug=slug,
@@ -65,6 +107,148 @@ def _make_upstream_model(slug: str) -> UpstreamModel:
         available_in_plans=frozenset({"plus"}),
         raw={},
     )
+
+
+@pytest.mark.asyncio
+async def test_transcription_openapi_preserves_explicit_multipart_contract(app_instance) -> None:
+    schemas = {
+        "/backend-api/transcribe": {
+            "type": "object",
+            "title": "Body_backend_transcribe_backend_api_transcribe_post",
+            "required": ["file"],
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "contentMediaType": "application/octet-stream",
+                    "title": "File",
+                },
+                "prompt": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "title": "Prompt",
+                },
+            },
+        },
+        "/v1/audio/transcriptions": {
+            "type": "object",
+            "title": "Body_v1_audio_transcriptions_v1_audio_transcriptions_post",
+            "required": ["model", "file"],
+            "properties": {
+                "model": {"type": "string", "title": "Model"},
+                "file": {
+                    "type": "string",
+                    "contentMediaType": "application/octet-stream",
+                    "title": "File",
+                },
+                "prompt": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "title": "Prompt",
+                },
+            },
+        },
+    }
+
+    openapi = app_instance.openapi()
+    for path, expected_schema in schemas.items():
+        request_body = openapi["paths"][path]["post"]["requestBody"]
+        assert request_body["required"] is True
+        assert request_body["content"]["multipart/form-data"]["schema"] == expected_schema
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/transcribe", "/v1/audio/transcriptions"])
+async def test_transcription_auth_rejection_does_not_consume_multipart_body(async_client, endpoint: str) -> None:
+    await _enable_api_key_auth(async_client)
+    body = _CountingBody(b"multipart body must remain unread")
+
+    response = await async_client.post(
+        endpoint,
+        content=body,
+        headers={"Content-Type": "multipart/form-data; boundary=unused"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert body.iterations == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/transcribe", "/v1/audio/transcriptions"])
+async def test_transcription_encoded_body_rejects_after_auth_without_consuming_body(
+    async_client,
+    endpoint: str,
+) -> None:
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post("/api/api-keys/", json={"name": f"encoded-{endpoint}"})
+    assert created.status_code == 200
+    body = _CountingBody(b"compressed bytes must remain unread")
+
+    response = await async_client.post(
+        endpoint,
+        content=body,
+        headers={
+            "Authorization": f"Bearer {created.json()['key']}",
+            "Content-Type": "multipart/form-data; boundary=unused",
+            "Content-Encoding": "gzip",
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_request_error"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert body.iterations == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "expected_param"),
+    [("/backend-api/transcribe", "file"), ("/v1/audio/transcriptions", "model")],
+)
+async def test_transcription_missing_content_type_retains_openai_validation(
+    async_client,
+    endpoint: str,
+    expected_param: str,
+) -> None:
+    response = await async_client.post(endpoint, content=b"not multipart")
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request_error"
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == expected_param
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/transcribe", "/v1/audio/transcriptions"])
+async def test_transcription_declared_body_limit_rejects_before_reservation_or_body_read(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    reservation_calls = 0
+
+    async def unexpected_reservation(*args, **kwargs):
+        nonlocal reservation_calls
+        reservation_calls += 1
+        raise AssertionError("multipart admission must precede usage reservation")
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", unexpected_reservation)
+    body = _CountingBody(b"body is rejected from its declared length")
+    response = await async_client.post(
+        endpoint,
+        content=body,
+        headers={
+            "Content-Type": "multipart/form-data; boundary=unused",
+            "Content-Length": str(TRANSCRIPTION_MULTIPART_POLICY.max_body_bytes + 1),
+        },
+    )
+
+    assert response.status_code == 413
+    payload = response.json()
+    assert payload["error"]["code"] == "payload_too_large"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert body.iterations == 0
+    assert reservation_calls == 0
 
 
 @pytest.mark.asyncio
@@ -108,6 +292,130 @@ async def test_backend_transcribe_forwards_file_and_prompt(async_client, monkeyp
     assert captured["prompt"] == "speaker says hello"
     assert captured["access_token"] == "access-token"
     assert captured["account_id"] == "acc_transcribe_backend"
+
+
+@pytest.mark.asyncio
+async def test_backend_transcribe_exact_file_limit_closes_spool_before_reservation_and_service(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spools = _record_spools(monkeypatch)
+    payload = b"x" * TRANSCRIPTION_MULTIPART_POLICY.max_file_bytes
+    events: list[str] = []
+
+    async def fake_reservation(*args, **kwargs):
+        del args, kwargs
+        assert spools
+        assert all(spool.closed for spool in spools)
+        events.append("reservation")
+        return None
+
+    async def fake_transcribe(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers,
+        api_key=None,
+    ):
+        del self, headers, api_key
+        assert spools
+        assert all(spool.closed for spool in spools)
+        events.append("service")
+        assert audio_bytes == payload
+        assert filename == "exact.wav"
+        assert content_type == "audio/wav"
+        assert prompt == "exact boundary"
+        return {"text": "exact upload accepted"}
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", fake_reservation)
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", fake_transcribe)
+
+    response = await async_client.post(
+        "/backend-api/transcribe",
+        data={"prompt": "exact boundary"},
+        files={"file": ("exact.wav", payload, "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "exact upload accepted"}
+    assert events == ["reservation", "service"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/transcribe", "/v1/audio/transcriptions"])
+async def test_transcription_file_limit_rejects_before_selection_reservation_or_upstream(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    calls: list[str] = []
+
+    async def unexpected_call(*args, **kwargs):
+        del args, kwargs
+        calls.append("unexpected")
+        raise AssertionError("oversized upload must not invoke route side effects")
+
+    monkeypatch.setattr(proxy_api, "_select_audio_transcriptions_model_source", unexpected_call)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", unexpected_call)
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", unexpected_call)
+    payload = b"x" * (TRANSCRIPTION_MULTIPART_POLICY.max_file_bytes + 1)
+    data = {"model": "gpt-4o-transcribe"} if endpoint.startswith("/v1/") else None
+
+    response = await async_client.post(
+        endpoint,
+        data=data,
+        files={"file": ("oversized.wav", payload, "audio/wav")},
+    )
+
+    assert response.status_code == 413
+    error = response.json()["error"]
+    assert error["code"] == "payload_too_large"
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "file"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/transcribe", "/v1/audio/transcriptions"])
+@pytest.mark.parametrize("invalid_shape", ["missing_file", "extra_file"])
+async def test_transcription_invalid_file_shape_has_no_route_side_effects(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    invalid_shape: str,
+) -> None:
+    calls: list[str] = []
+
+    async def unexpected_call(*args, **kwargs):
+        del args, kwargs
+        calls.append("unexpected")
+        raise AssertionError("invalid multipart shape must not invoke route side effects")
+
+    monkeypatch.setattr(proxy_api, "_select_audio_transcriptions_model_source", unexpected_call)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", unexpected_call)
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", unexpected_call)
+    fields = [("model", (None, "gpt-4o-transcribe"))] if endpoint.startswith("/v1/") else []
+    if invalid_shape == "missing_file":
+        fields.append(("prompt", (None, "missing audio")))
+    else:
+        fields.extend(
+            [
+                ("file", ("audio.wav", b"audio", "audio/wav")),
+                ("extra", ("extra.wav", b"extra", "audio/wav")),
+            ]
+        )
+
+    response = await async_client.post(endpoint, files=fields)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request_error"
+    if invalid_shape == "missing_file":
+        assert error["param"] == "file"
+    assert calls == []
 
 
 @pytest.mark.asyncio

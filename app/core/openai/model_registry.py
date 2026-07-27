@@ -615,6 +615,48 @@ class ModelRegistry:
             return None
         return tier_accounts.get(normalized_service_tier, frozenset())
 
+    def model_advertises_service_tier(self, slug: str, service_tier: str | None) -> bool:
+        """Report whether the catalog lists ``service_tier`` for ``slug`` at all.
+
+        This is deliberately distinct from "no account carries the tier": a model
+        that never advertises the tier cannot be routed at it by any account, so
+        an enforced tier must not be treated as an account-eligibility filter for
+        that model. Returns ``True`` whenever the answer is unknown (no snapshot,
+        non-authoritative catalogs, unusable slug/tier) so callers keep their
+        existing behavior until the catalog can actually answer.
+        """
+        if service_tier is None or self._snapshot is None:
+            return True
+        if not self._snapshot.account_catalogs_authoritative:
+            return True
+        normalized_slug = slug.strip().lower()
+        normalized_service_tier = canonical_service_tier_value(service_tier)
+        if not normalized_slug or not normalized_service_tier:
+            return True
+
+        model_is_known = (
+            slug in self._snapshot.model_plans
+            or normalized_slug in self._snapshot.model_plans
+            or slug in self._snapshot.model_accounts
+            or normalized_slug in self._snapshot.model_accounts
+        )
+        if not model_is_known:
+            # An authoritative subscription snapshot cannot describe the tier
+            # capabilities of an operator-mapped or source-routed model that it
+            # does not contain. Keep the enforced tier when model identity is
+            # unknown instead of broadening fallback beyond catalog evidence.
+            return True
+
+        tier_accounts = self._snapshot.model_service_tier_accounts.get(
+            slug
+        ) or self._snapshot.model_service_tier_accounts.get(normalized_slug)
+        tier_plans = self._snapshot.model_service_tier_plans.get(slug) or self._snapshot.model_service_tier_plans.get(
+            normalized_slug
+        )
+        if tier_accounts is None and tier_plans is None:
+            return False
+        return normalized_service_tier in (tier_accounts or {}) or normalized_service_tier in (tier_plans or {})
+
     def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
         """Return exact supporting accounts, or ``None`` while coverage is incomplete."""
         if self._snapshot is None or not self._snapshot.account_catalogs_authoritative:

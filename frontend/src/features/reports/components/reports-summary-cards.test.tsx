@@ -15,6 +15,7 @@ describe("ReportsSummaryCards", () => {
           totalCachedTokens: 990_000_000,
           totalRequests: 1500,
           totalErrors: 0,
+          totalConversations: 0,
           activeAccounts: 3,
           avgCostPerDay: 5,
           avgRequestsPerDay: 500,
@@ -64,6 +65,7 @@ describe("ReportsSummaryCards", () => {
           totalCachedTokens: 0,
           totalRequests: 1500,
           totalErrors: 0,
+          totalConversations: 0,
           activeAccounts: 3,
           avgCostPerDay: 5,
           avgRequestsPerDay: 500,
@@ -90,6 +92,7 @@ describe("ReportsSummaryCards", () => {
           totalCachedTokens: 0,
           totalRequests: 1500,
           totalErrors: 0,
+          totalConversations: 0,
           activeAccounts: 3,
           avgCostPerDay: 5,
           avgRequestsPerDay: 500,
@@ -126,6 +129,7 @@ describe("ReportsSummaryCards", () => {
           totalCachedTokens: 0,
           totalRequests: 1500,
           totalErrors: 0,
+          totalConversations: 0,
           activeAccounts: 3,
           avgCostPerDay: 5,
           avgRequestsPerDay: 500,
@@ -144,6 +148,23 @@ describe("ReportsSummaryCards", () => {
     expect(screen.queryByText(/^[▲▼] \d+%$/)).not.toBeInTheDocument();
   });
 
+
+  it("renders Conversations card immediately after Requests with distinctive value", () => {
+    render(
+      <ReportsSummaryCards
+        summary={{ totalCostUsd: 15, totalInputTokens: 300, totalOutputTokens: 150, totalCachedTokens: 0, totalRequests: 1500, totalErrors: 0, totalConversations: 42, activeAccounts: 3, avgCostPerDay: 5, avgRequestsPerDay: 500 }}
+        comparison={{ canCompare: false, previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 } }}
+      />,
+    );
+    const conversationsCard = screen.getByTestId("report-summary-card-conversations");
+    expect(conversationsCard).toBeInTheDocument();
+    expect(within(conversationsCard).getByText("Active Conversations")).toBeInTheDocument();
+    expect(within(conversationsCard).getByText("42")).toBeInTheDocument();
+    expect(within(conversationsCard).queryByText("42 distinct")).not.toBeInTheDocument();
+    const requestsCard = screen.getByTestId("report-summary-card-requests");
+    expect(requestsCard.nextElementSibling).toBe(conversationsCard);
+  });
+
   it("preserves trailing zeroes for unrelated whole K and B values", () => {
     render(
       <ReportsSummaryCards
@@ -154,6 +175,7 @@ describe("ReportsSummaryCards", () => {
           totalCachedTokens: 0,
           totalRequests: 100_000,
           totalErrors: 0,
+          totalConversations: 0,
           activeAccounts: 3,
           avgCostPerDay: 5,
           avgRequestsPerDay: 500,

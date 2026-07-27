@@ -7,6 +7,7 @@ from datetime import timedelta, timezone
 
 import pytest
 
+from app.core import shutdown as shutdown_state
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -16,6 +17,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService
 from app.modules.fleet import api as fleet_api
+from app.modules.fleet.schemas import FleetRefreshResponse
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -1017,6 +1019,35 @@ async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_se
 
 
 @pytest.mark.asyncio
+async def test_fleet_refresh_rejects_post_cutoff_work_with_dashboard_503(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plain_key = await _create_api_key("fleet-refresh-post-cutoff-key")
+
+    def unexpected_refresh(_: list[str] | None) -> None:
+        raise AssertionError("post-cutoff fleet refresh coroutine was created")
+
+    monkeypatch.setattr(fleet_api, "_refresh_fleet_usage_with_owned_session", unexpected_refresh)
+    shutdown_state.close_control_plane_task_admission()
+
+    response = await async_client.post(
+        "/api/fleet/refresh",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "service_unavailable",
+            "message": "Server is draining",
+        }
+    }
+    assert fleet_api._BACKGROUND_REFRESH_TASKS == set()
+
+
+@pytest.mark.asyncio
 async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_setup, monkeypatch):
     fleet_api._BACKGROUND_REFRESH_TASKS.clear()
     await _seed_account_with_windows(
@@ -1090,22 +1121,47 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
     )
     await asyncio.wait_for(refresh_started.wait(), timeout=1)
 
+    assert len(fleet_api._BACKGROUND_REFRESH_TASKS) == 1
+    owned_refresh_task = next(iter(fleet_api._BACKGROUND_REFRESH_TASKS))
+    assert not owned_refresh_task.done()
+
     request_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await request_task
     await asyncio.sleep(0)
 
     assert not session_exited.is_set()
-    assert len(fleet_api._BACKGROUND_REFRESH_TASKS) == 1
+    assert fleet_api._BACKGROUND_REFRESH_TASKS == {owned_refresh_task}
+    drain = asyncio.create_task(fleet_api.drain_background_refresh_tasks(timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert not drain.done()
+
     allow_refresh_finish.set()
+    assert await drain is True
     await asyncio.wait_for(session_exited.wait(), timeout=1)
-    await asyncio.wait_for(_wait_for_background_refresh_tasks_to_drain(), timeout=1)
 
     assert session_was_open_during_refresh == [True]
     assert invalidations == ["rate_limit_headers", "account_selection"]
     assert fleet_api._BACKGROUND_REFRESH_TASKS == set()
 
 
-async def _wait_for_background_refresh_tasks_to_drain() -> None:
-    while fleet_api._BACKGROUND_REFRESH_TASKS:
-        await asyncio.sleep(0)
+@pytest.mark.asyncio
+async def test_fleet_refresh_drain_reports_overdue_task(caplog: pytest.LogCaptureFixture) -> None:
+    fleet_api._BACKGROUND_REFRESH_TASKS.clear()
+    allow_refresh_finish = asyncio.Event()
+
+    async def blocked_refresh() -> FleetRefreshResponse:
+        await allow_refresh_finish.wait()
+        return FleetRefreshResponse(usage_written=False, account_count=0, attempted_count=0, generated_at=utcnow())
+
+    task = asyncio.create_task(blocked_refresh(), name="fleet-usage-refresh")
+    fleet_api._BACKGROUND_REFRESH_TASKS.add(task)
+    task.add_done_callback(fleet_api._handle_cancelled_refresh_task_done)
+
+    with caplog.at_level("WARNING", logger=fleet_api.__name__):
+        assert await fleet_api.drain_background_refresh_tasks(timeout_seconds=0) is False
+
+    assert "Fleet refresh task did not drain before shutdown: fleet-usage-refresh" in caplog.text
+    allow_refresh_finish.set()
+    assert await fleet_api.drain_background_refresh_tasks(timeout_seconds=1) is True
+    assert fleet_api._BACKGROUND_REFRESH_TASKS == set()

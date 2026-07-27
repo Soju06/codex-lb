@@ -298,7 +298,6 @@ from app.modules.proxy._service.support import (
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
-    _TransientStreamError,
     _ttft_event_latency_ms,
     _WebSocketUpstreamControl,
 )
@@ -485,6 +484,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         concurrency_caps: AccountConcurrencyCaps | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        conversation_id: str | None = None,
         client_ip: str | None = None,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
@@ -595,8 +595,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                if allow_retry:
-                    raise _RetryableStreamError(error_code, settlement.error, exclude_account=True)
                 yield format_sse_event(
                     response_failed_event(
                         error_code,
@@ -711,12 +709,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                    if allow_transient_retry and _facade()._should_retry_transient_stream_error(
-                        code,
-                        error_message,
-                        response_id=response_id if event.type == "response.failed" else None,
-                    ):
-                        raise _TransientStreamError(code, upstream_error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
                     upstream_error,
@@ -1080,9 +1072,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 bridge_stage=failure_metadata.bridge_stage,
                 upstream_proxy_route_mode=route_trace.mode or (route.mode if route is not None else None),
                 upstream_proxy_pool_id=route_trace.pool_id or (route.pool_id if route is not None else None),
-                upstream_proxy_endpoint_id=(
-                    route_trace.endpoint_id or (route.endpoint_id if route is not None else None)
-                ),
+                upstream_proxy_endpoint_id=route_trace.endpoint_id or (route.endpoint_id if route else None),
                 upstream_proxy_fallback_used=(
                     route_trace.fallback_used
                     if route_trace.endpoint_id is not None
@@ -1091,6 +1081,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
                 client_ip=client_ip,
             )
             _maybe_log_proxy_service_tier_trace(

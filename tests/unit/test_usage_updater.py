@@ -19,6 +19,7 @@ from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.repository import UsageWindowWrite
 from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.unit
@@ -112,6 +113,15 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
             credits_balance: float | None = None,
         ) -> UsageHistory | None:
             return None
+
+        async def add_account_snapshot(
+            self,
+            account_id: str,
+            windows: Collection[UsageWindowWrite],
+            *,
+            recorded_at: datetime | None = None,
+        ) -> list[UsageHistory]:
+            return []
 
     class InnerUsageRepository(OuterUsageRepository):
         def __init__(self, session) -> None:
@@ -230,6 +240,15 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
             credits_balance: float | None = None,
         ) -> UsageHistory | None:
             return None
+
+        async def add_account_snapshot(
+            self,
+            account_id: str,
+            windows: Collection[UsageWindowWrite],
+            *,
+            recorded_at: datetime | None = None,
+        ) -> list[UsageHistory]:
+            return []
 
     class InnerUsageRepository(OuterUsageRepository):
         def __init__(self, session) -> None:
@@ -381,9 +400,17 @@ class UsageEntry:
     credits_balance: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class UsageSnapshotCall:
+    account_id: str
+    windows: tuple[UsageWindowWrite, ...]
+    recorded_at: datetime
+
+
 class StubUsageRepository:
     def __init__(self, *, return_rows: bool = False) -> None:
         self.entries: list[UsageEntry] = []
+        self.snapshot_calls: list[UsageSnapshotCall] = []
         self._return_rows = return_rows
         self._next_id = 1
 
@@ -460,6 +487,39 @@ class StubUsageRepository:
         )
         self._next_id += 1
         return entry
+
+    async def add_account_snapshot(
+        self,
+        account_id: str,
+        windows: Collection[UsageWindowWrite],
+        *,
+        recorded_at: datetime | None = None,
+    ) -> list[UsageHistory]:
+        captured_at = recorded_at or datetime.now(tz=timezone.utc)
+        snapshot_windows = tuple(windows)
+        self.snapshot_calls.append(
+            UsageSnapshotCall(
+                account_id=account_id,
+                windows=snapshot_windows,
+                recorded_at=captured_at,
+            )
+        )
+        rows: list[UsageHistory] = []
+        for window in snapshot_windows:
+            entry = await self.add_entry(
+                account_id,
+                window.used_percent,
+                recorded_at=captured_at,
+                window=window.window,
+                reset_at=window.reset_at,
+                window_minutes=window.window_minutes,
+                credits_has=window.credits_has,
+                credits_unlimited=window.credits_unlimited,
+                credits_balance=window.credits_balance,
+            )
+            if entry is not None:
+                rows.append(entry)
+        return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -2527,7 +2587,12 @@ async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -
 
     await updater.refresh_accounts([acc], latest_usage={})
 
+    assert len(usage_repo.snapshot_calls) == 1
+    snapshot_call = usage_repo.snapshot_calls[0]
+    assert snapshot_call.account_id == "acc_test"
+    assert [window.window for window in snapshot_call.windows] == ["primary", "secondary"]
     assert len(usage_repo.entries) == 2
+    assert {entry.recorded_at for entry in usage_repo.entries} == {snapshot_call.recorded_at}
     by_window = {entry.window: entry for entry in usage_repo.entries}
 
     primary = by_window["primary"]

@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 
+import aiohttp
 import pytest
 
 import app.modules.proxy.service as proxy_module
@@ -20,6 +21,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
+from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 
@@ -117,6 +119,20 @@ def _stream_timeout_sse_event() -> str:
     )
 
 
+def _model_capacity_sse_event() -> str:
+    return _sse_event(
+        {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+        }
+    )
+
+
 def _success_sse_event(response_id: str = "resp_ok") -> str:
     return _sse_event(
         {
@@ -146,8 +162,8 @@ def _extract_events(lines: list[str]) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_stream_server_error_succeeds_on_second_try_same_account(async_client, monkeypatch):
-    """server_error on 1st SSE event → inner retry on same account → success on 2nd try."""
+async def test_stream_server_error_surfaces_without_replay(async_client, monkeypatch):
+    """An upstream terminal server error cannot prove that retrying the POST is safe."""
     await _import_account(async_client, "acc_trans_1", "trans1@example.com")
 
     call_count = 0
@@ -170,17 +186,15 @@ async def test_stream_server_error_succeeds_on_second_try_same_account(async_cli
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = _extract_events(lines)
-    completed = [e for e in events if e.get("type") == "response.completed"]
-    assert len(completed) == 1
-
-    # Both calls should be to the same account
-    assert len(seen_account_ids) == 2
-    assert seen_account_ids[0] == seen_account_ids[1]
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "server_error"
+    assert seen_account_ids == ["acc_trans_1"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_code", ["overloaded_error", "server_is_overloaded"])
-async def test_stream_overload_alias_succeeds_on_second_try_same_account(async_client, monkeypatch, error_code):
+async def test_stream_overload_alias_surfaces_without_replay(async_client, monkeypatch, error_code):
     await _import_account(async_client, f"acc_{error_code}", f"{error_code}@example.com")
 
     call_count = 0
@@ -203,17 +217,15 @@ async def test_stream_overload_alias_succeeds_on_second_try_same_account(async_c
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = _extract_events(lines)
-    assert [event["response"]["id"] for event in events if event.get("type") == "response.completed"] == [
-        "resp_server_overloaded_ok"
-    ]
-    assert [event for event in events if event.get("type") == "response.failed"] == []
-    assert len(seen_account_ids) == 2
-    assert seen_account_ids[0] == seen_account_ids[1]
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == error_code
+    assert seen_account_ids == [f"acc_{error_code}"]
 
 
 @pytest.mark.asyncio
-async def test_stream_timeout_succeeds_on_second_try_same_account(async_client, monkeypatch):
-    """Timeout as the first SSE event is a reconnectable transient failure."""
+async def test_stream_timeout_surfaces_without_replay(async_client, monkeypatch):
+    """An upstream terminal timeout is not proven pre-dispatch work."""
     await _import_account(async_client, "acc_trans_timeout", "timeout@example.com")
 
     call_count = 0
@@ -236,17 +248,307 @@ async def test_stream_timeout_succeeds_on_second_try_same_account(async_client, 
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = _extract_events(lines)
-    completed = [e for e in events if e.get("type") == "response.completed"]
     failed = [e for e in events if e.get("type") == "response.failed"]
-    assert len(completed) == 1
-    assert failed == []
-    assert len(seen_account_ids) == 2
-    assert seen_account_ids[0] == seen_account_ids[1]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "upstream_request_timeout"
+    assert seen_account_ids == ["acc_trans_timeout"]
 
 
 @pytest.mark.asyncio
-async def test_stream_server_error_exhausts_inner_retries_then_failover(async_client, monkeypatch):
-    """server_error x3 on account A → penalize A → failover to account B → success."""
+async def test_stream_model_capacity_without_response_id_surfaces_without_replay(async_client, monkeypatch):
+    """An upstream terminal event is accepted work even when it omits a response id."""
+    await _import_account(async_client, "acc_model_capacity_retry", "model-capacity@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            yield _model_capacity_sse_event()
+            return
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "invalid_request_error"
+    assert seen_account_ids == ["acc_model_capacity_retry"]
+
+
+@pytest.mark.asyncio
+async def test_stream_raw_capacity_error_with_proxy_request_id_surfaces_without_replay(async_client, monkeypatch):
+    """A terminal upstream error remains terminal even with a proxy-generated id."""
+    await _import_account(async_client, "acc_raw_model_capacity_retry", "raw-model-capacity@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            yield _sse_event(
+                {
+                    "type": "error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                }
+            )
+            return
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    errors = [event for event in events if event.get("type") == "error"]
+    assert len(errors) == 1
+    assert errors[0]["code"] == "invalid_request_error"
+    assert seen_account_ids == ["acc_raw_model_capacity_retry"]
+
+
+@pytest.mark.asyncio
+async def test_stream_model_capacity_top_level_response_id_surfaces_without_replay(async_client, monkeypatch):
+    """A top-level upstream response_id proves dispatch, so capacity errors must not be replayed."""
+    await _import_account(async_client, "acc_model_capacity_accepted", "model-capacity-accepted@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response_id": "resp_model_capacity_accepted",
+                "response": {
+                    "error": {
+                        "code": "invalid_request_error",
+                        "message": "Selected model is at capacity. Please try a different model.",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "invalid_request_error"
+    assert seen_account_ids == ["acc_model_capacity_accepted"]
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
+    """An untyped empty upstream stream may be post-dispatch, so it is not replayed."""
+    await _import_account(async_client, "acc_empty_body_no_replay", "empty-body-no-replay@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            if False:
+                yield ""
+            return
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    error_codes = [event["response"]["error"]["code"] for event in events if event.get("type") == "response.failed"]
+    assert error_codes[-1] == "stream_incomplete"
+    assert seen_account_ids == ["acc_empty_body_no_replay"]
+
+
+@pytest.mark.asyncio
+async def test_stream_body_read_client_error_surfaces_without_replay(async_client, monkeypatch):
+    """Post-connect body-read errors are not replayed because upstream delivery is uncertain."""
+    await _import_account(async_client, "acc_previsible_disconnect_a", "previsible-disconnect-a@example.com")
+    await _import_account(async_client, "acc_previsible_disconnect_b", "previsible-disconnect-b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if False:
+            yield ""
+        raise aiohttp.ServerDisconnectedError("Server disconnected")
+
+    async def fake_sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    error_codes = [event["response"]["error"]["code"] for event in events if event.get("type") == "response.failed"]
+    assert error_codes[-1] == "upstream_unavailable"
+    assert "no_accounts" not in error_codes
+    assert seen_account_ids == ["acc_previsible_disconnect_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_serialized_body_read_disconnect_with_response_id_surfaces_without_replay(
+    async_client, monkeypatch
+):
+    """Serialized post-dispatch body-read failures with response_id are not safe to replay."""
+    await _import_account(async_client, "acc_serialized_disconnect_a", "serialized-disconnect-a@example.com")
+    await _import_account(async_client, "acc_serialized_disconnect_b", "serialized-disconnect-b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response_id": "resp_serialized_disconnect",
+                "response": {
+                    "error": {
+                        "code": "upstream_unavailable",
+                        "message": "Server disconnected",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_account_ids == ["acc_serialized_disconnect_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_serialized_body_read_disconnect_with_request_id_surfaces_without_replay(
+    async_client, monkeypatch
+):
+    """A response.failed using the proxy request id still represents an unsafe post-dispatch failure."""
+    await _import_account(async_client, "acc_serialized_request_id_disconnect_a", "serialized-request-a@example.com")
+    await _import_account(async_client, "acc_serialized_request_id_disconnect_b", "serialized-request-b@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        request_id = get_request_id()
+        assert request_id is not None
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": request_id,
+                    "error": {
+                        "code": "upstream_unavailable",
+                        "message": "Server disconnected",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "upstream_unavailable"
+    assert seen_account_ids == ["acc_serialized_request_id_disconnect_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_pinned_previsible_close_exhaustion_surfaces_stream_incomplete(async_client, monkeypatch):
+    """Pinned previous-response EOF cannot fail over, so preserve the stream failure for the client."""
+    upstream_account_id = "acc_pinned_previsible_close"
+    owner_account_id = await _import_account(
+        async_client,
+        upstream_account_id,
+        "pinned-previsible-close@example.com",
+    )
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if False:
+            yield ""
+        return
+
+    async def fake_sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", fake_sleep)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "previous_response_id": "resp_pinned_previsible_close",
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    error_codes = [event["response"]["error"]["code"] for event in events if event.get("type") == "response.failed"]
+    assert error_codes[-1] == "stream_incomplete"
+    assert "previous_response_owner_unavailable" not in error_codes
+    assert set(seen_account_ids) == {upstream_account_id}
+
+
+@pytest.mark.asyncio
+async def test_stream_server_error_does_not_fail_over_after_accepted_terminal_event(async_client, monkeypatch):
+    """A terminal event stays on its first account even when another account is eligible."""
     await _import_account(async_client, "acc_trans_fo_a", "fo_a@example.com")
     await _import_account(async_client, "acc_trans_fo_b", "fo_b@example.com")
 
@@ -267,14 +569,10 @@ async def test_stream_server_error_exhausts_inner_retries_then_failover(async_cl
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = _extract_events(lines)
-    completed = [e for e in events if e.get("type") == "response.completed"]
-    assert len(completed) == 1
-
-    # 3 retries on account A + 1 success on account B
-    a_calls = [aid for aid in seen_account_ids if aid == "acc_trans_fo_a"]
-    b_calls = [aid for aid in seen_account_ids if aid == "acc_trans_fo_b"]
-    assert len(a_calls) == 3
-    assert len(b_calls) >= 1
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "server_error"
+    assert seen_account_ids == ["acc_trans_fo_a"]
 
 
 @pytest.mark.asyncio
@@ -299,8 +597,8 @@ async def test_stream_server_error_all_accounts_exhausted(async_client, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_stream_server_error_succeeds_on_third_try(async_client, monkeypatch):
-    """server_error on tries 1 and 2, success on try 3 — all same account."""
+async def test_stream_server_error_does_not_make_a_third_post(async_client, monkeypatch):
+    """An accepted terminal event prevents follow-up same-account POSTs."""
     await _import_account(async_client, "acc_trans_3rd", "trans3@example.com")
 
     call_count = 0
@@ -323,12 +621,10 @@ async def test_stream_server_error_succeeds_on_third_try(async_client, monkeypat
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = _extract_events(lines)
-    completed = [e for e in events if e.get("type") == "response.completed"]
-    assert len(completed) == 1
-
-    # All 3 calls to the same account
-    assert len(seen_account_ids) == 3
-    assert len(set(seen_account_ids)) == 1
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["error"]["code"] == "server_error"
+    assert seen_account_ids == ["acc_trans_3rd"]
 
 
 # ===========================================================================

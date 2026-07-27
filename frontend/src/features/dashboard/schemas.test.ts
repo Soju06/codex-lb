@@ -6,6 +6,7 @@ import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DepletionSchema,
+  FilterStateSchema,
   parseOverviewTimeframe,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
@@ -372,6 +373,104 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.clientIp).toBeNull();
   });
 
+  it("parses row-level conversationId and response-level conversation", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-cid",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+          conversationId: "conv_abc123",
+        },
+        {
+          requestedAt: ISO,
+          accountId: null,
+          requestId: "req-no-cid",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 5,
+          cachedInputTokens: null,
+          reasoningEffort: null,
+          costUsd: null,
+          latencyMs: 30,
+        },
+      ],
+      total: 2,
+      hasMore: false,
+      conversation: {
+        requestCount: 2,
+        aggregatedCostUsd: 0.001,
+      },
+    });
+
+    expect(parsed.requests[0]?.conversationId).toBe("conv_abc123");
+    expect(parsed.requests[1]?.conversationId).toBeNull();
+    expect(parsed.conversation?.requestCount).toBe(2);
+    expect(parsed.conversation?.aggregatedCostUsd).toBe(0.001);
+  });
+
+  it("accepts null response-level conversation", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-cid-null",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+      conversation: null,
+    });
+
+    expect(parsed.conversation).toBeNull();
+  });
+
+  it("omits response-level conversation when absent", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          requestId: "req-no-conv-key",
+          model: "gpt-5.1",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          latencyMs: 42,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.conversation).toBeNull();
+  });
+
   it("defaults omitted nested cost breakdown fields to null", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [
@@ -420,6 +519,39 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.apiKeys[0]?.id).toBe("key-1");
     expect(parsed.apiKeys[0]?.keyPrefix).toBe("sk-key-a");
+  });
+});
+
+describe("FilterStateSchema", () => {
+  it("parses optional string conversationId from URL params", () => {
+    const state = {
+      search: "",
+      timeframe: "all" as const,
+      accountIds: [],
+      apiKeyIds: [],
+      modelOptions: [],
+      statuses: [],
+      conversationId: "conv_abc123",
+      limit: 25,
+      offset: 0,
+    };
+    const parsed = FilterStateSchema.parse(state);
+    expect(parsed.conversationId).toBe("conv_abc123");
+  });
+
+  it("defaults conversationId to null when absent", () => {
+    const state = {
+      search: "",
+      timeframe: "all" as const,
+      accountIds: [],
+      apiKeyIds: [],
+      modelOptions: [],
+      statuses: [],
+      limit: 25,
+      offset: 0,
+    };
+    const parsed = FilterStateSchema.parse(state);
+    expect(parsed.conversationId).toBeNull();
   });
 });
 

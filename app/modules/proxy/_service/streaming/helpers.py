@@ -51,7 +51,8 @@ from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
 )
 from app.core.types import JsonValue
-from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -445,10 +446,12 @@ def _should_retry_transient_stream_error(
         # stable code keeps settlement account-neutral, but cannot prove that
         # replaying the POST is safe.
         return False
+    if response_id is not None:
+        return False
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if is_upstream_model_capacity_error(message):
-        if code in _MODEL_CAPACITY_LIMIT_CODES or response_id is not None:
+        if code in _MODEL_CAPACITY_LIMIT_CODES:
             return False
         return True
     if code != "upstream_unavailable" or not message:
@@ -727,14 +730,28 @@ async def _resolve_upstream_route_for_account(
     *,
     operation: str,
 ) -> ResolvedUpstreamRoute | None:
+    # Outcomes (route / direct-egress None / fail-closed error) are cached
+    # verbatim, so a hit can never change the degradation path the resolver
+    # chose; errors re-raise with their original reason.
+    cache = get_upstream_route_cache()
+    cached = cache.get(account.id)
+    if cached is not None:
+        return cached.unwrap(account.id)
+    generation = cache.generation
     async with _facade().SessionLocal() as session:
-        return await _facade().resolve_upstream_route(
-            session,
-            account_id=account.id,
-            operation=operation,
-            scope="account",
-            encryptor=proxy._encryptor,
-        )
+        try:
+            route = await _facade().resolve_upstream_route(
+                session,
+                account_id=account.id,
+                operation=operation,
+                scope="account",
+                encryptor=proxy._encryptor,
+            )
+        except UpstreamProxyRouteError as exc:
+            cache.store_error(account.id, exc, generation=generation)
+            raise
+    cache.store_route(account.id, route, generation=generation)
+    return route
 
 
 async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **kwargs: Any) -> AccountSelection:
@@ -744,6 +761,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
         "lease_kind",
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",
+        "preferred_account_is_continuity_owner",
         "spill_bare_session_on_account_cap",
         "require_unambiguous_account",
     )

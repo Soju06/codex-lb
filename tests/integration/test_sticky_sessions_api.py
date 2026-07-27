@@ -12,7 +12,10 @@ from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
+from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeAliasRegistration,
+    DurableBridgeRepository,
+)
 from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
@@ -209,10 +212,10 @@ async def test_durable_bridge_owned_alias_registration_is_epoch_fenced(db_setup)
         lease_ttl_seconds=60.0,
     )
 
-    assert stale_turn_registered is False
-    assert stale_response_registered is False
-    assert current_turn_registered is True
-    assert current_response_registered is True
+    assert stale_turn_registered == DurableBridgeAliasRegistration.OWNER_FENCED
+    assert stale_response_registered == DurableBridgeAliasRegistration.OWNER_FENCED
+    assert current_turn_registered == DurableBridgeAliasRegistration.REGISTERED
+    assert current_response_registered == DurableBridgeAliasRegistration.REGISTERED
     assert (
         await coordinator.lookup_turn_state_target(
             turn_state="http_turn_stale_epoch",

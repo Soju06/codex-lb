@@ -213,7 +213,7 @@ async def test_concurrent_settings_put_loser_receives_409(async_client, monkeypa
     second_writer_committed = asyncio.Event()
     call_count = 0
 
-    async def racing_commit(self, settings):
+    async def racing_commit(self, settings, *, on_committed=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -222,7 +222,7 @@ async def test_concurrent_settings_put_loser_receives_409(async_client, monkeypa
             # same version) commit first — the cross-replica interleaving.
             first_writer_reached_commit.set()
             await asyncio.wait_for(second_writer_committed.wait(), timeout=10)
-        return await original_commit(self, settings)
+        return await original_commit(self, settings, on_committed=on_committed)
 
     monkeypatch.setattr(SettingsRepository, "commit_refresh", racing_commit)
 
@@ -252,7 +252,7 @@ async def test_concurrent_no_op_settings_put_loser_receives_409(async_client, mo
     second_writer_committed = asyncio.Event()
     call_count = 0
 
-    async def racing_commit(self, settings):
+    async def racing_commit(self, settings, *, on_committed=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -261,7 +261,7 @@ async def test_concurrent_no_op_settings_put_loser_receives_409(async_client, mo
             # commit a real change first.
             first_writer_reached_commit.set()
             await asyncio.wait_for(second_writer_committed.wait(), timeout=10)
-        return await original_commit(self, settings)
+        return await original_commit(self, settings, on_committed=on_committed)
 
     monkeypatch.setattr(SettingsRepository, "commit_refresh", racing_commit)
 

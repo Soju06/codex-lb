@@ -1,6 +1,7 @@
-import { RotateCcw, Search } from "lucide-react";
+import { RotateCcw, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MultiSelectFilter, type MultiSelectOption } from "@/features/dashboard/components/filters/multi-select-filter";
@@ -19,6 +20,7 @@ export type RequestFiltersProps = {
   onApiKeyChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
   onStatusChange: (values: string[]) => void;
+  onConversationDismiss: () => void;
   onReset: () => void;
 };
 
@@ -34,6 +36,7 @@ export function RequestFilters({
   onApiKeyChange,
   onModelChange,
   onStatusChange,
+  onConversationDismiss,
   onReset,
 }: RequestFiltersProps) {
   const { t } = useTranslation();
@@ -79,6 +82,22 @@ export function RequestFilters({
           options={statusOptions}
           onChange={onStatusChange}
         />
+
+        {filters.conversationId ? (
+          <Badge variant="outline" className="h-8 gap-1.5 px-3 text-xs font-normal">
+            <span className="max-w-[200px] truncate" title={filters.conversationId}>
+              {t("dashboard.filters.conversationBadge", { id: filters.conversationId })}
+            </span>
+            <button
+              type="button"
+              className="ml-0.5 rounded-full p-0.5 hover:bg-muted-foreground/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={onConversationDismiss}
+              aria-label={t("dashboard.filters.conversationDismiss")}
+            >
+              <X className="h-3 w-3" aria-hidden="true" />
+            </button>
+          </Badge>
+        ) : null}
 
         <Button type="button" variant="ghost" size="sm" onClick={onReset} className="h-8 gap-1.5 text-xs text-muted-foreground">
           <RotateCcw className="h-3 w-3" aria-hidden="true" />

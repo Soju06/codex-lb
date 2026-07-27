@@ -106,6 +106,86 @@ def test_external_secrets_upgrade_keeps_startup_migration_disabled_and_runs_hook
     assert '"helm.sh/hook": "post-install,pre-upgrade"' in rendered
 
 
+def test_external_secret_uses_v1_api_and_default_json_properties() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["apiVersion"] == "external-secrets.io/v1"
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "codex-lb", "property": "database-url"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "codex-lb", "property": "encryption-key"},
+        },
+    ]
+
+
+def test_external_secret_supports_individual_remote_secret_keys() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=infisical",
+        "--set-string",
+        "externalSecrets.remoteRefs.databaseUrl.key=/apps/codex-lb/DATABASE_URL",
+        "--set",
+        "externalSecrets.remoteRefs.databaseUrl.property=",
+        "--set-string",
+        "externalSecrets.remoteRefs.encryptionKey.key=/apps/codex-lb/ENCRYPTION_KEY",
+        "--set",
+        "externalSecrets.remoteRefs.encryptionKey.property=",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "/apps/codex-lb/DATABASE_URL"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "/apps/codex-lb/ENCRYPTION_KEY"},
+        },
+    ]
+
+
+def test_external_secret_nulled_remote_refs_render_default_layout() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/externalsecret.yaml",
+        "--set",
+        "externalSecrets.enabled=true",
+        "--set",
+        "externalSecrets.secretStoreRef.name=test-store",
+        "--set",
+        "externalSecrets.remoteRefs=null",
+    )
+
+    (external_secret,) = _helm_documents(rendered)
+    assert external_secret["spec"]["data"] == [
+        {
+            "secretKey": "database-url",
+            "remoteRef": {"key": "codex-lb", "property": "database-url"},
+        },
+        {
+            "secretKey": "encryption-key",
+            "remoteRef": {"key": "codex-lb", "property": "encryption-key"},
+        },
+    ]
+
+
 def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migration() -> None:
     rendered = _helm_template(
         "--is-upgrade",
@@ -374,6 +454,186 @@ def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None
     assert 'nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "2"' in rendered
     assert "path: /v1/responses" in rendered
     assert "path: /backend-api/codex/responses" in rendered
+
+
+def test_gateway_api_defaults_to_catch_all_backend_rule() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+    )
+
+    (route,) = _helm_documents(rendered)
+    assert route["spec"]["rules"] == [{"backendRefs": [{"name": "codex-lb", "port": 2455}]}]
+
+
+def test_gateway_api_renders_ordered_path_matches_and_filters() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set-string",
+        "gatewayApi.rules[0].matches[0].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[0].path.value=/v1",
+        "--set-string",
+        "gatewayApi.rules[0].matches[1].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[1].path.value=/backend-api/codex",
+        "--set-string",
+        "gatewayApi.rules[0].matches[2].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[2].path.value=/backend-api/wham",
+        "--set-string",
+        "gatewayApi.rules[0].matches[3].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[3].path.value=/backend-api/transcribe",
+        "--set-string",
+        "gatewayApi.rules[0].matches[4].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[4].path.value=/backend-api/files",
+        "--set-string",
+        "gatewayApi.rules[0].matches[5].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[0].matches[5].path.value=/api/codex",
+        "--set-string",
+        "gatewayApi.rules[1].matches[0].path.type=PathPrefix",
+        "--set-string",
+        "gatewayApi.rules[1].matches[0].path.value=/",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].type=ExtensionRef",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.group=traefik.io",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.kind=Middleware",
+        "--set-string",
+        "gatewayApi.rules[1].filters[0].extensionRef.name=oauth-forward-auth",
+    )
+
+    (route,) = _helm_documents(rendered)
+    rules = route["spec"]["rules"]
+    assert rules[0] == {
+        "matches": [
+            {"path": {"type": "PathPrefix", "value": "/v1"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/codex"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/wham"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/transcribe"}},
+            {"path": {"type": "PathPrefix", "value": "/backend-api/files"}},
+            {"path": {"type": "PathPrefix", "value": "/api/codex"}},
+        ],
+        "backendRefs": [{"name": "codex-lb", "port": 2455}],
+    }
+    assert rules[1]["matches"] == [{"path": {"type": "PathPrefix", "value": "/"}}]
+    assert rules[1]["filters"] == [
+        {
+            "type": "ExtensionRef",
+            "extensionRef": {
+                "group": "traefik.io",
+                "kind": "Middleware",
+                "name": "oauth-forward-auth",
+            },
+        }
+    ]
+    assert rules[1]["backendRefs"] == [{"name": "codex-lb", "port": 2455}]
+
+
+def test_gateway_api_can_create_application_specific_gateway() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/gateway.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+    )
+
+    (gateway,) = _helm_documents(rendered)
+    assert gateway["apiVersion"] == "gateway.networking.k8s.io/v1"
+    assert gateway["kind"] == "Gateway"
+    assert gateway["metadata"]["name"] == "codex-lb"
+    assert gateway["spec"]["gatewayClassName"] == "envoy"
+    assert gateway["spec"]["listeners"] == [{"name": "http", "port": 80, "protocol": "HTTP"}]
+
+
+def test_gateway_api_httproute_attaches_to_chart_managed_gateway() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+        "--set-string",
+        "gatewayApi.parentRefs[0].name=shared-gateway",
+        "--set-string",
+        "gatewayApi.parentRefs[0].namespace=gateway-system",
+    )
+
+    (route,) = _helm_documents(rendered)
+    assert route["spec"]["parentRefs"] == [{"name": "codex-lb"}]
+
+
+def test_gateway_api_gateway_supports_custom_listeners() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/gateway.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].name=https",
+        "--set",
+        "gatewayApi.gateway.listeners[0].port=443",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].protocol=HTTPS",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].tls.mode=Terminate",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].tls.certificateRefs[0].name=codex-lb-tls",
+    )
+
+    (gateway,) = _helm_documents(rendered)
+    assert gateway["spec"]["listeners"] == [
+        {
+            "name": "https",
+            "port": 443,
+            "protocol": "HTTPS",
+            "tls": {"mode": "Terminate", "certificateRefs": [{"name": "codex-lb-tls"}]},
+        }
+    ]
+
+
+def test_gateway_api_gateway_requires_gateway_class_name() -> None:
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        _helm_template(
+            "--set",
+            "gatewayApi.enabled=true",
+            "--set",
+            "gatewayApi.gateway.create=true",
+        )
+
+    assert "gatewayApi.gateway.gatewayClassName" in excinfo.value.stderr
+
+
+def test_gateway_api_does_not_render_gateway_by_default() -> None:
+    rendered = _helm_template(
+        "--set",
+        "gatewayApi.enabled=true",
+    )
+
+    documents = _helm_documents(rendered)
+    assert all(document.get("kind") != "Gateway" for document in documents)
+    (route,) = [document for document in documents if document.get("kind") == "HTTPRoute"]
+    assert route["spec"]["parentRefs"] == [{"name": "gateway", "namespace": "gateway-system"}]
 
 
 def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:

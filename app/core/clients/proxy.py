@@ -1483,6 +1483,21 @@ def _payload_has_responses_lite_websocket_marker(payload: Mapping[str, JsonValue
     return is_json_mapping(raw_metadata) and _client_metadata_uses_responses_lite(raw_metadata)
 
 
+def _finalize_responses_lite_reasoning_context(
+    payload: dict[str, JsonValue],
+    *,
+    responses_lite: bool,
+) -> None:
+    if not responses_lite:
+        return
+    raw_reasoning = payload.get("reasoning")
+    if raw_reasoning is not None and not is_json_mapping(raw_reasoning):
+        return
+    reasoning = dict(raw_reasoning) if is_json_mapping(raw_reasoning) else {}
+    reasoning["context"] = "all_turns"
+    payload["reasoning"] = reasoning
+
+
 def _normalize_responses_lite_websocket_client_metadata(
     payload: Mapping[str, JsonValue],
     client_metadata: Mapping[str, JsonValue],
@@ -1708,7 +1723,8 @@ async def _open_upstream_websocket(
             transport = conn.transport
             assert transport is not None
             reader = WebSocketDataQueue(conn_proto, 2**16, loop=session._loop)
-            conn_proto.set_parser(WebSocketReader(reader, max_msg_size), reader)
+            parser = WebSocketReader(reader, max_msg_size, compress=False, decode_text=True)
+            conn_proto.set_parser(parser, reader)
             writer = WebSocketWriter(conn_proto, transport, use_mask=True, compress=0, notakeover=False)
         except BaseException as exc:
             if circuit_breaker is not None and not _cb_recorded and isinstance(exc, Exception):
@@ -2697,8 +2713,16 @@ async def _stream_responses_with_session(
         )
     http_payload_dict = dict(payload_dict)
     _strip_responses_lite_websocket_client_metadata(http_payload_dict)
+    _finalize_responses_lite_reasoning_context(
+        http_payload_dict,
+        responses_lite=_payload_uses_responses_lite(http_payload_dict),
+    )
     websocket_payload_dict = dict(payload_dict)
     _set_responses_lite_websocket_client_metadata(websocket_payload_dict)
+    _finalize_responses_lite_reasoning_context(
+        websocket_payload_dict,
+        responses_lite=_payload_has_responses_lite_websocket_marker(websocket_payload_dict),
+    )
     payload_json = json.dumps(websocket_payload_dict, ensure_ascii=True, separators=(",", ":"))
     payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     transport_mode = _configured_stream_transport(
@@ -3141,8 +3165,8 @@ async def _stream_responses_with_session(
         failure_phase = exc.failure_phase or "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        retryable_same_contract = exc.retryable_same_contract
-        if routed_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and exc.retryable_same_contract:
+        retryable_same_contract = exc.retryable_same_contract and not exc.is_tls_verification_failure
+        if routed_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and retryable_same_contract:
             # Routed Codex sessions are private to this attempt, so recovery
             # legitimately has no shared HTTP generation for compare-and-swap.
             raise _process_network_failure_error(
@@ -3150,6 +3174,17 @@ async def _stream_responses_with_session(
                 exc,
                 retryable_same_contract=True,
                 failed_session=None,
+            ) from exc
+        if raise_for_status and retryable_same_contract:
+            raise ProxyResponseError(
+                exc.status_code or 502,
+                openai_error(routed_error_code, response_error_message),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
+                upstream_status_code=exc.status_code,
+                upstream_error_code=routed_error_code,
             ) from exc
         yield format_sse_event(
             response_failed_event(routed_error_code, response_error_message, response_id=get_request_id()),
@@ -3168,8 +3203,13 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
-        retryable_same_contract = transport == "http" and is_pre_dispatch_connection_failure(exc)
-        failure_phase = "connect" if retryable_same_contract else "upstream"
+        pre_dispatch_connection_failure = is_pre_dispatch_connection_failure(exc)
+        # Typed connector failures prove that neither the HTTP request nor the
+        # websocket response.create frame was dispatched. TLS verification is
+        # also pre-dispatch, but it is a stable configuration failure rather
+        # than a transient condition worth retrying on another account.
+        retryable_same_contract = pre_dispatch_connection_failure and not isinstance(exc, aiohttp.ClientSSLError)
+        failure_phase = "connect" if pre_dispatch_connection_failure else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
         # Direct HTTP streams and direct upstream WebSockets both use this
@@ -3180,6 +3220,16 @@ async def _stream_responses_with_session(
                 response_error_message,
                 exc,
                 retryable_same_contract=retryable_same_contract,
+                failed_session=client_session,
+            ) from exc
+        if raise_for_status and retryable_same_contract:
+            raise ProxyResponseError(
+                502,
+                openai_error(error_code or "upstream_unavailable", response_error_message),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail=failure_detail,
+                failure_exception_type=failure_exception_type,
                 failed_session=client_session,
             ) from exc
         yield format_sse_event(
@@ -3504,13 +3554,17 @@ class _CompactCommandTransport:
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = self.payload.to_payload()
+        payload_dict = dict(self.payload.to_payload())
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
                 _as_image_fetch_session(self.session),
                 effective_connect_timeout,
             )
+        _finalize_responses_lite_reasoning_context(
+            payload_dict,
+            responses_lite=_payload_uses_responses_lite(payload_dict),
+        )
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
         try:
             validate_compact_input_wire_budget(payload_dict)

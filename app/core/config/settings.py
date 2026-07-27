@@ -304,6 +304,10 @@ class Settings(BaseSettings):
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
     sticky_session_cleanup_enabled: bool = True
+    # TTL backstop for the per-account upstream-route resolution cache; 0
+    # disables caching. Admin mutations invalidate durably through the
+    # cache-invalidation bus, so this only bounds out-of-band database edits.
+    upstream_route_cache_ttl_seconds: float = Field(default=60.0, ge=0)
     # Data retention (0 = disabled). Non-zero values have safety floors so
     # every in-product consumer window stays inside retained data.
     # DEPRECATED: retention is managed from the dashboard runtime settings

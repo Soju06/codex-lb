@@ -2,8 +2,53 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+
+HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND = "internal_unanchored_parallel"
+HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX = "account-neutral-replay:v1:"
+HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS = frozenset({"prompt_cache", "session_header", "turn_state_header"})
+_HTTP_BRIDGE_SESSION_AFFINITY_HEADERS = frozenset(
+    {
+        "session_id",
+        "session-id",
+        "thread-id",
+        "x-codex-conversation-id",
+        "x-codex-session-id",
+        "x-codex-turn-state",
+    }
+)
+
+
+def make_http_bridge_account_neutral_replay_key(nonce: str) -> tuple[str, str]:
+    if not nonce:
+        raise ValueError("account-neutral replay nonce must not be empty")
+    return (
+        HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
+        f"{HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX}{nonce}",
+    )
+
+
+def is_http_bridge_account_neutral_replay(*, kind: str, key: str) -> bool:
+    """Recognize only server-namespaced durable replay keys."""
+
+    return (
+        kind == HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND
+        and key.startswith(HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX)
+        and len(key) > len(HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX)
+    )
+
+
+def without_http_bridge_session_affinity_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Drop downstream aliases that must not reach a fresh upstream account."""
+
+    return {
+        header_name: header_value
+        for header_name, header_value in headers.items()
+        if header_name.lower() not in _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS
+    }
 
 
 def resolve_required_account_id(*owners: tuple[str, str | None]) -> str | None:

@@ -8,17 +8,14 @@ from typing import Protocol
 
 import zstandard as zstd
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
+from starlette._utils import get_route_path
 from starlette.requests import ClientDisconnect
 
-from app.core.config.settings import get_settings
-from app.core.errors import dashboard_error
-
-_RESPONSES_DECOMPRESSION_PATHS = frozenset(
-    {
-        "/backend-api/codex/responses",
-        "/v1/responses",
-    }
+from app.core.middleware.request_body_limit import (
+    REQUEST_BODY_TOO_LARGE_MESSAGE,
+    request_body_limit_for_path,
+    request_ingress_error_response,
 )
 
 
@@ -61,15 +58,16 @@ def _decompress_deflate(data: bytes, max_size: int) -> bytes:
         # Bound output growth to avoid oversized allocations.
         while chunk:
             remaining = max_size - len(buffer)
-            if remaining == 0:
+            decompressed = decompressor.decompress(chunk, max_length=remaining + 1)
+            if len(decompressed) > remaining:
                 raise _DecompressedBodyTooLarge(max_size)
-            buffer.extend(decompressor.decompress(chunk, max_length=remaining))
+            buffer.extend(decompressed)
             chunk = decompressor.unconsumed_tail
     while True:
         remaining = max_size - len(buffer)
-        if remaining == 0:
+        drained = decompressor.decompress(b"", max_length=remaining + 1)
+        if len(drained) > remaining:
             raise _DecompressedBodyTooLarge(max_size)
-        drained = decompressor.decompress(b"", max_length=remaining)
         if not drained:
             break
         buffer.extend(drained)
@@ -104,7 +102,9 @@ def _decompress_body(data: bytes, encodings: list[str], max_size: int) -> bytes:
         elif encoding == "deflate":
             result = _decompress_deflate(result, max_size)
         elif encoding == "identity":
-            continue
+            pass
+        if len(result) > max_size:
+            raise _DecompressedBodyTooLarge(max_size)
     return result
 
 
@@ -121,13 +121,6 @@ def _replace_request_body(request: Request, body: bytes) -> None:
     request.__dict__.pop("_headers", None)
 
 
-def _max_decompressed_body_bytes_for_request(request: Request) -> int:
-    settings = get_settings()
-    if request.url.path.rstrip("/") in _RESPONSES_DECOMPRESSION_PATHS:
-        return max(settings.max_decompressed_body_bytes, settings.max_decompressed_responses_body_bytes)
-    return settings.max_decompressed_body_bytes
-
-
 def add_request_decompression_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def request_decompression_middleware(
@@ -140,7 +133,7 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         encodings = [enc.strip().lower() for enc in content_encoding.split(",") if enc.strip()]
         if not encodings:
             return await call_next(request)
-        max_size = _max_decompressed_body_bytes_for_request(request)
+        max_size = request_body_limit_for_path(get_route_path(request.scope))
         try:
             body = await request.body()
         except ClientDisconnect:
@@ -148,28 +141,25 @@ def add_request_decompression_middleware(app: FastAPI) -> None:
         try:
             decompressed = _decompress_body(body, encodings, max_size)
         except _DecompressedBodyTooLarge:
-            return JSONResponse(
+            return request_ingress_error_response(
+                request,
                 status_code=413,
-                content=dashboard_error(
-                    "payload_too_large",
-                    "Request body exceeds the maximum allowed size",
-                ),
+                code="payload_too_large",
+                message=REQUEST_BODY_TOO_LARGE_MESSAGE,
             )
         except ValueError:
-            return JSONResponse(
+            return request_ingress_error_response(
+                request,
                 status_code=400,
-                content=dashboard_error(
-                    "invalid_request",
-                    "Unsupported Content-Encoding",
-                ),
+                code="invalid_request",
+                message="Unsupported Content-Encoding",
             )
         except Exception:
-            return JSONResponse(
+            return request_ingress_error_response(
+                request,
                 status_code=400,
-                content=dashboard_error(
-                    "invalid_request",
-                    "Request body is compressed but could not be decompressed",
-                ),
+                code="invalid_request",
+                message="Request body is compressed but could not be decompressed",
             )
         _replace_request_body(request, decompressed)
         return await call_next(request)

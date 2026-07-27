@@ -375,12 +375,79 @@ class TestSelectAccountHealthTier:
 
     def test_prefers_healthy_over_probing(self) -> None:
         states = [
-            AccountState("a", AccountStatus.ACTIVE, used_percent=10.0, health_tier=HEALTH_TIER_PROBING),
+            AccountState(
+                "a",
+                AccountStatus.ACTIVE,
+                used_percent=10.0,
+                health_tier=HEALTH_TIER_PROBING,
+                last_selected_at=990.0,
+            ),
             AccountState("b", AccountStatus.ACTIVE, used_percent=80.0, health_tier=HEALTH_TIER_HEALTHY),
         ]
-        result = select_account(states, routing_strategy="usage_weighted")
+        result = select_account(states, now=1000.0, routing_strategy="usage_weighted")
         assert result.account is not None
         assert result.account.account_id == "b"
+
+    def test_due_probing_account_precedes_healthy(self) -> None:
+        states = [
+            AccountState(
+                "probing",
+                AccountStatus.ACTIVE,
+                used_percent=10.0,
+                health_tier=HEALTH_TIER_PROBING,
+                last_selected_at=900.0,
+            ),
+            AccountState("healthy", AccountStatus.ACTIVE, used_percent=80.0, health_tier=HEALTH_TIER_HEALTHY),
+        ]
+
+        result = select_account(states, now=1000.0, routing_strategy="usage_weighted")
+
+        assert result.account is not None
+        assert result.account.account_id == "probing"
+
+    def test_never_selected_probing_account_is_due(self) -> None:
+        states = [
+            AccountState(
+                "probing",
+                AccountStatus.ACTIVE,
+                used_percent=10.0,
+                health_tier=HEALTH_TIER_PROBING,
+            ),
+            AccountState("healthy", AccountStatus.ACTIVE, used_percent=80.0, health_tier=HEALTH_TIER_HEALTHY),
+        ]
+
+        result = select_account(states, now=1000.0, routing_strategy="usage_weighted")
+
+        assert result.account is not None
+        assert result.account.account_id == "probing"
+
+    def test_oldest_due_probing_account_is_deterministic(self) -> None:
+        states = [
+            AccountState(
+                "probing-later",
+                AccountStatus.ACTIVE,
+                health_tier=HEALTH_TIER_PROBING,
+                last_selected_at=850.0,
+            ),
+            AccountState(
+                "probing-tie-b",
+                AccountStatus.ACTIVE,
+                health_tier=HEALTH_TIER_PROBING,
+                last_selected_at=800.0,
+            ),
+            AccountState(
+                "probing-tie-a",
+                AccountStatus.ACTIVE,
+                health_tier=HEALTH_TIER_PROBING,
+                last_selected_at=800.0,
+            ),
+            AccountState("healthy", AccountStatus.ACTIVE, health_tier=HEALTH_TIER_HEALTHY),
+        ]
+
+        result = select_account(states, now=1000.0, routing_strategy="usage_weighted")
+
+        assert result.account is not None
+        assert result.account.account_id == "probing-tie-a"
 
     def test_prefers_probing_over_draining(self) -> None:
         states = [

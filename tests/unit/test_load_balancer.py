@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from datetime import datetime
@@ -12,8 +13,10 @@ from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
+    HEALTH_TIER_PROBING,
     RATE_LIMIT_RESET_MAX_HORIZON_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
+    ROUTING_POLICY_PRESERVE,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -338,6 +341,98 @@ def test_budget_safe_selection_applies_burn_first_after_health_tier_filtering():
 
     assert result.account is not None
     assert result.account.account_id == "normal"
+
+
+def test_due_probe_precedes_healthy_burn_first_policy():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-burn-first",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "due-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "due-probe"
+
+
+def test_due_preserve_probe_precedes_healthy_normal_policy():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-normal",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "due-preserve-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            routing_policy=ROUTING_POLICY_PRESERVE,
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "due-preserve-probe"
+
+
+def test_unavailable_due_probe_does_not_bypass_availability_gates():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "blocked-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+            cooldown_until=now + 60.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
 
 
 def test_budget_safe_selection_falls_back_when_burn_first_unavailable():
@@ -3664,24 +3759,36 @@ def test_error_backoff_expired_account_does_not_immediately_relock():
 
 
 @pytest.mark.asyncio
-async def test_load_selection_inputs_parallelizes_usage_queries():
-    """Verify that independent usage queries are parallelized with asyncio.gather()."""
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock
-
+async def test_load_selection_inputs_serializes_usage_queries_on_shared_session():
+    """Usage reads sharing one repository context must never overlap."""
     from app.modules.proxy.load_balancer import LoadBalancer
 
-    # Create mock repositories
     mock_accounts_repo = AsyncMock()
-    mock_accounts_repo.list_accounts = AsyncMock(return_value=[])
+    mock_accounts_repo.list_accounts = AsyncMock(
+        return_value=[_make_test_account(account_id="a", status=AccountStatus.ACTIVE)]
+    )
 
     mock_usage_repo = AsyncMock()
+    in_flight = 0
+    max_in_flight = 0
+    calls: list[str] = []
 
-    async def slow_query():
-        await asyncio.sleep(0.2)
-        return {}
+    async def guarded_query(*, window: str | None = None):
+        nonlocal in_flight, max_in_flight
+        label = window or "primary"
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        if in_flight > 1:
+            in_flight -= 1
+            raise AssertionError(f"overlapping shared-session usage read: {label}")
+        calls.append(label)
+        try:
+            await asyncio.sleep(0)
+            return {"a": _make_test_usage(account_id="a", window=label)}
+        finally:
+            in_flight -= 1
 
-    mock_usage_repo.latest_by_account = AsyncMock(side_effect=slow_query)
+    mock_usage_repo.latest_by_account = AsyncMock(side_effect=guarded_query)
 
     mock_repos = MagicMock()
     mock_repos.accounts = mock_accounts_repo
@@ -3689,20 +3796,14 @@ async def test_load_selection_inputs_parallelizes_usage_queries():
     mock_repos.__aenter__ = AsyncMock(return_value=mock_repos)
     mock_repos.__aexit__ = AsyncMock(return_value=None)
 
-    # Create LoadBalancer with mocked repo factory
     balancer = LoadBalancer(repo_factory=lambda: mock_repos)
-
-    # Measure execution time
-    start = time.time()
     result = await balancer._load_selection_inputs(model=None)
-    elapsed = time.time() - start
 
-    # If queries were sequential, elapsed would be ~0.4s (0.2 + 0.2)
-    # If queries are parallel, elapsed should be ~0.2s
-    # We use a generous threshold of 0.35s to account for test environment overhead
-    assert elapsed < 0.35, f"Queries appear to be sequential (took {elapsed:.3f}s, expected <0.35s)"
-    assert result.latest_primary == {}
-    assert result.latest_secondary == {}
+    assert max_in_flight == 1
+    assert calls == ["primary", "secondary", "monthly"]
+    assert result.latest_primary["a"].window == "primary"
+    assert result.latest_secondary["a"].window == "secondary"
+    assert result.latest_monthly["a"].window == "monthly"
 
 
 @pytest.mark.asyncio

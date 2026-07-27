@@ -11,7 +11,10 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
+from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeAliasRegistration,
+    DurableBridgeAliasRegistrationReceipt,
     DurableBridgeRepository,
     DurableBridgeSessionSnapshot,
     durable_bridge_api_key_scope,
@@ -64,7 +67,7 @@ class DurableBridgeSessionCoordinator:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
-            resolved_snapshots: list[DurableBridgeSessionSnapshot] = []
+            resolved_aliases: list[tuple[str, DurableBridgeSessionSnapshot]] = []
             for alias_kind, alias_value in (
                 (_DURABLE_TURN_STATE_ALIAS, turn_state),
                 (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
@@ -78,9 +81,58 @@ class DurableBridgeSessionCoordinator:
                     api_key_scope=api_key_scope,
                 )
                 if snapshot is not None:
-                    resolved_snapshots.append(snapshot)
-            resolved_identities = {(snapshot.id, snapshot.account_id) for snapshot in resolved_snapshots}
+                    resolved_aliases.append((alias_kind, snapshot))
+            resolved_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in resolved_aliases}
+            resolved_account_ids = {
+                snapshot.account_id for _alias_kind, snapshot in resolved_aliases if snapshot.account_id is not None
+            }
+            has_ownerless_snapshot = any(snapshot.account_id is None for _alias_kind, snapshot in resolved_aliases)
             if len(resolved_identities) > 1:
+                same_account_handoff = len(resolved_account_ids) == 1 and not has_ownerless_snapshot
+                if same_account_handoff:
+                    account_id = next(iter(resolved_account_ids))
+                    same_account_snapshots = [
+                        snapshot for _alias_kind, snapshot in resolved_aliases if snapshot.account_id == account_id
+                    ]
+                    requested_response_snapshot = next(
+                        (
+                            snapshot
+                            for alias_kind, snapshot in resolved_aliases
+                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and snapshot.account_id == account_id
+                        ),
+                        None,
+                    )
+                    account_snapshot = requested_response_snapshot or max(
+                        same_account_snapshots,
+                        key=lambda snapshot: (
+                            snapshot.latest_response_id is not None,
+                            snapshot.last_seen_at,
+                        ),
+                    )
+                    # Same-account aliases may point at different durable rows
+                    # during a handoff. Preserve an explicitly requested
+                    # response anchor; otherwise prefer the newest persisted
+                    # response anchor rather than alias-resolution order.
+                    return _to_lookup(account_snapshot)
+                specific_aliases = [
+                    (alias_kind, snapshot)
+                    for alias_kind, snapshot in resolved_aliases
+                    if alias_kind != _DURABLE_SESSION_HEADER_ALIAS
+                ]
+                specific_identities = {(snapshot.id, snapshot.account_id) for _alias_kind, snapshot in specific_aliases}
+                if len(specific_identities) == 1:
+                    specific_snapshot = specific_aliases[0][1]
+                    specific_identity = (specific_snapshot.id, specific_snapshot.account_id)
+                    conflicting_alias_kinds = {
+                        alias_kind
+                        for alias_kind, snapshot in resolved_aliases
+                        if (snapshot.id, snapshot.account_id) != specific_identity
+                    }
+                    if is_http_bridge_account_neutral_replay(
+                        kind=specific_snapshot.session_key_kind,
+                        key=specific_snapshot.session_key_value,
+                    ) and conflicting_alias_kinds == {_DURABLE_SESSION_HEADER_ALIAS}:
+                        return _to_lookup(specific_snapshot)
                 # Turn-state/response/session aliases are independent hard
                 # evidence. Returning the first match would silently discard a
                 # conflicting durable owner based on source ordering.
@@ -92,8 +144,8 @@ class DurableBridgeSessionCoordinator:
                         error_type="server_error",
                     ),
                 )
-            if resolved_snapshots:
-                return _to_lookup(resolved_snapshots[0])
+            if resolved_aliases:
+                return _to_lookup(resolved_aliases[0][1])
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
@@ -250,7 +302,7 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         turn_state: str,
         lease_ttl_seconds: float,
-    ) -> bool:
+    ) -> DurableBridgeAliasRegistration:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             return await DurableBridgeRepository(session).register_owned_alias(
@@ -264,6 +316,37 @@ class DurableBridgeSessionCoordinator:
                 latest_turn_state=turn_state,
             )
 
+    async def register_recovery_turn_state(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        turn_state: str,
+        lease_ttl_seconds: float,
+    ) -> DurableBridgeAliasRegistrationReceipt:
+        api_key_scope = durable_bridge_api_key_scope(api_key_id)
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).register_reversible_turn_state_alias(
+                session_id=session_id,
+                api_key_scope=api_key_scope,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                turn_state=turn_state,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
+
+    async def rollback_recovery_turn_state_registration(
+        self,
+        *,
+        receipt: DurableBridgeAliasRegistrationReceipt,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rollback_reversible_turn_state_alias(
+                receipt=receipt,
+            )
+
     async def register_previous_response_id(
         self,
         *,
@@ -275,7 +358,7 @@ class DurableBridgeSessionCoordinator:
         lease_ttl_seconds: float,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
-    ) -> bool:
+    ) -> DurableBridgeAliasRegistration:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
             return await DurableBridgeRepository(session).register_owned_alias(

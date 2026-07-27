@@ -84,11 +84,9 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
 )
-from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_CODE
 from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
-from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.upstream_proxy.resolver import (
@@ -120,15 +118,9 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
-from app.modules.proxy._service.api_key_usage import (
-    _ApiKeyUsageMixin,
-)
-from app.modules.proxy._service.codex_control import (
-    _CodexControlMixin,
-)
-from app.modules.proxy._service.compact import (
-    _CompactMixin,
-)
+from app.modules.proxy._service.api_key_usage import _ApiKeyUsageMixin
+from app.modules.proxy._service.codex_control import _CodexControlMixin
+from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
     _service_tier_from_compact_payload as _service_tier_from_compact_payload,
 )
@@ -138,12 +130,8 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
-from app.modules.proxy._service.file_ops import (
-    _FileOpsMixin,
-)
-from app.modules.proxy._service.http_bridge import (
-    _HTTPBridgeMixin,
-)
+from app.modules.proxy._service.file_ops import _FileOpsMixin
+from app.modules.proxy._service.http_bridge import _HTTPBridgeMixin
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -322,21 +310,13 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
-from app.modules.proxy._service.observability import (
-    _hash_identifier as _hash_identifier,
-)
-from app.modules.proxy._service.observability import (
-    _hash_identifier_or_none as _hash_identifier_or_none,
-)
-from app.modules.proxy._service.observability import (
-    _interesting_header_keys as _interesting_header_keys,
-)
+from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
+from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
+from app.modules.proxy._service.observability import _interesting_header_keys as _interesting_header_keys
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_payload as _maybe_log_proxy_request_payload,
 )
-from app.modules.proxy._service.observability import (
-    _maybe_log_proxy_request_shape as _maybe_log_proxy_request_shape,
-)
+from app.modules.proxy._service.observability import _maybe_log_proxy_request_shape as _maybe_log_proxy_request_shape
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_service_tier_trace as _maybe_log_proxy_service_tier_trace,
 )
@@ -346,18 +326,10 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
-from app.modules.proxy._service.observability import (
-    _summarize_input as _summarize_input,
-)
-from app.modules.proxy._service.observability import (
-    _tools_hash as _tools_hash,
-)
-from app.modules.proxy._service.observability import (
-    _truncate_identifier as _truncate_identifier,
-)
-from app.modules.proxy._service.observability import (
-    continuity_fail_closed_total as continuity_fail_closed_total,
-)
+from app.modules.proxy._service.observability import _summarize_input as _summarize_input
+from app.modules.proxy._service.observability import _tools_hash as _tools_hash
+from app.modules.proxy._service.observability import _truncate_identifier as _truncate_identifier
+from app.modules.proxy._service.observability import continuity_fail_closed_total as continuity_fail_closed_total
 from app.modules.proxy._service.observability import (
     continuity_owner_resolution_total as continuity_owner_resolution_total,
 )
@@ -378,6 +350,9 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS as _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS,
+)
+from app.modules.proxy._service.response_create import (
+    _RESPONSE_CREATE_DUMP_MAX_PAIRS as _RESPONSE_CREATE_DUMP_MAX_PAIRS,
 )
 from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
@@ -565,13 +540,18 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
     _finalize_ttft_reasoning_deltas,  # noqa: F401
+    _http_error_status_from_payload,  # noqa: F401
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_account_neutral_error_code,
+    _is_local_account_cap_code,  # noqa: F401
     _is_ttft_event,  # noqa: F401
+    _openai_error_envelope_from_response_failed_payload,  # noqa: F401
     _PreparedWebSocketRequest,  # noqa: F401
     _record_response_event,  # noqa: F401
     _record_websocket_route_metadata,  # noqa: F401
-    _request_log_useragent_fields,
+    _request_log_client_fields,  # noqa: F401
+    _request_log_useragent_fields,  # noqa: F401
     _RequestLogFailureMetadata,
     _RetryableStreamError,  # noqa: F401
     _stream_settlement_error_payload,  # noqa: F401
@@ -990,7 +970,7 @@ class ProxyService(
         api_key: ApiKeyData | None = None,
     ) -> dict[str, JsonValue]:
         filtered = filter_inbound_headers(headers)
-        useragent, useragent_group = _request_log_useragent_fields(headers)
+        useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = time.monotonic()
         base_settings = get_settings()
@@ -1272,6 +1252,7 @@ class ProxyService(
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                conversation_id=conversation_id,
             )
 
     async def _acquire_request_state_response_create_admission(
@@ -1709,6 +1690,7 @@ class ProxyService(
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
         preferred_account_id: str | None = None,
+        preferred_account_is_continuity_owner: bool = False,
         require_security_work_authorized: bool = False,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
@@ -1770,8 +1752,13 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
+                required_continuity_preferred_account = (
+                    required_preferred_account and preferred_account_is_continuity_owner
+                )
                 single_account_routing_id: str | None = None
-                if _routing_strategy(settings) == "single_account" and not required_preferred_account:
+                if _routing_strategy(settings) == "single_account" and (
+                    not required_preferred_account or required_continuity_preferred_account
+                ):
                     selected_account_id = (settings.single_account_id or "").strip()
                     if not selected_account_id:
                         return AccountSelection(
@@ -1796,8 +1783,16 @@ class ProxyService(
                 preferred_eligible = (
                     preferred_account_id is not None
                     and preferred_account_id not in excluded_account_ids_set
-                    and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
-                    and (single_account_routing_id is None or preferred_account_id == single_account_routing_id)
+                    and (
+                        scoped_account_ids is None
+                        or preferred_account_id in scoped_account_ids
+                        or required_continuity_preferred_account
+                    )
+                    and (
+                        single_account_routing_id is None
+                        or preferred_account_id == single_account_routing_id
+                        or required_continuity_preferred_account
+                    )
                 )
                 if preferred_account_id is not None and not preferred_eligible:
                     logger.warning(
@@ -1840,8 +1835,14 @@ class ProxyService(
                         model=model,
                         service_tier=service_tier,
                         additional_limit_name=additional_limit_name,
-                        account_ids=scoped_account_ids,
+                        account_ids=(
+                            {single_account_routing_id}
+                            if required_continuity_preferred_account and single_account_routing_id is not None
+                            else scoped_account_ids
+                        ),
                         required_account_id=preferred_account_id,
+                        required_account_is_ownership_constraint=required_preferred_account,
+                        required_continuity_owner=(required_continuity_preferred_account),
                         require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
@@ -2038,70 +2039,6 @@ class ProxyService(
             code,
             http_status=exc.status_code,
         )
-
-
-def _is_account_neutral_error_code(code: str | None) -> bool:
-    return is_local_overload_error_code(code) or code in {
-        PROCESS_NETWORK_UNAVAILABLE_CODE,
-        "proxy_unavailable",
-        "responses_compact_input_too_large",
-    }
-
-
-def _is_local_account_cap_code(code: str | None) -> bool:
-    return code in {"account_response_create_cap", "account_stream_cap"}
-
-
-def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
-    if not isinstance(payload, dict):
-        return None
-    for status_field in ("status", "status_code"):
-        status = payload.get(status_field)
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
-    return None
-
-
-def _openai_error_envelope_from_response_failed_payload(
-    payload: dict[str, JsonValue] | None,
-) -> OpenAIErrorEnvelope:
-    default_envelope = openai_error("upstream_error", "Upstream error")
-    if not isinstance(payload, dict):
-        return default_envelope
-    response_payload = payload.get("response")
-    if not isinstance(response_payload, dict):
-        return default_envelope
-    error_payload = response_payload.get("error")
-    if not isinstance(error_payload, dict):
-        return default_envelope
-
-    message_value = error_payload.get("message")
-    if isinstance(message_value, str) and message_value.strip():
-        message = message_value.strip()
-    else:
-        message = "Upstream error"
-
-    code_value = error_payload.get("code")
-    code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else "upstream_error"
-
-    type_value = error_payload.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
-
-    envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
-    error_detail = envelope["error"]
-    plan_type = error_payload.get("plan_type")
-    if plan_type is not None:
-        error_detail["plan_type"] = str(plan_type)
-    resets_at = error_payload.get("resets_at")
-    if isinstance(resets_at, int | float):
-        error_detail["resets_at"] = resets_at
-    resets_in = error_payload.get("resets_in_seconds")
-    if isinstance(resets_in, int | float):
-        error_detail["resets_in_seconds"] = resets_in
-    return envelope
 
 
 def _is_previous_response_not_found_message(message: str | None) -> bool:

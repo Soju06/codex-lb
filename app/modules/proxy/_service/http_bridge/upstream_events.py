@@ -8,7 +8,7 @@ from typing import Any, TypeVar, cast
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
-from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
+from app.core.clients.proxy import (  # noqa: F401
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -45,13 +45,17 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+    _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
+    _record_http_bridge_stuck_retire,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
+    _await_cancelled_task,
     _build_stream_incomplete_terminal_event_for_request,
     _find_websocket_request_state_by_response_id,
     _http_error_status_from_payload,
@@ -78,6 +82,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_time,
     _upstream_websocket_disconnect_message,
     _websocket_auth_request_can_switch_account,
+    _websocket_downstream_response_id,
     _websocket_event_error_code,
     _websocket_event_error_message,
     _websocket_event_error_param,
@@ -106,10 +111,16 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
+    _clear_websocket_request_error_overrides,
     _event_type_from_payload,
     _HTTPBridgeSession,
+    _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
+    _websocket_request_can_replay_before_visible_output,
+    _websocket_should_defer_reasoning_prelude,
+    _WebSocketReceiveTimeout,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -148,6 +159,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
 )
+from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
@@ -162,22 +174,24 @@ from app.modules.proxy.tool_call_dedupe import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
-_REQUEST_TRANSPORT_HTTP = "http"
-_UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
-_WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
-_NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
     "codex-lb is retrying on an account marked as authorized for security work."
 )
-_SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
-    "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
-)
-_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-_HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
 def _archive_http_bridge_upstream_text(
@@ -211,6 +225,58 @@ def _archive_http_bridge_upstream_message(
         reset_request_id(token)
 
 
+async def _http_bridge_receive_timeout_with_eventless_deadline(
+    session: "_HTTPBridgeSession",
+    receive_timeout: _WebSocketReceiveTimeout | None,
+    *,
+    now: float,
+    stuck_gate_retire_after_seconds: float,
+) -> _WebSocketReceiveTimeout | None:
+    if session.closed:
+        return receive_timeout
+    async with session.pending_lock:
+        deadlines = [
+            deadline
+            for request_state in session.pending_requests
+            if (
+                deadline := _http_bridge_eventless_precreated_deadline(
+                    request_state,
+                    stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                )
+            )
+            is not None
+        ]
+    if not deadlines:
+        return receive_timeout
+    eventless_timeout = _WebSocketReceiveTimeout(
+        timeout_seconds=max(0.0, min(deadlines) - now),
+        error_code=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+        error_message="Upstream did not acknowledge response.create before the client-safe deadline",
+        fail_all_pending=True,
+    )
+    if receive_timeout is None or eventless_timeout.timeout_seconds <= receive_timeout.timeout_seconds:
+        return eventless_timeout
+    return receive_timeout
+
+
+async def _cancel_http_bridge_reader_child(task: asyncio.Task[Any] | None, *, label: str) -> bool:
+    if task is None:
+        return True
+    if task.done():
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("HTTP bridge reader child already failed during cleanup label=%s", label, exc_info=True)
+        return True
+    try:
+        return bool(await _await_cancelled_task(task, label=label))
+    except Exception:
+        logger.debug("Failed to cancel HTTP bridge reader child label=%s", label, exc_info=True)
+        return task.done()
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -219,6 +285,8 @@ class _HTTPBridgeUpstreamEventsMixin:
         error_code: str,
         error_message: str,
         penalize_account: bool = True,
+        retire_detail: str | None = None,
+        force_retire: bool = False,
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
@@ -241,7 +309,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 penalize_account=penalize_account,
             )
         finally:
-            if session.admission_waiter_count > 0:
+            if session.admission_waiter_count > 0 and not force_retire:
                 _log_http_bridge_event(
                     "retire_deferred_for_admission_waiter",
                     session.key,
@@ -253,8 +321,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
             else:
-                await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
-        return session.admission_waiter_count == 0
+                await self._retire_stale_pending_http_bridge_session(
+                    session,
+                    detail=retire_detail or error_code,
+                )
+        return force_retire or session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(
         self: Any,
@@ -262,27 +333,147 @@ class _HTTPBridgeUpstreamEventsMixin:
     ) -> None:
         runtime_settings = _service_get_settings()
         relay_upstream = session.upstream
+        receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
+        wakeup_task: asyncio.Task[bool] | None = None
         try:
             while True:
+                # Clear before taking the deadline snapshot. A send before the
+                # clear is represented by its timestamp; a send after it leaves
+                # the event set and wakes the persistent receive wait below.
+                session.upstream_reader_wakeup.clear()
                 receive_timeout = await self._next_websocket_receive_timeout(
                     session.pending_requests,
                     pending_lock=session.pending_lock,
                     proxy_request_budget_seconds=_http_bridge_request_budget_seconds(runtime_settings),
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                 )
-                try:
-                    if receive_timeout is None:
-                        message = await session.upstream.receive()
-                    elif receive_timeout.timeout_seconds <= 0:
-                        raise asyncio.TimeoutError()
+                stuck_gate_retire_after_seconds = float(
+                    getattr(
+                        runtime_settings,
+                        "http_responses_session_bridge_stuck_gate_retire_after_seconds",
+                        300.0,
+                    )
+                )
+                receive_timeout = await _http_bridge_receive_timeout_with_eventless_deadline(
+                    session,
+                    receive_timeout,
+                    now=_service_time().monotonic(),
+                    stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                )
+                if receive_task is None:
+                    receive_task = asyncio.create_task(session.upstream.receive())
+
+                message: UpstreamWebSocketMessage | None = None
+                timed_out = False
+                if receive_task.done():
+                    message = receive_task.result()
+                    receive_task = None
+                elif receive_timeout is not None and receive_timeout.timeout_seconds <= 0:
+                    timed_out = True
+                else:
+                    wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
+                    done, _pending = await asyncio.wait(
+                        (receive_task, wakeup_task),
+                        timeout=receive_timeout.timeout_seconds if receive_timeout is not None else None,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if receive_task in done:
+                        message = receive_task.result()
+                        receive_task = None
+                    elif wakeup_task in done:
+                        wakeup_task.result()
+                        wakeup_task = None
+                        continue
                     else:
-                        message = await asyncio.wait_for(
-                            session.upstream.receive(),
-                            timeout=receive_timeout.timeout_seconds,
+                        timed_out = True
+                    if wakeup_task is not None:
+                        await _cancel_http_bridge_reader_child(
+                            wakeup_task,
+                            label="HTTP bridge reader wakeup wait",
                         )
-                except asyncio.TimeoutError:
+                        wakeup_task = None
+
+                if timed_out:
                     if receive_timeout is None:
-                        raise
+                        raise RuntimeError("HTTP bridge reader timed out without a timeout contract")
+                    if receive_timeout.error_code == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL:
+                        if receive_task is not None and receive_task.done():
+                            continue
+                        async with session.lifecycle_lock:
+                            # Send-failure cleanup marks the session closed and
+                            # disarms the timestamp while holding this lock.
+                            # Do not race that caller's terminal settlement.
+                            if session.closed:
+                                continue
+                            now = _service_time().monotonic()
+                            async with session.pending_lock:
+                                if receive_task is not None and receive_task.done():
+                                    continue
+                                expired_owner = any(
+                                    deadline is not None and deadline <= now
+                                    for request_state in session.pending_requests
+                                    if (
+                                        deadline := _http_bridge_eventless_precreated_deadline(
+                                            request_state,
+                                            stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                                        )
+                                    )
+                                    is not None
+                                )
+                                if not expired_owner:
+                                    continue
+                                pending_count = len(session.pending_requests)
+                                for request_state in session.pending_requests:
+                                    if request_state.failure_phase_override is None:
+                                        request_state.failure_phase_override = "upstream"
+                                    if request_state.failure_detail_override is None:
+                                        request_state.failure_detail_override = (
+                                            _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+                                        )
+                            # Claim the session before cancelling receive so a
+                            # gate waiter cannot reopen this ambiguous socket.
+                            session.closed = True
+                            if receive_task is not None:
+                                receive_cancelled = await _cancel_http_bridge_reader_child(
+                                    receive_task,
+                                    label="HTTP bridge upstream receive after missing response.created",
+                                )
+                                if receive_cancelled:
+                                    receive_task = None
+                            _record_http_bridge_stuck_retire(
+                                reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                session=session,
+                            )
+                            _log_http_bridge_event(
+                                "missing_response_created_timeout",
+                                session.key,
+                                account_id=session.account.id,
+                                model=session.request_model,
+                                pending_count=pending_count,
+                                detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                cache_key_family=session.key.affinity_kind,
+                                model_class=(
+                                    _extract_model_class(session.request_model) if session.request_model else None
+                                ),
+                            )
+                            await self._fail_http_bridge_reader_and_maybe_retire(
+                                session,
+                                error_code="upstream_request_timeout",
+                                error_message=receive_timeout.error_message,
+                                penalize_account=False,
+                                retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                force_retire=True,
+                            )
+                        break
+
+                    if receive_task is not None:
+                        receive_cancelled = await _cancel_http_bridge_reader_child(
+                            receive_task,
+                            label="HTTP bridge upstream receive after timeout",
+                        )
+                        if not receive_cancelled:
+                            raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
+                        receive_task = None
                     retried = await self._retry_http_bridge_precreated_request(session)
                     if retried:
                         continue
@@ -294,6 +485,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                     break
 
+                if message is None:
+                    raise RuntimeError("HTTP bridge upstream receive completed without a message")
                 if message.kind == "text" and message.text is not None:
                     session.last_upstream_close_code = None
                     if EVENT_MARKER in message.text:
@@ -348,6 +541,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     penalize_account=not account_neutral,
                 )
         finally:
+            await _cancel_http_bridge_reader_child(
+                wakeup_task,
+                label="HTTP bridge reader wakeup wait",
+            )
+            await _cancel_http_bridge_reader_child(
+                receive_task,
+                label="HTTP bridge upstream receive",
+            )
             if session.upstream is relay_upstream:
                 session.closed = True
 
@@ -396,6 +597,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             matched_request_state = None
             created_request_state = None
             suppress_downstream_event = False
+            deferred_reasoning_prelude_event = False
             has_other_pending_requests = False
             grouped_previous_response_request_states: list[_WebSocketRequestState] = []
             anonymous_event_prefers_draining = event_type not in {"response.failed", "response.incomplete", "error"}
@@ -461,6 +663,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if payload is not None:
                     payload = _rewrite_websocket_downstream_response_id(payload, matched_request_state)
                     event_block = format_sse_event(payload)
+                if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
+                    matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
+                    matched_request_state.upstream_model_output_seen = True
+                    suppress_downstream_event = True
+                    deferred_reasoning_prelude_event = True
+                elif event_type in _MODEL_OUTPUT_EVENT_TYPES:
+                    matched_request_state.upstream_model_output_seen = True
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -589,11 +798,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:
             terminal_request_state = grouped_previous_response_request_states[0]
 
-        if matched_request_state is terminal_request_state:
-            _record_response_event(matched_request_state, event_type)
-        else:
-            _record_response_event(matched_request_state, event_type)
-            _record_response_event(terminal_request_state, event_type)
+        if not deferred_reasoning_prelude_event:
+            if matched_request_state is terminal_request_state:
+                _record_response_event(matched_request_state, event_type)
+            else:
+                _record_response_event(matched_request_state, event_type)
+                _record_response_event(terminal_request_state, event_type)
 
         status_request_state = terminal_request_state or matched_request_state
         if status_request_state is None and is_previous_response_not_found_event:
@@ -698,14 +908,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
-                status_request_state.error_http_status_override = 502
-                (
-                    _downstream_text,
-                    event_block,
-                    event,
-                    payload,
-                    event_type,
-                ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                if is_http_bridge_account_neutral_replay(
+                    kind=session.key.affinity_kind,
+                    key=session.key.affinity_key,
+                ):
+                    _clear_websocket_request_error_overrides(status_request_state)
+                else:
+                    status_request_state.error_http_status_override = 502
+                    (
+                        _downstream_text,
+                        event_block,
+                        event,
+                        payload,
+                        event_type,
+                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
         elif owner_pinned_quota_error is not None and not is_previous_response_not_found_event:
             await self._handle_stream_error(
                 session.account,
@@ -874,6 +1090,45 @@ class _HTTPBridgeUpstreamEventsMixin:
             and completed_usage.output_tokens == 0
         )
 
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and event_type == "response.completed"
+            and not completed_empty_prewarm
+        ):
+            alias_registered = await self._register_http_bridge_previous_response_id(
+                session,
+                response_id,
+                input_item_count=(
+                    matched_request_state.input_item_count if matched_request_state.input_item_count > 0 else None
+                ),
+                input_full_fingerprint=(
+                    matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
+                ),
+            )
+            if not alias_registered and is_http_bridge_account_neutral_replay(
+                kind=session.key.affinity_kind,
+                key=session.key.affinity_key,
+            ):
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                matched_request_state.error_http_status_override = 502
+                payload = cast(
+                    dict[str, JsonValue],
+                    dict(
+                        response_failed_event(
+                            "bridge_continuity_persistence_failed",
+                            "Recovered response continuity could not be persisted; retry the request.",
+                            response_id=_websocket_downstream_response_id(matched_request_state),
+                        )
+                    ),
+                )
+                event_block = format_sse_event(payload)
+                event = parse_sse_event_payload(payload)
+                event_type = "response.failed"
+                completed_usage = None
+                completed_empty_prewarm = False
+
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated
@@ -933,27 +1188,6 @@ class _HTTPBridgeUpstreamEventsMixin:
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if (
-            response_id is not None
-            and matched_request_state is not None
-            and event_type == "response.completed"
-            and not completed_empty_prewarm
-        ):
-            await self._register_http_bridge_previous_response_id(
-                session,
-                response_id,
-                input_item_count=(
-                    matched_request_state.input_item_count
-                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
-                    else None
-                ),
-                input_full_fingerprint=(
-                    matched_request_state.input_full_fingerprint
-                    if event_type == "response.completed" and matched_request_state.input_item_count > 0
-                    else None
-                ),
-            )
-
         if terminal_request_state is not None and settlement_event_type in {"response.failed", "error"}:
             if settlement_event_type == "error":
                 error = settlement_event.error if settlement_event else None
@@ -966,14 +1200,20 @@ class _HTTPBridgeUpstreamEventsMixin:
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
                 can_retry_security_work = (
-                    not session.account.security_work_authorized
+                    not is_http_bridge_account_neutral_replay(
+                        kind=session.key.affinity_kind,
+                        key=session.key.affinity_key,
+                    )
+                    and not session.account.security_work_authorized
                     and not has_other_pending_requests
                     and terminal_request_state.response_id is None
                     and terminal_request_state.replay_count < 1
                     and bool(terminal_request_state.request_text)
                     and terminal_request_state.preferred_account_id != session.account.id
                     and _websocket_auth_request_can_switch_account(terminal_request_state)
+                    and _websocket_request_can_replay_before_visible_output(terminal_request_state)
                 )
+                _clear_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
                 if terminal_request_state.event_queue is not None:
                     await terminal_request_state.event_queue.put(
                         format_sse_event(
@@ -1006,12 +1246,16 @@ class _HTTPBridgeUpstreamEventsMixin:
             and matched_request_state.event_queue is not None
             and not suppress_downstream_event
         ):
+            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state):
+                await matched_request_state.event_queue.put(deferred_text)
             await matched_request_state.event_queue.put(event_block)
 
         if terminal_request_state is None:
             return
 
         if terminal_request_state is not matched_request_state and terminal_request_state.event_queue is not None:
+            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state):
+                await terminal_request_state.event_queue.put(deferred_text)
             await terminal_request_state.event_queue.put(event_block)
         if terminal_request_state.event_queue is not None:
             await terminal_request_state.event_queue.put(None)

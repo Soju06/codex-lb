@@ -41,6 +41,10 @@ Requests from localhost (127.0.0.1, ::1) bypass bootstrap entirely — no token 
 
 Behind a trusted proxy, locality comes from the resolved client identity rather than from header presence alone. Chain headers preserve repeated fields because they form one ordered route; singleton identity headers (`X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP`) must appear once. Repetition is ambiguous and fails closed so a client-preseeded loopback field cannot win a first-value lookup.
 
+For authentication and locality, each allowed identity-header family containing a non-empty value is resolved independently with its existing hardened rules. Redundant families are accepted when they agree: for example, `X-Forwarded-For: 127.0.0.1` and `Forwarded: for=127.0.0.1` establish one loopback identity. If the `Forwarded` value instead resolves to `203.0.113.24`, or if either populated family is malformed, the locality check fails closed instead of choosing one by precedence. Families whose values are all empty or whitespace-only are ignored. Repeated chain fields and singleton duplicates retain their established within-family behavior. Generic client-IP consumers such as the API firewall, request logging, and bridge metadata retain their established resolution behavior. Drain and audit do not participate in this consensus path and remain unchanged.
+
+Owned launchers disable Uvicorn's outer projection so the application can preserve the raw HTTP/WebSocket peer before applying the same proxy projection once. Locality and the disabled-auth socket allowlist use that preserved peer; generic consumers continue to see the projected client and scheme.
+
 Direct loopback requests remain local when proxy-header trust is disabled only if every forwarded client-IP field value is empty. Repeated fields are all inspected: for example, an empty first `X-Forwarded-For` field followed by `203.0.113.24` is treated as proxied and remote. The same shared locality decision protects first-run dashboard setup and unauthenticated protected proxy access.
 
 ### Threat Model

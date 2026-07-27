@@ -12,6 +12,7 @@ from fastapi.exception_handlers import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from starlette._utils import get_route_path
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.errors import dashboard_error, openai_error
@@ -31,12 +32,26 @@ from app.core.exceptions import (
     ProxyRateLimitError,
     ProxyUpstreamError,
 )
+from app.core.middleware.multipart_content_encoding import (
+    UnsupportedMultipartContentEncoding,
+    multipart_error_response,
+)
+from app.core.middleware.request_body_limit import (
+    REQUEST_BODY_TOO_LARGE_MESSAGE,
+    request_body_limit_was_exceeded,
+    request_ingress_error_response,
+)
+from app.core.multipart import MultipartPayloadTooLarge
 from app.core.runtime_logging import log_error_response
-from app.modules.proxy.images_observability import ImageRoute, record_images_route_observability
+from app.modules.proxy.images_observability import (
+    IMAGE_ROUTE_MODEL_STATE,
+    IMAGE_ROUTE_STARTED_AT_STATE,
+    IMAGE_ROUTE_STREAM_STATE,
+    ImageRoute,
+    record_images_route_observability,
+)
 
 logger = logging.getLogger(__name__)
-
-_IMAGE_ROUTE_STARTED_AT_STATE = "_codex_lb_image_route_started_at"
 
 _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     ProxyAuthError,
@@ -79,6 +94,7 @@ _IMAGE_ROUTE_PATHS: dict[str, ImageRoute] = {
     "/v1/images/edits": "edits",
     "/backend-api/codex/images/edits": "edits",
 }
+_CODEX_JSON_IMAGE_EDIT_PATH = "/backend-api/codex/images/edits"
 
 
 def _image_route_from_path(path: str) -> ImageRoute | None:
@@ -94,9 +110,11 @@ async def _image_request_model_and_stream(request: Request, route: ImageRoute) -
     model: str | None = None
     stream = False
 
-    # Generations is always JSON; the codex edits alias also accepts a JSON
-    # payload (unlike the multipart /v1 edits surface).
-    if route == "generations" or _is_json_request(request):
+    # Generations is always JSON; only the codex edits alias accepts a JSON
+    # payload. The /v1 edits surface must never consume its body here, even
+    # when a client supplies the wrong Content-Type before authorization.
+    is_codex_json_edit = get_route_path(request.scope) == _CODEX_JSON_IMAGE_EDIT_PATH and _is_json_request(request)
+    if route == "generations" or is_codex_json_edit:
         try:
             payload: Any = await request.json()
         except Exception:
@@ -108,14 +126,18 @@ async def _image_request_model_and_stream(request: Request, route: ImageRoute) -
             stream = payload.get("stream") is True
         return model, stream
 
-    try:
-        form = await request.form()
-    except Exception:
+    if route == "edits":
+        # Multipart edit bodies are parsed only inside the authorized handler.
+        # Pre-handler errors use bounded unknown/false labels rather than
+        # consuming and spooling an unauthenticated upload for observability.
+        parsed_model = getattr(request.state, IMAGE_ROUTE_MODEL_STATE, None)
+        if isinstance(parsed_model, str) and parsed_model:
+            model = parsed_model
+        parsed_stream = getattr(request.state, IMAGE_ROUTE_STREAM_STATE, None)
+        if isinstance(parsed_stream, bool):
+            stream = parsed_stream
         return model, stream
-    model_value = form.get("model")
-    if isinstance(model_value, str) and model_value:
-        model = model_value
-    stream = form.get("stream") in {"true", "True", "1", "yes", "on"}
+
     return model, stream
 
 
@@ -125,13 +147,13 @@ async def _record_image_route_exception_observability(
     status: int,
     outcome: str,
 ) -> None:
-    path = request.url.path
+    path = get_route_path(request.scope)
     route = _image_route_from_path(path)
     if route is None:
         return
 
     model, stream = await _image_request_model_and_stream(request, route)
-    started_at = getattr(request.state, _IMAGE_ROUTE_STARTED_AT_STATE, None)
+    started_at = getattr(request.state, IMAGE_ROUTE_STARTED_AT_STATE, None)
     if not isinstance(started_at, float):
         started_at = time.perf_counter()
 
@@ -151,9 +173,45 @@ def add_exception_handlers(app: FastAPI) -> None:
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        if _image_route_from_path(request.url.path) is not None:
-            setattr(request.state, _IMAGE_ROUTE_STARTED_AT_STATE, time.perf_counter())
+        if _image_route_from_path(get_route_path(request.scope)) is not None:
+            setattr(request.state, IMAGE_ROUTE_STARTED_AT_STATE, time.perf_counter())
         return await call_next(request)
+
+    @app.exception_handler(MultipartPayloadTooLarge)
+    async def multipart_payload_too_large_handler(
+        request: Request,
+        exc: MultipartPayloadTooLarge,
+    ) -> JSONResponse:
+        await _record_image_route_exception_observability(
+            request,
+            status=413,
+            outcome="invalid_request",
+        )
+        return multipart_error_response(
+            request,
+            status_code=413,
+            code="payload_too_large",
+            message=exc.message,
+            param=exc.param,
+        )
+
+    @app.exception_handler(UnsupportedMultipartContentEncoding)
+    async def unsupported_multipart_content_encoding_handler(
+        request: Request,
+        exc: UnsupportedMultipartContentEncoding,
+    ) -> JSONResponse:
+        del exc
+        await _record_image_route_exception_observability(
+            request,
+            status=400,
+            outcome="invalid_request",
+        )
+        return multipart_error_response(
+            request,
+            status_code=400,
+            code="invalid_request",
+            message="Compressed multipart uploads are not supported",
+        )
 
     # --- Domain exceptions: OpenAI envelope ---
 
@@ -261,6 +319,13 @@ def add_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: StarletteHTTPException,
     ) -> Response:
+        if request_body_limit_was_exceeded(request):
+            return request_ingress_error_response(
+                request,
+                status_code=413,
+                code="payload_too_large",
+                message=REQUEST_BODY_TOO_LARGE_MESSAGE,
+            )
         fmt = _error_format(request)
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
         if fmt == "dashboard":
@@ -277,6 +342,12 @@ def add_exception_handlers(app: FastAPI) -> None:
                 content=dashboard_error(f"http_{exc.status_code}", detail),
             )
         if fmt == "openai":
+            if exc.status_code == 400 and _image_route_from_path(get_route_path(request.scope)) == "edits":
+                await _record_image_route_exception_observability(
+                    request,
+                    status=400,
+                    outcome="invalid_request",
+                )
             error_type = "invalid_request_error"
             code = "invalid_request_error"
             if exc.status_code == 401:

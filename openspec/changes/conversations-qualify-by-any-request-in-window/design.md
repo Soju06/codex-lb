@@ -4,7 +4,9 @@
 
 Meanwhile the dashboard activity/trends aggregations — `aggregate_conversations_by_bucket()` (`repository.py:616-644`) and `_aggregate_activity()` (`repository.py:697-706`) — already count conversations by **any** row in the window, with no first-request gate. The two views disagree about what belongs to a range.
 
-`get_conversation_details()` (`repository.py:361-438`) already aggregates all logs for a given `conversation_id` regardless of window, so it is unaffected by which side of the gate we pick.
+`get_conversation_details()` (`repository.py:361-438`) already aggregates all
+eligible logs for a given `conversation_id` regardless of window, so it is
+unaffected by which side of the gate we pick.
 
 ## Goals / Non-Goals
 
@@ -16,7 +18,9 @@ Meanwhile the dashboard activity/trends aggregations — `aggregate_conversation
 
 **Non-Goals:**
 - Introducing a stored conversation entity. Conversations remain a derived view over `request_logs`.
-- Changing `started_at` / `first_request` semantics. They stay as `MIN(requested_at)` over **all** logs — true conversation age, not window-relative position. No new field is introduced.
+- Changing `firstRequest` (list) / `start` (detail) semantics. They stay as
+  `MIN(requested_at)` over all eligible logs — true conversation age, not
+  window-relative position. No new field is introduced.
 - Changing the 30-day hard cap (`_CONVERSATION_MAX_LOOKBACK`, `api.py:33`). The cap stays; only its effect shifts from "can't look further back than 30 days for starts" to "can't look further back than 30 days for activity."
 - Touching proxy follow-up / owner resolution (`find_latest_owner_record_for_response_id` → `_resolve_websocket_previous_response_owner`). That path uses `request_id` matching, not conversation grouping.
 - Touching `get_conversation_details()`. It is already window-agnostic.
@@ -31,13 +35,13 @@ Meanwhile the dashboard activity/trends aggregations — `aggregate_conversation
 
 **Alternative considered:** Keep the subquery but flip its predicate to "only include if NO pre-window row" — rejected, that's the current behavior restated.
 
-### Decision 2: Keep `started_at` as true global `MIN(requested_at)`
+### Decision 2: Keep the external start fields as true global `MIN(requested_at)`
 
-**Choice:** `first_request` / `started_at` continue to report the earliest log for the conversation across all time, even when that timestamp falls outside the `since` window.
+**Choice:** `firstRequest` on list entries and `start` on detail responses continue to report the earliest eligible log for the conversation across all time, even when that timestamp falls outside the `since` window.
 
 **Rationale:** The field reports conversation age, not window position. Clamping to window-start would hide real history and mislead operators about how long-running a conversation is. Adding a separate `window_first_request_at` field was considered and rejected (user decision): no information loss justifies a schema/contract change here, and the dashboard already surfaces the in-window rows themselves.
 
-**Trade-off accepted:** A conversation surfaced in a 30-day window may display `started_at` from 200 days ago. This is intentional and will be documented in the capability context.
+**Trade-off accepted:** A conversation surfaced in a 30-day window may display `firstRequest` from 200 days ago. This is intentional and will be documented in the capability context.
 
 ### Decision 3: Establish new `conversations-api` capability rather than delta an existing one
 
@@ -55,7 +59,8 @@ Meanwhile the dashboard activity/trends aggregations — `aggregate_conversation
 
 - **[BREAKING semantics] `since` filtering returns a different row set for any window that intersects long-running conversations.** → Mitigation: document the semantic shift explicitly in the capability `context.md` and in the PR body; flag as BREAKING in the proposal. No migration path is possible (this is a read view), so callers must adapt.
 - **Test churn is larger than code churn (~15–30 assertions across ~5 files vs. ~15 lines of code).** → Mitigation: the canonical test `test_since_filter_excludes_conversation_started_before_window` (`test_conversations_api.py:818`) is the keystone — rewriting it to assert inclusion anchors the rest. Other count/pagination tests need fixture/expectation updates but no new fixtures.
-- **`started_at` outside the window may surprise operators.** → Mitigation: document in `context.md`; the field name (`started_at`/`first_request`) already implies "origin," not "window entry."
+- **`firstRequest` outside the window may surprise operators.** → Mitigation:
+  document in `context.md`; the field reports origin, not window entry.
 - **Agreement with dashboard aggregations is a fix, but could itself surface latent discrepancies operators had internalized.** → Mitigation: record in `context.md` as a resolved inconsistency, not a regression.
 
 ## Migration Plan
@@ -71,4 +76,4 @@ Rollback: revert the PR. No schema or data consequences.
 
 ## Open Questions
 
-None outstanding. The two semantic forks (`started_at` display, new-capability vs. delta) were resolved during proposal drafting.
+None outstanding. The two semantic forks (start-field display, new-capability vs. delta) were resolved during proposal drafting.

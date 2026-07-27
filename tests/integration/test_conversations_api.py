@@ -834,6 +834,20 @@ async def test_since_filter_includes_conversation_active_in_window(async_client,
                 conversation_id="conv-old",
             ),
             _ConversationSeed(
+                request_id="since-old-0",
+                account_id="since-old-account-a",
+                model="since-old-model-a",
+                reasoning_effort=None,
+                input_tokens=50,
+                output_tokens=5,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=5,
+                cost_usd=0.5,
+                requested_at=base - timedelta(days=11),
+                conversation_id="conv-old",
+            ),
+            _ConversationSeed(
                 request_id="since-old-2",
                 account_id="since-old-account-b",
                 model="since-old-model-b",
@@ -886,9 +900,14 @@ async def test_since_filter_includes_conversation_active_in_window(async_client,
     assert [row["conversationId"] for row in body["conversations"]] == ["conv-new", "conv-old"]
     assert body["total"] == 2
     entry = body["conversations"][1]
-    assert entry["totalTokens"] == 330
-    assert entry["totalCostUsd"] == pytest.approx(3.0)
-    assert entry["firstRequest"].startswith((base - timedelta(days=10)).isoformat())
+    assert entry["requestCount"] == 3
+    assert entry["representativeAccount"] == "since-old-account-a"
+    assert entry["remainingAccountCount"] == 1
+    assert entry["representativeModel"] == "since-old-model-a"
+    assert entry["remainingModelCount"] == 1
+    assert entry["totalTokens"] == 385
+    assert entry["totalCostUsd"] == pytest.approx(3.5)
+    assert entry["firstRequest"].startswith((base - timedelta(days=11)).isoformat())
 
 
 @pytest.mark.asyncio

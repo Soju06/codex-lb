@@ -87,5 +87,5 @@ None.
 - No changes to proxy routing, request-log capture, or the conversation-ID
   detection rules.
 - No unbounded "all" history option for the Conversations view; the day selector
-  is bounded to `1d`/`7d`/`30d` (default `7d`) so the dashboard poll stays off
-  the full-history scan path.
+  is bounded to `1d`/`7d`/`30d` (default `7d`) to cap activity lookback. Summary
+  aggregates for selected conversations intentionally retain eligible history.

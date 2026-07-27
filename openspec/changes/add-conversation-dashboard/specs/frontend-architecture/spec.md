@@ -7,8 +7,8 @@ endpoint MUST accept `limit`, `offset`, `search`, and `since` query parameters.
 When `since` is omitted, the server MUST apply a rolling 30-day lower bound;
 explicitly older `since` values MUST be capped at that same bound, and incoming
 timezone-aware datetimes MUST be normalized to naive UTC before querying. It
-MUST aggregate eligible `request_logs` rows by normalized, non-empty
-`conversation_id`, excluding rows whose request kind is `warmup` or
+MUST aggregate eligible `request_logs` rows by the raw, non-empty
+`conversation_id` column, excluding rows whose request kind is `warmup` or
 `limit_warmup`, and rows with `deleted_at IS NOT NULL`. Production request-log
 writes MUST normalize ASCII padding and blank conversation IDs before storage;
 conversation list, facet, and detail queries MUST use raw-column
@@ -21,24 +21,33 @@ after a conversation matches, aggregation MUST include all eligible rows in that
 conversation, including rows whose user-agent family or ID did not match the
 search text. The endpoint MUST derive aggregates from `request_logs` only.
 
-When `since` is provided, a conversation MUST be selected only when its earliest
-eligible row's `requested_at` — the first message of the conversation — is at or
-after `since`. The grouped summary MUST restrict its input rows to
-`requested_at >= since` before grouping and MUST separately exclude conversation
-IDs that have an eligible row with `requested_at < since`. This pre-group bound
-MUST preserve the first-message semantics: a conversation spanning the `since`
-boundary (rows both before and after) is excluded because its first message
-predates the window. Aggregates MUST include every eligible row of a selected
-conversation; because selected conversations have no eligible pre-window rows,
-restricting the grouped input to the window MUST NOT clip their totals.
+When `since` is provided, a conversation MUST be selected when at least one
+eligible row has `requested_at >= since`. A conversation MAY have eligible rows
+before `since` and MUST still be included when it has activity in the window.
+The grouped summary MUST aggregate all eligible rows for every selected
+conversation, so `firstRequest`, `lastRequest`, `requestCount`, token totals,
+cached-token totals, and cost MUST NOT be clipped to the window. Membership MUST
+be implemented as an in-window aggregate condition and MUST NOT use a global
+pre-window ID set or a pre-window anti-join.
+
+After page membership is selected, the account, API-key, and model facet
+queries for the returned page MUST use the same full eligible-row scope as the
+summary, restricted only by the selected page's raw `conversation_id` values.
+The facet queries MUST NOT add a `requested_at >= since` restriction after
+membership selection; facet representatives and remaining counts MUST include
+eligible history before `since` and MUST remain consistent with the full-history
+summary aggregates.
 
 The response MUST contain `conversations`, `total`, and `hasMore` pagination
 fields. Each row in `conversations` MUST contain exactly these fields and no
 response summary object:
 
 - `conversationId`: the normalized, non-empty conversation identity.
+- `firstRequest`: the earliest `requested_at` among all eligible rows in the
+  conversation.
 - `lastRequest`: the latest `requested_at` among all eligible rows in the
   conversation.
+- `requestCount`: the number of eligible rows in the conversation.
 - `representativeAccount` and `remainingAccountCount`.
 - `apiKeyId` and `apiKeyName`.
 - `representativeModel` and `remainingModelCount`.
@@ -116,22 +125,32 @@ The list order MUST be stable: `lastRequest DESC`, then normalized
 - **THEN** the conversation is selected when either the normalized ID or any
   eligible row's user-agent family matches case-insensitively
 
-#### Scenario: Since filter selects conversations whose first message is in window
+#### Scenario: Since filter selects conversations active in the window
 
 - **GIVEN** conversation `conv-old` has its earliest eligible row at `t-10d`
   and a later row at `t-1d`, and conversation `conv-new` has its earliest
   eligible row at `t-1d`
 - **WHEN** the client calls `GET /api/conversations?since=<t-7d ISO>`
-- **THEN** only `conv-new` is returned
-- **AND** `conv-old` is excluded because its first message predates the window
-  even though it has a row inside the window
-- **AND** the returned `conv-new` totals aggregate every eligible row of that
-  conversation, not only rows at or after `since`
+- **THEN** both `conv-new` and `conv-old` are returned
+- **AND** `conv-old` is included because it has a row inside the window even
+  though its first message predates the window
+- **AND** both conversations' summaries aggregate every eligible row, not only
+  rows at or after `since`
+
+#### Scenario: Since membership and facets share the full conversation scope
+
+- **GIVEN** a selected conversation has eligible account, API-key, and model
+  values both before and after the `since` boundary
+- **WHEN** the client calls `GET /api/conversations?since=<ISO>`
+- **THEN** `firstRequest`, `lastRequest`, `requestCount`, and summary totals
+  include all eligible rows for the conversation
+- **AND** account, API-key, and model facet counts and representatives include
+  all eligible rows in the selected conversation, including rows before `since`
 
 #### Scenario: Since filter composes with search and pagination
 
-- **GIVEN** two conversations started inside the `since` window and only one
-  matches the search text
+- **GIVEN** two conversations have activity inside the `since` window and only
+  one matches the search text
 - **WHEN** the client calls `GET /api/conversations?since=<ISO>&search=opencode`
 - **THEN** only the matching conversation is returned
 - **AND** the response total and hasMore reflect the since-and-search filtered
@@ -285,6 +304,11 @@ MUST reset pagination to offset 0 on change. The selector's values and default
 MUST mirror the dashboard overview timeframe selector, with no unbounded
 "all" option. The view MUST use the list endpoint's
 established loading, error, empty, and pagination behavior.
+While Conversations is active, the dashboard overview query that supplies the
+statistics cards MUST use the active `conversationTimeframe`, including on the
+initial render when that value is restored from the URL. The independently
+retained `overviewTimeframe` MUST continue to drive the overview query when
+Request Logs is active.
 
 The conversation list MUST render exactly these columns in order: Last request,
 Conversation, Accounts, API key, Models, Tokens, Cost, and Details. Last request
@@ -355,6 +379,16 @@ An empty conversation list MUST render the established dashboard empty state.
 - **AND** the list endpoint is called with a `since` query parameter equal to
   `now − 30d` as an ISO timestamp
 - **AND** pagination resets to offset 0
+
+#### Scenario: Conversation timeframe drives active dashboard statistics
+
+- **GIVEN** the URL restores `conversationTimeframe=30d` while
+  `overviewTimeframe` is absent or has a different value
+- **WHEN** the operator opens the Conversations view
+- **THEN** the statistics-card overview query uses the `30d` timeframe
+- **AND** the conversation list uses its corresponding `since` value
+- **AND** the independently retained overview timeframe remains unchanged
+  for the Request Logs view
 
 #### Scenario: Conversation day selector state is independent per view
 

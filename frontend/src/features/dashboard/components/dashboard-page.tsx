@@ -71,7 +71,11 @@ export function DashboardPage() {
     () => parseDashboardView(searchParams.get("view")),
     [searchParams],
   );
-  const dashboardQuery = useDashboard(overviewTimeframe);
+  // Conversation stats must follow the timeframe restored for the active
+  // view, including when that state came from a bookmarked URL.
+  const dashboardTimeframe =
+    dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
+  const dashboardQuery = useDashboard(dashboardTimeframe);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const conversationsState = useConversations({ enabled: dashboardView === "conversations" });
   const { conversationsQuery } = conversationsState;

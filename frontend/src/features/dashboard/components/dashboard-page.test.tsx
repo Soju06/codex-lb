@@ -388,14 +388,24 @@ describe("DashboardPage", () => {
       expect.any(Function),
     );
 
-    // The callback mirrors the conversation timeframe to overviewTimeframe so
-    // the stat boxes (driven by useDashboard(overviewTimeframe)) refetch too.
+    // The callback keeps the independently retained overview timeframe in sync
+    // after an explicit conversation selector change; the active query also
+    // follows conversationTimeframe directly on initial URL restoration.
     const mutateParams = useConversationsMock.mock.results[0]?.value.updateFilters.mock.calls.at(-1)?.[1] as (
       params: URLSearchParams,
     ) => void;
     const params = new URLSearchParams("overviewTimeframe=7d&conversationTimeframe=7d");
     mutateParams(params);
     expect(params.get("overviewTimeframe")).toBe("30d");
+  });
+
+  it("uses the restored conversation timeframe for dashboard stats", () => {
+    window.history.pushState({}, "", "/dashboard?view=conversations&conversationTimeframe=30d");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(useDashboardMock).toHaveBeenCalledWith("30d");
   });
 
   it("restores the retained conversation timeframe after switching views", async () => {

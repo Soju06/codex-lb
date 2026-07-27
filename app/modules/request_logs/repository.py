@@ -292,9 +292,11 @@ class RequestLogsRepository:
         api_key_facets: list[ConversationFacet] = []
         model_facets: list[ConversationFacet] = []
         if page_ids:
+            # The summary HAVING clause already selected conversations with
+            # activity in the window. Facets must describe the same full
+            # eligible conversation rows as that summary, including history
+            # before `since`.
             facet_conditions = [*conditions]
-            if since is not None:
-                facet_conditions.append(RequestLog.requested_at >= since)
             account_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.account_id)
             api_key_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.api_key_id)
             model_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.model)

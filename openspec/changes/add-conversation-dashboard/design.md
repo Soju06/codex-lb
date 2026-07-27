@@ -20,8 +20,8 @@ Covers:
 Does not cover conversation inference/backfill for historical rows or any change
 to proxy routing, request-log capture, or conversation-ID detection. A bounded
 day-range selector (`1d`/`7d`/`30d`, default `7d`, no unbounded "all") drives the
-list `since` parameter; it is intentionally bounded to keep the 30-second
-dashboard poll off the full-history scan path.
+list `since` parameter and caps activity lookback. Summary aggregates for
+selected conversations intentionally retain eligible history.
 
 Capability ownership for this change is `frontend-architecture`; no
 `proxy-runtime-observability` change-level delta is retained.
@@ -42,21 +42,21 @@ Capability ownership for this change is `frontend-architecture`; no
   normalized conversation ID and every eligible row's user-agent family. Once a
   conversation matches, all eligible rows in that conversation are aggregated;
   rows that did not contain the matching text remain included.
-- **Bounded `since` and first-message semantics.** The API supplies a rolling
+- **Bounded `since` and activity semantics.** The API supplies a rolling
   30-day default when `since` is omitted and caps explicitly older values at
-  that bound. Incoming timezone-aware values are converted to naive UTC. Within
-  that effective window, `since` filters by the conversation's first message,
-  not by every row. The conversation summary bounds its grouped input to rows at
-  or after `since` before grouping, while a correlated `NOT EXISTS` probe keyed
-  by the raw outer conversation ID rejects conversations with eligible rows
-  before `since`. This preserves the operator-requested
-  "first message in range" semantic without forcing the database to group old
-  history before discarding it. A selected conversation has no eligible
-  pre-window rows, so the bounded input still includes every row contributing to
-  its aggregate. The grouped total is display-only pagination metadata and is
-  served from the same short-TTL per-signature cache as the request-log listing
-  total (issue #1340), keyed by `search` and `since`, so the 30-second dashboard
-  poll does not re-scan the full eligible history on every request.
+  that bound. Incoming timezone-aware values are converted to naive UTC. A
+  conversation qualifies when any eligible row has `requested_at >= since`, so
+  long-running conversations remain visible while active in the selected
+  window. The grouped summary uses the raw conversation ID and aggregates all
+  eligible rows for a selected conversation, including rows before `since`;
+  membership is enforced by an in-window aggregate condition rather than a
+  global pre-window ID set or anti-join. After page membership is selected, the
+  account, API-key, and model facet queries use the same full eligible-row
+  scope as the summary, so representatives and remaining counts describe the
+  entire conversation rather than only its recent activity. The grouped total
+  is display-only pagination metadata and is served from the same short-TTL
+  per-signature cache as the request-log listing total (issue #1340), keyed by
+  `search` and `since`.
 - **List order is stable.** Groups are ordered by `lastRequest DESC`, then
   normalized conversation ID ASC; pagination is applied after this order.
 - **Representative selection is deterministic.** Representatives use
@@ -116,9 +116,13 @@ the refresh action, shown only while the Conversations view is active. It
 mirrors the existing dashboard overview timeframe selector's values and default.
 The selected value is persisted in the URL as `conversationTimeframe`, resets
 pagination to offset 0 on change, and is converted client-side to a
-`now − Nd` ISO timestamp sent to the list endpoint as `since`. This bounds the
-working set the 30-second poll scans, and the short-TTL grouped-count cache
-(pre-grouping `total`) keeps the repeated poll off the full-history scan path.
+`now − Nd` ISO timestamp sent to the list endpoint as `since`. This bounds
+activity membership while summary and page-facet aggregates for selected
+conversations intentionally retain eligible history. While Conversations is
+active, the dashboard overview/statistics query uses this same selected
+conversation timeframe, even when the independently retained overview
+timeframe differs in the URL. The short-TTL grouped-count cache (pre-grouping
+`total`) avoids recomputing pagination metadata on every repeated poll.
 The timestamp is captured with the current filter state and reused by polling,
 focus, and manual refetches until that state changes, keeping the cache
 signature stable for the short TTL while preserving the selected rolling
@@ -141,10 +145,10 @@ does not render a copy action.
   representatives and remaining counts, nullable/multiple API keys, cumulative
   elapsed time at both levels, token/cost semantics, exact detail columns,
   default `reqs DESC`, no API sort parameter, encoded blank detail path, and
-  unknown-ID 404 behavior. The `since` first-message-in-window filter is covered
-  by a conversation that spans the boundary (excluded) and one started in window
-  (included), plus search/pagination composition and the short-TTL grouped-count
-  cache behavior under a positive TTL.
+  unknown-ID 404 behavior. The `since` activity-in-window filter is covered by a
+  conversation that spans the boundary (included) and one with no in-window
+  activity (excluded), plus search/pagination composition and the short-TTL
+  grouped-count cache behavior under a positive TTL.
 - Frontend coverage asserts the Request Logs default, title-styled selector URL
   state with no duplicate right-side selector, no conversation free-text filter
   input, the day-range selector (options, default, URL-backed

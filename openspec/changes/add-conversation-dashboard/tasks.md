@@ -112,20 +112,23 @@
 
 ## 8. Conversation Day Selector And Count Cache
 
-- [x] 8.1 Add a `since` parameter to `GET /api/conversations` that filters
-  conversations by their first eligible message: the grouped summary is bounded
-  to rows with `requested_at >= since` before grouping and a separate eligible
-  pre-window-ID query rejects conversations with rows before `since`. Aggregates
-  MUST include every eligible row of a selected conversation.
+- [x] 8.1 Add a `since` parameter to `GET /api/conversations` that selects
+  conversations with any eligible row at or after `since`. The grouped summary
+  uses an in-window aggregate condition and includes every eligible row of a
+  selected conversation, including pre-window rows. After page membership is
+  selected, account, API-key, and model facets use the same full eligible-row
+  scope; no global pre-window-ID query or anti-join is used.
 - [x] 8.2 Serve the conversation listing `total` from the same short-TTL
   per-signature cache as the request-log listing total (`_recent_count_cache`),
   keyed by `search` and `since` (excluding `limit`/`offset`); the 30 s TTL
   constant and bounded eviction are reused unchanged.
 - [x] 8.3 Add backend integration tests: a conversation spanning the `since`
-  boundary is excluded (first message predates window) while a conversation
-  started in window is included; `since` composes with search and pagination;
-  the grouped total is cached under a positive TTL across repeated identical
-  signatures and isolated across distinct `since`/`search` signatures.
+  boundary is included when active in the window while a conversation with no
+  in-window activity is excluded; `since` composes with search and pagination;
+  facet representatives and remaining counts use the full conversation scope
+  while summary aggregates retain full history; and the grouped total is cached
+  under a positive TTL across repeated identical signatures and isolated across
+  distinct `since`/`search` signatures.
 - [x] 8.4 Add a day-range selector (`1d`, `7d`, `30d`; default `7d`; no
   unbounded "all") rendered at the dashboard top-right, shown only while the
   Conversations view is active, mirroring the overview timeframe selector. The
@@ -139,3 +142,14 @@
 - [x] 8.6 Run targeted backend and frontend suites, `openspec validate --specs`,
   `openspec validate add-conversation-dashboard --type change --strict`, and
   `git diff --check`.
+
+## 9. Review Follow-ups
+
+- [x] 9.1 Keep conversation account, API-key, and model facets on the full
+  eligible-row scope after `since` selects page membership, with a regression
+  covering historical representatives and remaining counts.
+- [x] 9.2 Derive the dashboard overview/statistics query timeframe from the
+  active Conversations selection on initial URL restoration, while retaining
+  the overview timeframe for Request Logs.
+- [x] 9.3 Add frontend coverage for a bookmarked `conversationTimeframe=30d`
+  and rerun focused backend, frontend, and OpenSpec validation.

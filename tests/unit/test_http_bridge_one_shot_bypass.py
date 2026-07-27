@@ -96,6 +96,12 @@ def test_account_scoped_hosted_items_are_not_one_shot(item_type: str) -> None:
     assert not _is_one_shot(payload, _OPENCODE_HEADERS)
 
 
+def test_stored_prompt_requests_are_not_one_shot() -> None:
+    payload = _payload(prompt={"id": "pmpt_123"})
+
+    assert not _is_one_shot(payload, _OPENCODE_HEADERS)
+
+
 def test_native_codex_clients_are_excluded() -> None:
     headers = {**_OPENCODE_HEADERS, "originator": "codex_cli_rs"}
     assert not _is_one_shot(_payload(), headers)

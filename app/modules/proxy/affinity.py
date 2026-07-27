@@ -21,7 +21,10 @@ from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, 
 from app.core.types import JsonValue
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy.replay_safety import responses_input_items_are_self_contained_fresh_replay
+from app.modules.proxy.replay_safety import (
+    responses_input_items_are_self_contained_fresh_replay,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 
 # This typed provenance is a routing capability: callers must never recover it
 # from key text, because a client-controlled turn state can mimic any prefix.
@@ -343,12 +346,10 @@ def _request_allows_bare_session_cap_spillover(
     payload: ResponsesRequest | ResponsesCompactRequest,
 ) -> bool:
     if isinstance(payload, ResponsesRequest):
-        previous_response_id = payload.previous_response_id
-        conversation = payload.conversation
-    else:
-        extra = payload.model_extra or {}
-        previous_response_id = extra.get("previous_response_id")
-        conversation = extra.get("conversation")
+        return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
+    extra = payload.model_extra or {}
+    previous_response_id = extra.get("previous_response_id")
+    conversation = extra.get("conversation")
     # A lookup miss does not make an upstream-stored object portable. Selection
     # must remain fail-closed for every owner-bearing payload shape.
     return not (

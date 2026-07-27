@@ -12,12 +12,14 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Literal, cast
 from uuid import uuid4
 
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.utils.time import to_utc_naive
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 
@@ -162,6 +164,22 @@ def _api_key_affinity_scope(api_key: ApiKeyData | None) -> tuple[str | None, int
     if api_key is None:
         return None, 1
     return api_key.id, max(1, int(getattr(api_key, "account_assignment_generation", 1)))
+
+
+def api_key_hard_owner_drain_active(
+    api_key: ApiKeyData | None,
+    *,
+    now: datetime,
+    drain_seconds: int,
+) -> bool:
+    if api_key is None or drain_seconds <= 0:
+        return False
+    generation = max(1, int(getattr(api_key, "account_assignment_generation", 1)))
+    changed_at = getattr(api_key, "account_assignment_changed_at", None)
+    if generation <= 1 or changed_at is None:
+        return False
+    deadline = to_utc_naive(changed_at) + timedelta(seconds=drain_seconds)
+    return to_utc_naive(now) < deadline
 
 
 def _prompt_cache_key_from_request_model(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:

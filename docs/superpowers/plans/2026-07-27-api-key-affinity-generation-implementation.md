@@ -249,7 +249,7 @@ Expected: both files pass.
 - Modify: `tests/unit/test_load_balancer_concurrency.py`
 - Modify: `tests/unit/test_proxy_http_bridge.py`
 
-- [ ] Add failing tests covering:
+- [x] Add failing tests covering:
 
   - a proven hard owner outside the new pool remains eligible inside the 30-minute window;
   - the same owner is rejected after the window;
@@ -258,13 +258,13 @@ Expected: both files pass.
   - an inactive, rate-limited, model-incompatible, or missing hard owner fails immediately;
   - drain-only owners never become candidates for unrelated new work.
 
-- [ ] Run the selected tests and confirm red.
+- [x] Run the selected tests and confirm red.
 
 ```powershell
 uv run pytest -q tests/unit/test_load_balancer_concurrency.py tests/unit/test_proxy_http_bridge.py -k "assignment_drain or hard_owner_outside_scope"
 ```
 
-- [ ] Add a pure eligibility helper:
+- [x] Add a pure eligibility helper:
 
 ```python
 def api_key_hard_owner_drain_active(
@@ -286,17 +286,17 @@ def api_key_hard_owner_drain_active(
 
 It returns true only when generation is greater than `1`, the change timestamp exists, the configured duration is positive, and `now` is before the deadline.
 
-- [ ] Extend `select_account` with an explicit required-owner-only scope bypass. Load the out-of-scope account only when `required_continuity_owner=True` and drain is active; never union it into the ordinary candidate pool.
+- [x] Extend `select_account` with an explicit required-owner-only scope bypass. Load the out-of-scope account only when `required_continuity_owner=True` and drain is active; never union it into the ordinary candidate pool.
 
 ```python
 allow_required_owner_outside_account_ids: bool = False
 ```
 
-- [ ] Propagate this flag from direct responses, compact, streaming, and HTTP bridge selection only after hard ownership is proven by typed evidence.
+- [x] Propagate this flag from direct responses, compact, streaming, and HTTP bridge selection only after hard ownership is proven by typed evidence.
 
-- [ ] Ensure a saturated or unavailable hard owner returns immediately without entering a long capacity gate wait.
+- [x] Ensure a saturated or unavailable hard owner returns immediately without entering a long capacity gate wait.
 
-- [ ] Re-run the focused files.
+- [x] Re-run the focused files.
 
 ```powershell
 uv run pytest -q tests/unit/test_load_balancer_concurrency.py tests/unit/test_proxy_http_bridge.py

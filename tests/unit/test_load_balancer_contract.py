@@ -446,6 +446,121 @@ async def test_required_continuity_owner_policy_conflict_does_not_fallback(
 
 
 @pytest.mark.asyncio
+async def test_required_continuity_owner_can_drain_outside_scope_without_expanding_new_work_pool(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    owner = _account("contract-drain-owner")
+    alternate = _account("contract-drain-alternate")
+    balancer, _, _, _ = _balancer([owner, alternate], selection_cache)
+
+    drained = await balancer.select_account(
+        account_ids={alternate.id},
+        required_account_id=owner.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        allow_required_owner_outside_account_ids=True,
+        lease_kind="stream",
+    )
+    new_work = await balancer.select_account(
+        account_ids={alternate.id},
+        lease_kind="stream",
+    )
+
+    assert drained.account is not None
+    assert drained.account.id == owner.id
+    assert new_work.account is not None
+    assert new_work.account.id == alternate.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "owner_status",
+    [
+        AccountStatus.QUOTA_EXCEEDED,
+        AccountStatus.REAUTH_REQUIRED,
+        AccountStatus.RATE_LIMITED,
+    ],
+)
+async def test_out_of_scope_drain_owner_must_still_be_runtime_eligible(
+    selection_cache: AccountSelectionCache,
+    owner_status: AccountStatus,
+) -> None:
+    owner = _account("contract-ineligible-drain-owner")
+    owner.status = owner_status
+    alternate = _account("contract-ineligible-drain-alternate")
+    balancer, _, _, _ = _balancer([owner, alternate], selection_cache)
+
+    selection = await balancer.select_account(
+        account_ids={alternate.id},
+        required_account_id=owner.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        allow_required_owner_outside_account_ids=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_missing_out_of_scope_drain_owner_fails_without_falling_back(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    alternate = _account("contract-missing-drain-alternate")
+    balancer, _, _, _ = _balancer([alternate], selection_cache)
+
+    selection = await balancer.select_account(
+        account_ids={alternate.id},
+        required_account_id="contract-missing-drain-owner",
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        allow_required_owner_outside_account_ids=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_model_incompatible_out_of_scope_drain_owner_fails_policy_closed(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _account("contract-model-incompatible-drain-owner")
+    alternate = _account("contract-model-incompatible-drain-alternate")
+    balancer, _, _, _ = _balancer([owner, alternate], selection_cache)
+    monkeypatch.setattr(load_balancer_module, "_mapped_model_has_registry_entry", lambda _model: True)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda _accounts, _model, *, service_tier=None: [],
+    )
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model_with_catalog_evidence",
+        lambda _accounts, _model, **_kwargs: load_balancer_module._ModelAccountFilterResult(
+            accounts=[],
+            general_model_account_ids=frozenset(),
+        ),
+    )
+
+    selection = await balancer.select_account(
+        account_ids={alternate.id},
+        required_account_id=owner.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        allow_required_owner_outside_account_ids=True,
+        model="gpt-incompatible",
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
 async def test_required_continuity_owner_preserves_empty_security_policy_error(
     selection_cache: AccountSelectionCache,
 ) -> None:

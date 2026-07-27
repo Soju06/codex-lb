@@ -415,6 +415,7 @@ class LoadBalancer:
         required_account_id: str | None = None,
         required_account_is_ownership_constraint: bool = False,
         required_continuity_owner: bool = False,
+        allow_required_owner_outside_account_ids: bool = False,
         exclude_account_ids: Collection[str] | None = None,
         require_security_work_authorized: bool = False,
         budget_threshold_pct: float = 95.0,
@@ -428,9 +429,17 @@ class LoadBalancer:
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
+        if allow_required_owner_outside_account_ids and not required_continuity_owner:
+            raise ValueError("outside-scope owner allowance requires required_continuity_owner")
 
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
+        required_owner_outside_scope = bool(
+            allow_required_owner_outside_account_ids
+            and required_account_id is not None
+            and scoped_account_ids is not None
+            and required_account_id not in scoped_account_ids
+        )
         owner_restricted_selection = required_account_is_ownership_constraint or required_continuity_owner
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
 
@@ -439,7 +448,7 @@ class LoadBalancer:
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
-                account_ids=scoped_account_ids,
+                account_ids={required_account_id} if required_owner_outside_scope else scoped_account_ids,
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even

@@ -2251,6 +2251,7 @@ def _make_api_key(
     assigned_account_ids: list[str],
     account_assignment_scope_enabled: bool | None = None,
     account_assignment_generation: int = 1,
+    account_assignment_changed_at: datetime | None = None,
 ) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id=key_id,
@@ -2268,6 +2269,7 @@ def _make_api_key(
             bool(assigned_account_ids) if account_assignment_scope_enabled is None else account_assignment_scope_enabled
         ),
         account_assignment_generation=account_assignment_generation,
+        account_assignment_changed_at=account_assignment_changed_at,
         assigned_account_ids=assigned_account_ids,
     )
 
@@ -4852,6 +4854,7 @@ async def test_select_account_with_budget_skips_preferred_account_outside_assign
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
     assert first_call.kwargs["account_ids"] == {"acc-allowed"}
+    assert first_call.kwargs.get("allow_required_owner_outside_account_ids", False) is False
 
 
 @pytest.mark.asyncio
@@ -4871,16 +4874,28 @@ async def test_select_account_with_budget_classifies_continuity_owner_outside_as
         proxy_service,
         "get_settings_cache",
         lambda: SimpleNamespace(
-            get=AsyncMock(return_value=SimpleNamespace(sticky_reallocation_budget_threshold_pct=95.0))
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                    api_key_account_assignment_drain_seconds=1800,
+                )
+            )
         ),
     )
+    now = datetime(2026, 7, 27, 12, 0, 0)
+    monkeypatch.setattr(proxy_service, "utcnow", lambda: now)
 
     selection = await service._select_account_with_budget(
         time.monotonic() + 60.0,
         request_id="req-continuity-owner-scope",
         kind="http_bridge",
         request_stage="reattach",
-        api_key=_make_api_key(key_id="key-1", assigned_account_ids=["acc-allowed"]),
+        api_key=_make_api_key(
+            key_id="key-1",
+            assigned_account_ids=["acc-allowed"],
+            account_assignment_generation=2,
+            account_assignment_changed_at=now - timedelta(minutes=5),
+        ),
         prefer_earlier_reset_window="primary",
         preferred_account_id="acc-continuity-owner",
         preferred_account_is_continuity_owner=True,
@@ -4895,6 +4910,100 @@ async def test_select_account_with_budget_classifies_continuity_owner_outside_as
     assert selection_call.kwargs["required_account_id"] == "acc-continuity-owner"
     assert selection_call.kwargs["required_account_is_ownership_constraint"] is True
     assert selection_call.kwargs["required_continuity_owner"] is True
+    assert selection_call.kwargs["allow_required_owner_outside_account_ids"] is True
+
+
+@pytest.mark.parametrize(
+    ("generation", "changed_at_delta", "drain_seconds", "expected"),
+    [
+        (2, timedelta(seconds=1799), 1800, True),
+        (2, timedelta(seconds=1800), 1800, False),
+        (2, timedelta(seconds=1), 0, False),
+        (1, timedelta(seconds=1), 1800, False),
+    ],
+)
+def test_api_key_hard_owner_assignment_drain_boundary(
+    generation: int,
+    changed_at_delta: timedelta,
+    drain_seconds: int,
+    expected: bool,
+) -> None:
+    now = datetime(2026, 7, 27, 12, 0, 0)
+    api_key = _make_api_key(
+        key_id="key-drain",
+        assigned_account_ids=["acc-new"],
+        account_assignment_generation=generation,
+        account_assignment_changed_at=now - changed_at_delta,
+    )
+
+    assert (
+        proxy_service.api_key_hard_owner_drain_active(
+            api_key,
+            now=now,
+            drain_seconds=drain_seconds,
+        )
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed_at_delta", "drain_seconds"),
+    [
+        (timedelta(seconds=1800), 1800),
+        (timedelta(seconds=1), 0),
+    ],
+)
+async def test_select_account_with_budget_does_not_bypass_scope_after_assignment_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_at_delta: timedelta,
+    drain_seconds: int,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=None,
+            error_message="Required continuity owner is outside the effective account policy",
+            error_code="continuity_owner_policy_conflict",
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                    api_key_account_assignment_drain_seconds=drain_seconds,
+                )
+            )
+        ),
+    )
+    now = datetime(2026, 7, 27, 12, 0, 0)
+    monkeypatch.setattr(proxy_service, "utcnow", lambda: now)
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-continuity-owner-expired-drain",
+        kind="http_bridge",
+        request_stage="reattach",
+        api_key=_make_api_key(
+            key_id="key-1",
+            assigned_account_ids=["acc-allowed"],
+            account_assignment_generation=2,
+            account_assignment_changed_at=now - changed_at_delta,
+        ),
+        prefer_earlier_reset_window="primary",
+        preferred_account_id="acc-continuity-owner",
+        preferred_account_is_continuity_owner=True,
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    assert selection.error_code == "continuity_owner_policy_conflict"
+    selection_call = select_account.await_args
+    assert selection_call is not None
+    assert selection_call.kwargs["allow_required_owner_outside_account_ids"] is False
 
 
 @pytest.mark.asyncio

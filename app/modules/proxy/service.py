@@ -691,6 +691,7 @@ from app.modules.proxy.affinity import (
     _CodexSessionSource,
     _sticky_key_for_codex_control_request,
     _sticky_key_from_session_header,  # noqa: F401
+    api_key_hard_owner_drain_active,
 )
 from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers as _owner_lookup_session_id_from_headers,
@@ -1770,6 +1771,16 @@ class ProxyService(
                 required_continuity_preferred_account = (
                     required_preferred_account and preferred_account_is_continuity_owner
                 )
+                allow_required_owner_outside_account_ids = bool(
+                    required_continuity_preferred_account
+                    and scoped_account_ids is not None
+                    and preferred_account_id not in scoped_account_ids
+                    and api_key_hard_owner_drain_active(
+                        api_key,
+                        now=utcnow(),
+                        drain_seconds=int(getattr(settings, "api_key_account_assignment_drain_seconds", 1800)),
+                    )
+                )
                 single_account_routing_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and (
                     not required_preferred_account or required_continuity_preferred_account
@@ -1859,6 +1870,7 @@ class ProxyService(
                         required_account_id=preferred_account_id,
                         required_account_is_ownership_constraint=required_preferred_account,
                         required_continuity_owner=(required_continuity_preferred_account),
+                        allow_required_owner_outside_account_ids=(allow_required_owner_outside_account_ids),
                         require_unambiguous_account=require_unambiguous_account,
                         require_security_work_authorized=require_security_work_authorized,
                         budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),

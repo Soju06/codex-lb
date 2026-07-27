@@ -511,8 +511,15 @@ def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
     return tokens
 
 
-def filter_inbound_websocket_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    filtered = filter_inbound_headers(headers)
+def filter_inbound_websocket_headers(
+    headers: Mapping[str, str],
+    *,
+    preserve_client_session_identity: bool = False,
+) -> dict[str, str]:
+    filtered = filter_inbound_headers(
+        headers,
+        preserve_client_session_identity=preserve_client_session_identity,
+    )
     blocked_header_names = _WEBSOCKET_HOP_BY_HOP_HEADERS | _connection_header_tokens(filtered)
     return {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
 
@@ -524,8 +531,12 @@ def _build_upstream_websocket_headers(
     *,
     include_responses_beta: bool = True,
     normalize_non_native_fingerprint: bool = True,
+    preserve_client_session_identity: bool = False,
 ) -> dict[str, str]:
-    headers = filter_inbound_websocket_headers(inbound)
+    headers = filter_inbound_websocket_headers(
+        inbound,
+        preserve_client_session_identity=preserve_client_session_identity,
+    )
     # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
     # lives in ``IGNORE_INBOUND_HEADERS``. Callers normalize the selected account's
     # canonical installation id onto the inbound headers before connecting (mirroring the
@@ -574,6 +585,7 @@ def _build_upstream_live_websocket_headers(
         account_id,
         include_responses_beta=False,
         normalize_non_native_fingerprint=False,
+        preserve_client_session_identity=True,
     )
     beta_value = _pop_header_case_insensitive(headers, "openai-beta")
     if beta_value:

@@ -10,7 +10,7 @@ Agent clients identify each session — including every subagent session — wit
 - Each client session (including each subagent) thereby carries its own bare process-session key: first turns select an account independently under the existing cap-filtered, usage-weighted selection with #1382 bare-session cap spillover, so parallel subagents distribute across eligible accounts instead of collapsing onto one prompt-cache account.
 - Parent identity headers (`x-parent-session-id`, `x-codex-parent-thread-id`, `x-claude-code-parent-agent-id`, `x-openai-subagent`) and per-request ids (`x-client-request-id`) are explicitly excluded from session identity: parent keys would re-collapse subagents; request ids are not stable session identity.
 - The account-neutral replay header strip set drops the new headers alongside the Codex names so a fresh-account replay cannot re-register the alias.
-- None of the new headers are added to the upstream forwarding allowlist; they remain proxy-local.
+- None of the new headers are added to Responses upstream forwarding; they remain proxy-local for Responses traffic without changing non-Responses protocols that already use the same names as upstream metadata.
 
 ## Capabilities
 

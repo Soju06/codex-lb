@@ -1469,6 +1469,7 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
         "originator": "sdk",
         "Version": "9.9.9",
         "openai-beta": "responses_websockets=2026-02-06",
+        "x-session-id": "proxy-local-session",
     }
     with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
         headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
@@ -1480,6 +1481,7 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
     assert headers["originator"] == "codex_cli_rs"
     assert headers["version"] == "0.142.0"
     assert "Version" not in headers
+    assert "x-session-id" not in lowered
     assert headers["ChatGPT-Account-Id"] == "acct-1"
     assert "chatgpt-account-id" not in headers
     # The responses websocket beta header is still appended.

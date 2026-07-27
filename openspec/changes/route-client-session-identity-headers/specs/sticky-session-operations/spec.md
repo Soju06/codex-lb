@@ -6,7 +6,7 @@ The service MUST recognize client-declared session identity headers as the bare 
 
 Parent identity headers — `x-parent-session-id`, `x-codex-parent-thread-id`, `x-claude-code-parent-agent-id`, and `x-openai-subagent` — MUST NOT supply the session affinity key: a parent key would collapse every subagent of one parent onto a single session. `x-client-request-id` MUST NOT supply the key because clients also populate it with per-request identifiers.
 
-The account-neutral replay header filter MUST strip the recognized client identity headers alongside the Codex names so a replay dispatched to a fresh account cannot re-register the downstream alias. The recognized client identity headers MUST NOT be forwarded upstream. Stripping MUST apply at upstream egress (and in the account-neutral replay filter) only: internal request handling MUST retain these headers so request-log conversation metadata (see `proxy-runtime-observability`) and session affinity derivation still observe them.
+The account-neutral replay header filter MUST strip the recognized client identity headers alongside the Codex names so a replay dispatched to a fresh account cannot re-register the downstream alias. The recognized client identity headers MUST NOT be forwarded on Responses upstream egress. Stripping MUST apply at Responses upstream egress (and in the account-neutral replay filter) only: internal request handling MUST retain these headers so request-log conversation metadata (see `proxy-runtime-observability`) and session affinity derivation still observe them. Non-Responses protocols that already use the same header names as upstream protocol metadata MUST retain their existing contracts.
 
 #### Scenario: Subagent sessions route independently
 

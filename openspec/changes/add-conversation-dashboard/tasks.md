@@ -153,3 +153,6 @@
   the overview timeframe for Request Logs.
 - [x] 9.3 Add frontend coverage for a bookmarked `conversationTimeframe=30d`
   and rerun focused backend, frontend, and OpenSpec validation.
+- [x] 9.4 Apply the shared eligible-row scope to dashboard conversation summary
+  and trend aggregates, including soft-delete exclusion, and add an integration
+  regression proving list and overview conversation counts agree.

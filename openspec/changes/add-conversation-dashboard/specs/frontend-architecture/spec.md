@@ -178,6 +178,26 @@ The list order MUST be stable: `lastRequest DESC`, then normalized
 - **AND** the response contains only the corresponding dashboard-safe name and
   never secret, hash, or plaintext key material
 
+### Requirement: Dashboard conversation activity uses the list eligibility scope
+
+The dashboard overview conversation metrics and per-bucket conversation trend
+MUST use the same eligible `request_logs` row scope as the conversation list:
+non-empty conversation IDs, request kinds other than `warmup` and
+`limit_warmup`, and `deleted_at IS NULL`. This scope MUST apply to both the
+distinct conversation count and conversation request count in the overview
+summary and to each conversation trend bucket.
+
+#### Scenario: Soft-deleted-only conversations are absent from dashboard activity
+
+- **GIVEN** the selected timeframe contains an eligible conversation and a
+  second conversation whose only rows are soft-deleted
+- **WHEN** the client requests the conversation list and dashboard overview for
+  that timeframe
+- **THEN** the list total and summary conversation count include only the
+  eligible conversation
+- **AND** the summary conversation request count and conversation trend contain
+  no contribution from the soft-deleted-only conversation
+
 ### Requirement: Conversation listing total is served from a short-TTL cache
 
 The grouped `total` returned by `GET /api/conversations` is display-only

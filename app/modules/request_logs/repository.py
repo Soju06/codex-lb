@@ -184,10 +184,15 @@ class RequestLogsRepository:
             else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
         )
 
-    def _conversation_conditions(self) -> list[ColumnElement[bool]]:
+    def _eligible_conversation_row_conditions(self) -> list[ColumnElement[bool]]:
         return [
             RequestLog.deleted_at.is_(None),
             self._exclude_warmup_clause(),
+        ]
+
+    def _conversation_conditions(self) -> list[ColumnElement[bool]]:
+        return [
+            *self._eligible_conversation_row_conditions(),
             RequestLog.conversation_id.is_not(None),
             RequestLog.conversation_id != "",
         ]
@@ -614,7 +619,7 @@ class RequestLogsRepository:
             )
             .where(
                 RequestLog.requested_at >= since,
-                self._exclude_warmup_clause(),
+                *self._eligible_conversation_row_conditions(),
                 conversation_id.is_not(None),
             )
             .group_by(bucket_col)
@@ -685,7 +690,7 @@ class RequestLogsRepository:
             func.count(self._conversation_id_expr()).label("conversation_request_count"),
         ).where(
             RequestLog.requested_at >= since,
-            self._exclude_warmup_clause(),
+            *self._eligible_conversation_row_conditions(),
         )
         if until is not None:
             conversation_stmt = conversation_stmt.where(RequestLog.requested_at < until)

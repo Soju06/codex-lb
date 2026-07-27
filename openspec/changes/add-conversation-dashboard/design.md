@@ -36,7 +36,8 @@ Capability ownership for this change is `frontend-architecture`; no
   on the raw `request_logs.conversation_id` column, preserving the
   `idx_logs_conversation_id` access path while excluding null/blank production
   IDs. Rows exclude `warmup` and `limit_warmup` request kinds and soft-deleted
-  rows (`deleted_at IS NULL`), keeping list and detail totals consistent.
+  rows (`deleted_at IS NULL`), keeping list, detail, and dashboard conversation
+  totals consistent.
 - **Search selects conversations before aggregation.** The list accepts `limit`,
   `offset`, `search`, and `since`. Search is case-insensitive and checks the
   normalized conversation ID and every eligible row's user-agent family. Once a
@@ -147,8 +148,9 @@ does not render a copy action.
   default `reqs DESC`, no API sort parameter, encoded blank detail path, and
   unknown-ID 404 behavior. The `since` activity-in-window filter is covered by a
   conversation that spans the boundary (included) and one with no in-window
-  activity (excluded), plus search/pagination composition and the short-TTL
-  grouped-count cache behavior under a positive TTL.
+  activity (excluded), plus search/pagination composition, the agreement between
+  list and overview conversation counts when rows are soft-deleted, and the
+  short-TTL grouped-count cache behavior under a positive TTL.
 - Frontend coverage asserts the Request Logs default, title-styled selector URL
   state with no duplicate right-side selector, no conversation free-text filter
   input, the day-range selector (options, default, URL-backed

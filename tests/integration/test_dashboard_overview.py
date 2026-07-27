@@ -312,6 +312,15 @@ async def test_conversation_list_agrees_with_dashboard_activity_window(
                     status="success",
                     conversation_id="conv-b",
                 ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-deleted",
+                    requested_at=now - timedelta(hours=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-deleted",
+                    deleted_at=now - timedelta(hours=1),
+                ),
             ]
         )
         await session.commit()
@@ -326,6 +335,7 @@ async def test_conversation_list_agrees_with_dashboard_activity_window(
     assert [row["conversationId"] for row in conversations["conversations"]] == ["conv-a"]
     assert conversations["total"] == 1
     assert dashboard["summary"]["metrics"]["conversations"] == 1
+    assert dashboard["summary"]["metrics"]["conversationRequests"] == 1
     assert sum(point["v"] for point in dashboard["trends"]["conversations"]) == 1.0
 
 

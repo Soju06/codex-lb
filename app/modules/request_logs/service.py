@@ -91,6 +91,7 @@ class RequestLogsService:
             include_error_other=status_filter.include_error_other,
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
+            include_sensitive_metadata=include_sensitive_metadata,
         )
         logs = result.logs
         total = result.total

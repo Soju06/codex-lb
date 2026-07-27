@@ -747,6 +747,8 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
+        *,
+        include_sensitive_metadata: bool = True,
     ) -> RequestLogsResult:
         filters = self._build_filters(
             search=search,
@@ -763,6 +765,7 @@ class RequestLogsRepository:
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
             exclude_soft_deleted=True,
+            include_sensitive_metadata=include_sensitive_metadata,
         )
 
         stmt = select(RequestLog).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -797,6 +800,7 @@ class RequestLogsRepository:
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
+            include_sensitive_metadata,
         )
         total = _cached_recent_count(cache_key)
         if total is None:
@@ -993,6 +997,7 @@ class RequestLogsRepository:
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
+        include_sensitive_metadata: bool = True,
     ) -> _RequestLogFilters:
         conditions = []
         if exclude_soft_deleted:
@@ -1045,28 +1050,28 @@ class RequestLogsRepository:
             conditions.append(or_(*status_conditions))
         if search:
             search_pattern = f"%{search}%"
-            conditions.append(
-                or_(
-                    RequestLog.account_id.ilike(search_pattern),
-                    Account.email.ilike(search_pattern),
-                    RequestLog.request_id.ilike(search_pattern),
-                    RequestLog.model.ilike(search_pattern),
-                    RequestLog.reasoning_effort.ilike(search_pattern),
-                    RequestLog.source.ilike(search_pattern),
-                    RequestLog.client_ip.ilike(search_pattern),
-                    RequestLog.status.ilike(search_pattern),
-                    RequestLog.error_code.ilike(search_pattern),
-                    RequestLog.error_message.ilike(search_pattern),
-                    RequestLog.api_key_id.ilike(search_pattern),
-                    ApiKey.name.ilike(search_pattern),
-                    cast(RequestLog.requested_at, String).ilike(search_pattern),
-                    cast(RequestLog.input_tokens, String).ilike(search_pattern),
-                    cast(RequestLog.output_tokens, String).ilike(search_pattern),
-                    cast(RequestLog.cached_input_tokens, String).ilike(search_pattern),
-                    cast(RequestLog.reasoning_tokens, String).ilike(search_pattern),
-                    cast(RequestLog.latency_ms, String).ilike(search_pattern),
-                )
-            )
+            search_conditions = [
+                RequestLog.account_id.ilike(search_pattern),
+                Account.email.ilike(search_pattern),
+                RequestLog.request_id.ilike(search_pattern),
+                RequestLog.model.ilike(search_pattern),
+                RequestLog.reasoning_effort.ilike(search_pattern),
+                RequestLog.source.ilike(search_pattern),
+                RequestLog.status.ilike(search_pattern),
+                RequestLog.error_code.ilike(search_pattern),
+                RequestLog.error_message.ilike(search_pattern),
+                RequestLog.api_key_id.ilike(search_pattern),
+                ApiKey.name.ilike(search_pattern),
+                cast(RequestLog.requested_at, String).ilike(search_pattern),
+                cast(RequestLog.input_tokens, String).ilike(search_pattern),
+                cast(RequestLog.output_tokens, String).ilike(search_pattern),
+                cast(RequestLog.cached_input_tokens, String).ilike(search_pattern),
+                cast(RequestLog.reasoning_tokens, String).ilike(search_pattern),
+                cast(RequestLog.latency_ms, String).ilike(search_pattern),
+            ]
+            if include_sensitive_metadata:
+                search_conditions.append(RequestLog.client_ip.ilike(search_pattern))
+            conditions.append(or_(*search_conditions))
             return _RequestLogFilters(conditions=conditions, needs_related_search_joins=True)
         return _RequestLogFilters(conditions=conditions, needs_related_search_joins=False)
 

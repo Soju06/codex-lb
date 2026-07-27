@@ -305,6 +305,53 @@ async def test_request_logs_api_redacts_sensitive_metadata_for_guest_and_preserv
 
 
 @pytest.mark.asyncio
+async def test_request_logs_api_excludes_client_ip_from_guest_search_and_preserves_admin_search(
+    app_instance,
+    async_client,
+    db_setup,
+    monkeypatch,
+):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    del db_setup
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_ip_search_target",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=20,
+            latency_ms=250,
+            status="success",
+            error_code=None,
+            client_ip="203.0.113.17",
+        )
+
+    try:
+        app_instance.dependency_overrides[validate_dashboard_session] = guest_principal
+        try:
+            guest_response = await async_client.get("/api/request-logs?search=203.0.113")
+        finally:
+            app_instance.dependency_overrides.pop(validate_dashboard_session, None)
+
+        assert guest_response.status_code == 200
+        assert guest_response.json()["requests"] == []
+        assert guest_response.json()["total"] == 0
+
+        admin_response = await async_client.get("/api/request-logs?search=203.0.113")
+        assert admin_response.status_code == 200
+        assert [entry["requestId"] for entry in admin_response.json()["requests"]] == [
+            "req_ip_search_target",
+        ]
+        assert admin_response.json()["total"] == 1
+    finally:
+        logs_repository_module._clear_recent_count_cache()
+
+
+@pytest.mark.asyncio
 async def test_request_logs_api_lists_limit_warmup_rows(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

@@ -24,11 +24,27 @@ The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversati
 - **THEN** the admin request-log API response includes `archiveRequestId` with the original archive lookup id
 - **AND** the persisted `requestId` remains available for response-id continuity lookup
 
+### Requirement: Request-log search matches client IP
+
+Request-log search MUST match persisted `client_ip` values for an admin principal. For a guest principal, request-log search MUST NOT inspect or match persisted `client_ip` values.
+
+#### Scenario: Admin searches by client IP
+
+- **GIVEN** a request log row has `client_ip = "203.0.113.7"`
+- **WHEN** an admin principal searches request logs for `203.0.113.7`
+- **THEN** the matching request log row is returned
+
+#### Scenario: Guest cannot search by redacted client IP
+
+- **GIVEN** a request log row has `client_ip = "203.0.113.7"` and no non-sensitive field matching `203.0.113`
+- **WHEN** a guest principal searches request logs for `203.0.113`
+- **THEN** the request log row is not returned
+
 ## ADDED Requirements
 
 ### Requirement: Guest request logs redact raw identifying metadata
 
-The dashboard request-log API MUST return request rows and non-identifying operational metrics to a guest principal, but MUST serialize `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` as null. It MUST retain those values for an admin principal. The lower-cardinality `useragentGroup`, status, model, token, latency, and cost fields MAY remain available to guests.
+The dashboard request-log API MUST return request rows and non-identifying operational metrics to a guest principal, but MUST serialize `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` as null and MUST NOT use those redacted values to match guest text searches. It MUST retain those values for an admin principal. The lower-cardinality `useragentGroup`, status, model, token, latency, and cost fields MAY remain available to guests.
 
 #### Scenario: Guest reads operational request rows without raw identifiers
 

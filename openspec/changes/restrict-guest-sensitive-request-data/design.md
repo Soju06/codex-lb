@@ -25,11 +25,13 @@ Add `require_dashboard_admin_access` beside the existing dashboard session and w
 
 Using the write-access dependency was rejected because archive reads are not mutations and its `read_only_access` message would describe the failure incorrectly.
 
-### Redact at the request-log response mapping boundary
+### Redact at the request-log response boundary and exclude sensitive search branches
 
 The request-log endpoint passes the resolved principal into the service as an explicit `include_sensitive_metadata` decision. The mapper emits null for `clientIp`, full `useragent`, `conversationId`, and `archiveRequestId` for guests while retaining persisted values and all non-sensitive fields.
 
-Repository filtering and persistence remain unchanged. Redacting at the response mapping boundary gives one typed enforcement point and keeps aggregate queries identical for admins and guests.
+The service threads the same decision into repository filter construction. Guest text search excludes the `client_ip` predicate so redacted values cannot be reconstructed as a membership oracle; admin search retains the existing client-IP behavior. The role decision is also part of the short-lived filtered-count cache key so an admin result cannot leak through a guest count lookup.
+
+Persistence remains unchanged. Keeping the role decision explicit across filter construction and response mapping provides typed enforcement points while preserving non-sensitive filters and aggregates for both roles.
 
 ### Hide sensitive request-detail UI by role
 
@@ -38,5 +40,6 @@ The request-detail component reads the authenticated dashboard role. Admins reta
 ## Risks / Trade-offs
 
 - [Risk] A future request-log identifying field could be added without joining the redaction set. → Keep the sensitive-field list explicit in the role-aware mapper test and OpenSpec requirement.
+- [Risk] A redacted request-log field could remain searchable and become a membership oracle. → Pass the role decision into filter construction and test guest and admin search behavior at the API boundary.
 - [Risk] Client-side role state could be stale. → Backend response redaction and archive authorization are authoritative and do not rely on the UI.
 - [Trade-off] Guests lose conversation drill-down and archive inspection. → They retain request rows, model/status/token/cost/latency fields, `useragentGroup`, and aggregate dashboard/report statistics.

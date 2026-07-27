@@ -6,6 +6,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { listAccounts } from "@/features/accounts/api";
 import { useReports } from "@/features/reports/hooks/use-reports";
+import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
 import { ReportsSummaryCards } from "./reports-summary-cards";
@@ -89,6 +90,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const [reportsTimeZone, setReportsTimeZone] = useState<string | undefined>(() =>
     getBrowserReportsTimeZone(),
   );
+  const { visibleChartIds, setVisibleChartIds } = useReportChartVisibility();
 
   useEffect(() => {
     const refreshReportsTimeZone = () => {
@@ -217,8 +219,10 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         accountOptions={accountOptions}
         modelOptions={modelOptions}
         useragentOptions={useragentOptions}
+        visibleChartIds={visibleChartIds}
         onPresetSelect={handlePresetSelect}
         onFiltersChange={handleFiltersChange}
+        onVisibleChartIdsChange={setVisibleChartIds}
       />
 
       {mainReportsError ? (
@@ -247,43 +251,55 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
             summary={reportsQuery.data.summary}
             comparison={reportsQuery.data.comparison}
           />
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <CostPerDayChart
-                startDate={filters.startDate}
-                endDate={filters.endDate}
-                data={reportsQuery.data.daily}
-              />
-            </Suspense>
-            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <TokensPerDayChart
-                startDate={filters.startDate}
-                endDate={filters.endDate}
-                data={reportsQuery.data.daily}
-              />
-            </Suspense>
-            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <TimeToFirstTokenChart
-                startDate={filters.startDate}
-                endDate={filters.endDate}
-                data={reportsQuery.data.daily}
-              />
-            </Suspense>
-            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <TokensPerSecondChart
-                startDate={filters.startDate}
-                endDate={filters.endDate}
-                data={reportsQuery.data.daily}
-              />
-            </Suspense>
-            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <QueueWaitChart
-                startDate={filters.startDate}
-                endDate={filters.endDate}
-                data={reportsQuery.data.daily}
-              />
-            </Suspense>
-          </div>
+          {visibleChartIds.length > 0 ? (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {visibleChartIds.includes("costByDay") ? (
+                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+                  <CostPerDayChart
+                    startDate={filters.startDate}
+                    endDate={filters.endDate}
+                    data={reportsQuery.data.daily}
+                  />
+                </Suspense>
+              ) : null}
+              {visibleChartIds.includes("tokensByDay") ? (
+                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+                  <TokensPerDayChart
+                    startDate={filters.startDate}
+                    endDate={filters.endDate}
+                    data={reportsQuery.data.daily}
+                  />
+                </Suspense>
+              ) : null}
+              {visibleChartIds.includes("timeToFirstToken") ? (
+                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+                  <TimeToFirstTokenChart
+                    startDate={filters.startDate}
+                    endDate={filters.endDate}
+                    data={reportsQuery.data.daily}
+                  />
+                </Suspense>
+              ) : null}
+              {visibleChartIds.includes("tokensPerSecond") ? (
+                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+                  <TokensPerSecondChart
+                    startDate={filters.startDate}
+                    endDate={filters.endDate}
+                    data={reportsQuery.data.daily}
+                  />
+                </Suspense>
+              ) : null}
+              {visibleChartIds.includes("queueWait") ? (
+                <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+                  <QueueWaitChart
+                    startDate={filters.startDate}
+                    endDate={filters.endDate}
+                    data={reportsQuery.data.daily}
+                  />
+                </Suspense>
+              ) : null}
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="space-y-4 lg:col-span-1">
               <Suspense fallback={<div className="h-[220px] rounded-xl border bg-card" />}>

@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 from collections import deque
+from contextlib import asynccontextmanager
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -14,13 +15,16 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import anyio
 import pytest
+from fastapi import WebSocket
 from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
+from yarl import URL
 
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
 from app.core.audit import service as audit_service_module
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import Settings
 from app.core.runtime_logging import JsonFormatter
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
@@ -49,7 +53,9 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         provider=None,
         exporter_endpoint=None,
         fastapi_instrumented=0,
+        fastapi_server_request_hook=None,
         aiohttp_instrumented=0,
+        aiohttp_url_filter=None,
         sqlalchemy_instrumented=0,
         resource_attributes=None,
     )
@@ -86,12 +92,19 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             self.endpoint = endpoint
 
     class FakeFastAPIInstrumentor:
-        def instrument(self) -> None:
+        @staticmethod
+        def instrument_app(_app: object, *, server_request_hook=None) -> None:
             state.fastapi_instrumented += 1
+            state.fastapi_server_request_hook = server_request_hook
+
+        def instrument(self, *, server_request_hook=None) -> None:
+            state.fastapi_instrumented += 1
+            state.fastapi_server_request_hook = server_request_hook
 
     class FakeAioHttpClientInstrumentor:
-        def instrument(self) -> None:
+        def instrument(self, *, url_filter=None) -> None:
             state.aiohttp_instrumented += 1
+            state.aiohttp_url_filter = url_filter
 
     class FakeSQLAlchemyInstrumentor:
         def instrument(self) -> None:
@@ -200,8 +213,314 @@ def test_init_tracing_returns_true_when_opentelemetry_modules_are_available(monk
     assert state.exporter_endpoint == "http://collector:4317"
     assert state.resource_attributes == {"service.name": "codex-lb"}
     assert state.fastapi_instrumented == 1
+    assert callable(state.fastapi_server_request_hook)
     assert state.aiohttp_instrumented == 1
+    assert callable(state.aiohttp_url_filter)
     assert state.sqlalchemy_instrumented == 1
+
+
+class _RecordingSpan:
+    def __init__(self, attributes: dict[str, str]) -> None:
+        self.attributes = attributes.copy()
+
+    def set_attribute(self, key: str, value: str) -> None:
+        self.attributes[key] = value
+
+
+def test_create_app_instruments_unbuilt_stack_before_testclient_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    state = _install_fake_otel(monkeypatch)
+    observed_spans: list[tuple[str, dict[str, str]]] = []
+    lifecycle: list[str] = []
+
+    class _StackPatchingFastAPIInstrumentor:
+        @staticmethod
+        def instrument_app(instrumented_app: Any, *, server_request_hook: Any) -> None:
+            state.fastapi_instrumented += 1
+            state.fastapi_server_request_hook = server_request_hook
+            state.middleware_stack_was_unbuilt = instrumented_app.middleware_stack is None
+            original_build_middleware_stack = instrumented_app.build_middleware_stack
+
+            def build_middleware_stack():
+                downstream = original_build_middleware_stack()
+
+                async def traced_stack(scope, receive, send) -> None:
+                    if scope["type"] in {"http", "websocket"}:
+                        path = scope["path"]
+                        query = scope.get("query_string", b"").decode("utf-8", errors="replace")
+                        raw_url = f"{scope['scheme']}://testserver{path}"
+                        if query:
+                            raw_url = f"{raw_url}?{query}"
+                        span = _RecordingSpan(
+                            {
+                                "http.target": path,
+                                "http.url": raw_url,
+                                "url.full": raw_url,
+                                "url.path": path,
+                                "url.query": query,
+                                "url.fragment": "",
+                            }
+                        )
+                        server_request_hook(span, scope)
+                        observed_spans.append((scope["type"], span.attributes.copy()))
+                    await downstream(scope, receive, send)
+
+                return traced_stack
+
+            instrumented_app.build_middleware_stack = build_middleware_stack
+
+        def instrument(self, *, server_request_hook: Any) -> None:
+            raise AssertionError("create_app must instrument its explicit FastAPI app")
+
+    fastapi_instrumentation = cast(Any, sys.modules["opentelemetry.instrumentation.fastapi"])
+    monkeypatch.setattr(
+        fastapi_instrumentation,
+        "FastAPIInstrumentor",
+        _StackPatchingFastAPIInstrumentor,
+    )
+
+    @asynccontextmanager
+    async def probe_lifespan(_app):
+        lifecycle.append("started")
+        yield
+        lifecycle.append("stopped")
+
+    settings = Settings(
+        otel_enabled=True,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        backpressure_max_concurrent_requests=0,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "lifespan", probe_lifespan)
+
+    app = main.create_app()
+
+    async def http_probe() -> dict[str, bool]:
+        return {"ok": True}
+
+    async def websocket_probe(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_text("ok")
+        await websocket.close()
+
+    route_count = len(app.router.routes)
+    app.add_api_route("/__otel_probe/http", http_probe, methods=["GET"])
+    app.add_api_websocket_route("/v1/realtime", websocket_probe)
+    probe_routes = app.router.routes[route_count:]
+    del app.router.routes[route_count:]
+    app.router.routes[:0] = probe_routes
+
+    assert state.fastapi_instrumented == 1
+    assert state.middleware_stack_was_unbuilt is True
+    assert app.middleware_stack is None
+
+    with TestClient(app) as client:
+        assert lifecycle == ["started"]
+        response = client.get("/__otel_probe/http?mode=ordinary")
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        with client.websocket_connect("/v1/realtime?call_id=rtc_one&call_id=rtc_two") as websocket:
+            assert websocket.receive_text() == "ok"
+
+    assert lifecycle == ["started", "stopped"]
+    assert [
+        (scope_type, attributes["url.path"], attributes["url.query"]) for scope_type, attributes in observed_spans
+    ] == [
+        ("http", "/__otel_probe/http", "mode=ordinary"),
+        ("websocket", "/v1/realtime", ""),
+    ]
+
+
+@pytest.mark.parametrize("explicit_app", [False, True], ids=["global", "explicit-app"])
+@pytest.mark.parametrize(
+    ("path", "query", "redacted_path"),
+    [
+        (
+            "/backend-api/codex/rtc_private",
+            "intent=quicksilver",
+            "/backend-api/codex/<redacted>",
+        ),
+        (
+            "/backend-api/codex/v1/rtc_private",
+            "intent=quicksilver",
+            "/backend-api/codex/v1/<redacted>",
+        ),
+        (
+            "/v1/live/rtc_private",
+            "intent=quicksilver",
+            "/v1/live/<redacted>",
+        ),
+        (
+            "/v1/realtime",
+            "",
+            "/v1/realtime",
+        ),
+        (
+            "/v1/realtime",
+            "call_id=rtc_one&call_id=rtc_two",
+            "/v1/realtime",
+        ),
+        (
+            "/v1/realtime",
+            "call_id=%ZZ",
+            "/v1/realtime",
+        ),
+        (
+            "/v1/realtime",
+            "CALL_ID=rtc_private",
+            "/v1/realtime",
+        ),
+    ],
+    ids=[
+        "backend-live",
+        "unsupported-duplicated-alias",
+        "v1-live",
+        "realtime-missing-query",
+        "realtime-duplicate-query",
+        "realtime-malformed-query",
+        "realtime-uppercase-query",
+    ],
+)
+def test_init_tracing_redacts_private_live_server_span_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_app: bool,
+    path: str,
+    query: str,
+    redacted_path: str,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+    raw_url = f"wss://codex-lb.test{path}?{query}#private-fragment"
+    span = _RecordingSpan(
+        {
+            "http.target": path,
+            "http.url": raw_url,
+            "url.full": raw_url,
+            "url.path": path,
+            "url.query": query,
+            "url.fragment": "private-fragment",
+        }
+    )
+    app = cast(Any, object()) if explicit_app else None
+
+    assert otel.init_tracing(app=app) is True
+    state.fastapi_server_request_hook(
+        span,
+        {
+            "type": "websocket",
+            "scheme": "wss",
+            "server": ("codex-lb.test", 443),
+            "headers": [(b"host", b"codex-lb.test")],
+            "path": path,
+            "query_string": query.encode(),
+        },
+    )
+
+    redacted_url = f"wss://codex-lb.test{redacted_path}"
+    assert span.attributes == {
+        "http.target": redacted_path,
+        "http.url": redacted_url,
+        "url.full": redacted_url,
+        "url.path": redacted_path,
+        "url.query": "",
+        "url.fragment": "",
+    }
+
+
+def test_init_tracing_keeps_ordinary_responses_server_span_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+    path = "/backend-api/codex/responses"
+    query = "model=gpt-5.6"
+    raw_url = f"https://codex-lb.test{path}?{query}#ordinary-fragment"
+    attributes = {
+        "http.target": path,
+        "http.url": raw_url,
+        "url.full": raw_url,
+        "url.path": path,
+        "url.query": query,
+        "url.fragment": "ordinary-fragment",
+    }
+    span = _RecordingSpan(attributes)
+
+    assert otel.init_tracing() is True
+    state.fastapi_server_request_hook(
+        span,
+        {
+            "type": "http",
+            "scheme": "https",
+            "server": ("codex-lb.test", 443),
+            "headers": [(b"host", b"codex-lb.test")],
+            "path": path,
+            "query_string": query.encode(),
+        },
+    )
+
+    assert span.attributes == attributes
+
+
+@pytest.mark.parametrize(
+    ("raw_url", "filtered_url"),
+    [
+        (
+            "https://api.openai.com/v1/live/rtc_private?intent=quicksilver#private-fragment",
+            "https://api.openai.com/v1/live/<redacted>",
+        ),
+        (
+            "https://api.openai.com/v1/realtime#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/v1/realtime?call_id=rtc_one&call_id=rtc_two#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/v1/realtime?call_id=%ZZ#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/v1/realtime?CALL_ID=rtc_private#private-fragment",
+            "https://api.openai.com/v1/realtime",
+        ),
+        (
+            "https://api.openai.com/backend-api/codex/responses?model=gpt-5.6",
+            "https://api.openai.com/backend-api/codex/responses?model=gpt-5.6",
+        ),
+    ],
+    ids=[
+        "live-v3",
+        "realtime-missing-query",
+        "realtime-duplicate-query",
+        "realtime-malformed-query",
+        "realtime-uppercase-query",
+        "ordinary-responses",
+    ],
+)
+def test_init_tracing_filters_private_live_urls_only(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_url: str,
+    filtered_url: str,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+
+    assert otel.init_tracing() is True
+    assert state.aiohttp_url_filter(raw_url) == filtered_url
+
+
+def test_init_tracing_filters_yarl_live_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_fake_otel(monkeypatch)
+
+    assert otel.init_tracing() is True
+    assert (
+        state.aiohttp_url_filter(URL("https://api.openai.com/v1/live/rtc_private?intent=quicksilver"))
+        == "https://api.openai.com/v1/live/<redacted>"
+    )
 
 
 def test_get_current_trace_id_returns_none_when_opentelemetry_is_inactive(monkeypatch: pytest.MonkeyPatch):
@@ -694,7 +1013,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
                 ),
                 request_model="gpt-5.4",
                 account=cast(Any, SimpleNamespace(id="acc-existing", status=AccountStatus.ACTIVE)),
-                upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+                upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
                 upstream_control=proxy_module._WebSocketUpstreamControl(),
                 pending_requests=deque(),
                 pending_lock=anyio.Lock(),

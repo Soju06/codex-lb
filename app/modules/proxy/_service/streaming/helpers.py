@@ -12,6 +12,7 @@ from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.proxy import CodexControlRequestPrivacyPolicy as CodexControlRequestPrivacyPolicy
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ImageFetchSession,
@@ -33,7 +34,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
-    UpstreamResponsesWebSocket,
+    UpstreamWebSocket,
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_STALE_CODE as PREVIOUS_RESPONSE_STALE_CODE,
@@ -787,6 +788,8 @@ async def _handle_stream_error(
     error: UpstreamError,
     code: str,
     http_status: int | None = None,
+    *,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> ClassifiedFailure:
     classified = classify_upstream_failure(
         error_code=code,
@@ -806,7 +809,7 @@ async def _handle_stream_error(
         await proxy._load_balancer.record_error(account)
         _facade().logger.info(
             "Recorded transient account error account_id=%s request_id=%s code=%s",
-            account.id,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else account.id,
             get_request_id(),
             code,
         )
@@ -827,7 +830,7 @@ def _should_retry_stream_error(code: str) -> bool:
     return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
 
 
-def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None) -> str | None:
+def _upstream_turn_state_from_socket(upstream: UpstreamWebSocket | None) -> str | None:
     if upstream is None:
         return None
     getter = getattr(upstream, "response_header", None)

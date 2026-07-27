@@ -1,0 +1,23 @@
+{{- if and .Values.gatewayApi.enabled .Values.gatewayApi.gateway.create }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "codex-lb.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "codex-lb.labels" . | nindent 4 }}
+  {{- with .Values.gatewayApi.gateway.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ required "gatewayApi.gateway.gatewayClassName is required when gatewayApi.gateway.create=true" .Values.gatewayApi.gateway.gatewayClassName }}
+  listeners:
+    {{- if .Values.gatewayApi.gateway.listeners }}
+    {{- toYaml .Values.gatewayApi.gateway.listeners | nindent 4 }}
+    {{- else }}
+    - name: http
+      port: 80
+      protocol: HTTP
+    {{- end }}
+{{- end }}

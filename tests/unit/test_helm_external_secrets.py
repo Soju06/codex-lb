@@ -539,6 +539,103 @@ def test_gateway_api_renders_ordered_path_matches_and_filters() -> None:
     assert rules[1]["backendRefs"] == [{"name": "codex-lb", "port": 2455}]
 
 
+def test_gateway_api_can_create_application_specific_gateway() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/gateway.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+    )
+
+    (gateway,) = _helm_documents(rendered)
+    assert gateway["apiVersion"] == "gateway.networking.k8s.io/v1"
+    assert gateway["kind"] == "Gateway"
+    assert gateway["metadata"]["name"] == "codex-lb"
+    assert gateway["spec"]["gatewayClassName"] == "envoy"
+    assert gateway["spec"]["listeners"] == [{"name": "http", "port": 80, "protocol": "HTTP"}]
+
+
+def test_gateway_api_httproute_attaches_to_chart_managed_gateway() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/httproute.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+        "--set-string",
+        "gatewayApi.parentRefs[0].name=shared-gateway",
+        "--set-string",
+        "gatewayApi.parentRefs[0].namespace=gateway-system",
+    )
+
+    (route,) = _helm_documents(rendered)
+    assert route["spec"]["parentRefs"] == [{"name": "codex-lb"}]
+
+
+def test_gateway_api_gateway_supports_custom_listeners() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/gateway.yaml",
+        "--set",
+        "gatewayApi.enabled=true",
+        "--set",
+        "gatewayApi.gateway.create=true",
+        "--set",
+        "gatewayApi.gateway.gatewayClassName=envoy",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].name=https",
+        "--set",
+        "gatewayApi.gateway.listeners[0].port=443",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].protocol=HTTPS",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].tls.mode=Terminate",
+        "--set-string",
+        "gatewayApi.gateway.listeners[0].tls.certificateRefs[0].name=codex-lb-tls",
+    )
+
+    (gateway,) = _helm_documents(rendered)
+    assert gateway["spec"]["listeners"] == [
+        {
+            "name": "https",
+            "port": 443,
+            "protocol": "HTTPS",
+            "tls": {"mode": "Terminate", "certificateRefs": [{"name": "codex-lb-tls"}]},
+        }
+    ]
+
+
+def test_gateway_api_gateway_requires_gateway_class_name() -> None:
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        _helm_template(
+            "--set",
+            "gatewayApi.enabled=true",
+            "--set",
+            "gatewayApi.gateway.create=true",
+        )
+
+    assert "gatewayApi.gateway.gatewayClassName" in excinfo.value.stderr
+
+
+def test_gateway_api_does_not_render_gateway_by_default() -> None:
+    rendered = _helm_template(
+        "--set",
+        "gatewayApi.enabled=true",
+    )
+
+    documents = _helm_documents(rendered)
+    assert all(document.get("kind") != "Gateway" for document in documents)
+    (route,) = [document for document in documents if document.get("kind") == "HTTPRoute"]
+    assert route["spec"]["parentRefs"] == [{"name": "gateway", "namespace": "gateway-system"}]
+
+
 def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
     script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
 

@@ -66,6 +66,7 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     stream_reserve_slots: int
     traffic_class: TrafficClass
     concurrency_caps: AccountConcurrencyCaps
+    redact_sensitive_details: bool
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
@@ -101,6 +102,7 @@ async def run_unbound_selection_path(
     stream_reserve_slots = request.stream_reserve_slots
     traffic_class = request.traffic_class
     caps = request.concurrency_caps
+    redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
 
@@ -135,6 +137,7 @@ async def run_unbound_selection_path(
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
                 required_account_id=required_account_id,
+                redact_sensitive_details=redact_sensitive_details,
             )
             effective_routing_costs = (
                 routing_costs_by_account_id

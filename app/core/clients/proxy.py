@@ -15,6 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Any,
     AsyncContextManager,
@@ -525,6 +526,15 @@ class CodexControlResponse:
     headers: Mapping[str, str]
 
 
+class CodexControlRequestPrivacyPolicy(Enum):
+    STANDARD = "standard"
+    PRIVATE_REALTIME = "private_realtime"
+
+    @property
+    def redacts_sensitive_details(self) -> bool:
+        return self is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
+
+
 def _should_drop_inbound_header(name: str) -> bool:
     normalized = name.lower()
     if normalized in IGNORE_INBOUND_HEADERS:
@@ -926,6 +936,7 @@ def _maybe_log_upstream_request_start(
     method: str,
     payload_summary: str,
     payload_json: str | None = None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> None:
     trace_channels = get_settings().trace_channels
     if "upstream_summary" not in trace_channels and "upstream_payload" not in trace_channels:
@@ -936,6 +947,10 @@ def _maybe_log_upstream_request_start(
     account_id = _account_id_for_upstream_log(headers)
     header_keys = _interesting_upstream_header_keys(headers)
 
+    if privacy_policy.redacts_sensitive_details:
+        account_id = "<redacted>"
+        payload_summary = "sensitive private payload redacted"
+        payload_json = None
     if "upstream_summary" in trace_channels:
         logger.info(
             "upstream_request_start request_id=%s kind=%s method=%s target=%s account_id=%s headers=%s payload=%s",
@@ -972,6 +987,7 @@ def _maybe_log_upstream_request_complete(
     failure_detail: str | None = None,
     failure_exception_type: str | None = None,
     retryable_same_contract: bool | None = None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> None:
     if "upstream_summary" not in get_settings().trace_channels:
         return
@@ -981,6 +997,13 @@ def _maybe_log_upstream_request_complete(
         level = logging.ERROR
     elif (status_code is not None and status_code >= 400) or error_code is not None:
         level = logging.WARNING
+    account_id = "<redacted>" if privacy_policy.redacts_sensitive_details else _account_id_for_upstream_log(headers)
+    if privacy_policy.redacts_sensitive_details:
+        error_code = "upstream_error" if error_code is not None else None
+        error_message = "Upstream request failed" if error_message is not None else None
+        payload_object = None
+        failure_detail = None
+        failure_exception_type = None
 
     logger.log(
         level,
@@ -994,7 +1017,7 @@ def _maybe_log_upstream_request_complete(
         kind,
         method,
         _summarize_upstream_target(url),
-        _account_id_for_upstream_log(headers),
+        account_id,
         status_code,
         int((time.monotonic() - started_at) * 1000),
         error_code,
@@ -4240,11 +4263,15 @@ async def codex_control_request(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")
+    effective_privacy_policy = (
+        CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME if normalized_path == "realtime/calls" else privacy_policy
+    )
     upstream_path = normalized_path if normalized_path.startswith("wham/") else f"codex/{normalized_path}"
     url = f"{upstream_base}/{upstream_path}"
     request_method = method.upper()
@@ -4289,7 +4316,8 @@ async def codex_control_request(
     error_code: str | None = None
     error_message: str | None = None
     payload_summary: dict[str, JsonValue] | None = None
-    if payload and content_type and "json" in content_type.lower():
+    sensitive_realtime_payload = effective_privacy_policy.redacts_sensitive_details
+    if not sensitive_realtime_payload and payload and content_type and "json" in content_type.lower():
         with contextlib.suppress(Exception):
             decoded = json.loads(payload)
             if isinstance(decoded, dict):
@@ -4299,10 +4327,17 @@ async def codex_control_request(
         url=url,
         headers=upstream_headers,
         method=request_method,
-        payload_summary=_summarize_json_payload(payload_summary or {}),
-        payload_json=payload.decode("utf-8", errors="replace")
-        if payload is not None and "upstream_payload" in settings.trace_channels
-        else None,
+        payload_summary=(
+            "sensitive realtime payload redacted"
+            if sensitive_realtime_payload
+            else _summarize_json_payload(payload_summary or {})
+        ),
+        payload_json=(
+            payload.decode("utf-8", errors="replace")
+            if not sensitive_realtime_payload and payload is not None and "upstream_payload" in settings.trace_channels
+            else None
+        ),
+        privacy_policy=effective_privacy_policy,
     )
     try:
         if route is not None:
@@ -4419,6 +4454,7 @@ async def codex_control_request(
                 status_code=status_code,
                 error_code=error_code,
                 error_message=error_message,
+                privacy_policy=effective_privacy_policy,
             )
         finally:
             if lease is not None:

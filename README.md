@@ -266,6 +266,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/mhooooo"><img src="https://avatars.githubusercontent.com/u/142386428?v=4?s=100" width="100px;" alt="mhooooo"/><br /><sub><b>mhooooo</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mhooooo" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mhooooo" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/crowscc"><img src="https://avatars.githubusercontent.com/u/17800561?v=4?s=100" width="100px;" alt="crowscc"/><br /><sub><b>crowscc</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=crowscc" title="Code">💻</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/BrenticusMaximus"><img src="https://avatars.githubusercontent.com/u/32489248?v=4?s=100" width="100px;" alt="BrenticusMaximus"/><br /><sub><b>BrenticusMaximus</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=BrenticusMaximus" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=BrenticusMaximus" title="Tests">⚠️</a></td>
+    </tr>
   </tbody>
 </table>
 

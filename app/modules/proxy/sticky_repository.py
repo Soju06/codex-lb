@@ -24,7 +24,10 @@ from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessi
 # bind parameters, which this chunk size also respects.
 _DELETE_ENTRIES_CHUNK_SIZE = 250
 
-RESERVED_STICKY_SESSION_KEY_PREFIX = "\n"
+# Only the Live-call ownership namespace is reserved. Other LF-prefixed keys
+# (e.g. the pre-existing "\ncodex-lb-affinity-v1" selection affinities) remain
+# ordinary operator-manageable sessions.
+RESERVED_STICKY_SESSION_KEY_PREFIX = "\ncodex_live_call:"
 
 
 def is_reserved_sticky_session_key(key: str) -> bool:

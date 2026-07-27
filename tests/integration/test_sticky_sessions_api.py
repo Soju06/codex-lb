@@ -330,11 +330,29 @@ async def test_sticky_sessions_api_hides_and_protects_reserved_live_bindings(asy
         kind=StickySessionKind.CODEX_SESSION,
         updated_at_offset_seconds=5,
     )
+    # An LF-prefixed key outside the Live-call namespace (the pre-existing
+    # selection-affinity shape) is NOT reserved: it stays operator-visible
+    # and operator-deletable.
+    affinity_key = "\ncodex-lb-affinity-v1:regression"
+    await _insert_sticky_session(
+        key=affinity_key,
+        account_id=accounts[1].id,
+        kind=StickySessionKind.CODEX_SESSION,
+        updated_at_offset_seconds=5,
+    )
 
     listed = await async_client.get("/api/sticky-sessions", params={"kind": "codex_session"})
     assert listed.status_code == 200
-    assert listed.json()["total"] == 1
-    assert [entry["key"] for entry in listed.json()["entries"]] == ["visible-codex-session"]
+    assert listed.json()["total"] == 2
+    assert {entry["key"] for entry in listed.json()["entries"]} == {"visible-codex-session", affinity_key}
+
+    affinity_delete = await async_client.post(
+        "/api/sticky-sessions/delete",
+        json={"sessions": [{"key": affinity_key, "kind": "codex_session"}]},
+    )
+    assert affinity_delete.status_code == 200
+    assert affinity_delete.json()["deletedCount"] == 1
+    assert affinity_delete.json()["failed"] == []
 
     single_delete = await async_client.delete(
         f"/api/sticky-sessions/codex_session/{quote(reserved_keys['single-delete'], safe='')}"

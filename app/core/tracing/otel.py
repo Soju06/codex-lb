@@ -94,10 +94,30 @@ def _filter_aiohttp_trace_url(url: str | URL) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, redacted_path, "", ""))
 
 
+def _instrument_fastapi(app: FastAPI | None) -> None:
+    try:
+        instrumentation_module = import_module("opentelemetry.instrumentation.fastapi")
+        FastAPIInstrumentor = getattr(instrumentation_module, "FastAPIInstrumentor")
+
+        if app is not None:
+            FastAPIInstrumentor.instrument_app(app, server_request_hook=_redact_live_server_span)
+        else:
+            FastAPIInstrumentor().instrument(server_request_hook=_redact_live_server_span)
+    except ImportError:
+        pass
+    except Exception:
+        logger.exception("Failed to auto-instrument FastAPI")
+
+
 def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: FastAPI | None = None) -> bool:
     global _otel_initialized
 
     if _otel_initialized:
+        # Process-global providers are already set up, but a factory-created
+        # FastAPI instance (e.g. ``uvicorn --factory``) still needs its own
+        # per-app instrumentation.
+        if app is not None:
+            _instrument_fastapi(app)
         return True
 
     try:
@@ -124,18 +144,7 @@ def init_tracing(service_name: str = "codex-lb", endpoint: str = "", app: FastAP
 
         trace.set_tracer_provider(provider)
 
-        try:
-            instrumentation_module = import_module("opentelemetry.instrumentation.fastapi")
-            FastAPIInstrumentor = getattr(instrumentation_module, "FastAPIInstrumentor")
-
-            if app is not None:
-                FastAPIInstrumentor.instrument_app(app, server_request_hook=_redact_live_server_span)
-            else:
-                FastAPIInstrumentor().instrument(server_request_hook=_redact_live_server_span)
-        except ImportError:
-            pass
-        except Exception:
-            logger.exception("Failed to auto-instrument FastAPI")
+        _instrument_fastapi(app)
 
         try:
             instrumentation_module = import_module("opentelemetry.instrumentation.aiohttp_client")

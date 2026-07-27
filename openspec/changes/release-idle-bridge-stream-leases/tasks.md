@@ -15,6 +15,8 @@
 - [x] 2.5 Pass the turn's usage-budget token estimate into the reacquired lease, matching initial selection and reconnect, so capacity-weighted routing pressure sees reused-session turns.
 - [x] 2.6 Retire a session closed during prewarm when failed-submit cleanup removes its final admission waiter.
 - [x] 2.7 Defer cancellation until prewarm-failure cleanup removes the admission waiter and settles the lease.
+- [x] 2.8 Cover the final lease check with failed-submit cleanup so exceptions cannot leak admission waiters.
+- [x] 2.9 Serialize reconnect lease replacement with idle-session reacquisition and release the losing lease.
 
 ## 3. Tests
 
@@ -25,3 +27,5 @@
 - [x] 3.5 Reacquisition passes the turn's usage-budget token estimate to the lease.
 - [x] 3.6 Prewarm failure after reader-side closure retires the session and releases its stream lease.
 - [x] 3.7 Repeated cancellation during prewarm cannot interrupt waiter and lease cleanup.
+- [x] 3.8 Final lease-check failure removes the admission waiter and releases the idle lease.
+- [x] 3.9 Reconnect racing reacquisition retains one lease and releases the other.

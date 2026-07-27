@@ -14,7 +14,7 @@ import anyio
 import pytest
 
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
 from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyRequestUsageBudget
@@ -35,7 +35,7 @@ def _make_bridge_session(*, queued_request_count: int = 0) -> proxy_service._HTT
         ),
         request_model="gpt-5.2",
         account=cast(Any, SimpleNamespace(id="acc-bridge", status=AccountStatus.ACTIVE, plan_type="plus")),
-        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),
@@ -270,6 +270,64 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
     assert session.account_lease is None
     assert session.queued_request_count == 0
     assert session.admission_waiter_count == 0
+
+
+@pytest.mark.asyncio
+async def test_final_lease_check_failure_removes_admission_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    lease = _make_lease("l-final-check")
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    ensure_calls = 0
+
+    async def ensure_then_deny(*_args: object, **_kwargs: object) -> None:
+        nonlocal ensure_calls
+        ensure_calls += 1
+        if ensure_calls == 1:
+            session.account_lease = lease
+            return
+        raise ProxyResponseError(
+            429,
+            openai_error(
+                "account_stream_cap",
+                "Account stream capacity is exhausted; wait for active streams to finish.",
+                error_type="rate_limit_error",
+            ),
+        )
+
+    monkeypatch.setattr(service, "_ensure_http_bridge_session_stream_lease_locked", ensure_then_deny)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-final-lease-check",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_stream_cap"
+    assert ensure_calls == 2
+    assert session.admission_waiter_count == 0
+    assert session.queued_request_count == 0
+    assert session.account_lease is None
+    release_account_lease.assert_awaited_once_with(lease)
 
 
 @pytest.mark.asyncio

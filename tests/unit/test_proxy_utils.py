@@ -33166,6 +33166,103 @@ async def test_reconnect_http_bridge_session_reuses_same_account_stream_lease(mo
 
 
 @pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_serializes_lease_swap_with_reacquisition(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_reconnect_racing_reacquire")
+    allow_old_upstream_close = asyncio.Event()
+    reconnect_before_swap = asyncio.Event()
+
+    async def close_old_upstream(*_args: object, **_kwargs: object) -> None:
+        reconnect_before_swap.set()
+        await allow_old_upstream_close.wait()
+
+    old_upstream = SimpleNamespace(close=close_old_upstream)
+    new_upstream = SimpleNamespace(response_header=lambda _name: None)
+    reconnect_lease = proxy_service.AccountLease(
+        lease_id="lease_reconnect_winner",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    reacquired_lease = proxy_service.AccountLease(
+        lease_id="lease_idle_reacquire_loser",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=2.0,
+    )
+    allow_reacquire = asyncio.Event()
+    reacquire_started = asyncio.Event()
+
+    async def acquire_account_lease(*_args: object, **_kwargs: object) -> proxy_service.AccountLease:
+        reacquire_started.set()
+        await allow_reacquire.wait()
+        return reacquired_lease
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(
+            return_value=AccountSelection(
+                account=account,
+                error_message=None,
+                lease=reconnect_lease,
+            )
+        ),
+    )
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=new_upstream))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_reconnect_racing_reacquire",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-key"),
+        request_model="gpt-5.5",
+        account=account,
+        upstream=old_upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    reconnect_task = asyncio.create_task(service._reconnect_http_bridge_session(session, request_state=request_state))
+    await reconnect_before_swap.wait()
+
+    async def reacquire_under_pending_lock() -> None:
+        async with session.pending_lock:
+            await service._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
+
+    reacquire_task = asyncio.create_task(reacquire_under_pending_lock())
+    await reacquire_started.wait()
+    allow_old_upstream_close.set()
+    await asyncio.sleep(0)
+    allow_reacquire.set()
+    await asyncio.gather(reconnect_task, reacquire_task)
+
+    assert session.account_lease is reconnect_lease
+    assert session.upstream is new_upstream
+    release_account_lease.assert_awaited_once_with(reacquired_lease)
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_security_rebind_clears_previous_response_state(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

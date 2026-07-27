@@ -693,33 +693,45 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             await _await_task_deferring_cancellation(cleanup_task)
             raise
-        async with session.pending_lock:
-            if session.queued_request_count >= queue_limit:
-                session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
-                admission_waiter_registered = False
+        try:
+            async with session.pending_lock:
+                if session.queued_request_count >= queue_limit:
+                    _log_http_bridge_event(
+                        "bridge_queue_full",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        pending_count=session.queued_request_count,
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
+                    raise ProxyResponseError(
+                        429,
+                        openai_error(
+                            "bridge_queue_full",
+                            "HTTP responses session bridge queue is full",
+                            error_type="rate_limit_error",
+                        ),
+                    )
+                await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
+                session.queued_request_count += 1
                 if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                     session.unanchored_reservation_id = None
-                _log_http_bridge_event(
-                    "bridge_queue_full",
-                    session.key,
-                    account_id=session.account.id,
-                    model=session.request_model,
-                    pending_count=session.queued_request_count,
-                    cache_key_family=session.key.affinity_kind,
-                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                )
-                raise ProxyResponseError(
-                    429,
-                    openai_error(
-                        "bridge_queue_full",
-                        "HTTP responses session bridge queue is full",
-                        error_type="rate_limit_error",
-                    ),
-                )
-            await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
-            session.queued_request_count += 1
+        except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
+            cleanup_task = asyncio.create_task(
+                self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=False,
+                    request_enqueued=False,
+                    counted_in_queue=False,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
+            )
+            await _await_task_deferring_cancellation(cleanup_task)
+            raise
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
             text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)

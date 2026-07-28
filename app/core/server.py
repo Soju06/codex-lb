@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import FrameType
+from typing import NoReturn
 
 import uvicorn
 
@@ -14,6 +17,14 @@ from app.core import shutdown as shutdown_state
 logger = logging.getLogger("uvicorn.error")
 
 POST_DRAIN_CLEANUP_TIMEOUT_SECONDS = 25.0
+
+
+def _force_process_exit(signum: int) -> NoReturn:
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+    finally:
+        os._exit(128 + signum)
 
 
 def _finish_abandoned_uvicorn_shutdown(
@@ -107,9 +118,11 @@ class GracefulDrainServer(uvicorn.Server):
                 )
             )
             logger.warning(
-                "Shared drain deadline plus %.1fs Uvicorn cleanup reserve exhausted; continuing process shutdown",
+                "Shared drain deadline plus %.1fs Uvicorn cleanup reserve exhausted; forcing process exit",
                 self._post_drain_cleanup_timeout_seconds,
             )
+            exit_signal = self._captured_signals[-1] if self._captured_signals else signal.SIGTERM
+            _force_process_exit(exit_signal)
         except asyncio.CancelledError:
             restore_timeout_on_return = False
             shutdown_task.cancel()

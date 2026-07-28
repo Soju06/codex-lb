@@ -252,13 +252,26 @@ async def test_shutdown_preserves_subsecond_uvicorn_task_budget(
     assert observed_shutdown_wait_timeout == pytest.approx(0.875)
 
 
+@pytest.mark.parametrize(
+    ("captured_signal", "expected_exit_signal"),
+    [
+        (None, signal.SIGTERM),
+        (signal.SIGINT, signal.SIGINT),
+    ],
+)
 @pytest.mark.asyncio
-async def test_shutdown_stops_waiting_when_uvicorn_lifespan_absorbs_cancellation(
+async def test_shutdown_forces_process_exit_when_uvicorn_cleanup_absorbs_cancellation(
     monkeypatch: pytest.MonkeyPatch,
+    captured_signal: int | None,
+    expected_exit_signal: int,
 ) -> None:
+    class ForcedProcessExit(Exception):
+        pass
+
     base_started = asyncio.Event()
     base_cancelled = asyncio.Event()
     release_base = asyncio.Event()
+    forced_exit_signals: list[int] = []
     warnings: list[str] = []
 
     async def blocked_base_shutdown(
@@ -273,7 +286,12 @@ async def test_shutdown_stops_waiting_when_uvicorn_lifespan_absorbs_cancellation
             base_cancelled.set()
             await release_base.wait()
 
+    def force_process_exit(signum: int) -> None:
+        forced_exit_signals.append(signum)
+        raise ForcedProcessExit
+
     monkeypatch.setattr(uvicorn.Server, "shutdown", blocked_base_shutdown)
+    monkeypatch.setattr("app.core.server._force_process_exit", force_process_exit)
     monkeypatch.setattr(
         "app.core.server.logger.warning",
         lambda message, *args: warnings.append(message % args),
@@ -282,8 +300,11 @@ async def test_shutdown_stops_waiting_when_uvicorn_lifespan_absorbs_cancellation
         drain_timeout_seconds=0,
         post_drain_cleanup_timeout_seconds=0.01,
     )
+    if captured_signal is not None:
+        server._captured_signals.append(captured_signal)
 
-    await asyncio.wait_for(server.shutdown(), timeout=1)
+    with pytest.raises(ForcedProcessExit):
+        await asyncio.wait_for(server.shutdown(), timeout=1)
     await asyncio.wait_for(base_cancelled.wait(), timeout=1)
     shutdown_tasks = [
         task
@@ -298,7 +319,8 @@ async def test_shutdown_stops_waiting_when_uvicorn_lifespan_absorbs_cancellation
     await asyncio.sleep(0)
 
     assert base_started.is_set()
-    assert any("continuing process shutdown" in warning for warning in warnings)
+    assert forced_exit_signals == [expected_exit_signal]
+    assert any("forcing process exit" in warning for warning in warnings)
     assert server.config.timeout_graceful_shutdown is None
 
 

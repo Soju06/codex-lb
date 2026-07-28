@@ -31,7 +31,9 @@ are rejected. An admitted Responses turn may finish terminal delivery,
 request-log persistence, and API-key settlement; an idle admitted connection
 closes promptly. Kubernetes' `terminationGracePeriodSeconds` starts before the
 preStop helper, so it must also reserve time for helper startup and bounded
-post-drain process cleanup.
+post-drain process cleanup. If that cleanup ignores cancellation at its bound,
+the launcher forces the captured signal (or SIGTERM for programmatic shutdown)
+instead of returning an unbounded task to asyncio runner teardown.
 
 The defaults satisfy the chart's timing guards. When tuning them, keep
 `preStopSleepSeconds <= config.shutdownDrainTimeoutSeconds` and

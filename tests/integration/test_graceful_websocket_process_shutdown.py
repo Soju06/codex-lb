@@ -162,6 +162,20 @@ async def test_sigterm_exits_when_lifespan_absorbs_cleanup_cancellation() -> Non
 
 
 @pytest.mark.asyncio
+async def test_sigint_exits_when_lifespan_absorbs_cleanup_cancellation() -> None:
+    async with _run_server(
+        mode="cleanup_stuck",
+        drain_timeout_seconds=0.1,
+        post_drain_cleanup_timeout_seconds=0.1,
+    ) as server:
+        started_at = time.monotonic()
+        server.process.send_signal(signal.SIGINT)
+
+        assert await asyncio.wait_for(server.process.wait(), timeout=2) == -signal.SIGINT
+        assert time.monotonic() - started_at < 1.5
+
+
+@pytest.mark.asyncio
 async def test_prestop_commits_deadline_before_sigterm_and_cannot_reopen() -> None:
     async with _run_server(
         mode="complete",

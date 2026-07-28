@@ -10,7 +10,7 @@ Graceful shutdown currently excludes WebSocket scopes from admission and in-flig
 - Put the barrier before Uvicorn closes connections on every shipped or documented server launch path, preserve CLI startup/interrupt semantics, and keep the embedded metrics server from taking process-signal ownership.
 - Declare the Uvicorn 0.47 API floor used by the owned launcher.
 - Make Helm preStop wait on routing dwell plus `in_flight`, bounded by the same application deadline, with render-time timing guards.
-- Add focused admission, cancellation, persistence, Helm, and real SIGTERM lifecycle regression coverage.
+- Add focused admission, cancellation, persistence, Helm, and real SIGTERM/SIGINT lifecycle regression coverage.
 
 ## Capabilities
 

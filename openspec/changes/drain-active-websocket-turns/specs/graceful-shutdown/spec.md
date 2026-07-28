@@ -191,7 +191,7 @@ After an upstream message is received, processing and downstream delivery MUST b
 
 ### Requirement: Owned launchers preserve shutdown semantics
 
-The project CLI MUST use the pre-connection drain server with exactly one worker per process while preserving Uvicorn's startup-failure exit status and clean KeyboardInterrupt behavior. Every supported server launch path shipped or documented by the project MUST delegate to that owned CLI rather than invoking raw FastAPI or Uvicorn startup. Development Compose source synchronization MUST restart the owned server instead of relying on Uvicorn's incompatible reload launcher. Ambient `WEB_CONCURRENCY` MUST NOT create an unsupported multiprocess launch. The project MUST declare a Uvicorn version whose launcher API includes `Config.load_app()`. An embedded metrics server MUST NOT replace the main server's process signal handlers. During SIGTERM shutdown, after the shared application drain deadline, the owned server MUST stop awaiting Uvicorn connection and lifespan cleanup after 25 seconds so Uvicorn can restore and replay the captured process signal.
+The project CLI MUST use the pre-connection drain server with exactly one worker per process while preserving Uvicorn's startup-failure exit status and clean KeyboardInterrupt behavior. Every supported server launch path shipped or documented by the project MUST delegate to that owned CLI rather than invoking raw FastAPI or Uvicorn startup. Development Compose source synchronization MUST restart the owned server instead of relying on Uvicorn's incompatible reload launcher. Ambient `WEB_CONCURRENCY` MUST NOT create an unsupported multiprocess launch. The project MUST declare a Uvicorn version whose launcher API includes `Config.load_app()`. An embedded metrics server MUST NOT replace the main server's process signal handlers. During shutdown, after the shared application drain deadline, the owned server MUST stop awaiting Uvicorn connection and lifespan cleanup after 25 seconds. If that bound expires, it MUST terminate with the most recently captured shutdown signal, or SIGTERM when shutdown was programmatic, rather than return a cancellation-resistant cleanup task to asyncio runner teardown.
 
 #### Scenario: Lifespan startup fails
 
@@ -224,5 +224,6 @@ The project CLI MUST use the pre-connection drain server with exactly one worker
 
 - **WHEN** Uvicorn connection or lifespan cleanup remains blocked after the shared drain phase
 - **THEN** the owned launcher cancels and stops waiting after 25 seconds
-- **AND** Uvicorn restores and replays the captured SIGTERM
+- **AND** terminates with the most recently captured signal, or SIGTERM when no signal initiated shutdown
+- **AND** does not leave cancellation-resistant cleanup registered for unbounded asyncio runner teardown
 - **AND** Helm termination grace reserves two seconds for failed preStop start plus 30 seconds after the application deadline, leaving five seconds after the cleanup bound for process exit before SIGKILL

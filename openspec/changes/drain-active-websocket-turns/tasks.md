@@ -7,7 +7,7 @@
 ## 2. Regression coverage
 
 - [x] 2.1 Add focused unit coverage for admission races, signal-reentrant deadline reuse, embedded lifecycle restart, clean-close/send-failure ownership, cross-account create-lease transfer, atomic pending-batch ownership, connection-lease partial failure, idle close, terminal delivery, real logging/settlement, cancel-once/close/bounded-await cleanup, and preStop behavior.
-- [x] 2.2 Add and run real POSIX SIGTERM/Uvicorn/WebSocket process coverage for terminal-before-close, late admission, and bounded timeout.
+- [x] 2.2 Add and run real POSIX SIGTERM/SIGINT/Uvicorn/WebSocket process coverage for terminal-before-close, late admission, and bounded timeout.
 - [ ] 2.3 Render the Helm lifecycle hook and both timing-guard failures without mutating or downloading dependencies.
 
 ## 3. Verification

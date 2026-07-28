@@ -109,8 +109,10 @@ only that hard grace and remains outside the application deadline. The chart req
 `terminationGracePeriodSeconds` to cover the application timeout plus a two-second failed
 preStop-start fallback and a fixed 30-second post-drain reserve. The launcher stops awaiting
 Uvicorn connection and lifespan cleanup 25 seconds after the shared application deadline, leaving
-five additional seconds after helper start for Uvicorn's restored SIGTERM and ordinary process
-exit; the 65-second default adds three seconds of launch headroom above the enforced minimum.
+five additional seconds after helper start for captured-signal delivery and ordinary process exit.
+If cleanup ignores cancellation, the launcher forces that captured signal, or SIGTERM for a
+programmatic shutdown, instead of returning an unbounded task to asyncio runner teardown. The
+65-second default adds three seconds of launch headroom above the enforced minimum.
 
 ## Known limitations (triaged follow-ups)
 

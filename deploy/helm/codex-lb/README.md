@@ -465,7 +465,7 @@ terminationGracePeriodSeconds (65s) bounds preStop, SIGTERM, and final cleanup
    - Starts before the preStop helper process and covers helper launch, preStop, SIGTERM, and final process cleanup before SIGKILL
    - Must be ≥ `config.shutdownDrainTimeoutSeconds + 32`
    - After the helper starts, the extra two seconds cover a failed local drain-start request before direct SIGTERM starts the application budget
-   - After the application deadline, the launcher stops awaiting Uvicorn connection or lifespan cleanup after a further 25 seconds; Uvicorn then restores and replays SIGTERM, while the remaining five seconds cover ordinary process exit
+   - After the application deadline, the launcher stops awaiting Uvicorn connection or lifespan cleanup after a further 25 seconds; if cleanup remains cancellation-resistant, it forces the captured signal (or SIGTERM for programmatic shutdown), while the remaining five seconds cover signal delivery and ordinary process exit
    - Kubelet's exec/Python launch latency is outside the application's control and consumes only this hard grace, not the application budget. Production overrides should retain headroom above the minimum; the 65-second default includes three additional seconds
    - This post-drain phase is not a second request-drain period
 

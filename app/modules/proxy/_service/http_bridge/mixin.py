@@ -1633,7 +1633,6 @@ class _HTTPBridgeMixin(
                 )
                 sessions_to_close.append(session)
         return sessions_to_close
-
     async def _close_http_bridge_session(
         self,
         session: "_HTTPBridgeSession",
@@ -2372,9 +2371,10 @@ class _HTTPBridgeMixin(
                 logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
             session.closed = True
             if selected_account_lease is not session.account_lease:
-                old_lease, session.account_lease = session.account_lease, None
+                old_lease = session.account_lease
                 if old_lease is not None:
                     await self._load_balancer.release_account_lease(old_lease)
+                    session.account_lease = None
             session.account_lease = selected_account_lease
             session.account, session.headers, session.upstream = account, connect_headers, upstream
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission

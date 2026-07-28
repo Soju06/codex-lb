@@ -8,9 +8,9 @@ python oauth sqlalchemy dashboard load-balancer openai rate-limit api-proxy code
 
 # codex-lb
 
-**English** | [简体中文](./README.zh-CN.md)
-
 ![codex-lb](docs/screenshots/banner.jpg)
+
+**English** | [简体中文](./README.zh-CN.md)
 
 Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage API keys, view everything in a dashboard.
 

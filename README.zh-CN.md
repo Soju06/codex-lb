@@ -8,9 +8,9 @@ python oauth sqlalchemy dashboard load-balancer openai rate-limit api-proxy code
 
 # codex-lb
 
-[English](./README.md) | **简体中文**
-
 ![codex-lb](docs/screenshots/banner.jpg)
+
+[English](./README.md) | **简体中文**
 
 > **文档站点（英文，权威版本）**: <https://soju06.github.io/codex-lb/> — 本页内容可能滞后，最新使用说明以英文文档站点为准。
 

@@ -301,6 +301,9 @@ class _HTTPBridgeRetryCircuitMixin:
             state = self._http_bridge_retry_circuits.pop(session.key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
             self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+            expected_updated_at_epoch = (
+                state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else 0.0
+            )
         try:
             # Clearing is idempotent and must be attempted even when the
             # preceding lookup failed; a successful request should settle
@@ -309,6 +312,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
+                expected_updated_at_epoch=expected_updated_at_epoch,
             )
         except Exception:
             logger.warning(

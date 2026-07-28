@@ -349,15 +349,19 @@ class DurableBridgeRepository:
         session_key_kind: str,
         session_key_value: str,
         api_key_scope: str,
+        expected_updated_at_epoch: float | None = None,
     ) -> None:
+        conditions = [
+            HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+            HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+            HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+        ]
+        if expected_updated_at_epoch is not None:
+            conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
         async with sqlite_writer_section():
             await self._session.execute(
                 update(HttpBridgeRetryCircuit)
-                .where(
-                    HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
-                    HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
-                    HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
-                )
+                .where(*conditions)
                 .values(
                     consecutive_failures=0,
                     cooldown_until_epoch=0.0,

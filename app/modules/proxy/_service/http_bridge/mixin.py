@@ -249,6 +249,7 @@ class _HTTPBridgeMixin(
             and (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
+                or task.get_name().startswith("cancelled-task-cleanup-")
             )
         ]
         if not tasks:
@@ -1655,7 +1656,7 @@ class _HTTPBridgeMixin(
             if upstream_reader is asyncio.current_task():
                 session.upstream_reader = None
             else:
-                await _await_cancelled_task(upstream_reader, label="http bridge upstream reader")
+                await _await_cancelled_task(upstream_reader, label="http bridge upstream reader", cleanup_tasks=self._background_cleanup_tasks)
                 if session.upstream_reader is upstream_reader:
                     session.upstream_reader = None
         try:
@@ -1997,7 +1998,7 @@ class _HTTPBridgeMixin(
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 try:
-                    cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
+                    cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader", cleanup_tasks=self._background_cleanup_tasks)
                 except BaseException:
                     session.closed = True
                     _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)

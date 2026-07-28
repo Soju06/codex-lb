@@ -473,7 +473,13 @@ async def _cancel_http_bridge_reader_child(task: asyncio.Task[Any] | None, *, la
             logger.debug("HTTP bridge reader child already failed during cleanup label=%s", label, exc_info=True)
         return True
     try:
-        return bool(await _await_cancelled_task(task, label=label))
+        return bool(
+            await _await_cancelled_task(
+                task,
+                label=label,
+                cleanup_tasks=self._background_cleanup_tasks,
+            )
+        )
     except Exception:
         logger.debug("Failed to cancel HTTP bridge reader child label=%s", label, exc_info=True)
         return task.done()

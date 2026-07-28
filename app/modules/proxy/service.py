@@ -783,16 +783,15 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
-
 async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
     await asyncio.gather(task, return_exceptions=True)
-
 
 async def _await_cancelled_task(
     task: asyncio.Task[_TaskResultT],
     *,
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
+    cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
     caller_task = asyncio.current_task()
     task.cancel()
@@ -804,10 +803,12 @@ async def _await_cancelled_task(
         return True
     except TimeoutError:
         logger.warning("Timed out waiting for %s cancellation", label)
-        asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+        cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+        if cleanup_tasks is not None:
+            cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(cleanup_tasks.discard)
         return False
     return True
-
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
@@ -919,7 +920,6 @@ def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
     if value is None:
         return default
     return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
-
 
 class ProxyService(
     _ApiKeyUsageMixin,

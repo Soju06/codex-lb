@@ -8812,11 +8812,26 @@ async def test_await_cancelled_task_defers_stubborn_child_cleanup() -> None:
             await release_child.wait()
 
     child = asyncio.create_task(stubborn_child())
-    assert await proxy_service._await_cancelled_task(child, timeout_seconds=0.001, label="stubborn cleanup") is False
+    cleanup_tasks: set[asyncio.Task[None]] = set()
+    assert (
+        await proxy_service._await_cancelled_task(
+            child,
+            timeout_seconds=0.001,
+            label="stubborn cleanup",
+            cleanup_tasks=cleanup_tasks,
+        )
+        is False
+    )
+    assert cleanup_tasks
     await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
 
     release_child.set()
     await asyncio.wait_for(child, timeout=1.0)
+    for _ in range(10):
+        if not cleanup_tasks:
+            break
+        await asyncio.sleep(0)
+    assert cleanup_tasks == set()
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import aiohttp
 import anyio
-
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -209,13 +208,11 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
 )
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, AccountLease
-
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
-
 
 class _HTTPBridgeMixin(
     _HTTPBridgeStreamingMixin,
@@ -470,7 +467,6 @@ class _HTTPBridgeMixin(
                 ("requested continuity owner", preferred_account_id),
                 ("local account-neutral recovery", session.account.id),
             )
-
         while True:
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
                 kind=key.affinity_kind,
@@ -2321,6 +2317,10 @@ class _HTTPBridgeMixin(
                 raise
             except asyncio.CancelledError:
                 session.closed = True
+                await release_selected_account_lease()
+                complete_failed_handoff()
+                raise
+            except BaseException:
                 await release_selected_account_lease()
                 complete_failed_handoff()
                 raise

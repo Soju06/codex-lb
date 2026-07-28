@@ -87,7 +87,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
                 self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
                 try:
-                    await self._durable_bridge.clear_retry_circuit(
+                    await self._durable_bridge.purge_retry_circuit(
                         session_key_kind=session.key.affinity_kind,
                         session_key_value=session.key.affinity_key,
                         api_key_id=session.key.api_key_id,
@@ -146,6 +146,12 @@ class _HTTPBridgeRetryCircuitMixin:
                 base_updated_at_epoch=state.persisted_updated_at_epoch,
                 failure_threshold=threshold,
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
+                base_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS),
+                max_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS),
+                clean_close_max_backoff_seconds=max(
+                    0.001,
+                    _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS,
+                ),
             )
             if persisted is not None:
                 persisted_cooldown_until = now_monotonic + max(

@@ -19881,6 +19881,34 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-expired-circuit")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=(
+                    time.time()
+                    - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                    - 1.0
+                ),
+            )
+        ),
+        purge_retry_circuit=AsyncMock(),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    service._durable_bridge.purge_retry_circuit.assert_awaited_once_with(
+        session_key_kind=hard_session.key.affinity_kind,
+        session_key_value=hard_session.key.affinity_key,
+        api_key_id=hard_session.key.api_key_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_refreshes_persisted_state_after_initial_miss() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-replica-refresh-circuit")

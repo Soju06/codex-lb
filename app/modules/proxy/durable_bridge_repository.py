@@ -192,6 +192,9 @@ class DurableBridgeRepository:
         base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
         conflict_cooldown_until_epoch: float | None = None,
+        base_backoff_seconds: float = 60.0,
+        max_backoff_seconds: float = 600.0,
+        clean_close_max_backoff_seconds: float = 30.0,
     ) -> None:
         values = {
             "session_key_kind": session_key_kind,
@@ -209,6 +212,24 @@ class DurableBridgeRepository:
             else max(0.0, cooldown_until_epoch)
         )
         reset_failure_cooldown = cooldown_floor if threshold <= 1 else 0.0
+        base_backoff = max(0.001, base_backoff_seconds)
+        max_backoff = max(base_backoff, max_backoff_seconds)
+        clean_close_max_backoff = max(0.001, clean_close_max_backoff_seconds)
+
+        def cooldown_for_failure_count(failure_count: object, last_detail: object) -> object:
+            regular_cooldown = case(
+                (failure_count < threshold, 0.0),
+                (failure_count == threshold, base_backoff),
+                (failure_count == threshold + 1, min(max_backoff, base_backoff * 2.0)),
+                (failure_count == threshold + 2, min(max_backoff, base_backoff * 4.0)),
+                else_=max_backoff,
+            )
+            clean_cooldown = case(
+                (failure_count < threshold, 0.0),
+                else_=clean_close_max_backoff,
+            )
+            return case((last_detail == "clean_close", clean_cooldown), else_=regular_cooldown)
+
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
@@ -226,6 +247,17 @@ class DurableBridgeRepository:
                     excluded.consecutive_failures,
                 ),
             )
+            merged_updated_at = func.greatest(
+                HttpBridgeRetryCircuit.updated_at_epoch,
+                excluded.updated_at_epoch,
+            )
+            merged_cooldown = case(
+                (conflict_failures >= threshold, func.greatest(
+                    cooldown_floor,
+                    merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                )),
+                else_=0.0,
+            )
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
                     HttpBridgeRetryCircuit.session_key_kind,
@@ -240,7 +272,7 @@ class DurableBridgeRepository:
                             else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                         ),
                         excluded.cooldown_until_epoch,
-                        case((conflict_failures >= threshold, cooldown_floor), else_=0.0),
+                        merged_cooldown,
                     ),
                     "last_detail": excluded.last_detail,
                     "updated_at_epoch": func.greatest(
@@ -265,6 +297,17 @@ class DurableBridgeRepository:
                     excluded.consecutive_failures,
                 ),
             )
+            merged_updated_at = func.max(
+                HttpBridgeRetryCircuit.updated_at_epoch,
+                excluded.updated_at_epoch,
+            )
+            merged_cooldown = case(
+                (conflict_failures >= threshold, func.max(
+                    cooldown_floor,
+                    merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                )),
+                else_=0.0,
+            )
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
                     HttpBridgeRetryCircuit.session_key_kind,
@@ -279,7 +322,7 @@ class DurableBridgeRepository:
                             else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                         ),
                         excluded.cooldown_until_epoch,
-                        case((conflict_failures >= threshold, cooldown_floor), else_=0.0),
+                        merged_cooldown,
                     ),
                     "last_detail": excluded.last_detail,
                     "updated_at_epoch": func.max(
@@ -314,6 +357,23 @@ class DurableBridgeRepository:
                     cooldown_until_epoch=0.0,
                     last_detail=None,
                     updated_at_epoch=time.time(),
+                )
+            )
+            await self._session.commit()
+
+    async def purge_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+    ) -> None:
+        async with sqlite_writer_section():
+            await self._session.execute(
+                delete(HttpBridgeRetryCircuit).where(
+                    HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                    HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                    HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
                 )
             )
             await self._session.commit()

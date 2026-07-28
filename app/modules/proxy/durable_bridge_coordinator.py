@@ -222,6 +222,9 @@ class DurableBridgeSessionCoordinator:
         base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
         conflict_cooldown_until_epoch: float | None = None,
+        base_backoff_seconds: float = 60.0,
+        max_backoff_seconds: float = 600.0,
+        clean_close_max_backoff_seconds: float = 30.0,
     ) -> DurableBridgeRetryCircuitSnapshot | None:
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
@@ -236,6 +239,9 @@ class DurableBridgeSessionCoordinator:
                 base_updated_at_epoch=base_updated_at_epoch,
                 failure_threshold=failure_threshold,
                 conflict_cooldown_until_epoch=conflict_cooldown_until_epoch,
+                base_backoff_seconds=base_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
+                clean_close_max_backoff_seconds=clean_close_max_backoff_seconds,
             )
             return await repository.get_retry_circuit(
                 session_key_kind=session_key_kind,
@@ -252,6 +258,20 @@ class DurableBridgeSessionCoordinator:
     ) -> None:
         async with self._session() as session:
             await DurableBridgeRepository(session).delete_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+            )
+
+    async def purge_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+    ) -> None:
+        async with self._session() as session:
+            await DurableBridgeRepository(session).purge_retry_circuit(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),

@@ -660,16 +660,17 @@ def _http_bridge_pending_state_is_stale(
     # Do not require the gate/awaiting flags: retry and reader re-enqueue
     # paths re-register states whose admission flags were already cleared,
     # and leaning on them starves the watchdog entirely (observed prod
-    # wedges 2026-07-20). Likewise do not treat a nonzero event count as
-    # progress: a reattached stream can deliver events whose
-    # response.created was lost (observed events=54, created=None in prod),
-    # and the create gate only releases on response.created — so a missing
-    # created past the deadline is the authoritative wedge signal.
+    # wedges 2026-07-20). A reattached stream can deliver events whose
+    # response.created was lost, so use the most recent upstream event as
+    # the silence clock instead of aging every active stream from its
+    # original gate wait.
     if request_state.response_id is not None:
         return False
     if request_state.latency_response_created_ms is not None:
         return False
     wait_started_at = request_state.response_create_gate_wait_started_at or request_state.started_at
+    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+        wait_started_at = request_state.last_upstream_activity_at
     return max(0.0, now - wait_started_at) >= threshold_seconds
 
 

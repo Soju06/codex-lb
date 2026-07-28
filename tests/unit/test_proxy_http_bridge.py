@@ -1630,10 +1630,10 @@ async def test_response_create_gate_timeout_does_not_retire_active_response_prog
     assert session.closed is False
 
 
-def test_http_bridge_pending_state_with_events_but_no_created_is_stale() -> None:
+def test_http_bridge_pending_state_with_recent_events_but_no_created_is_not_stale() -> None:
     # Reattached streams can deliver events whose response.created was lost
-    # (observed events=54, created=None in prod on 2026-07-20); the create
-    # gate only releases on response.created, so this shape must retire.
+    # (observed events=54, created=None in prod on 2026-07-20). Recent upstream
+    # activity must keep the stream alive while the create gate remains held.
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-events-no-created",
         model="gpt-5.2",
@@ -1646,8 +1646,19 @@ def test_http_bridge_pending_state_with_events_but_no_created_is_stale() -> None
         awaiting_response_created=True,
         latency_first_upstream_event_ms=25,
         response_event_count=54,
+        last_upstream_activity_at=time.monotonic(),
     )
 
+    assert (
+        http_bridge_helpers_module._http_bridge_pending_state_is_stale(
+            request_state,
+            now=time.monotonic(),
+            threshold_seconds=300.0,
+        )
+        is False
+    )
+
+    request_state.last_upstream_activity_at = time.monotonic() - 301.0
     assert (
         http_bridge_helpers_module._http_bridge_pending_state_is_stale(
             request_state,

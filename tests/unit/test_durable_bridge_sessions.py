@@ -2683,11 +2683,12 @@ async def test_durable_bridge_retry_circuit_round_trip(
         session_key_value="sid-retry-circuit",
         api_key_id="key-1",
     )
-    assert (
-        await coordinator.lookup_retry_circuit(
-            session_key_kind="session_header",
-            session_key_value="sid-retry-circuit",
-            api_key_id="key-1",
-        )
-        is None
+    cleared = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
     )
+    assert cleared is not None
+    assert cleared.consecutive_failures == 0
+    assert cleared.cooldown_until_epoch == 0.0
+    assert cleared.last_detail is None

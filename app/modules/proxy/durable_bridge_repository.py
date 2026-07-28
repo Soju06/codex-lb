@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -188,6 +189,7 @@ class DurableBridgeRepository:
         cooldown_until_epoch: float,
         last_detail: str | None,
         updated_at_epoch: float,
+        base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
         conflict_cooldown_until_epoch: float | None = None,
     ) -> None:
@@ -206,13 +208,23 @@ class DurableBridgeRepository:
             if conflict_cooldown_until_epoch is not None
             else max(0.0, cooldown_until_epoch)
         )
+        reset_failure_cooldown = cooldown_floor if threshold <= 1 else 0.0
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_statement = pg_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
-            conflict_failures = func.greatest(
-                HttpBridgeRetryCircuit.consecutive_failures + 1,
-                excluded.consecutive_failures,
+            reset_lineage = and_(
+                HttpBridgeRetryCircuit.consecutive_failures == 0,
+                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
+                HttpBridgeRetryCircuit.last_detail.is_(None),
+                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
+            )
+            conflict_failures = case(
+                (reset_lineage, 1),
+                else_=func.greatest(
+                    HttpBridgeRetryCircuit.consecutive_failures + 1,
+                    excluded.consecutive_failures,
+                ),
             )
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
@@ -223,7 +235,10 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": func.greatest(
-                        HttpBridgeRetryCircuit.cooldown_until_epoch,
+                        case(
+                            (reset_lineage, reset_failure_cooldown),
+                            else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
+                        ),
                         excluded.cooldown_until_epoch,
                         case((conflict_failures >= threshold, cooldown_floor), else_=0.0),
                     ),
@@ -237,9 +252,18 @@ class DurableBridgeRepository:
         elif dialect == "sqlite":
             insert_statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values)
             excluded = insert_statement.excluded
-            conflict_failures = func.max(
-                HttpBridgeRetryCircuit.consecutive_failures + 1,
-                excluded.consecutive_failures,
+            reset_lineage = and_(
+                HttpBridgeRetryCircuit.consecutive_failures == 0,
+                HttpBridgeRetryCircuit.cooldown_until_epoch <= 0,
+                HttpBridgeRetryCircuit.last_detail.is_(None),
+                HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
+            )
+            conflict_failures = case(
+                (reset_lineage, 1),
+                else_=func.max(
+                    HttpBridgeRetryCircuit.consecutive_failures + 1,
+                    excluded.consecutive_failures,
+                ),
             )
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
@@ -250,7 +274,10 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": func.max(
-                        HttpBridgeRetryCircuit.cooldown_until_epoch,
+                        case(
+                            (reset_lineage, reset_failure_cooldown),
+                            else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
+                        ),
                         excluded.cooldown_until_epoch,
                         case((conflict_failures >= threshold, cooldown_floor), else_=0.0),
                     ),
@@ -276,10 +303,17 @@ class DurableBridgeRepository:
     ) -> None:
         async with sqlite_writer_section():
             await self._session.execute(
-                delete(HttpBridgeRetryCircuit).where(
+                update(HttpBridgeRetryCircuit)
+                .where(
                     HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
                     HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
                     HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                )
+                .values(
+                    consecutive_failures=0,
+                    cooldown_until_epoch=0.0,
+                    last_detail=None,
+                    updated_at_epoch=time.time(),
                 )
             )
             await self._session.commit()

@@ -219,6 +219,7 @@ class DurableBridgeSessionCoordinator:
         cooldown_until_epoch: float,
         last_detail: str | None,
         updated_at_epoch: float,
+        base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
         conflict_cooldown_until_epoch: float | None = None,
     ) -> DurableBridgeRetryCircuitSnapshot | None:
@@ -232,6 +233,7 @@ class DurableBridgeSessionCoordinator:
                 cooldown_until_epoch=cooldown_until_epoch,
                 last_detail=last_detail,
                 updated_at_epoch=updated_at_epoch,
+                base_updated_at_epoch=base_updated_at_epoch,
                 failure_threshold=failure_threshold,
                 conflict_cooldown_until_epoch=conflict_cooldown_until_epoch,
             )

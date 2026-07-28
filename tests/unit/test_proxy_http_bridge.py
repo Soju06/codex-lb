@@ -19816,6 +19816,47 @@ async def test_http_bridge_retry_circuit_drops_local_state_after_durable_clear()
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-replica-reset-lineage")
+    reset = SimpleNamespace(
+        consecutive_failures=0,
+        cooldown_until_epoch=0.0,
+        last_detail=None,
+        updated_at_epoch=200.0,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    consecutive_failures=3,
+                    cooldown_until_epoch=time.time() + 60.0,
+                    last_detail="stream_incomplete",
+                    updated_at_epoch=100.0,
+                ),
+                reset,
+            ]
+        ),
+        persist_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=1,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=300.0,
+            )
+        ),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
+
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    assert state.consecutive_failures == 1
+    assert state.persisted_updated_at_epoch == 300.0
+    assert service._durable_bridge.persist_retry_circuit.await_args.kwargs["base_updated_at_epoch"] == 200.0
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_refreshes_conflict_merged_persisted_state() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-conflict-merged-circuit")

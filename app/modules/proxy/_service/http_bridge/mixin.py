@@ -2222,7 +2222,8 @@ class _HTTPBridgeMixin(
                 )
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
-                    await self._load_balancer.release_account_lease(selection.lease)
+                    selected_account_lease = selection.lease
+                    await release_selected_account_lease()
                 record_selected_account_takeover(account.id, required_preferred_account_id)
                 complete_failed_handoff()
                 raise _http_bridge_previous_response_owner_unavailable_error()

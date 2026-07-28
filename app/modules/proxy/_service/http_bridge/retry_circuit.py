@@ -26,6 +26,7 @@ class _HTTPBridgeRetryCircuitState:
     cooldown_until: float = 0.0
     last_detail: str | None = None
     last_touched_monotonic: float = 0.0
+    persisted_updated_at_epoch: float = 0.0
 
 
 def _initialize_http_bridge_retry_circuit(service: Any) -> None:
@@ -107,15 +108,15 @@ class _HTTPBridgeRetryCircuitMixin:
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[session.key] = state
-            # Durable state may have been opened by another replica since the
-            # previous decision. Merge it into the local state instead of
-            # trusting the old loaded-key shortcut.
-            state.consecutive_failures = max(
-                state.consecutive_failures,
-                max(0, persisted.consecutive_failures),
-            )
-            state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-            state.last_detail = persisted.last_detail or state.last_detail
+            if persisted.updated_at_epoch > state.persisted_updated_at_epoch:
+                state.consecutive_failures = max(0, persisted.consecutive_failures)
+                state.cooldown_until = persisted_cooldown_until
+                state.last_detail = persisted.last_detail
+            else:
+                state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
+                state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                state.last_detail = persisted.last_detail or state.last_detail
+            state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
             state.last_touched_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(session.key)
 
@@ -142,16 +143,23 @@ class _HTTPBridgeRetryCircuitMixin:
                 cooldown_until_epoch=now_wall + max(0.0, state.cooldown_until - now_monotonic),
                 last_detail=state.last_detail,
                 updated_at_epoch=now_wall,
+                base_updated_at_epoch=state.persisted_updated_at_epoch,
                 failure_threshold=threshold,
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
             )
             if persisted is not None:
-                state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
-                state.cooldown_until = max(
-                    state.cooldown_until,
-                    now_monotonic + max(0.0, persisted.cooldown_until_epoch - now_wall),
+                persisted_cooldown_until = now_monotonic + max(
+                    0.0, persisted.cooldown_until_epoch - now_wall
                 )
-                state.last_detail = persisted.last_detail or state.last_detail
+                if persisted.updated_at_epoch > state.persisted_updated_at_epoch:
+                    state.consecutive_failures = max(0, persisted.consecutive_failures)
+                    state.cooldown_until = persisted_cooldown_until
+                    state.last_detail = persisted.last_detail
+                else:
+                    state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
+                    state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                    state.last_detail = persisted.last_detail or state.last_detail
+                state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
         except Exception:
             logger.warning(

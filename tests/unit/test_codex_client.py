@@ -9,7 +9,7 @@ import pytest
 from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
-from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
+from app.core.clients.codex import CodexClient, CodexTransportError, require_route_or_direct_egress_opt_in
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 
@@ -288,27 +288,87 @@ async def test_websocket_network_error_can_disable_route_fallback(
 
 @pytest.mark.asyncio
 async def test_websocket_network_error_uses_route_fallback_by_default(
+    monkeypatch: pytest.MonkeyPatch,
     route: ResolvedUpstreamRoute,
 ) -> None:
-    class _FailFirstNetworkSession:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
+    connection_key = ConnectionKey("proxy.test", 8080, False, False, None, None, None)
+    session = aiohttp.ClientSession()
+    calls: list[dict[str, Any]] = []
 
-        def ws_connect(self, url: str, **kwargs: Any) -> object:
-            self.calls.append({"url": url, **kwargs})
-            if len(self.calls) == 1:
-                raise OSError("network unavailable")
-            return object()
+    async def fake_ws_connect(url: str, **kwargs: Any) -> object:
+        calls.append({"url": url, **kwargs})
+        if len(calls) == 1:
+            raise aiohttp.ClientProxyConnectionError(connection_key, ConnectionRefusedError("connection refused"))
+        return object()
 
-    session = _FailFirstNetworkSession()
-    result = await CodexClient(session).open_ws_with_route_metadata(
-        "wss://upstream.test",
-        route=route,
-    )
+    monkeypatch.setattr(session, "_ws_connect", fake_ws_connect)
+    client = CodexClient(session)
+    try:
+        result = await client.open_ws_with_route_metadata(
+            "wss://upstream.test",
+            route=route,
+        )
+    finally:
+        await client.close()
 
-    assert len(session.calls) == 2
+    assert len(calls) == 2
     assert result.fallback_used is True
     assert result.route.endpoint_id == "ep_2"
+
+
+@pytest.mark.asyncio
+async def test_websocket_awaitable_connect_failure_preserves_original_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+    route: ResolvedUpstreamRoute,
+) -> None:
+    connection_key = ConnectionKey("proxy.test", 8080, False, False, None, None, None)
+    session = aiohttp.ClientSession()
+    calls: list[dict[str, Any]] = []
+
+    async def fail_ws_connect(url: str, **kwargs: Any) -> object:
+        calls.append({"url": url, **kwargs})
+        raise aiohttp.ClientProxyConnectionError(connection_key, ConnectionRefusedError("connection refused"))
+
+    monkeypatch.setattr(session, "_ws_connect", fail_ws_connect)
+    client = CodexClient(session)
+    try:
+        with pytest.raises(CodexTransportError) as exc_info:
+            await client.open_ws_with_route_metadata(
+                "wss://upstream.test",
+                route=route,
+                retry_network_errors=False,
+            )
+    finally:
+        await client.close()
+
+    assert str(exc_info.value) == (
+        "Codex upstream websocket failed via proxy endpoint ep_1: ClientProxyConnectionError"
+    )
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.retryable_same_contract is False
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_websocket_success_returns_caller_owned_entered_context(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    class _WsContextSession:
+        def __init__(self) -> None:
+            self.context = _WsContext()
+
+        def ws_connect(self, *_args: object, **_kwargs: object) -> _WsContext:
+            return self.context
+
+    session = _WsContextSession()
+    result = await CodexClient(session).open_ws_with_route_metadata("wss://upstream.test", route=route)
+
+    assert result.websocket is session.context.websocket
+    assert result.context is session.context
+
+    await result.context.__aexit__(None, None, None)
+
+    assert session.context.exited is True
 
 
 @pytest.mark.asyncio

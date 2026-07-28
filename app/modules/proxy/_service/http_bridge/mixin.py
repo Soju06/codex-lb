@@ -2002,7 +2002,9 @@ class _HTTPBridgeMixin(
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
-        session.handoff_in_progress = restart_reader
+        # Every reconnect temporarily exposes a closed registry entry while
+        # its account lease and upstream socket are being swapped.
+        session.handoff_in_progress = True
         # Keep the registry from reusing a half-handoff session if this task is
         # cancelled while the old reader is stopped or the replacement socket
         # is being opened. A successful handoff marks it live again below.

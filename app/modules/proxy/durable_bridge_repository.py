@@ -271,7 +271,10 @@ class DurableBridgeRepository:
                             (reset_lineage, reset_failure_cooldown),
                             else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                         ),
-                        excluded.cooldown_until_epoch,
+                        case(
+                            (reset_lineage, reset_failure_cooldown),
+                            else_=excluded.cooldown_until_epoch,
+                        ),
                         merged_cooldown,
                     ),
                     "last_detail": excluded.last_detail,
@@ -321,7 +324,10 @@ class DurableBridgeRepository:
                             (reset_lineage, reset_failure_cooldown),
                             else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
                         ),
-                        excluded.cooldown_until_epoch,
+                        case(
+                            (reset_lineage, reset_failure_cooldown),
+                            else_=excluded.cooldown_until_epoch,
+                        ),
                         merged_cooldown,
                     ),
                     "last_detail": excluded.last_detail,

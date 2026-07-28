@@ -403,7 +403,7 @@ async def test_retry_circuit_reset_starts_new_failure_lineage(
             session_key_value="sid-retry-reset-lineage",
             api_key_scope="key-1",
             consecutive_failures=1,
-            cooldown_until_epoch=0.0,
+            cooldown_until_epoch=5000.0,
             last_detail="stream_incomplete",
             updated_at_epoch=2000.0,
             base_updated_at_epoch=1000.0,
@@ -418,8 +418,8 @@ async def test_retry_circuit_reset_starts_new_failure_lineage(
             ),
         )
         assert row is not None
-        assert row.consecutive_failures == 1
         assert row.cooldown_until_epoch == 0.0
+        assert row.consecutive_failures == 1
         assert row.last_detail == "stream_incomplete"
         assert row.updated_at_epoch == 2000.0
     finally:

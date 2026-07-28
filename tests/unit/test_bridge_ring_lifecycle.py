@@ -377,6 +377,41 @@ async def test_retry_circuit_conflict_cooldown_scales_with_merged_failures(
 
 
 @pytest.mark.asyncio
+async def test_retry_circuit_ignores_out_of_order_failure_snapshot(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        for failures, updated_at in ((1, 1000.0), (2, 1002.0), (1, 1001.0)):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value="sid-retry-out-of-order",
+                api_key_scope="key-1",
+                consecutive_failures=failures,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=updated_at,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=updated_at + 60.0,
+            )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-out-of-order"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 2
+        assert row.updated_at_epoch == 1002.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_retry_circuit_reset_starts_new_failure_lineage(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

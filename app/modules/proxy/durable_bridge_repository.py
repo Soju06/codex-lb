@@ -242,10 +242,14 @@ class DurableBridgeRepository:
             )
             conflict_failures = case(
                 (reset_lineage, 1),
-                else_=func.greatest(
-                    HttpBridgeRetryCircuit.consecutive_failures + 1,
-                    excluded.consecutive_failures,
+                (
+                    excluded.updated_at_epoch > HttpBridgeRetryCircuit.updated_at_epoch,
+                    func.greatest(
+                        HttpBridgeRetryCircuit.consecutive_failures + 1,
+                        excluded.consecutive_failures,
+                    ),
                 ),
+                else_=HttpBridgeRetryCircuit.consecutive_failures,
             )
             merged_updated_at = func.greatest(
                 HttpBridgeRetryCircuit.updated_at_epoch,
@@ -277,7 +281,13 @@ class DurableBridgeRepository:
                         ),
                         merged_cooldown,
                     ),
-                    "last_detail": excluded.last_detail,
+                    "last_detail": case(
+                        (
+                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.last_detail,
+                        ),
+                        else_=HttpBridgeRetryCircuit.last_detail,
+                    ),
                     "updated_at_epoch": func.greatest(
                         HttpBridgeRetryCircuit.updated_at_epoch,
                         excluded.updated_at_epoch,
@@ -295,10 +305,14 @@ class DurableBridgeRepository:
             )
             conflict_failures = case(
                 (reset_lineage, 1),
-                else_=func.max(
-                    HttpBridgeRetryCircuit.consecutive_failures + 1,
-                    excluded.consecutive_failures,
+                (
+                    excluded.updated_at_epoch > HttpBridgeRetryCircuit.updated_at_epoch,
+                    func.max(
+                        HttpBridgeRetryCircuit.consecutive_failures + 1,
+                        excluded.consecutive_failures,
+                    ),
                 ),
+                else_=HttpBridgeRetryCircuit.consecutive_failures,
             )
             merged_updated_at = func.max(
                 HttpBridgeRetryCircuit.updated_at_epoch,
@@ -330,7 +344,13 @@ class DurableBridgeRepository:
                         ),
                         merged_cooldown,
                     ),
-                    "last_detail": excluded.last_detail,
+                    "last_detail": case(
+                        (
+                            excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.last_detail,
+                        ),
+                        else_=HttpBridgeRetryCircuit.last_detail,
+                    ),
                     "updated_at_epoch": func.max(
                         HttpBridgeRetryCircuit.updated_at_epoch,
                         excluded.updated_at_epoch,

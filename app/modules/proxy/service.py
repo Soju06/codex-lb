@@ -1347,7 +1347,7 @@ class ProxyService(
                     logger.warning(
                         "http_bridge_stuck_watchdog_skipped session_closed=%s candidates=%s states=%s",
                         bridge_session.closed,
-                        len(stale_candidate_states),
+                        len(stale_pending_requests_to_fail),
                         "; ".join(
                             (
                                 f"id={state.request_log_id or state.request_id}"

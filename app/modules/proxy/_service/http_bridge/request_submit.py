@@ -1664,7 +1664,6 @@ class _HTTPBridgeRequestSubmitMixin:
             key=session.key.affinity_key,
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
-        model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1684,6 +1683,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+            model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             if request_state.previous_response_id is not None and not (
                 request_state.proxy_injected_previous_response_id
                 and request_state.fresh_upstream_request_is_retry_safe

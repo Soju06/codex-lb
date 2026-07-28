@@ -970,6 +970,7 @@ class _HTTPBridgeSession:
     # retain the registered session during this short transition even though
     # ``closed`` is fail-closed for normal request reuse.
     handoff_in_progress: bool = False
+    handoff_future: asyncio.Future["_HTTPBridgeSession"] | None = None
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
@@ -978,6 +979,19 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+
+def _complete_http_bridge_handoff(
+    session: _HTTPBridgeSession,
+    inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]],
+) -> None:
+    session.handoff_in_progress = False
+    future = session.handoff_future
+    session.handoff_future = None
+    if future is not None and not future.done():
+        future.set_result(session)
+    if inflight_sessions.get(session.key) is future:
+        inflight_sessions.pop(session.key, None)
 
 
 def _http_bridge_session_supports_service_tier(

@@ -823,7 +823,11 @@ def _http_bridge_compatible(
 
 
 def _http_bridge_alias_target_is_stale(session: _HTTPBridgeSession | None) -> bool:
-    return session is None or session.closed or not _http_bridge_session_account_active(session)
+    return (
+        session is None
+        or (session.closed and not session.handoff_in_progress)
+        or not _http_bridge_session_account_active(session)
+    )
 
 
 def _http_bridge_incompatible_model_fork_key(

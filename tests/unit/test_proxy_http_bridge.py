@@ -6569,6 +6569,8 @@ async def test_reconnect_keeps_handoff_protected_during_lease_swap(
     assert session.account_lease is new_lease
     assert session.closed is False
     assert session.handoff_in_progress is False
+    assert session.handoff_future is None
+    assert session.key not in service._http_bridge_inflight_sessions
 
 
 @pytest.mark.asyncio

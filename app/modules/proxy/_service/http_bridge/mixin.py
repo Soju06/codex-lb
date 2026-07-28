@@ -282,6 +282,8 @@ class _HTTPBridgeMixin(
             current_future = self._http_bridge_inflight_sessions.get(key)
             if current_future is not inflight_future:
                 return False
+            if getattr(inflight_future, "_http_bridge_handoff", False):
+                return False
             self._http_bridge_inflight_sessions.pop(key, None)
             if inflight_future.done():
                 return True
@@ -291,7 +293,6 @@ class _HTTPBridgeMixin(
                 inflight_future.set_exception(exc)
                 inflight_future.exception()
             return True
-
     async def _evict_http_bridge_inflight_waiter(
         self,
         inflight_future: asyncio.Future["_HTTPBridgeSession"],
@@ -305,12 +306,13 @@ class _HTTPBridgeMixin(
                     break
             if stale_key is None:
                 return None
+            if getattr(inflight_future, "_http_bridge_handoff", False):
+                return None
             self._http_bridge_inflight_sessions.pop(stale_key, None)
             if not inflight_future.done():
                 inflight_future.set_exception(exc)
                 inflight_future.exception()
             return stale_key
-
     @overload
     async def _get_or_create_http_bridge_session(
         self,
@@ -342,7 +344,6 @@ class _HTTPBridgeMixin(
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
     ) -> "_HTTPBridgeSession": ...
-
     @overload
     async def _get_or_create_http_bridge_session(
         self,
@@ -374,7 +375,6 @@ class _HTTPBridgeMixin(
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
-
     async def _get_or_create_http_bridge_session(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -432,7 +432,6 @@ class _HTTPBridgeMixin(
                         skip_registration_gate = True
             if not skip_registration_gate:
                 import app.core.startup as startup_module
-
                 registered = await startup_module.wait_for_bridge_registration(
                     timeout_seconds=settings.upstream_connect_timeout_seconds,
                 )
@@ -1998,6 +1997,7 @@ class _HTTPBridgeMixin(
         inflight_sessions = self._http_bridge_inflight_sessions
         handoff_future = inflight_sessions.get(session.key) or asyncio.get_running_loop().create_future()
         inflight_sessions.setdefault(session.key, handoff_future)
+        setattr(handoff_future, "_http_bridge_handoff", True)
         session.handoff_future = handoff_future
         session.closed = True
         if old_reader is not None:

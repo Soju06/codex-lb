@@ -32,9 +32,8 @@ def _isolated_settings(**overrides: Any) -> Settings:
     """
     clean = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_LB_") and k != "PORT"}
     with mock.patch.dict(os.environ, clean, clear=True):
-        # ``_env_file`` is a documented pydantic-settings init kwarg that its
-        # type stubs do not expose; ty flags it as unknown.
-        return Settings(_env_file=None, **overrides)  # ty: ignore[unknown-argument]
+        # ``_env_file`` is a documented pydantic-settings initialization keyword.
+        return Settings(_env_file=None, **overrides)
 
 
 pytestmark = pytest.mark.unit

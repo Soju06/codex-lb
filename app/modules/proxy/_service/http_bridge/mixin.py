@@ -2373,7 +2373,6 @@ class _HTTPBridgeMixin(
         # Keep the session fail-closed until old-resource cleanup and the
         # replacement lease transfer have committed successfully.
         session.closed = True
-<<<<<<< HEAD
         async with session.pending_lock:
             replaced_account_lease = session.account_lease
             session.account_lease = selected_account_lease

@@ -6499,6 +6499,79 @@ async def test_reconnect_http_bridge_session_filters_http_headers_for_upstream_w
 
 
 @pytest.mark.asyncio
+async def test_reconnect_keeps_handoff_protected_during_lease_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    old_lease = proxy_service.AccountLease(
+        lease_id="lease-old-handoff",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    new_account = cast(Any, SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE, plan_type="plus"))
+    new_lease = proxy_service.AccountLease(
+        lease_id="lease-new-handoff",
+        account_id=new_account.id,
+        kind="stream",
+        acquired_at=2.0,
+    )
+    session.account_lease = old_lease
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-handoff-lease-swap",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+    )
+    replacement = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()),
+    )
+    release_account_lease = AsyncMock()
+
+    async def release_lease(lease: proxy_service.AccountLease | None) -> None:
+        assert lease is old_lease
+        assert session.closed is True
+        assert session.handoff_in_progress is True
+        await release_account_lease(lease)
+
+    async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(account=new_account, error_message=None, lease=new_lease)
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=replacement))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    release_account_lease.assert_awaited_once_with(old_lease)
+    assert session.account is new_account
+    assert session.account_lease is new_lease
+    assert session.closed is False
+    assert session.handoff_in_progress is False
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_preserves_hard_account_after_1011(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

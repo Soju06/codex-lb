@@ -357,8 +357,8 @@ async def test_stream_model_capacity_top_level_response_id_surfaces_without_repl
 
 
 @pytest.mark.asyncio
-async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
-    """An untyped empty upstream stream may be post-dispatch, so it is not replayed."""
+async def test_stream_anchored_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
+    """An anchored empty upstream stream may be post-dispatch, so it is not replayed."""
     await _import_account(async_client, "acc_empty_body_no_replay", "empty-body-no-replay@example.com")
 
     call_count = 0
@@ -375,7 +375,13 @@ async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, 
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp-empty-body-parent",
+        "stream": True,
+    }
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]

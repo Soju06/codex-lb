@@ -37,8 +37,8 @@ The defaults satisfy the chart's timing guards. When tuning them, keep
 `preStopSleepSeconds <= config.shutdownDrainTimeoutSeconds` and
 `terminationGracePeriodSeconds >= config.shutdownDrainTimeoutSeconds + 32`.
 See the owning
-[deployment-installation](../../openspec/specs/deployment-installation/)
-contract and [replica-operations](../../openspec/specs/replica-operations/)
+[deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)
+contract and [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)
 operational context.
 
 ## Gateway API path filters

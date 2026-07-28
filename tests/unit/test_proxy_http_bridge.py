@@ -19623,7 +19623,7 @@ async def test_http_bridge_clean_close_before_response_does_not_penalize_account
 
     assert fail_pending.await_args is not None
     assert fail_pending.await_args.kwargs["penalize_account"] is False
-    retire.assert_awaited_once_with(session, detail="stream_incomplete")
+    retire.assert_awaited_once_with(session, detail="stream_incomplete", response_events_seen=0)
 
 
 @pytest.mark.asyncio
@@ -19793,6 +19793,27 @@ async def test_retire_stale_pending_http_bridge_session_unregisters_aliases_and_
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retirement_does_not_record_midstream_retry_circuit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-midstream-retire")
+    record_failure = AsyncMock()
+    close = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close)
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="stream_incomplete",
+        response_events_seen=1,
+    )
+
+    record_failure.assert_not_awaited()
+    close.assert_awaited_once_with(session, reason="retire_stale_pending")
 
 
 @pytest.mark.asyncio

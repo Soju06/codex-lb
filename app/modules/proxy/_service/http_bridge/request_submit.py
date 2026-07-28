@@ -1292,6 +1292,10 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._retire_stale_pending_http_bridge_session(
                 session,
                 detail="last_admission_waiter_cancelled",
+                response_events_seen=max(
+                    request_state.response_event_count,
+                    int(request_state.response_id is not None or request_state.latency_response_created_ms is not None),
+                ),
             )
         await self._maybe_release_idle_http_bridge_session_lease(session)
 
@@ -1443,17 +1447,28 @@ class _HTTPBridgeRequestSubmitMixin:
         detail: str,
     ) -> None:
         stale_requests: deque[_WebSocketRequestState] = deque()
+        response_events_seen = 0
         async with session.pending_lock:
             for request_state in request_states:
                 if request_state not in session.pending_requests:
                     continue
+                response_events_seen = max(
+                    response_events_seen,
+                    request_state.response_event_count,
+                    int(
+                        request_state.response_id is not None
+                        or request_state.latency_response_created_ms is not None
+                        or request_state.downstream_visible
+                    ),
+                )
                 session.pending_requests.remove(request_state)
                 if _http_bridge_request_counts_against_queue(request_state):
                     session.queued_request_count = max(0, session.queued_request_count - 1)
                 stale_requests.append(request_state)
         if not stale_requests:
             return
-        await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
+        if response_events_seen == 0:
+            await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
         await self._fail_pending_websocket_requests(
             account=session.account,
             account_id_value=session.account.id,
@@ -1519,11 +1534,13 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         detail: str,
         retry_circuit_detail: str | None = None,
+        response_events_seen: int | None = None,
     ) -> None:
-        await self._record_http_bridge_retry_circuit_failure(
-            session,
-            detail=retry_circuit_detail or detail,
-        )
+        if response_events_seen is None or response_events_seen == 0:
+            await self._record_http_bridge_retry_circuit_failure(
+                session,
+                detail=retry_circuit_detail or detail,
+            )
         session.closed = True
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:

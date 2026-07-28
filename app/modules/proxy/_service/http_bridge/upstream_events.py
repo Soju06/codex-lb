@@ -581,9 +581,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session,
                         detail=error_code,
                         retry_circuit_detail="clean_close",
+                        response_events_seen=observed_response_events,
                     )
                 else:
-                    await self._retire_stale_pending_http_bridge_session(session, detail=retire_detail or error_code)
+                    await self._retire_stale_pending_http_bridge_session(
+                        session,
+                        detail=retire_detail or error_code,
+                        response_events_seen=observed_response_events,
+                    )
         return force_retire or session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(

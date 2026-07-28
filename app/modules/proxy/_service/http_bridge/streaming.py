@@ -2901,6 +2901,11 @@ class _HTTPBridgeStreamingMixin:
                 if event_block is None:
                     break
                 keepalive_count = 0
+                # A real upstream event means the stream is active again; do
+                # not carry the pre-response retry-circuit wake mode into the
+                # normal response-started idle timeout policy.
+                circuit_keepalive_waiting = False
+                circuit_keepalive_until = None
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
                 if request_state.latency_first_token_ms is None:

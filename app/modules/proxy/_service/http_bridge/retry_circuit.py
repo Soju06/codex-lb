@@ -302,7 +302,9 @@ class _HTTPBridgeRetryCircuitMixin:
             self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
             self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
             expected_updated_at_epoch = (
-                state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else 0.0
+                state.persisted_updated_at_epoch
+                if state is not None and state.persisted_updated_at_epoch > 0
+                else None
             )
         try:
             # Clearing is idempotent and must be attempted even when the

@@ -20010,7 +20010,7 @@ async def test_http_bridge_retry_circuit_clear_retries_after_lookup_failure() ->
         session_key_kind=hard_session.key.affinity_kind,
         session_key_value=hard_session.key.affinity_key,
         api_key_id=hard_session.key.api_key_id,
-        expected_updated_at_epoch=0.0,
+        expected_updated_at_epoch=None,
     )
     assert hard_session.key not in service._http_bridge_retry_circuits
     assert hard_session.key not in service._http_bridge_retry_circuit_persisted_keys

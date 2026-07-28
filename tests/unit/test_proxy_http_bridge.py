@@ -19254,7 +19254,7 @@ async def test_http_bridge_reconnect_failure_keeps_reader_handoff_session_closed
     )
     session = _make_bridge_session(key_value="bridge-reconnect-fails-closed")
     session.closed = True
-    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock()))
 
     async def old_reader() -> None:
         await asyncio.sleep(60.0)
@@ -19273,7 +19273,7 @@ async def test_http_bridge_reconnect_failure_keeps_reader_handoff_session_closed
     )
 
     async def select_no_account(*_args: object, **_kwargs: object) -> object:
-        assert session.closed is False
+        assert session.closed is True
         return SimpleNamespace(
             account=None,
             error_code="no_accounts",
@@ -19290,6 +19290,9 @@ async def test_http_bridge_reconnect_failure_keeps_reader_handoff_session_closed
         )
 
     assert session.closed is True
+    assert session.handoff_in_progress is False
+    assert session.handoff_future is None
+    assert session.key not in service._http_bridge_inflight_sessions
 
 
 @pytest.mark.asyncio
@@ -19319,7 +19322,7 @@ async def test_retry_http_bridge_precreated_request_consumes_each_clean_close_on
     session.last_upstream_close_code = 1000
     session.last_upstream_close_generation = 7
     send_text = AsyncMock()
-    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
 
@@ -19357,7 +19360,7 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
     )
     session.account = cast(Any, SimpleNamespace(id="acc-rejected", status=AccountStatus.ACTIVE))
     session.last_upstream_close_code = 1011
-    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     reconnect = AsyncMock()
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
@@ -19468,7 +19471,7 @@ async def test_http_bridge_clean_close_before_response_does_not_penalize_account
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-clean-close")
     session.upstream = cast(
-        UpstreamResponsesWebSocket,
+        UpstreamWebSocket,
         SimpleNamespace(
             receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1000)),
             close=AsyncMock(),

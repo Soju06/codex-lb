@@ -2012,7 +2012,12 @@ class _HTTPBridgeMixin(
         session.closed = True
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
-                cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
+                try:
+                    cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
+                except BaseException:
+                    session.closed = True
+                    _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+                    raise
                 if not cancelled:
                     session.closed = True
                     _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
@@ -2027,32 +2032,34 @@ class _HTTPBridgeMixin(
             request_state,
             _http_bridge_request_budget_seconds(_service_get_settings()),
         )
-        settings = await _service_get_settings_cache().get()
-        session.api_key = request_state.api_key
-        forced_refresh_account_id = request_state.force_refresh_account_id
-        excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
-        requested_preferred_account_id = (
-            request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
-        )
-        required_preferred_account_id = resolve_required_account_id(
-            ("requested reconnect owner", requested_preferred_account_id),
-            (
-                "account-neutral recovery",
-                session.account.id if account_neutral_recovery else None,
-            ),
-        )
-        close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
-        skip_same_account = (
-            session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
-        )
-        if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
+        try:
+            settings = await _service_get_settings_cache().get()
+            session.api_key = request_state.api_key
+            forced_refresh_account_id = request_state.force_refresh_account_id
+            excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+            requested_preferred_account_id = (
+                request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
+            )
+            required_preferred_account_id = resolve_required_account_id(
+                ("requested reconnect owner", requested_preferred_account_id),
+                ("account-neutral recovery", session.account.id if account_neutral_recovery else None),
+            )
+            close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
+            hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
+            skip_same_account = (
+                session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
+            )
+            if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
+                session.closed = True
+                _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+                raise _http_bridge_previous_response_owner_unavailable_error()
+            _require_http_bridge_bound_account_not_excluded(
+                hard_close_account_bound, session.account.id, excluded_account_ids
+            )
+        except BaseException:
             session.closed = True
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
-            raise _http_bridge_previous_response_owner_unavailable_error()
-        _require_http_bridge_bound_account_not_excluded(
-            hard_close_account_bound, session.account.id, excluded_account_ids
-        )
+            raise
         if skip_same_account:
             excluded_account_ids.add(session.account.id)
         retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
@@ -2072,7 +2079,6 @@ class _HTTPBridgeMixin(
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
         selected_account_model_replacement = False
-
         def record_selected_account_takeover(
             selected_account_id: str | None, preferred_account_id: str | None = session.account.id
         ) -> None:
@@ -2080,7 +2086,6 @@ class _HTTPBridgeMixin(
                 preferred_account_id=preferred_account_id,
                 selected_account_id=selected_account_id,
             )
-
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
             lease = selected_account_lease
@@ -2091,7 +2096,6 @@ class _HTTPBridgeMixin(
                 if session.account_lease is not None and lease.lease_id == session.account_lease.lease_id:
                     session.account_lease = None
             await self._load_balancer.release_account_lease(lease)
-
         async def abandon_selected_account_retry(selected_account: Any) -> None:
             nonlocal preferred_candidate_id
             if hard_close_account_bound or selected_account_model_replacement:
@@ -2102,9 +2106,7 @@ class _HTTPBridgeMixin(
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
-
         async def open_replacement_upstream(selected_account: Any, selected_headers: dict[str, str]) -> Any:
-            session.closed = False
             try:
                 return await self._open_upstream_websocket_with_budget(
                     selected_account,
@@ -2115,8 +2117,6 @@ class _HTTPBridgeMixin(
             except Exception:
                 session.closed = True
                 raise
-
-        session.closed = False if old_reader is not None else session.closed
         while True:
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
             try:

@@ -8800,6 +8800,26 @@ async def test_await_cancelled_task_propagates_caller_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_await_cancelled_task_defers_stubborn_child_cleanup() -> None:
+    child_cancelled = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def stubborn_child() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            await release_child.wait()
+
+    child = asyncio.create_task(stubborn_child())
+    assert await proxy_service._await_cancelled_task(child, timeout_seconds=0.001, label="stubborn cleanup") is False
+    await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
+
+    release_child.set()
+    await asyncio.wait_for(child, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_close_http_bridge_session_bounded_cancellation_keeps_close_task_tracked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

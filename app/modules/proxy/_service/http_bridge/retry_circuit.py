@@ -132,8 +132,15 @@ class _HTTPBridgeRetryCircuitMixin:
         now_monotonic = time.monotonic()
         now_wall = time.time()
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
+        async with self._http_bridge_retry_circuit_lock:
+            if self._http_bridge_retry_circuits.get(session.key) is not state:
+                return
+            consecutive_failures = state.consecutive_failures
+            cooldown_until = state.cooldown_until
+            last_detail = state.last_detail
+            persisted_updated_at_epoch = state.persisted_updated_at_epoch
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
-        if state.last_detail == "clean_close":
+        if last_detail == "clean_close":
             base_backoff = min(
                 base_backoff,
                 max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS),
@@ -143,11 +150,11 @@ class _HTTPBridgeRetryCircuitMixin:
                 session_key_kind=session.key.affinity_kind,
                 session_key_value=session.key.affinity_key,
                 api_key_id=session.key.api_key_id,
-                consecutive_failures=state.consecutive_failures,
-                cooldown_until_epoch=now_wall + max(0.0, state.cooldown_until - now_monotonic),
-                last_detail=state.last_detail,
+                consecutive_failures=consecutive_failures,
+                cooldown_until_epoch=now_wall + max(0.0, cooldown_until - now_monotonic),
+                last_detail=last_detail,
                 updated_at_epoch=now_wall,
-                base_updated_at_epoch=state.persisted_updated_at_epoch,
+                base_updated_at_epoch=persisted_updated_at_epoch,
                 failure_threshold=threshold,
                 conflict_cooldown_until_epoch=now_wall + base_backoff,
                 base_backoff_seconds=max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS),
@@ -161,16 +168,24 @@ class _HTTPBridgeRetryCircuitMixin:
                 persisted_cooldown_until = now_monotonic + max(
                     0.0, persisted.cooldown_until_epoch - now_wall
                 )
-                if persisted.updated_at_epoch > state.persisted_updated_at_epoch:
-                    state.consecutive_failures = max(0, persisted.consecutive_failures)
-                    state.cooldown_until = persisted_cooldown_until
-                    state.last_detail = persisted.last_detail
-                else:
-                    state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
-                    state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                    state.last_detail = persisted.last_detail or state.last_detail
-                state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
-            self._http_bridge_retry_circuit_persisted_keys.add(session.key)
+                async with self._http_bridge_retry_circuit_lock:
+                    current = self._http_bridge_retry_circuits.get(session.key)
+                    if current is state:
+                        if persisted.updated_at_epoch > state.persisted_updated_at_epoch:
+                            state.consecutive_failures = max(0, persisted.consecutive_failures)
+                            state.cooldown_until = persisted_cooldown_until
+                            state.last_detail = persisted.last_detail
+                        else:
+                            state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
+                            state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
+                            state.last_detail = persisted.last_detail or state.last_detail
+                        state.persisted_updated_at_epoch = max(
+                            state.persisted_updated_at_epoch,
+                            persisted.updated_at_epoch,
+                        )
+            async with self._http_bridge_retry_circuit_lock:
+                if self._http_bridge_retry_circuits.get(session.key) is state:
+                    self._http_bridge_retry_circuit_persisted_keys.add(session.key)
         except Exception:
             logger.warning(
                 "Failed to persist HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
@@ -267,8 +282,10 @@ class _HTTPBridgeRetryCircuitMixin:
                     backoff,
                     detail,
                 )
-            await self._persist_http_bridge_retry_circuit(session, state)
-            self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+        await self._persist_http_bridge_retry_circuit(session, state)
+        async with self._http_bridge_retry_circuit_lock:
+            if self._http_bridge_retry_circuits.get(session.key) is state:
+                self._http_bridge_retry_circuit_loaded_keys.add(session.key)
 
     async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":

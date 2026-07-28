@@ -757,7 +757,6 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
 _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
-
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
     settings = settings or get_settings()
     raw_timeout = getattr(
@@ -771,7 +770,6 @@ def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
         timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
     return max(0.001, timeout)
 
-
 # Maximum time (seconds) to wait for a prewarm upstream response before
 # giving up and letting the actual request proceed without prewarming.
 # A blocked prewarm holds the response_create_gate semaphore and prevents
@@ -784,6 +782,10 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # window this ensures the client sees a terminal event within ≈70s when the
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
+
+
+async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
+    await asyncio.gather(task, return_exceptions=True)
 
 
 async def _await_cancelled_task(
@@ -802,6 +804,7 @@ async def _await_cancelled_task(
         return True
     except TimeoutError:
         logger.warning("Timed out waiting for %s cancellation", label)
+        asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
         return False
     return True
 
@@ -820,7 +823,6 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
         *PERMANENT_FAILURE_CODES.keys(),
     }
 )
-
 
 _TRANSIENT_RETRY_CODES = frozenset(
     {
@@ -898,7 +900,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
-
 
 def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
     if budget is None:

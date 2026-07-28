@@ -126,7 +126,7 @@ from app.modules.proxy._service.api_key_usage import (
     _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY as _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY,
 )
 from app.modules.proxy._service.api_key_usage import _ApiKeyUsageMixin
-from app.modules.proxy._service.codex_control import _CodexControlMixin
+from app.modules.proxy._service.codex_control import _CodexControlMixin, _detached_account_copy
 from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
     _service_tier_from_compact_payload as _service_tier_from_compact_payload,

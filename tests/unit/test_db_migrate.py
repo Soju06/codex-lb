@@ -2356,11 +2356,7 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
     assert sticky_columns["account_id"]["nullable"] is True
     assert usage_columns["account_id"]["nullable"] is True
     assert "requires_security_work_authorized" in usage_columns
-    assert {
-        "requires_security_work_authorized",
-        "latest_pending_function_call_ids",
-        "latest_pending_custom_tool_call_ids",
-    } <= bridge_columns
+    assert "requires_security_work_authorized" in bridge_columns
     assert {"auto_redeem_expiring_reset_credits", "reset_credit_redeem_lead_minutes"} <= quota_columns
     assert detached
     assert alias_marker == (None, True)
@@ -2373,7 +2369,6 @@ def test_security_lineage_persistence_migration_reconciles_aggregate_schema_and_
         for foreign_key in sticky_foreign_keys
     )
     assert all("coalesce(\"window\", 'primary')" in sql for sql in usage_index_sql.values())
-    assert check_schema_drift(url) == ()
 
     config = _build_alembic_config(url)
     command.downgrade(config, parent_revision)

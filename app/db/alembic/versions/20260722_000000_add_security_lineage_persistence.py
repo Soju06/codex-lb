@@ -244,10 +244,6 @@ def _add_columns(bind: Connection) -> None:
                         "requires_security_work_authorized", sa.Boolean(), nullable=False, server_default=sa.false()
                     )
                 )
-            if "latest_pending_function_call_ids" not in bridge:
-                batch.add_column(sa.Column("latest_pending_function_call_ids", sa.Text(), nullable=True))
-            if "latest_pending_custom_tool_call_ids" not in bridge:
-                batch.add_column(sa.Column("latest_pending_custom_tool_call_ids", sa.Text(), nullable=True))
 
     quota = _columns(bind, "quota_planner_settings")
     if quota:

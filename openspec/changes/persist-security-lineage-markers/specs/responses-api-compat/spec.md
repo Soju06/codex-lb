@@ -1,10 +1,9 @@
 ## ADDED Requirements
 
-### Requirement: Persisted security-work lineage is enforced across Responses transports
+### Requirement: Persisted security-work lineage MUST be enforced across Responses transports
 
-When a Responses lineage is marked as requiring a security-work-authorized
-account, compact, streamed Responses, and HTTP bridge account selection MUST
-enforce that requirement for every durable alias, including
+Compact, streamed Responses, and HTTP bridge account selection MUST enforce a
+security-work-authorized requirement for every marked durable alias, including
 `previous_response_id`. The requirement MUST remain monotonic when the original
 account or durable bridge owner is no longer available.
 

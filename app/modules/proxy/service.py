@@ -1456,7 +1456,9 @@ class ProxyService(
         api_key: ApiKeyData | None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None:
+        del privacy_policy
         scoped_account_ids = (
             set(api_key.assigned_account_ids)
             if api_key is not None and api_key.account_assignment_scope_enabled

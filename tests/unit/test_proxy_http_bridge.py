@@ -1335,6 +1335,40 @@ async def test_response_create_gate_timeout_retires_old_pending_without_upstream
     assert waiter.response_create_gate_acquired is False
 
 
+def test_stale_gate_cleanup_keeps_draining_sibling_active() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    now = time.monotonic()
+    stale = proxy_service._WebSocketRequestState(
+        request_id="req-stale-gate-holder",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=now - 301.0,
+        transport="http",
+    )
+    draining = proxy_service._WebSocketRequestState(
+        request_id="req-draining-terminal-sibling",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=now - 301.0,
+        transport="http",
+        draining_until_terminal=True,
+    )
+
+    stale_states, should_retire = service._classify_http_bridge_stale_gate_holders(
+        [stale, draining],
+        now=now,
+        threshold_seconds=300.0,
+        session_closed=False,
+    )
+
+    assert stale_states == [stale]
+    assert should_retire is False
+
+
 @pytest.mark.asyncio
 async def test_response_create_gate_timeout_retires_closed_anchored_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
@@ -8567,6 +8601,41 @@ async def test_close_http_bridge_session_bounded_timeout_keeps_close_task_runnin
         await asyncio.sleep(0)
     assert service._background_cleanup_tasks == set()
     assert close_cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_await_cancelled_task_consumes_child_cancellation() -> None:
+    child = asyncio.create_task(asyncio.sleep(60))
+
+    assert await proxy_service._await_cancelled_task(child, timeout_seconds=1.0, label="test child") is True
+    assert child.done()
+    assert child.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_await_cancelled_task_propagates_caller_cancellation() -> None:
+    child_cancelled = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def stubborn_child() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            await release_child.wait()
+
+    child = asyncio.create_task(stubborn_child())
+    waiter = asyncio.create_task(
+        proxy_service._await_cancelled_task(child, timeout_seconds=10.0, label="stubborn test child")
+    )
+    await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    release_child.set()
+    await asyncio.wait_for(child, timeout=1.0)
 
 
 @pytest.mark.asyncio

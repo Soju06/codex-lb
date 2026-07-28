@@ -792,10 +792,13 @@ async def _await_cancelled_task(
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
 ) -> bool:
+    caller_task = asyncio.current_task()
     task.cancel()
     try:
-        await asyncio.wait_for(task, timeout=timeout_seconds)
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
     except asyncio.CancelledError:
+        if caller_task is not None and caller_task.cancelling():
+            raise
         return True
     except TimeoutError:
         logger.warning("Timed out waiting for %s cancellation", label)

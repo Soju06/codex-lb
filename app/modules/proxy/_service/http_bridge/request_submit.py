@@ -1486,7 +1486,9 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         ]
         active_states = [
-            state for state in pending_states if not state.draining_until_terminal and state not in stale_states
+            # A draining request still owns terminal response continuity.  It
+            # must keep the session alive while stale holders are cleaned up.
+            state for state in pending_states if state not in stale_states
         ]
         if stale_states and active_states:
             return stale_states, False

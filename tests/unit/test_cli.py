@@ -312,8 +312,10 @@ def test_run_server_reports_uvicorn_startup_failure(
     assert exc_info.value.code == 3
 
 
-def test_run_server_handles_keyboard_interrupt_after_startup(
+@pytest.mark.parametrize("started", [False, True])
+def test_run_server_handles_keyboard_interrupt_cleanly(
     monkeypatch: pytest.MonkeyPatch,
+    started: bool,
 ) -> None:
     class FakeConfig:
         workers = 1
@@ -325,10 +327,9 @@ def test_run_server_handles_keyboard_interrupt_after_startup(
             return None
 
     class FakeServer:
-        started = True
-
         def __init__(self, _config: FakeConfig, *, drain_timeout_seconds: float) -> None:
             assert drain_timeout_seconds == 17
+            self.started = started
 
         def run(self) -> None:
             raise KeyboardInterrupt

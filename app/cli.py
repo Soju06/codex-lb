@@ -154,7 +154,7 @@ def _run_server(app: str, **kwargs: Any) -> None:
     try:
         server.run()
     except KeyboardInterrupt:
-        pass
+        return
     if not server.started:
         from uvicorn.main import STARTUP_FAILURE
 

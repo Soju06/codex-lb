@@ -1597,7 +1597,6 @@ class _HTTPBridgeMixin(
             )
         except Exception:
             logger.warning("Failed to mark durable HTTP bridge sessions draining", exc_info=True)
-
     def _prune_http_bridge_sessions_locked(self) -> list["_HTTPBridgeSession"]:
         now = _service_time().monotonic()
         stale_keys: list[_HTTPBridgeSessionKey] = []
@@ -1982,7 +1981,6 @@ class _HTTPBridgeMixin(
         _copy_websocket_route_metadata_to_session(session, request_state)
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
-
     async def _reconnect_http_bridge_session(
         self,
         session: "_HTTPBridgeSession",
@@ -2326,74 +2324,68 @@ class _HTTPBridgeMixin(
                 _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
                 _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
                 raise
-        if owner_rebind_affinity is not None:
-            await self._claim_http_bridge_replacement_before_swap(
-                session,
-                account_id=account.id,
-                upstream=upstream,
-                release_selected_account_lease=release_selected_account_lease,
-                owner_rebind_affinity=owner_rebind_affinity,
-            )
-            await self._unregister_http_bridge_turn_states(session)
-            await self._unregister_http_bridge_previous_response_ids(session)
-            session.last_completed_response_id = None
-            session.last_completed_input_count = 0
-            session.last_completed_input_prefix_fingerprint = None
-            session.last_pending_tool_calls.clear()
-            session.affinity = selection_affinity or session.affinity
-            session.codex_session = False
-            session.upstream_turn_state = None
-            session.downstream_turn_state = None
-            session.headers = {
-                key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
-            }
-        try:
-            await old_upstream.close()
-        except asyncio.CancelledError:
-            # The replacement socket and its lease are still local until the
-            # handoff below commits them to the session. Clean both sides up
-            # before propagating cancellation so repeated client disconnects
-            # cannot leak sockets or account capacity.
+        async def abort_selected_handoff() -> None:
+            session.closed = True
             try:
                 await asyncio.shield(upstream.close())
             except BaseException:
-                logger.debug("Failed to close cancelled HTTP bridge replacement websocket", exc_info=True)
+                logger.debug("Failed to close HTTP bridge replacement websocket", exc_info=True)
             selected_lease = selected_account_lease
             old_lease = session.account_lease
-            await release_selected_account_lease()
+            try:
+                await asyncio.shield(release_selected_account_lease())
+            except BaseException:
+                logger.debug("Failed to release HTTP bridge replacement lease", exc_info=True)
             if old_lease is not None and old_lease is not selected_lease:
                 session.account_lease = None
                 try:
-                    await self._load_balancer.release_account_lease(old_lease)
-                except Exception:
-                    logger.debug("Failed to release cancelled HTTP bridge old account lease", exc_info=True)
-            session.closed = True
+                    await asyncio.shield(self._load_balancer.release_account_lease(old_lease))
+                except BaseException:
+                    logger.debug("Failed to release HTTP bridge old account lease", exc_info=True)
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
             _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
-            raise
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-        # Keep the session fail-closed until old-resource cleanup and the
-        # replacement lease transfer have committed successfully.
-        session.closed = True
-        async with session.pending_lock:
-            replaced_account_lease = session.account_lease
+        try:
+            if owner_rebind_affinity is not None:
+                await self._claim_http_bridge_replacement_before_swap(
+                    session,
+                    account_id=account.id,
+                    upstream=upstream,
+                    release_selected_account_lease=release_selected_account_lease,
+                    owner_rebind_affinity=owner_rebind_affinity,
+                )
+                await self._unregister_http_bridge_turn_states(session)
+                await self._unregister_http_bridge_previous_response_ids(session)
+                session.last_completed_response_id = None
+                session.last_completed_input_count = 0
+                session.last_completed_input_prefix_fingerprint = None
+                session.last_pending_tool_calls.clear()
+                session.affinity = selection_affinity or session.affinity
+                session.codex_session = False
+                session.upstream_turn_state = None
+                session.downstream_turn_state = None
+                session.headers = {
+                    key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+                }
+            try:
+                await old_upstream.close()
+            except Exception:
+                logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
+            session.closed = True
+            if selected_account_lease is not session.account_lease:
+                old_lease, session.account_lease = session.account_lease, None
+                if old_lease is not None:
+                    await self._load_balancer.release_account_lease(old_lease)
             session.account_lease = selected_account_lease
             session.account, session.headers, session.upstream = account, connect_headers, upstream
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
             session.upstream_control = _WebSocketUpstreamControl()
             session.closed = False
-            session.handoff_in_progress = False
             session.last_upstream_close_code = None
             session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
-        if replaced_account_lease is not None and (
-            selected_account_lease is None or selected_account_lease.lease_id != replaced_account_lease.lease_id
-        ):
-            release_task = asyncio.create_task(self._load_balancer.release_account_lease(replaced_account_lease))
-            _, cancellation = await _await_task_deferring_cancellation(release_task)
-            if cancellation is not None:
-                raise cancellation
-        _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+            _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+        except BaseException:
+            await abort_selected_handoff()
+            raise
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(

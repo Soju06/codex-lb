@@ -20257,7 +20257,9 @@ async def test_http_bridge_reader_failure_keeps_waiter_count_when_draining_reque
     )
     session.admission_waiter_count = 1
     fail_pending = AsyncMock()
+    record_failure = AsyncMock()
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
 
     retired = await service._fail_http_bridge_reader_and_maybe_retire(
         session,
@@ -20267,6 +20269,7 @@ async def test_http_bridge_reader_failure_keeps_waiter_count_when_draining_reque
 
     assert retired is False
     assert session.queued_request_count == 1
+    record_failure.assert_awaited_once_with(session, detail="stream_incomplete")
 
 
 @pytest.mark.asyncio

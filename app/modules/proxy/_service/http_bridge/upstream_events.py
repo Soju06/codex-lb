@@ -560,10 +560,22 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
         finally:
             if session.admission_waiter_count > 0 and not force_retire:
-                if close_classification == "clean" and failed_pending_count > 0:
+                retry_circuit_detail = None
+                if close_classification == "clean":
+                    retry_circuit_detail = "clean_close"
+                elif observed_response_events == 0:
+                    retry_circuit_detail = next(
+                        (
+                            detail
+                            for detail in (retire_detail, error_code)
+                            if detail in {"stream_incomplete", "stream_idle_timeout"}
+                        ),
+                        None,
+                    )
+                if failed_pending_count > 0 and retry_circuit_detail is not None:
                     await self._record_http_bridge_retry_circuit_failure(
                         session,
-                        detail="clean_close",
+                        detail=retry_circuit_detail,
                     )
                 _log_http_bridge_event(
                     "retire_deferred_for_admission_waiter",

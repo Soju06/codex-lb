@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: HTTP bridge clean-close replay remains bounded and pre-visible
+### Requirement: Clean upstream close before any response event fails fast
 
 When the HTTP Responses bridge observes an upstream WebSocket close with
 `close_code = 1000` before any `response.*` event has been surfaced for the

@@ -50,60 +50,64 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return
 
+        now_monotonic = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
-            now_monotonic = time.monotonic()
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(session.key)
             if local_state is not None:
                 local_state.last_touched_monotonic = now_monotonic
+        try:
+            persisted = await self._durable_bridge.lookup_retry_circuit(
+                session_key_kind=session.key.affinity_kind,
+                session_key_value=session.key.affinity_key,
+                api_key_id=session.key.api_key_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                exc_info=True,
+            )
+            return
+
+        if persisted is None:
+            # A successful lookup with no row is authoritative. Drop a state
+            # that was persisted earlier (and may have been cleared by another
+            # replica) so its failure count/cooldown cannot leak into a fresh
+            # circuit.
+            async with self._http_bridge_retry_circuit_lock:
+                if session.key in self._http_bridge_retry_circuit_persisted_keys:
+                    self._http_bridge_retry_circuits.pop(session.key, None)
+                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+            return
+
+        now_epoch = time.time()
+        if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
+            async with self._http_bridge_retry_circuit_lock:
+                self._http_bridge_retry_circuits.pop(session.key, None)
+                self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
             try:
-                persisted = await self._durable_bridge.lookup_retry_circuit(
+                await self._durable_bridge.purge_retry_circuit(
                     session_key_kind=session.key.affinity_kind,
                     session_key_value=session.key.affinity_key,
                     api_key_id=session.key.api_key_id,
                 )
             except Exception:
                 logger.warning(
-                    "Failed to load persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
+                    "Failed to remove stale HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
                     session.key.affinity_kind,
                     _hash_identifier(session.key.affinity_key),
                     exc_info=True,
                 )
-                return
-            if persisted is None:
-                # A successful lookup with no row is authoritative. Drop a
-                # state that was persisted earlier (and may have been cleared
-                # by another replica) so its failure count/cooldown cannot
-                # leak into a fresh circuit.
-                if session.key in self._http_bridge_retry_circuit_persisted_keys:
-                    self._http_bridge_retry_circuits.pop(session.key, None)
-                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-                return
+            return
 
-            now_epoch = time.time()
-            if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
-                self._http_bridge_retry_circuits.pop(session.key, None)
-                self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-                try:
-                    await self._durable_bridge.purge_retry_circuit(
-                        session_key_kind=session.key.affinity_kind,
-                        session_key_value=session.key.affinity_key,
-                        api_key_id=session.key.api_key_id,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to remove stale HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                        session.key.affinity_kind,
-                        _hash_identifier(session.key.affinity_key),
-                        exc_info=True,
-                    )
-                return
-
+        cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
+        persisted_cooldown_until = now_monotonic + cooldown_remaining
+        async with self._http_bridge_retry_circuit_lock:
             self._http_bridge_retry_circuit_persisted_keys.add(session.key)
-            cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
-            persisted_cooldown_until = now_monotonic + cooldown_remaining
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
@@ -273,24 +277,24 @@ class _HTTPBridgeRetryCircuitMixin:
         await self._load_http_bridge_retry_circuit(session)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.pop(session.key, None)
-            try:
-                # Clearing is idempotent and must be attempted even when the
-                # preceding lookup failed; a successful request should settle
-                # a previously persisted circuit after a transient read error.
-                await self._durable_bridge.clear_retry_circuit(
-                    session_key_kind=session.key.affinity_kind,
-                    session_key_value=session.key.affinity_key,
-                    api_key_id=session.key.api_key_id,
-                )
-                self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-            except Exception:
-                logger.warning(
-                    "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                    session.key.affinity_kind,
-                    _hash_identifier(session.key.affinity_key),
-                    exc_info=True,
-                )
+            self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+            self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+        try:
+            # Clearing is idempotent and must be attempted even when the
+            # preceding lookup failed; a successful request should settle
+            # a previously persisted circuit after a transient read error.
+            await self._durable_bridge.clear_retry_circuit(
+                session_key_kind=session.key.affinity_kind,
+                session_key_value=session.key.affinity_key,
+                api_key_id=session.key.api_key_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                exc_info=True,
+            )
         if state is None:
             return
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:

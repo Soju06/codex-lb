@@ -167,3 +167,23 @@ and durable circuit state.
 - **WHEN** the proxy evaluates or records a retry-circuit event
 - **THEN** the request continues using any available local circuit state
 - **AND** the failure is logged and exposed through retry-circuit observability
+
+### Requirement: Upstream websocket drops penalize affected accounts
+
+When an upstream websocket closes while one or more streamed response requests
+are pending and have not reached a terminal event, the proxy MUST record a
+transient upstream error for the account before signaling failure for those
+pending requests, except when the close carries a classified process-wide
+network failure or is a clean close (`close_code = 1000`) before any
+`response.*` event. Clean pre-response closes MUST remain account-neutral while
+using the bounded clean-close retry and retry-circuit handling above. A
+classified process-wide network failure MUST remain account neutral and use its
+network error code. For other closes, the proxy MUST surface
+`stream_incomplete` to affected pending requests.
+
+#### Scenario: clean pre-response close does not penalize the account
+
+- **GIVEN** a hard-affinity HTTP bridge request is pending with no surfaced response event
+- **WHEN** the upstream websocket closes cleanly before response output
+- **THEN** the proxy records the clean-close retry-circuit outcome
+- **AND** the selected account is not penalized

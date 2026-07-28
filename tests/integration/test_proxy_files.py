@@ -10,16 +10,23 @@ fully-wired httpx client against the FastAPI app.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+from datetime import datetime, timedelta
 from typing import cast
 
 import pytest
+from sqlalchemy import func, select, text
 
+import app.modules.proxy.file_pin_repository as file_pin_repository_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
+from app.db.models import FileAccountPin
+from app.db.session import SessionLocal
+from app.modules.proxy.file_pin_repository import FileAccountPinRepository
 
 pytestmark = pytest.mark.integration
 
@@ -515,6 +522,243 @@ async def test_resolve_file_account_for_responses_returns_pin_when_no_other_affi
     )
     assert prepared.request_state.preferred_account_id == "acc_resp_a"
     assert prepared.affinity_policy.codex_session_source == "session_header"
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_is_resolved_by_another_proxy_replica(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cross_replica", "cross-replica@example.com")
+
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+
+    origin = get_proxy_service_for_app(async_client._transport.app)
+    other_replica = proxy_module.ProxyService(origin._repo_factory)
+    await origin._pin_file_account("file_cross_replica", "acc_cross_replica")
+
+    assert await other_replica._resolve_file_account("file_cross_replica") == "acc_cross_replica"
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "instructions": "Summarize the uploaded file.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_cross_replica"}],
+                }
+            ],
+        }
+    )
+    assert await other_replica._resolve_file_account_for_responses(payload, {}) == "acc_cross_replica"
+
+    preferred_accounts: list[str | None] = []
+
+    async def fake_proxy_files_call(**kwargs):
+        preferred_accounts.append(await kwargs["resolve_preferred_account_id"]())
+        result = {"status": "success"}
+        await kwargs["on_success"](result, "acc_cross_replica")
+        return result, "acc_cross_replica"
+
+    monkeypatch.setattr(other_replica, "_proxy_files_call", fake_proxy_files_call)
+    assert await other_replica.finalize_file("file_cross_replica", {}) == {"status": "success"}
+    assert preferred_accounts == ["acc_cross_replica"]
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_repository_ignores_expired_rows(async_client):
+    del async_client
+    async with SessionLocal() as session:
+        database_now = await session.scalar(select(func.now()))
+        assert isinstance(database_now, datetime)
+        session.add(
+            FileAccountPin(
+                file_id="file_expired_repository",
+                account_id="acc_expired_repository",
+                expires_at=database_now,
+            )
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repository = FileAccountPinRepository(session)
+        assert await repository.get_live_account_id("file_expired_repository") is None
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_same_owner_claim_is_idempotent_and_renews_expiry(async_client):
+    del async_client
+    async with SessionLocal() as session:
+        await FileAccountPinRepository(session).claim(
+            "file_same_owner",
+            "acc_same_owner",
+            ttl_seconds=60,
+        )
+    async with SessionLocal() as session:
+        first_pin = await session.get(FileAccountPin, "file_same_owner")
+        assert first_pin is not None
+        first_expiry = first_pin.expires_at
+
+    async with SessionLocal() as session:
+        await FileAccountPinRepository(session).claim(
+            "file_same_owner",
+            "acc_same_owner",
+            ttl_seconds=120,
+        )
+    async with SessionLocal() as session:
+        renewed_pin = await session.get(FileAccountPin, "file_same_owner")
+        assert renewed_pin is not None
+        assert renewed_pin.account_id == "acc_same_owner"
+        assert renewed_pin.expires_at > first_expiry
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_claim_refreshes_a_stale_successful_insert_expiry(
+    async_client,
+    monkeypatch,
+):
+    del async_client
+    stale_insert = text(
+        """
+        INSERT INTO file_account_pins (file_id, account_id, expires_at)
+        VALUES (
+            :file_id,
+            :account_id,
+            (strftime('%Y-%m-%d %H:%M:%f', 'now', '-' || :ttl || ' seconds') || '000')
+        )
+        RETURNING account_id
+        """
+    )
+    monkeypatch.setattr(file_pin_repository_module, "_SQLITE_CLAIM", stale_insert)
+
+    async with SessionLocal() as session:
+        await FileAccountPinRepository(session).claim(
+            "file_stale_insert_candidate",
+            "acc_stale_insert_candidate",
+            ttl_seconds=120,
+        )
+
+    async with SessionLocal() as session:
+        database_now = await session.scalar(select(func.now()))
+        pin = await session.get(FileAccountPin, "file_stale_insert_candidate")
+        assert isinstance(database_now, datetime)
+        assert pin is not None
+        assert pin.expires_at > database_now + timedelta(seconds=100)
+
+
+@pytest.mark.asyncio
+async def test_file_account_pin_claim_rolls_back_when_post_claim_refresh_does_not_match(
+    async_client,
+    monkeypatch,
+):
+    del async_client
+    monkeypatch.setattr(
+        file_pin_repository_module,
+        "_SQLITE_REFRESH",
+        text(
+            """
+            UPDATE file_account_pins
+            SET expires_at = expires_at
+            WHERE file_id = :file_id
+              AND account_id = :account_id
+              AND 0 = 1
+            RETURNING account_id
+            """
+        ),
+    )
+
+    async with SessionLocal() as session:
+        with pytest.raises(RuntimeError, match="Failed to refresh file account pin after claim"):
+            await FileAccountPinRepository(session).claim(
+                "file_failed_post_claim_refresh",
+                "acc_failed_post_claim_refresh",
+                ttl_seconds=120,
+            )
+
+    async with SessionLocal() as session:
+        assert await session.get(FileAccountPin, "file_failed_post_claim_refresh") is None
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_file_account_pin_is_observed_without_local_cache(async_client):
+    from app.dependencies import get_proxy_service_for_app
+
+    first_replica = get_proxy_service_for_app(async_client._transport.app)
+    second_replica = proxy_module.ProxyService(first_replica._repo_factory)
+    await first_replica._pin_file_account("file_claim_lifecycle", "acc_claim_a")
+    assert await first_replica._resolve_file_account("file_claim_lifecycle") == "acc_claim_a"
+
+    async with SessionLocal() as session:
+        database_now = await session.scalar(select(func.now()))
+        assert isinstance(database_now, datetime)
+        pin = await session.get(FileAccountPin, "file_claim_lifecycle")
+        assert pin is not None
+        pin.expires_at = database_now - timedelta(seconds=1)
+        session.add(
+            FileAccountPin(
+                file_id="file_cleanup_expired",
+                account_id="acc_cleanup_expired",
+                expires_at=database_now - timedelta(seconds=1),
+            )
+        )
+        await session.commit()
+
+    await second_replica._pin_file_account("file_claim_lifecycle", "acc_claim_b")
+
+    async with SessionLocal() as session:
+        assert await session.get(FileAccountPin, "file_cleanup_expired") is None
+
+    assert await first_replica._resolve_file_account("file_claim_lifecycle") == "acc_claim_b"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_file_account_pin_claims_choose_one_durable_owner(async_client):
+    from app.dependencies import get_proxy_service_for_app
+
+    app_service = get_proxy_service_for_app(async_client._transport.app)
+    start = asyncio.Event()
+
+    async def claim(account_id: str) -> tuple[str, str]:
+        replica = proxy_module.ProxyService(app_service._repo_factory)
+        await start.wait()
+        try:
+            await replica._pin_file_account("file_concurrent_claim", account_id)
+        except ProxyResponseError as exc:
+            return account_id, str(exc.payload["error"]["code"])
+        return account_id, "claimed"
+
+    claims = [
+        asyncio.create_task(claim("acc_race_a")),
+        asyncio.create_task(claim("acc_race_b")),
+    ]
+    start.set()
+    results = await asyncio.gather(*claims)
+
+    winners = [account_id for account_id, outcome in results if outcome == "claimed"]
+    conflicts = [account_id for account_id, outcome in results if outcome == "continuity_owner_conflict"]
+    assert len(winners) == 1
+    assert len(conflicts) == 1
+
+    observer = proxy_module.ProxyService(app_service._repo_factory)
+    assert await observer._resolve_file_account("file_concurrent_claim") == winners[0]
+
+
+@pytest.mark.asyncio
+async def test_live_file_account_pin_cannot_be_reassigned_by_another_replica(async_client):
+    await _import_account(async_client, "acc_pin_owner_a", "pin-owner-a@example.com")
+    await _import_account(async_client, "acc_pin_owner_b", "pin-owner-b@example.com")
+
+    from app.dependencies import get_proxy_service_for_app
+
+    origin = get_proxy_service_for_app(async_client._transport.app)
+    other_replica = proxy_module.ProxyService(origin._repo_factory)
+    await origin._pin_file_account("file_immutable_owner", "acc_pin_owner_a")
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await other_replica._pin_file_account("file_immutable_owner", "acc_pin_owner_b")
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "continuity_owner_conflict"
+    assert await other_replica._resolve_file_account("file_immutable_owner") == "acc_pin_owner_a"
 
 
 @pytest.mark.asyncio

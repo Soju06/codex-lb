@@ -9893,7 +9893,7 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner_forward_failure(
+async def test_stream_via_http_bridge_reuses_origin_reservation_after_safe_owner_forward_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -9901,11 +9901,6 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     api_key = _make_api_key(key_id="key-1", assigned_account_ids=[])
     initial_reservation = proxy_service.ApiKeyUsageReservationData(
         reservation_id="resv-initial",
-        key_id=api_key.id,
-        model="gpt-5.4",
-    )
-    retried_reservation = proxy_service.ApiKeyUsageReservationData(
-        reservation_id="resv-retry",
         key_id=api_key.id,
         model="gpt-5.4",
     )
@@ -9936,7 +9931,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         model="gpt-5.4",
         service_tier=None,
         reasoning_effort=None,
-        api_key_reservation=retried_reservation,
+        api_key_reservation=initial_reservation,
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
@@ -10010,7 +10005,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
         asyncio.create_task(produce_after_reattach_delay())
 
-    reserve_retry = AsyncMock(return_value=retried_reservation)
+    reserve_retry = AsyncMock()
     capacity_unavailable = ProxyResponseError(
         503,
         proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
@@ -10074,9 +10069,145 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     assert http_bridge_streaming_module._codex_keepalive_frame() in chunks
     assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
     assert get_or_create.await_count == 3
-    assert prepare_reservations == [initial_reservation, retried_reservation]
-    assert submitted_reservations == [retried_reservation]
-    reserve_retry.assert_awaited_once()
+    assert prepare_reservations == [initial_reservation, initial_reservation]
+    assert submitted_reservations == [initial_reservation]
+    reserve_retry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("forward_outcome", "expected_recovery"),
+    [
+        pytest.param("not_dispatched", True, id="pre-dispatch"),
+        pytest.param("dispatch_ambiguous", False, id="ambiguous-dispatch"),
+        pytest.param("receiver_acknowledged", False, id="acknowledged-then-lost"),
+        pytest.param("receiver_rejected", True, id="definitive-non-200"),
+    ],
+)
+async def test_stream_via_http_bridge_replays_only_definitive_safe_forward_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    forward_outcome: str,
+    expected_recovery: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "continue",
+            "input": "hello",
+            "previous_response_id": "resp_forward_outcome",
+        }
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-forward-outcome",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        previous_response_id=payload.previous_response_id,
+        transport="http",
+    )
+
+    def fake_prepare(
+        _payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        return request_state, '{"type":"response.create"}'
+
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-forward-outcome", None),
+    )
+    local_replay_attempted = ProxyResponseError(
+        500,
+        openai_error("local_replay_attempted", "sentinel", error_type="server_error"),
+    )
+    get_or_create = AsyncMock(side_effect=[owner_forward, local_replay_attempted])
+
+    class _OutcomeOwnerClient:
+        async def stream_responses(self, **kwargs: object):
+            on_request_dispatched = cast(Any, kwargs["on_request_dispatched"])
+            on_response_rejected = cast(Any, kwargs["on_response_rejected"])
+            on_response_ready = cast(Any, kwargs["on_response_ready"])
+            if forward_outcome != "not_dispatched":
+                on_request_dispatched()
+            if forward_outcome == "receiver_rejected":
+                on_response_rejected()
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "bridge_owner_unreachable",
+                        "Owner rejected the forwarded request",
+                        error_type="server_error",
+                    ),
+                )
+            if forward_outcome == "receiver_acknowledged":
+                on_response_ready()
+            raise aiohttp.ClientConnectionError("owner response status unavailable")
+            yield ""
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: Settings(
+            http_responses_session_bridge_enabled=True,
+            http_responses_session_bridge_instance_id="instance-a",
+        ),
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    service._http_bridge_owner_client = cast(Any, _OutcomeOwnerClient())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        _ = [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={"x-codex-session-id": "sid-forward-outcome"},
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+            )
+        ]
+
+    expected_code = "local_replay_attempted" if expected_recovery else "bridge_owner_unreachable"
+    assert exc_info.value.payload["error"]["code"] == expected_code
+    assert get_or_create.await_count == (2 if expected_recovery else 1)
 
 
 async def _run_owner_forward_recovery_with_session(
@@ -16865,7 +16996,6 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
@@ -16921,6 +17051,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
             codex_idle_ttl_seconds=1800.0,
             max_sessions=8,
             queue_limit=4,
+            rewritten_file_account_id="acc-file",
         ):
             pass
 

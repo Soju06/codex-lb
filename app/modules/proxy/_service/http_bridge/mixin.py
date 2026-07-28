@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 import inspect
 import logging
@@ -7,7 +6,6 @@ from collections import deque
 from collections.abc import Collection
 from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
-
 import aiohttp
 import anyio
 from app.core import shutdown as shutdown_state
@@ -84,6 +82,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
     _http_bridge_has_durable_recovery_anchor,
+    _http_bridge_inflight_creation_count,
     _http_bridge_incompatible_model_fork_key,
     _http_bridge_key_strength,
     _http_bridge_locally_owned_fork_key,
@@ -213,7 +212,6 @@ T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
-
 class _HTTPBridgeMixin(
     _HTTPBridgeStreamingMixin,
     _HTTPBridgeSessionRegistryMixin,
@@ -1240,7 +1238,7 @@ class _HTTPBridgeMixin(
                             )
                     elif inflight_future is None:
                         while (
-                            len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions
+                            len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self) >= max_sessions
                             and self._http_bridge_sessions
                         ):
                             evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
@@ -1277,18 +1275,19 @@ class _HTTPBridgeMixin(
                             detached = self._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
                             if detached is not None:
                                 sessions_to_close_before_create.append(detached)
-                        if len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions:
-                            if self._http_bridge_inflight_sessions:
-                                capacity_wait_future = next(iter(self._http_bridge_inflight_sessions.values()))
+                        if len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self) >= max_sessions:
+                            if _http_bridge_inflight_creation_count(self):
+                                capacity_wait_future = next(
+                                    future for future in self._http_bridge_inflight_sessions.values()
+                                    if not getattr(future, "_http_bridge_handoff", False)
+                                )
                             else:
                                 _log_http_bridge_event(
                                     "capacity_exhausted_active_sessions",
                                     key,
                                     account_id=None,
                                     model=request_model,
-                                    pending_count=(
-                                        len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions)
-                                    ),
+                                    pending_count=len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self),
                                     cache_key_family=key.affinity_kind,
                                     model_class=_extract_model_class(request_model) if request_model else None,
                                 )

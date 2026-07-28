@@ -393,6 +393,14 @@ def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int
     }
 
 
+def _http_bridge_inflight_creation_count(service: Any) -> int:
+    return sum(
+        1
+        for future in service._http_bridge_inflight_sessions.values()
+        if not getattr(future, "_http_bridge_handoff", False)
+    )
+
+
 def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
     inflight_cleanup = _cleanup_http_bridge_inflight_sessions_nowait(service)
     live_sessions = 0

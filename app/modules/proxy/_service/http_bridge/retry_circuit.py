@@ -63,6 +63,8 @@ class _HTTPBridgeRetryCircuitMixin:
                 api_key_id=session.key.api_key_id,
             )
         except Exception:
+            if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+                http_bridge_retry_circuit_total.labels(outcome="lookup_failed").inc()
             logger.warning(
                 "Failed to load persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
                 session.key.affinity_kind,
@@ -187,6 +189,8 @@ class _HTTPBridgeRetryCircuitMixin:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
                     self._http_bridge_retry_circuit_persisted_keys.add(session.key)
         except Exception:
+            if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+                http_bridge_retry_circuit_total.labels(outcome="persist_failed").inc()
             logger.warning(
                 "Failed to persist HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
                 session.key.affinity_kind,

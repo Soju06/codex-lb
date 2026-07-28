@@ -198,13 +198,22 @@ def test_http_bridge_eventless_precreated_deadline_uses_dedicated_timeout() -> N
         == 105.0
     )
 
+    request_state.response_event_count = 1
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            response_created_timeout_seconds=5.0,
+        )
+        == 105.0
+    )
+
 
 @pytest.mark.parametrize(
     ("field_name", "field_value"),
     [
         ("response_id", "resp-created"),
         ("latency_response_created_ms", 12),
-        ("response_event_count", 1),
+        ("upstream_model_output_seen", True),
         ("downstream_visible", True),
         ("last_downstream_sequence_number", 0),
         ("awaiting_response_created", False),
@@ -17860,11 +17869,15 @@ async def test_get_or_create_http_bridge_session_replaces_live_session_when_scop
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("leading_telemetry", [False, True], ids=["silent", "leading-telemetry"])
+@pytest.mark.parametrize(
+    "leading_telemetry_type",
+    [None, "codex.rate_limits", "response.rate_limits"],
+    ids=["silent", "codex-telemetry", "response-telemetry"],
+)
 async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without_keepalives(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    leading_telemetry: bool,
+    leading_telemetry_type: str | None,
 ) -> None:
     class _TrackingUpstream:
         def __init__(self) -> None:
@@ -17884,13 +17897,13 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
             self.max_active_receives = max(self.max_active_receives, self.active_receives)
             self.first_receive_started.set()
             try:
-                if leading_telemetry and receive_number == 1:
+                if leading_telemetry_type is not None and receive_number == 1:
                     await self.telemetry_ready.wait()
                     return UpstreamWebSocketMessage(
                         kind="text",
                         text=json.dumps(
                             {
-                                "type": "codex.rate_limits",
+                                "type": leading_telemetry_type,
                                 "plan_type": "pro",
                                 "rate_limits": {"allowed": True, "limit_reached": False},
                             },
@@ -17913,7 +17926,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     upstream = _TrackingUpstream()
-    session = _make_bridge_session(key_value=f"eventless-{leading_telemetry}")
+    session = _make_bridge_session(key_value=f"eventless-{leading_telemetry_type}")
     session.upstream = cast(UpstreamResponsesWebSocket, upstream)
     service._http_bridge_sessions[session.key] = session
     settings = _make_app_settings(
@@ -17989,7 +18002,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
             owner,
             owner.request_text,
         )
-        if leading_telemetry:
+        if leading_telemetry_type is not None:
             upstream.telemetry_ready.set()
         await asyncio.wait_for(reader_task, timeout=1.0)
 
@@ -18022,8 +18035,8 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.preferred_account_id == "acc-bridge"
     assert owner.excluded_account_ids == {"acc-excluded"}
     assert owner.replay_count == 0
-    assert owner.response_event_count == 0
-    if leading_telemetry:
+    assert owner.response_event_count == (1 if leading_telemetry_type == "response.rate_limits" else 0)
+    if leading_telemetry_type is not None:
         assert owner.latency_first_upstream_event_ms is not None
     retry_precreated.assert_not_awaited()
     release_account_response_create.assert_awaited_once_with(account_response_create_lease)

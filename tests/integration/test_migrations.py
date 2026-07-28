@@ -1407,7 +1407,7 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'stamped-merge-rollup-repair.sqlite'}"
     merge_revision = "20260724_000000_merge_request_log_schema_heads"
-    repair_revision = "20260726_000000_repair_request_usage_rollups_after_merge"
+    final_revision = "20260728_000000_merge_pending_tool_calls_and_rollup_repair_heads"
     rollup_tables = {
         "request_usage_hourly_rollups",
         "request_usage_hourly_error_rollups",
@@ -1415,7 +1415,7 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
     }
 
     await to_thread.run_sync(lambda: command.stamp(_build_alembic_config(db_url), merge_revision))
-    await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
+    await to_thread.run_sync(lambda: run_upgrade(db_url, final_revision, bootstrap_legacy=False))
 
     engine = create_async_engine(db_url, future=True)
     try:

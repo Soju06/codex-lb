@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
 
@@ -35,6 +36,17 @@ _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
 # ``database_pool_size`` / ``database_max_overflow``.
 _POSTGRES_POOL_TIMEOUT_SECONDS = 30.0
 _POSTGRES_POOL_RECYCLE_SECONDS = 1800
+
+
+class _PostgresPooledEngineRole(StrEnum):
+    REQUEST_PATH = "request_path"
+    BACKGROUND_TASK = "background_task"
+
+
+# The owned launcher pins one worker per replica. Derive its two-engine
+# PostgreSQL budget from the roles that the real creation paths must declare.
+_POSTGRES_POOLED_ENGINE_ROLES = tuple(_PostgresPooledEngineRole)
+_POSTGRES_POOLED_ENGINES_PER_WORKER = len(_POSTGRES_POOLED_ENGINE_ROLES)
 
 
 def _is_sqlite_url(url: str) -> bool:
@@ -88,6 +100,16 @@ def _postgres_async_engine_kwargs(url: str) -> dict[str, object]:
     return kwargs
 
 
+def _create_postgres_async_engine(url: str, *, role: _PostgresPooledEngineRole) -> AsyncEngine:
+    if not isinstance(role, _PostgresPooledEngineRole):
+        raise TypeError(f"PostgreSQL engine role must be declared in {_PostgresPooledEngineRole.__name__}")
+    return create_async_engine(
+        url,
+        echo=False,
+        **_postgres_async_engine_kwargs(url),
+    )
+
+
 def _sqlite_file_async_engine_kwargs() -> dict[str, object]:
     return {
         "poolclass": NullPool,
@@ -109,27 +131,31 @@ def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
             cursor.close()
 
 
-if _is_sqlite_url(_settings.database_url):
-    is_sqlite_memory = _is_sqlite_memory_url(_settings.database_url)
+def _create_main_engine(url: str) -> AsyncEngine:
+    if not _is_sqlite_url(url):
+        return _create_postgres_async_engine(
+            url,
+            role=_PostgresPooledEngineRole.REQUEST_PATH,
+        )
+
+    is_sqlite_memory = _is_sqlite_memory_url(url)
     if is_sqlite_memory:
-        engine = create_async_engine(
-            _settings.database_url,
+        main_engine = create_async_engine(
+            url,
             echo=False,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     else:
-        engine = create_async_engine(
-            _settings.database_url,
+        main_engine = create_async_engine(
+            url,
             echo=False,
             **_sqlite_file_async_engine_kwargs(),
         )
-    _configure_sqlite_engine(engine.sync_engine, enable_wal=not is_sqlite_memory)
-else:
-    engine = create_async_engine(
-        _settings.database_url,
-        echo=False,
-        **_postgres_async_engine_kwargs(_settings.database_url),
-    )
+    _configure_sqlite_engine(main_engine.sync_engine, enable_wal=not is_sqlite_memory)
+    return main_engine
+
+
+engine = _create_main_engine(_settings.database_url)
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -252,10 +278,9 @@ def init_background_db(url: str | None = None) -> None:
         )
         _configure_sqlite_engine(_background_engine.sync_engine, enable_wal=not is_sqlite_memory)
     else:
-        _background_engine = create_async_engine(
+        _background_engine = _create_postgres_async_engine(
             db_url,
-            echo=False,
-            **_postgres_async_engine_kwargs(db_url),
+            role=_PostgresPooledEngineRole.BACKGROUND_TASK,
         )
 
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)

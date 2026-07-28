@@ -124,12 +124,13 @@ config:
   # @param config.databaseMigrateOnStartup Disable auto-migration (migration Job handles it)
   databaseMigrateOnStartup: false
   # @param config.databasePoolSize SQLAlchemy connection pool size
-  # Connection pool budget: (databasePoolSize + databaseMaxOverflow) × maxReplicas MUST be ≤ PostgreSQL max_connections (default 100)
-  # Default (5+5)×10=100 fits HPA maxReplicas=10 against PG default max_connections.
-  # Prod overlay uses (3+2)×20=100. Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
-  databasePoolSize: 5
+  # Each supported replica has one worker with two pools (request + background).
+  # Reserve 20 of PostgreSQL's default 100 slots for PG internals, migrations, and operations.
+  # Default (3+1)×2×1×10=80. Prod uses (1+1)×2×1×20=80.
+  # Increase PG max_connections or deploy PgBouncer if more concurrency is needed.
+  databasePoolSize: 3
   # @param config.databaseMaxOverflow SQLAlchemy connection pool max overflow
-  databaseMaxOverflow: 5
+  databaseMaxOverflow: 1
   # @param config.upstreamBaseUrl Override OpenAI upstream base URL (empty = default)
   upstreamBaseUrl: ""
   # @param config.upstreamConnectTimeout Upstream connection timeout seconds

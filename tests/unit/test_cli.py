@@ -341,6 +341,28 @@ def test_run_server_handles_keyboard_interrupt_cleanly(
     cli._run_server("app.main:app", host="127.0.0.1", port=2455)
 
 
+def test_run_server_handles_keyboard_interrupt_during_app_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfig:
+        workers = 1
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def load_app(self) -> None:
+            raise KeyboardInterrupt
+
+    def fail_load_server() -> None:
+        pytest.fail("The server must not be constructed after interrupted app loading")
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", fail_load_server)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
+
+    cli._run_server("app.main:app", host="127.0.0.1", port=2455)
+
+
 def test_main_reports_invalid_keep_alive_timeout_env(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["codex-lb"])
     monkeypatch.setenv("UVICORN_TIMEOUT_KEEP_ALIVE", "not-a-timeout")

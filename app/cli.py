@@ -146,12 +146,12 @@ def _run_server(app: str, **kwargs: Any) -> None:
         timeout_graceful_shutdown=drain_timeout_seconds,
         **kwargs,
     )
-    config.load_app()
-    server = _load_graceful_drain_server()(
-        config,
-        drain_timeout_seconds=drain_timeout_seconds,
-    )
     try:
+        config.load_app()
+        server = _load_graceful_drain_server()(
+            config,
+            drain_timeout_seconds=drain_timeout_seconds,
+        )
         server.run()
     except KeyboardInterrupt:
         return

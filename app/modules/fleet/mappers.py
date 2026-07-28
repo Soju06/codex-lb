@@ -35,6 +35,7 @@ def fleet_account_summary_from_account(
             reset_at=account.reset_at_secondary if include_usage else None,
             window_minutes=account.window_minutes_secondary if include_usage else None,
         ),
+        usage_refreshed_at=account.usage_refreshed_at_for_fleet() if include_usage else None,
         last_refresh_at=account.last_refresh_at if include_usage else None,
     )
 

@@ -25,6 +25,7 @@ class FleetAccountSummary(DashboardModel):
     plan_type: str
     primary: FleetWindowSummary
     secondary: FleetWindowSummary
+    usage_refreshed_at: datetime | None = None
     last_refresh_at: datetime | None = None
 
 

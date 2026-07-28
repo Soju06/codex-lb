@@ -80,6 +80,8 @@ class AccountAdditionalQuota(DashboardModel):
 
 
 class AccountSummary(DashboardModel):
+    _usage_refreshed_at: datetime | None = PrivateAttr(default=None)
+
     account_id: str
     chatgpt_account_id: str | None = None
     email: str
@@ -128,6 +130,11 @@ class AccountSummary(DashboardModel):
     # otherwise the latest persisted primary usage_history count from /wham/usage.
     available_reset_credits: int = 0
     reset_credit_nearest_expires_at: datetime | None = None
+
+    def usage_refreshed_at_for_fleet(self) -> datetime | None:
+        """Return internal usage freshness without expanding the accounts API."""
+
+        return self._usage_refreshed_at
 
 
 class AccountsResponse(DashboardModel):

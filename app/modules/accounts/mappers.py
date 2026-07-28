@@ -112,6 +112,7 @@ def _account_to_summary(
     is_email_duplicate: bool = False,
     reset_credits_snapshot: RateLimitResetCreditsSnapshot | None = None,
 ) -> AccountSummary:
+    usage_refreshed_at = _latest_usage_recorded_at(primary_usage, secondary_usage, monthly_usage)
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
     effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
@@ -252,7 +253,7 @@ def _account_to_summary(
         reset_at_primary = None
         window_minutes_primary = None
 
-    return AccountSummary(
+    summary = AccountSummary(
         account_id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
         email=account.email,
@@ -296,6 +297,8 @@ def _account_to_summary(
         available_reset_credits=reset_credits_snapshot.available_count if reset_credits_snapshot else 0,
         reset_credit_nearest_expires_at=(reset_credits_snapshot.nearest_expires_at if reset_credits_snapshot else None),
     )
+    summary._usage_refreshed_at = usage_refreshed_at
+    return summary
 
 
 def _normalize_account_routing_policy(value: str | None) -> str:
@@ -478,6 +481,11 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _latest_usage_recorded_at(*entries: UsageHistory | None) -> datetime | None:
+    recorded_at_values = [entry.recorded_at for entry in entries if entry is not None and entry.recorded_at is not None]
+    return max(recorded_at_values, default=None)
 
 
 def _extract_credit_status(

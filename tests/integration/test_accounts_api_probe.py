@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,9 +10,12 @@ import pytest
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.usage.models import UsagePayload
+from app.core.utils.time import utcnow
+from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.schemas import AccountProbeResponse
 from app.modules.accounts.service import AccountsService
+from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater
 
 pytestmark = pytest.mark.integration
@@ -41,6 +45,12 @@ async def _import_test_account(async_client, *, email: str, account_id: str, pla
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200, response.text
     return generate_unique_account_id(account_id, email)
+
+
+async def _create_fleet_api_key(async_client, *, name: str) -> str:
+    response = await async_client.post("/api/api-keys/", json={"name": name})
+    assert response.status_code == 200, response.text
+    return response.json()["key"]
 
 
 @pytest.mark.asyncio
@@ -138,6 +148,79 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
         account_id=account_id,
         http_status=200,
     )
+
+
+@pytest.mark.asyncio
+async def test_force_probe_advances_fleet_usage_timestamp_without_token_refresh(async_client, monkeypatch):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 25.0,
+                        "reset_after_seconds": 300,
+                        "limit_window_seconds": 18_000,
+                    },
+                    "secondary_window": {
+                        "used_percent": 40.0,
+                        "reset_after_seconds": 3600,
+                        "limit_window_seconds": 604_800,
+                    },
+                }
+            }
+        )
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-usage-freshness@example.com",
+        account_id="acc_probe_usage_freshness",
+    )
+    old_recorded_at = utcnow() - timedelta(hours=2)
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id,
+            10.0,
+            recorded_at=old_recorded_at,
+            window="primary",
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id,
+            20.0,
+            recorded_at=old_recorded_at,
+            window="secondary",
+            window_minutes=10_080,
+        )
+
+    plain_key = await _create_fleet_api_key(async_client, name="probe-usage-freshness-key")
+    headers = {"Authorization": f"Bearer {plain_key}"}
+    before_response = await async_client.get("/api/fleet/summary", headers=headers)
+    assert before_response.status_code == 200, before_response.text
+    before = next(item for item in before_response.json()["accounts"] if item["accountId"] == account_id)
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+    record_probe_result = AsyncMock()
+    proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
+    monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
+
+    probe_response = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert probe_response.status_code == 200, probe_response.text
+
+    after_response = await async_client.get("/api/fleet/summary", headers=headers)
+    assert after_response.status_code == 200, after_response.text
+    after = next(item for item in after_response.json()["accounts"] if item["accountId"] == account_id)
+
+    before_usage_refreshed_at = before["usageRefreshedAt"]
+    after_usage_refreshed_at = after["usageRefreshedAt"]
+    assert before_usage_refreshed_at is not None
+    assert after_usage_refreshed_at is not None
+    assert after_usage_refreshed_at > before_usage_refreshed_at
+    assert after["lastRefreshAt"] == before["lastRefreshAt"]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts import mappers
 from app.modules.accounts.mappers import _effective_status_from_usage, _normalize_account_routing_policy
@@ -37,6 +38,32 @@ def test_extract_credit_status_uses_freshest_sample() -> None:
     )
 
     assert mappers._extract_credit_status(stale, fresh) == (False, False, 0.0)
+
+
+def test_account_summary_carries_freshest_usage_timestamp_without_serializing_it() -> None:
+    primary_recorded_at = datetime(2026, 1, 1, 12, 0, 0)
+    secondary_recorded_at = datetime(2026, 1, 1, 12, 1, 0)
+
+    summary = mappers.build_account_summaries(
+        accounts=[_account(AccountStatus.ACTIVE)],
+        primary_usage={"account-1": _primary_usage(recorded_at=primary_recorded_at)},
+        secondary_usage={"account-1": _secondary_usage(recorded_at=secondary_recorded_at)},
+        encryptor=TokenEncryptor(),
+    )[0]
+
+    assert summary.usage_refreshed_at_for_fleet() == secondary_recorded_at
+    assert "usageRefreshedAt" not in summary.model_dump(mode="json", by_alias=True)
+
+
+def test_account_summary_has_no_usage_timestamp_without_samples() -> None:
+    summary = mappers.build_account_summaries(
+        accounts=[_account(AccountStatus.ACTIVE)],
+        primary_usage={},
+        secondary_usage={},
+        encryptor=TokenEncryptor(),
+    )[0]
+
+    assert summary.usage_refreshed_at_for_fleet() is None
 
 
 def _account(status: AccountStatus = AccountStatus.QUOTA_EXCEEDED) -> Account:

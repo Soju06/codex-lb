@@ -6574,6 +6574,81 @@ async def test_reconnect_keeps_handoff_protected_during_lease_swap(
 
 
 @pytest.mark.asyncio
+async def test_reconnect_cancellation_during_wrong_owner_lease_release_completes_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    required_account = cast(Any, SimpleNamespace(id="acc-required", status=AccountStatus.ACTIVE, plan_type="plus"))
+    replacement_account = cast(
+        Any,
+        SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE, plan_type="plus"),
+    )
+    replacement_lease = proxy_service.AccountLease(
+        lease_id="lease-wrong-owner-cancelled",
+        account_id=replacement_account.id,
+        kind="stream",
+        acquired_at=2.0,
+    )
+    release_started = asyncio.Event()
+
+    async def select_account(_deadline: float, **_: object) -> proxy_service.AccountSelection:
+        return proxy_service.AccountSelection(
+            account=replacement_account,
+            error_message=None,
+            error_code=None,
+            lease=replacement_lease,
+        )
+
+    async def release_lease(_lease: proxy_service.AccountLease | None) -> None:
+        release_started.set()
+        await asyncio.Event().wait()
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-wrong-owner-cancelled",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id=required_account.id,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    reconnect_task = asyncio.create_task(
+        service._reconnect_http_bridge_session(
+            session,
+            request_state=request_state,
+            require_preferred_account=True,
+        )
+    )
+    await asyncio.wait_for(release_started.wait(), timeout=1.0)
+    reconnect_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await reconnect_task
+
+    assert session.closed is True
+    assert session.handoff_in_progress is False
+    assert session.handoff_future is None
+    assert session.key not in service._http_bridge_inflight_sessions
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_preserves_hard_account_after_1011(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

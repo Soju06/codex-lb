@@ -459,7 +459,6 @@ class _HTTPBridgeMixin(
         force_durable_takeover_after_detach = used_session_header_fallback = False
         locally_owned_fork_key: _HTTPBridgeSessionKey | None = None
         model_transition_parent_key: _HTTPBridgeSessionKey | None = None
-
         def bind_account_neutral_recovery_owner(session: _HTTPBridgeSession) -> None:
             nonlocal preferred_account_id
             if not is_http_bridge_account_neutral_replay(

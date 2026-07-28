@@ -19369,6 +19369,7 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == {"acc-rejected"}
     reconnect.assert_awaited_once()
+    assert reconnect.await_args.kwargs["require_same_account"] is False
 
 
 @pytest.mark.asyncio

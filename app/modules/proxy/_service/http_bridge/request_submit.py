@@ -1664,6 +1664,7 @@ class _HTTPBridgeRequestSubmitMixin:
             key=session.key.affinity_key,
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
+        model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1761,9 +1762,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 if account_neutral_recovery:
                     request_state.preferred_account_id = session.account.id
                 elif not request_state.file_required_preferred_account:
-                    model_fallback_replay = (
-                        request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
-                    )
                     if hard_owner_bound and not model_fallback_replay:
                         request_state.preferred_account_id = session.account.id
                     else:
@@ -1805,7 +1803,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_jitter_seconds,
                 )
                 await asyncio.sleep(retry_jitter_seconds)
-            if hard_owner_bound:
+            if hard_owner_bound and not model_fallback_replay:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,

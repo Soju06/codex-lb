@@ -461,7 +461,12 @@ async def _http_bridge_receive_timeout_with_eventless_deadline(
     return receive_timeout
 
 
-async def _cancel_http_bridge_reader_child(task: asyncio.Task[Any] | None, *, label: str) -> bool:
+async def _cancel_http_bridge_reader_child(
+    task: asyncio.Task[Any] | None,
+    *,
+    label: str,
+    cleanup_tasks: set[asyncio.Task[None]] | None = None,
+) -> bool:
     if task is None:
         return True
     if task.done():
@@ -477,7 +482,7 @@ async def _cancel_http_bridge_reader_child(task: asyncio.Task[Any] | None, *, la
             await _await_cancelled_task(
                 task,
                 label=label,
-                cleanup_tasks=self._background_cleanup_tasks,
+                cleanup_tasks=cleanup_tasks,
             )
         )
     except Exception:
@@ -672,6 +677,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         await _cancel_http_bridge_reader_child(
                             wakeup_task,
                             label="HTTP bridge reader wakeup wait",
+                            cleanup_tasks=self._background_cleanup_tasks,
                         )
                         wakeup_task = None
 
@@ -719,6 +725,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 receive_cancelled = await _cancel_http_bridge_reader_child(
                                     receive_task,
                                     label="HTTP bridge upstream receive after missing response.created",
+                                    cleanup_tasks=self._background_cleanup_tasks,
                                 )
                                 if receive_cancelled:
                                     receive_task = None
@@ -752,6 +759,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         receive_cancelled = await _cancel_http_bridge_reader_child(
                             receive_task,
                             label="HTTP bridge upstream receive after timeout",
+                            cleanup_tasks=self._background_cleanup_tasks,
                         )
                         if not receive_cancelled:
                             raise RuntimeError("HTTP bridge upstream receive did not cancel after timeout")
@@ -857,10 +865,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await _cancel_http_bridge_reader_child(
                 wakeup_task,
                 label="HTTP bridge reader wakeup wait",
+                cleanup_tasks=self._background_cleanup_tasks,
             )
             await _cancel_http_bridge_reader_child(
                 receive_task,
                 label="HTTP bridge upstream receive",
+                cleanup_tasks=self._background_cleanup_tasks,
             )
             if session.upstream is relay_upstream:
                 session.closed = True

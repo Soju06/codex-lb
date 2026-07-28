@@ -9422,18 +9422,19 @@ async def test_stream_via_http_bridge_fails_closed_on_forward_loop_prevented(
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-forwarded",
+        key_id="key-1",
+        model="gpt-5.4",
+    )
     owner_forward = proxy_service._HTTPBridgeOwnerForward(
         owner_instance="instance-b",
         owner_endpoint="http://instance-b",
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
     )
 
-    async def fake_forward(**kwargs: object):
-        del kwargs
-        raise ProxyResponseError(503, proxy_service.openai_error("bridge_forward_loop_prevented", "loop"))
-        yield ""
-
     get_or_create = AsyncMock(return_value=owner_forward)
+    forward = Mock()
     monkeypatch.setattr(
         proxy_service,
         "get_settings_cache",
@@ -9454,7 +9455,7 @@ async def test_stream_via_http_bridge_fails_closed_on_forward_loop_prevented(
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
-    monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", fake_forward)
+    monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", forward)
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_via_http_bridge(
@@ -9463,18 +9464,20 @@ async def test_stream_via_http_bridge_fails_closed_on_forward_loop_prevented(
             codex_session_affinity=True,
             openai_cache_affinity=False,
             api_key=None,
-            api_key_reservation=None,
+            api_key_reservation=reservation,
             propagate_http_errors=False,
             suppress_text_done_events=False,
             idle_ttl_seconds=120.0,
             codex_idle_ttl_seconds=900.0,
             max_sessions=8,
             queue_limit=4,
+            forwarded_request=True,
         ):
             pass
 
     assert exc_info.value.payload["error"]["code"] == "bridge_forward_loop_prevented"
     get_or_create.assert_awaited_once()
+    forward.assert_not_called()
 
 
 @pytest.mark.asyncio

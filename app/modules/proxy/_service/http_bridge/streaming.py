@@ -1333,6 +1333,18 @@ class _HTTPBridgeStreamingMixin:
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
+            if forwarded_request:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "bridge_forward_loop_prevented",
+                        (
+                            "HTTP bridge request was forwarded back to a non-owner instance; "
+                            "refusing takeover to avoid a forward loop"
+                        ),
+                        error_type="server_error",
+                    ),
+                )
             await _current_origin_legacy_owner_anchor_lookup(
                 durable_bridge=self._durable_bridge,
                 bridge_session_key=session_or_forward.key,

@@ -267,23 +267,24 @@ class _HTTPBridgeRetryCircuitMixin:
         await self._load_http_bridge_retry_circuit(session)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.pop(session.key, None)
-            should_clear_persisted = session.key in self._http_bridge_retry_circuit_persisted_keys
-            if should_clear_persisted:
-                try:
-                    await self._durable_bridge.clear_retry_circuit(
-                        session_key_kind=session.key.affinity_kind,
-                        session_key_value=session.key.affinity_key,
-                        api_key_id=session.key.api_key_id,
-                    )
-                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-                except Exception:
-                    logger.warning(
-                        "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
-                        session.key.affinity_kind,
-                        _hash_identifier(session.key.affinity_key),
-                        exc_info=True,
-                    )
+            try:
+                # Clearing is idempotent and must be attempted even when the
+                # preceding lookup failed; a successful request should settle
+                # a previously persisted circuit after a transient read error.
+                await self._durable_bridge.clear_retry_circuit(
+                    session_key_kind=session.key.affinity_kind,
+                    session_key_value=session.key.affinity_key,
+                    api_key_id=session.key.api_key_id,
+                )
+                self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+            except Exception:
+                logger.warning(
+                    "Failed to clear persisted HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    exc_info=True,
+                )
         if state is None:
             return
         if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:

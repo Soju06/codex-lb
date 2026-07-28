@@ -19891,6 +19891,34 @@ async def test_http_bridge_retry_circuit_drops_local_state_after_durable_clear()
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_clear_retries_after_lookup_failure() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-retry-clear-after-lookup-failure")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=RuntimeError("durable read unavailable")),
+        clear_retry_circuit=AsyncMock(),
+    )
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=time.monotonic() + 60.0,
+        last_detail="stream_incomplete",
+        last_touched_monotonic=time.monotonic(),
+    )
+    service._http_bridge_retry_circuits[hard_session.key] = state
+    service._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+
+    await service._clear_http_bridge_retry_circuit(hard_session)
+
+    service._durable_bridge.clear_retry_circuit.assert_awaited_once_with(
+        session_key_kind=hard_session.key.affinity_kind,
+        session_key_value=hard_session.key.affinity_key,
+        api_key_id=hard_session.key.api_key_id,
+    )
+    assert hard_session.key not in service._http_bridge_retry_circuits
+    assert hard_session.key not in service._http_bridge_retry_circuit_persisted_keys
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-replica-reset-lineage")

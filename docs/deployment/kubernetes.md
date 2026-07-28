@@ -18,6 +18,29 @@ The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica
 
 In multi-replica setups, replicas must share the same encryption key (the Helm chart default) for bootstrap-token restart recovery and encrypted-data access to work.
 
+## Graceful shutdown
+
+The chart's preStop hook commits one process drain deadline before Uvicorn
+closes HTTP or WebSocket connections. It first allows the configured routing
+dwell to elapse, then returns as soon as tracked work reaches zero; otherwise
+it waits only until the same application deadline. A later SIGTERM reuses that
+deadline instead of starting another drain period.
+
+During that bounded window, new WebSocket connections and new Responses turns
+are rejected. An admitted Responses turn may finish terminal delivery,
+request-log persistence, and API-key settlement; an idle admitted connection
+closes promptly. Kubernetes' `terminationGracePeriodSeconds` starts before the
+preStop helper, so it must also reserve time for helper startup and bounded
+post-drain process cleanup.
+
+The defaults satisfy the chart's timing guards. When tuning them, keep
+`preStopSleepSeconds <= config.shutdownDrainTimeoutSeconds` and
+`terminationGracePeriodSeconds >= config.shutdownDrainTimeoutSeconds + 32`.
+See the owning
+[deployment-installation](../../openspec/specs/deployment-installation/)
+contract and [replica-operations](../../openspec/specs/replica-operations/)
+operational context.
+
 ## Gateway API path filters
 
 Set `gatewayApi.rules` when different request paths need different Gateway API

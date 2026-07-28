@@ -63,9 +63,9 @@ updateStrategy:
   rollingUpdate:
     # @param updateStrategy.rollingUpdate.partition RollingUpdate partition for StatefulSet updates
     partition: 0
-# @param terminationGracePeriodSeconds Pod termination grace period seconds
-terminationGracePeriodSeconds: 60
-# @param preStopSleepSeconds Seconds to sleep in preStop lifecycle hook
+# @param terminationGracePeriodSeconds Pod termination grace; must cover app drain plus 32s start fallback and bounded cleanup
+terminationGracePeriodSeconds: 65
+# @param preStopSleepSeconds Minimum routing dwell from Python preStop helper start
 preStopSleepSeconds: 15
 resources:
   requests:
@@ -148,7 +148,7 @@ config:
   circuitBreakerEnabled: true
   # @param config.backpressureMaxConcurrentRequests Max concurrent in-flight requests
   backpressureMaxConcurrentRequests: 200
-  # @param config.shutdownDrainTimeoutSeconds Graceful shutdown drain timeout
+  # @param config.shutdownDrainTimeoutSeconds Shared application drain timeout in seconds
   shutdownDrainTimeoutSeconds: 30
   # @param config.httpConnectorLimit Global HTTP connection pool limit
   httpConnectorLimit: 100

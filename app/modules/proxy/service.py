@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
 import aiohttp
 import anyio
 
+from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import (
     RefreshError,
     is_transient_refresh_contention,
@@ -787,15 +788,23 @@ async def _await_cancelled_task(
     *,
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
+    cancel: bool = True,
 ) -> bool:
-    task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=timeout_seconds)
-    except asyncio.CancelledError:
-        return True
-    except TimeoutError:
+    effective_timeout = max(float(timeout_seconds), 0.0)
+    remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
+    if remaining_drain_timeout is not None:
+        effective_timeout = min(effective_timeout, remaining_drain_timeout)
+
+    if cancel:
+        task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=effective_timeout)
+    if task not in done:
         logger.warning("Timed out waiting for %s cancellation", label)
         return False
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return True
     return True
 
 

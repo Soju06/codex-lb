@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 from hashlib import sha256
 from ipaddress import ip_address
@@ -10,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
+from app.core.shutdown import DRAIN_DEADLINE_HEADER
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import get_session
@@ -98,14 +100,37 @@ async def start_internal_drain(request: Request) -> HealthCheckResponse:
 
     import app.core.shutdown as shutdown_state
 
-    shutdown_state.set_bridge_drain_active(True)
-    shutdown_state.set_draining(True)
+    deadline_header = getattr(request, "headers", {}).get(DRAIN_DEADLINE_HEADER)
+    deadline_monotonic: float | None = None
+    if deadline_header is not None:
+        try:
+            deadline_monotonic = float(deadline_header)
+            if not math.isfinite(deadline_monotonic):
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid drain deadline") from exc
+
+    timeout_seconds = get_settings().shutdown_drain_timeout_seconds
+    if deadline_monotonic is None:
+        effective_deadline = shutdown_state.begin_drain(timeout_seconds=timeout_seconds)
+    else:
+        effective_deadline = shutdown_state.commit_shutdown(
+            timeout_seconds=timeout_seconds,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     proxy_service = getattr(request.app.state, "proxy_service", None)
     if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
         await proxy_service.mark_http_bridge_draining()
 
-    return HealthCheckResponse(status="ok", checks={"draining": "ok"})
+    return HealthCheckResponse(
+        status="ok",
+        checks={
+            "draining": str(shutdown_state.is_draining()).lower(),
+            "shutdown_committed": str(shutdown_state.is_shutdown_committed()).lower(),
+            "deadline_monotonic": format(effective_deadline, ".17g"),
+        },
+    )
 
 
 @router.post("/internal/drain/stop", include_in_schema=False)
@@ -116,8 +141,8 @@ async def stop_internal_drain(request: Request) -> HealthCheckResponse:
 
     import app.core.shutdown as shutdown_state
 
-    shutdown_state.set_draining(False)
-    shutdown_state.set_bridge_drain_active(False)
+    if not shutdown_state.stop_drain():
+        raise HTTPException(status_code=409, detail="Process shutdown is already committed")
 
     return HealthCheckResponse(status="ok", checks={"draining": "false"})
 

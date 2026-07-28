@@ -15575,7 +15575,7 @@ def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_rele
     start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
     branch = source[start_index : source.index("await proxy._emit_websocket_terminal_error", start_index)]
 
-    assert "proxy._release_websocket_request_state_reservation(request_state)" in branch
+    assert "proxy._release_websocket_request_state_reservation(response_create_request_state)" in branch
     assert "_release_websocket_reservation(request_state.api_key_reservation)" not in source
 
 

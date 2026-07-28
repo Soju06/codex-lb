@@ -273,6 +273,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/yeongjun-cigro"><img src="https://avatars.githubusercontent.com/u/260819931?v=4?s=100" width="100px;" alt="유영준"/><br /><sub><b>유영준</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=yeongjun-cigro" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=yeongjun-cigro" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/HulianBuligon"><img src="https://avatars.githubusercontent.com/u/205309211?v=4?s=100" width="100px;" alt="HulianBuligon"/><br /><sub><b>HulianBuligon</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=HulianBuligon" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=HulianBuligon" title="Tests">⚠️</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/crowscc"><img src="https://avatars.githubusercontent.com/u/17800561?v=4?s=100" width="100px;" alt=" 哆啦AI梦"/><br /><sub><b> 哆啦AI梦</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=crowscc" title="Code">💻</a></td>
+    </tr>
   </tbody>
 </table>
 

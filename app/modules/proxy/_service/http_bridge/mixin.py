@@ -246,7 +246,6 @@ class _HTTPBridgeMixin(
                 action="http_bridge_session_close",
                 request_id=_hash_identifier(session.key.affinity_key),
             )
-
     async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
         tasks = [
             task
@@ -271,7 +270,6 @@ class _HTTPBridgeMixin(
                 len(tasks),
                 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
-
     async def _fail_http_bridge_inflight_session_creation(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -1362,7 +1360,6 @@ class _HTTPBridgeMixin(
                 except Exception:
                     pass
                 continue
-
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1452,7 +1449,6 @@ class _HTTPBridgeMixin(
                     if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
-
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:
@@ -2089,7 +2085,11 @@ class _HTTPBridgeMixin(
             async with session.pending_lock:
                 if session.account_lease is not None and lease.lease_id == session.account_lease.lease_id:
                     session.account_lease = None
-            await self._load_balancer.release_account_lease(lease)
+            try:
+                await self._load_balancer.release_account_lease(lease)
+            except BaseException:
+                complete_failed_handoff()
+                raise
         async def abandon_selected_account_retry(selected_account: Any) -> None:
             nonlocal preferred_candidate_id
             if hard_close_account_bound or selected_account_model_replacement:

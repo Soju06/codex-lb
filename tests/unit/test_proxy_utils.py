@@ -33495,8 +33495,8 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
     assert calls == [(payload, "acc_doc")]
 
 
-def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
-    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
+def test_classify_upstream_close_clean_for_clean_close_before_any_response_event():
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "clean"
     assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 

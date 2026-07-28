@@ -43,6 +43,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Build docs
         run: |

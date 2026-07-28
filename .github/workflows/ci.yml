@@ -298,6 +298,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Install frontend dependencies
         run: make frontend-install
@@ -325,6 +326,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Ruff check
         run: make lint
@@ -346,6 +348,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Ty check
         run: make typecheck
@@ -399,6 +402,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -453,6 +457,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -551,6 +556,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -573,6 +579,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Validate migration policy and drift
         run: make migration-check
@@ -608,6 +615,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Validate migration policy and drift on PostgreSQL
         run: make migration-check-postgres
@@ -644,6 +652,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Build and verify package
         run: make package

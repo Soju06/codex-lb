@@ -57,6 +57,7 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Sync uv.lock with the release version
         if: ${{ steps.release-branch.outputs.branch != '' }}

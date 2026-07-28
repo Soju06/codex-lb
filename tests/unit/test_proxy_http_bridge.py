@@ -19904,17 +19904,18 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
 async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-expired-circuit")
+    expired_updated_at = (
+        time.time()
+        - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+        - 1.0
+    )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
             return_value=SimpleNamespace(
                 consecutive_failures=2,
                 cooldown_until_epoch=time.time() + 60.0,
                 last_detail="stream_incomplete",
-                updated_at_epoch=(
-                    time.time()
-                    - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
-                    - 1.0
-                ),
+                updated_at_epoch=expired_updated_at,
             )
         ),
         purge_retry_circuit=AsyncMock(),
@@ -19925,6 +19926,7 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
         session_key_kind=hard_session.key.affinity_kind,
         session_key_value=hard_session.key.affinity_key,
         api_key_id=hard_session.key.api_key_id,
+        expected_updated_at_epoch=expired_updated_at,
     )
 
 

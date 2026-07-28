@@ -96,6 +96,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     session_key_kind=session.key.affinity_kind,
                     session_key_value=session.key.affinity_key,
                     api_key_id=session.key.api_key_id,
+                    expected_updated_at_epoch=persisted.updated_at_epoch,
                 )
             except Exception:
                 logger.warning(
@@ -270,7 +271,7 @@ class _HTTPBridgeRetryCircuitMixin:
             if state.consecutive_failures >= threshold:
                 backoff = min(
                     max_backoff,
-                    base_backoff * (2 ** (state.consecutive_failures - threshold)),
+                    base_backoff * (2 ** min(state.consecutive_failures - threshold, 30)),
                 )
                 if detail == "clean_close":
                     backoff = min(backoff, clean_close_max_backoff)

@@ -2618,6 +2618,12 @@ class _HTTPBridgeStreamingMixin:
                 request_state.request_id,
                 retry_cooldown_seconds,
             )
+            # This path returns before the request is submitted, so the normal
+            # detach/finally cleanup cannot settle an API-key reservation.
+            # Release it before handing the synthetic terminal event to the
+            # non-streaming collector.
+            await self._release_websocket_request_state_reservation(request_state)
+            request_state.api_key_reservation = None
             return format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
@@ -2734,7 +2740,7 @@ class _HTTPBridgeStreamingMixin:
                 request_state.request_id,
                 initial_retry_cooldown_seconds,
             )
-            yield format_sse_event(
+            terminal_event = format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
                     response_failed_event(
@@ -2744,6 +2750,12 @@ class _HTTPBridgeStreamingMixin:
                     ),
                 )
             )
+            # The request was submitted before the durable cooldown refresh,
+            # so detach it before returning. This releases the response-create
+            # gate, reservation, and pending queue entry while marking the
+            # upstream handoff for retirement.
+            await self._detach_http_bridge_request(session, request_state=request_state)
+            yield terminal_event
             return
         try:
             if downstream_turn_state is not None and not account_neutral_recovery:

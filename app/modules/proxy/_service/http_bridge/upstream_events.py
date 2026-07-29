@@ -724,8 +724,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     label="HTTP bridge upstream receive after missing response.created",
                                     cleanup_tasks=self._background_cleanup_tasks,
                                 )
-                                if receive_cancelled:
-                                    receive_task = None
+                                if not receive_cancelled:
+                                    # Do not reconnect while the old receive
+                                    # task still owns the superseded socket.
+                                    # The ordinary timeout path takes the same
+                                    # fail-closed branch; its finally block
+                                    # will make one bounded cleanup attempt.
+                                    raise RuntimeError(
+                                        "HTTP bridge upstream receive did not cancel after missing response.created"
+                                    )
+                                receive_task = None
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,

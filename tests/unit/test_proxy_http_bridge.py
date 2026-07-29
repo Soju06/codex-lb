@@ -4136,6 +4136,93 @@ async def test_http_bridge_stream_masks_single_top_level_previous_response_error
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-startup-reservation")
+    reservation = cast(Any, object())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-startup-reservation",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-anchor",
+    )
+    cooldown = AsyncMock(return_value=30.0)
+    release = AsyncMock()
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+
+    events = [
+        event
+        async for event in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=False,
+            downstream_turn_state=None,
+        )
+    ]
+
+    assert len(events) == 1
+    assert '"code":"stream_idle_timeout"' in events[0]
+    release.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_post_submit_cooldown_race_detaches_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-post-submit-cooldown")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-post-submit-cooldown",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        previous_response_id="resp-anchor",
+    )
+
+    async def submit(target_session: Any, *, request_state: Any, **kwargs: Any) -> None:
+        del kwargs
+        target_session.pending_requests.append(request_state)
+
+    cooldown = AsyncMock(side_effect=[0.0, 30.0])
+    detach = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    events = [
+        event
+        async for event in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=False,
+            downstream_turn_state=None,
+        )
+    ]
+
+    assert len(events) == 1
+    assert '"code":"stream_idle_timeout"' in events[0]
+    assert cooldown.await_count == 2
+    detach.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_keepalive_counts_as_first_yield_before_late_response_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

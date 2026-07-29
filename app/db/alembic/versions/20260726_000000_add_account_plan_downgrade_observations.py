@@ -1,7 +1,7 @@
 """add account plan downgrade observations table
 
 Revision ID: 20260726_000000_add_account_plan_downgrade_observations
-Revises: 20260724_000000_add_request_usage_time_rollups
+Revises: 20260725_000000_add_http_bridge_pending_tool_calls
 Create Date: 2026-07-26
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260726_000000_add_account_plan_downgrade_observations"
-down_revision = "20260724_000000_add_request_usage_time_rollups"
+down_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
 branch_labels = None
 depends_on = None
 

@@ -228,17 +228,6 @@ def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesReque
     return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
 
 
-def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
-    """Whether an ambiguous send cannot be safely replayed as a fresh turn."""
-    fresh_replay_is_safe = bool(
-        request_state.fresh_upstream_request_is_retry_safe
-        and request_state.fresh_upstream_request_text
-    )
-    if request_state.previous_response_id is not None:
-        return not fresh_replay_is_safe
-    return request_state.hard_continuity_anchor and not fresh_replay_is_safe
-
-
 def _apply_http_bridge_downstream_turn_state(
     request_state: _WebSocketRequestState,
     *,
@@ -2587,6 +2576,18 @@ class _HTTPBridgeStreamingMixin:
                     ),
                 )
 
+        def continuity_bound_without_safe_replay() -> bool:
+            """Do not hold a client stream through a cooldown we cannot use."""
+            if request_state.previous_response_id is not None:
+                return not (
+                    request_state.fresh_upstream_request_is_retry_safe
+                    and request_state.fresh_upstream_request_text
+                )
+            return request_state.hard_continuity_anchor and not (
+                request_state.fresh_upstream_request_is_retry_safe
+                and request_state.fresh_upstream_request_text
+            )
+
         while True:
             try:
                 if account_neutral_recovery:
@@ -2774,34 +2775,33 @@ class _HTTPBridgeStreamingMixin:
                                 retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(
                                     session
                                 )
+                                if retry_cooldown_seconds > 0 and continuity_bound_without_safe_replay():
+                                    if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                                        stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                    _record_continuity_fail_closed(
+                                        surface="http_bridge",
+                                        reason="retry_circuit_cooldown_continuity_bound",
+                                        previous_response_id=request_state.previous_response_id,
+                                        session_id=downstream_turn_state or request_state.session_id,
+                                    )
+                                    logger.info(
+                                        "HTTP bridge stream idle timeout fail-closed for continuity-bound request "
+                                        "request_id=%s retry_after_seconds=%.1f",
+                                        request_state.request_id,
+                                        retry_cooldown_seconds,
+                                    )
+                                    yield format_sse_event(
+                                        cast(
+                                            Mapping[str, JsonValue],
+                                            response_failed_event(
+                                                "stream_idle_timeout",
+                                                "Upstream did not respond within the keepalive window",
+                                                response_id=downstream_response_id,
+                                            ),
+                                        )
+                                    )
+                                    break
                                 if retry_cooldown_seconds > 0:
-                                    if _http_bridge_continuity_bound_without_safe_replay(request_state):
-                                        if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
-                                        _record_continuity_fail_closed(
-                                            surface="http_bridge",
-                                            reason="retry_circuit_cooldown_continuity_bound",
-                                            previous_response_id=request_state.previous_response_id,
-                                            session_id=downstream_turn_state or request_state.session_id,
-                                        )
-                                        logger.warning(
-                                            "HTTP bridge stream idle timeout fail-closed for continuity-bound "
-                                            "request_id=%s retry_after_seconds=%.1f",
-                                            request_state.request_id,
-                                            retry_cooldown_seconds,
-                                        )
-                                        yield format_sse_event(
-                                            cast(
-                                                Mapping[str, JsonValue],
-                                                response_failed_event(
-                                                    "stream_idle_timeout",
-                                                    "Upstream retry circuit cooldown is unsafe for this "
-                                                    "continuation",
-                                                    response_id=downstream_response_id,
-                                                ),
-                                            )
-                                        )
-                                        break
                                     retry_cooldown_remaining_budget = max(
                                         0.0,
                                         request_deadline - _service_time().monotonic(),

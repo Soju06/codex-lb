@@ -718,9 +718,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                                         request_state.failure_detail_override = (
                                             _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
                                         )
-                            # Claim the session before cancelling receive so a
-                            # gate waiter cannot reopen this ambiguous socket.
-                            session.closed = True
                             if receive_task is not None:
                                 receive_cancelled = await _cancel_http_bridge_reader_child(
                                     receive_task,
@@ -745,6 +742,17 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     _extract_model_class(session.request_model) if session.request_model else None
                                 ),
                             )
+                            # A fresh, self-contained hard request can use the
+                            # same bounded pre-created recovery as the idle
+                            # timeout path. Keep the session open until the
+                            # recovery routine claims the handoff; otherwise
+                            # its retry gate would reject the request as
+                            # already retired. Continuity-bound requests still
+                            # fail closed in _retry_http_bridge_precreated_request.
+                            retried = await self._retry_http_bridge_precreated_request(session)
+                            if retried:
+                                continue
+                            session.closed = True
                             await self._fail_http_bridge_reader_and_maybe_retire(
                                 session,
                                 error_code="upstream_request_timeout",

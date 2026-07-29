@@ -1587,10 +1587,10 @@ class _HTTPBridgeRequestSubmitMixin:
             # The single exception is a proof-gated, trim-safe full-resend
             # payload: dropping the anchor and replaying the original
             # unanchored request is equivalent to the client's own retry.
-            # The proof is deliberately independent of where the anchor came
-            # from; a client-provided full resend may be just as safe as a
-            # durable-anchor injection. Session-level follow-up payloads do
-            # not opt in because their context may depend on the anchor.
+            # The proof is independent of where the anchor came from; a
+            # client-provided full resend is as safe as a durable injection.
+            # Session-level follow-ups do not opt in because their context may
+            # depend on the anchor.
             if (
                 not request_state.fresh_upstream_request_text
                 or not request_state.fresh_upstream_request_is_retry_safe
@@ -1649,8 +1649,6 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
     ) -> bool:
-        if not await self._http_bridge_precreated_retry_allowed(session):
-            return False
         clean_close_retry_max_count = self._http_bridge_clean_close_retry_max_count()
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -1676,6 +1674,39 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state,
                 allow_clean_close_retry=True,
             )
+
+        fresh_hard_request_account_switch_candidate = False
+        proof_gated_continuity_replay_candidate = False
+        if session.key.strength == "hard":
+            async with session.pending_lock:
+                retryable_candidates = [
+                    request_state
+                    for request_state in session.pending_requests
+                    if not request_state.draining_until_terminal and request_is_retryable(request_state)
+                ]
+                if len(retryable_candidates) == 1:
+                    candidate = retryable_candidates[0]
+                    fresh_hard_request_account_switch_candidate = (
+                        candidate.previous_response_id is None
+                        and not candidate.hard_continuity_anchor
+                        and not candidate.proxy_injected_previous_response_id
+                        and not candidate.file_required_preferred_account
+                        and candidate.response_event_count == 0
+                        and candidate.replay_count == 0
+                    )
+                    proof_gated_continuity_replay_candidate = (
+                        candidate.previous_response_id is not None
+                        and candidate.fresh_upstream_request_is_retry_safe
+                        and bool(candidate.fresh_upstream_request_text)
+                        and candidate.response_event_count == 0
+                        and candidate.replay_count == 0
+                    )
+        if not await self._http_bridge_precreated_retry_allowed(
+            session,
+            allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
+            allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
+        ):
+            return False
 
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -1709,8 +1740,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
                 # is unsafe without upstream idempotency guarantees. Proxy-
-                # injected retry-safe anchors are equivalent to the client's own
-                # full resend once the anchor is stripped.
+                # injected anchors and proof-gated client full resends are
+                # equivalent to the client's own retry once the anchor is
+                # stripped. The latter remains pinned to the current owner.
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
@@ -1718,6 +1750,13 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             close_generation = session.last_upstream_close_generation
             hard_session_affinity = session.key.strength == "hard"
+            fresh_hard_request_account_switch_allowed = (
+                hard_session_affinity
+                and request_state.previous_response_id is None
+                and not request_state.hard_continuity_anchor
+                and not request_state.proxy_injected_previous_response_id
+                and not request_state.file_required_preferred_account
+            )
             clean_close_hard_continuation = (
                 close_classification == "clean"
                 and hard_session_affinity
@@ -1779,7 +1818,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 if account_neutral_recovery:
                     request_state.preferred_account_id = session.account.id
                 elif not request_state.file_required_preferred_account:
-                    if hard_owner_bound and not model_fallback_replay:
+                    if (
+                        hard_owner_bound
+                        and not model_fallback_replay
+                        and not fresh_hard_request_account_switch_allowed
+                    ):
                         request_state.preferred_account_id = session.account.id
                     else:
                         request_state.preferred_account_id = None
@@ -1820,7 +1863,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_jitter_seconds,
                 )
                 await asyncio.sleep(retry_jitter_seconds)
-            if hard_owner_bound and not model_fallback_replay:
+            if (
+                hard_owner_bound
+                and not model_fallback_replay
+                and not fresh_hard_request_account_switch_allowed
+            ):
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,

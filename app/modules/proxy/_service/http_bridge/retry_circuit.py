@@ -95,9 +95,10 @@ class _HTTPBridgeRetryCircuitMixin:
         now_epoch = time.time()
         if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
             async with self._http_bridge_retry_circuit_lock:
-                self._http_bridge_retry_circuits.pop(session.key, None)
-                self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
-                self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
+                stale_local_state = self._http_bridge_retry_circuits.get(session.key)
+                stale_local_failure_monotonic = (
+                    stale_local_state.last_failure_monotonic if stale_local_state is not None else 0.0
+                )
             try:
                 await self._durable_bridge.purge_retry_circuit(
                     session_key_kind=session.key.affinity_kind,
@@ -112,6 +113,22 @@ class _HTTPBridgeRetryCircuitMixin:
                     _hash_identifier(session.key.affinity_key),
                     exc_info=True,
                 )
+                # Keep a newer process-local circuit when persistence is
+                # unavailable. The next failure can still open the local
+                # circuit even though the expired durable row remains.
+                return
+            async with self._http_bridge_retry_circuit_lock:
+                current_local_state = self._http_bridge_retry_circuits.get(session.key)
+                if (
+                    current_local_state is None
+                    or (
+                        current_local_state is stale_local_state
+                        and current_local_state.last_failure_monotonic <= stale_local_failure_monotonic
+                    )
+                ):
+                    self._http_bridge_retry_circuits.pop(session.key, None)
+                    self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
+                    self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
             return
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)

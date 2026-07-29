@@ -224,6 +224,19 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
+def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
+    """Return whether retrying would require replaying an unsafe continuation."""
+    if request_state.previous_response_id is not None:
+        return not (
+            request_state.fresh_upstream_request_is_retry_safe
+            and request_state.fresh_upstream_request_text
+        )
+    return request_state.hard_continuity_anchor and not (
+        request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    )
+
+
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
     return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
 
@@ -2578,15 +2591,7 @@ class _HTTPBridgeStreamingMixin:
 
         def continuity_bound_without_safe_replay() -> bool:
             """Do not hold a client stream through a cooldown we cannot use."""
-            if request_state.previous_response_id is not None:
-                return not (
-                    request_state.fresh_upstream_request_is_retry_safe
-                    and request_state.fresh_upstream_request_text
-                )
-            return request_state.hard_continuity_anchor and not (
-                request_state.fresh_upstream_request_is_retry_safe
-                and request_state.fresh_upstream_request_text
-            )
+            return _http_bridge_continuity_bound_without_safe_replay(request_state)
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
             if (

@@ -137,7 +137,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 340.0
+        == 130.0
     )
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
@@ -153,7 +153,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 340.0
+        == 130.0
     )
 
 
@@ -19169,7 +19169,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.response_event_count == 0
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
-    retry_precreated.assert_not_awaited()
+    retry_precreated.assert_awaited_once_with(session)
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()
@@ -19554,6 +19554,43 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_fresh_hard_request_excludes_silent_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-fresh-hard-account-fallback",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-luna","input":"hello"}',
+        transport="http",
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-fresh-hard", None),
+        key_value="bridge-fresh-hard",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.account = cast(Any, SimpleNamespace(id="acc-silent", status=AccountStatus.ACTIVE))
+    session.last_upstream_close_code = 1011
+    session.upstream = cast(Any, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {"acc-silent"}
+    reconnect.assert_awaited_once()
+    assert reconnect.await_args.kwargs["require_same_account"] is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_send_network_failure_is_neutral_and_not_replayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -19881,6 +19918,75 @@ async def test_http_bridge_retry_circuit_backoff_is_scoped_to_repeated_hard_keys
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_allows_fresh_hard_account_switch_during_cooldown() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-fresh-circuit-bypass",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-luna","input":"hello"}',
+    )
+    hard_session = _make_bridge_session(
+        key_value="bridge-circuit-fresh-bypass",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert (
+        await service._http_bridge_precreated_retry_allowed(
+            hard_session,
+            allow_fresh_hard_account_switch=True,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_allows_proof_gated_continuity_replay_during_cooldown() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-proof-gated-circuit-bypass",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor"}',
+        previous_response_id="resp_anchor",
+        fresh_upstream_request_text='{"type":"response.create","input":"full resend"}',
+        fresh_upstream_request_is_retry_safe=True,
+    )
+    hard_session = _make_bridge_session(
+        key_value="bridge-circuit-proof-gated",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert (
+        await service._http_bridge_precreated_retry_allowed(
+            hard_session,
+            allow_proof_gated_continuity_replay=True,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_clean_close_retry_circuit_is_bounded() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-clean-close-circuit")
@@ -19912,7 +20018,7 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
     )
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
     assert await service._http_bridge_precreated_retry_cooldown_seconds(hard_session) > 0
-    service._durable_bridge.lookup_retry_circuit.assert_awaited_count(2)
+    assert service._durable_bridge.lookup_retry_circuit.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from dataclasses import replace
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 
+
 def test_http_bridge_continuity_bound_without_safe_replay() -> None:
     unsafe_continuation = proxy_service._WebSocketRequestState(
         request_id="req-unsafe",

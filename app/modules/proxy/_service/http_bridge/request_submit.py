@@ -1863,6 +1863,26 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_jitter_seconds,
                 )
                 await asyncio.sleep(retry_jitter_seconds)
+                request_deadline = request_state.bridge_request_deadline
+                if request_deadline is None:
+                    request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(
+                        _service_get_settings()
+                    )
+                now_monotonic = _service_time().monotonic()
+                async with session.pending_lock:
+                    request_still_owned = (
+                        request_state in session.pending_requests and not request_state.draining_until_terminal
+                    )
+                if not request_still_owned or now_monotonic >= request_deadline:
+                    logger.info(
+                        "HTTP bridge clean-close retry abandoned after jitter request_id=%s "
+                        "still_owned=%s deadline_expired=%s",
+                        request_state.request_id,
+                        request_still_owned,
+                        now_monotonic >= request_deadline,
+                    )
+                    request_state.clean_close_retry_result = False
+                    return False
             if (
                 hard_owner_bound
                 and not model_fallback_replay

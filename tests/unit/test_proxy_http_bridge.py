@@ -20139,6 +20139,43 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_keeps_newer_local_failure_after_stale_purge() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-expired-circuit-new-local-failure")
+    now = time.monotonic()
+    local_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now + 60.0,
+        last_detail="stream_idle_timeout",
+        last_touched_monotonic=now,
+        last_failure_monotonic=now,
+        last_durable_load_monotonic=now - 10.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = local_state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    expired_updated_at = (
+        time.time()
+        - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+        - 1.0
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=2,
+                cooldown_until_epoch=time.time() + 60.0,
+                last_detail="stream_idle_timeout",
+                updated_at_epoch=expired_updated_at,
+            )
+        ),
+        purge_retry_circuit=AsyncMock(),
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key] is local_state
+    service._durable_bridge.purge_retry_circuit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_keeps_local_state_when_stale_purge_fails() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-expired-circuit-local-fallback")

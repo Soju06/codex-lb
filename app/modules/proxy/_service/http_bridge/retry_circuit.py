@@ -96,9 +96,6 @@ class _HTTPBridgeRetryCircuitMixin:
         if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
             async with self._http_bridge_retry_circuit_lock:
                 stale_local_state = self._http_bridge_retry_circuits.get(session.key)
-                stale_local_failure_monotonic = (
-                    stale_local_state.last_failure_monotonic if stale_local_state is not None else 0.0
-                )
             try:
                 await self._durable_bridge.purge_retry_circuit(
                     session_key_kind=session.key.affinity_kind,
@@ -119,12 +116,13 @@ class _HTTPBridgeRetryCircuitMixin:
                 return
             async with self._http_bridge_retry_circuit_lock:
                 current_local_state = self._http_bridge_retry_circuits.get(session.key)
+                local_state_is_newer = bool(
+                    current_local_state is not None
+                    and current_local_state.last_failure_monotonic > current_local_state.last_durable_load_monotonic
+                )
                 if (
                     current_local_state is None
-                    or (
-                        current_local_state is stale_local_state
-                        and current_local_state.last_failure_monotonic <= stale_local_failure_monotonic
-                    )
+                    or (current_local_state is stale_local_state and not local_state_is_newer)
                 ):
                     self._http_bridge_retry_circuits.pop(session.key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(session.key)

@@ -929,6 +929,7 @@ class _HTTPBridgeStreamingMixin:
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
         fresh_upstream_request_text: str | None = None
+        client_full_resend_fresh_upstream_request_text: str | None = None
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
@@ -1209,6 +1210,26 @@ class _HTTPBridgeStreamingMixin:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
+        elif (
+            effective_payload.previous_response_id is not None
+            and payload_looks_like_full_resend
+            and durable_full_resend_anchor_count is not None
+            and durable_full_resend_has_safe_fresh_context
+        ):
+            # A client-provided full resend carries the same proof as a
+            # proxy-injected anchor: the stored prefix matches and the fresh
+            # suffix retains the prior output/tool context. Capture the
+            # verified anchor-free body so a retry can use it without sending
+            # previous_response_id again.
+            client_full_resend_payload = _http_bridge_payload_without_previous_response_id(
+                untrimmed_effective_payload
+            )
+            _fresh_state, client_full_resend_fresh_upstream_request_text = prepare_bridge_request(
+                client_full_resend_payload
+            )
+            del _fresh_state
+            request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
+            request_state.fresh_upstream_request_is_retry_safe = True
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         session_creation_headers = (
@@ -1266,6 +1287,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal effective_payload
             nonlocal file_required_preferred_account
             nonlocal force_local_recovery_creation
+            nonlocal client_full_resend_fresh_upstream_request_text
             nonlocal fresh_upstream_request_text
             nonlocal incoming_turn_state_header
             nonlocal previous_response_trimmed_input_count
@@ -1317,6 +1339,7 @@ class _HTTPBridgeStreamingMixin:
             untrimmed_effective_payload = fresh_payload
             proxy_injected_previous_response_id = False
             fresh_upstream_request_text = None
+            client_full_resend_fresh_upstream_request_text = None
             previous_response_trimmed_input_count = None
             previous_response_trimmed_input_fingerprint = None
             durable_full_resend_anchor_count = None
@@ -1998,6 +2021,9 @@ class _HTTPBridgeStreamingMixin:
                     if store_context_trim_applied
                     else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
+            elif client_full_resend_fresh_upstream_request_text is not None:
+                request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
+                request_state.fresh_upstream_request_is_retry_safe = True
         initial_handoff_session = session
         initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
         if initial_handoff_scope_id is not None:

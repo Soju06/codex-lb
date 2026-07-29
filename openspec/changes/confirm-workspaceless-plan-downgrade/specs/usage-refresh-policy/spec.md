@@ -108,9 +108,21 @@ replaced. Account identifiers are deterministic, so deleting and re-importing an
 account, or reauthenticating it in place, reuses the identifier with new token
 material; evidence gathered under the previous credential MUST NOT count toward a
 downgrade for the new one, which MUST begin its own count. Evidence MUST also be
-removed when the account itself is deleted. The stored evidence MUST NOT contain
-usable token material, and comparison MUST be unaffected by re-encryption of an
-unchanged credential.
+removed when the account itself is deleted.
+
+Routine token rotation is not a credential replacement. Refresh tokens rotate on
+every successful token refresh, so rotation occurring between two observations
+MUST NOT reset the pending count; otherwise an account whose token-refresh
+cadence interleaves with usage refresh could have a real expiry postponed
+indefinitely.
+
+Security notes: the stored evidence MUST NOT contain usable token material or
+any other secret. The persisted credential fingerprint is a non-reversible
+digest — an HMAC under a fixed, public, versioned salt — over the account's
+stable seat-identity fields (the ChatGPT workspace and principal identifiers,
+the email address, and the codex installation id), stored outside the encrypted
+token columns. Deriving it involves no decryption, so encryption-key rotation,
+re-encryption, or an undecryptable credential row cannot perturb it.
 
 This requirement applies to scheduled usage refresh and to the forced refresh
 performed after an operator's Force probe. The confirmation threshold MUST work
@@ -213,11 +225,11 @@ with zero configuration and MUST NOT require an operator setting.
 - **THEN** the stored `plan_type` remains `plus`
 - **AND** the account's stored `plan_type` becomes `free` only on a further `free` observation
 
-#### Scenario: Re-encrypting an unchanged credential does not discard evidence
+#### Scenario: Routine token rotation between observations does not reset confirmation
 
 - **GIVEN** an active workspace-less account with stored `plan_type` `plus`
 - **AND** one workspace-less refresh has reported `plan_type` `free`
-- **WHEN** the account's stored credential is re-encrypted without changing the underlying token
+- **WHEN** a successful token refresh rotates the account's tokens
 - **AND** the next workspace-less refresh reports `plan_type` `free`
 - **THEN** the account's stored `plan_type` becomes `free`
 

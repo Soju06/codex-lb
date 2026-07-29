@@ -51,7 +51,8 @@ protection the archived change was written to provide.
 - Persist the pending observation in a new per-account table
   (`account_plan_downgrade_observations`) so the observation sequence is coherent
   across every replica sharing a database, and pin each observation to the
-  credential that produced it so a replaced credential starts its own count.
+  credential lineage that produced it so a replaced credential starts its own
+  count while routine token rotation never resets one.
 
 Confirmation state is stored per account rather than per process, modelled on the
 existing `account_refresh_claims` table used for cross-replica refresh
@@ -59,8 +60,10 @@ coordination. Process-local state would make the sequence diverge whenever more
 than one replica shares a database: one replica could confirm a downgrade the
 cluster had already contradicted, and two `free` samples split across replicas
 would never converge. The row holds no token material — only an observation
-count, a salted credential digest, and timestamps — and `ondelete="CASCADE"`
-removes it with the account.
+count, a non-secret digest of the account's stable seat identity, and
+timestamps — and `ondelete="CASCADE"` removes it with the account. Credential
+replacement (re-import or in-place reauthentication) discards pending evidence
+in the same transaction that applies the fresh material.
 
 The confirmation threshold remains a hardcoded default (two consecutive
 observations), so no operator setting is introduced.

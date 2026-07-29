@@ -2664,6 +2664,42 @@ class _HTTPBridgeStreamingMixin:
                     raise
                 continue
             break
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+        if (
+            initial_retry_cooldown_seconds > 0
+            and session.key.strength == "hard"
+            and continuity_bound_without_safe_replay()
+            and request_state.response_id is None
+            and request_state.response_event_count == 0
+            and event_queue.empty()
+        ):
+            if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                stream_idle_timeout_total.labels(surface="http_bridge").inc()
+            _record_continuity_fail_closed(
+                surface="http_bridge",
+                reason="retry_circuit_cooldown_continuity_bound",
+                previous_response_id=request_state.previous_response_id,
+                session_id=downstream_turn_state or request_state.session_id,
+            )
+            logger.info(
+                "HTTP bridge stream idle timeout fail-closed at startup without safe replay "
+                "request_id=%s retry_after_seconds=%.1f",
+                request_state.request_id,
+                initial_retry_cooldown_seconds,
+            )
+            yield format_sse_event(
+                cast(
+                    Mapping[str, JsonValue],
+                    response_failed_event(
+                        "stream_idle_timeout",
+                        "Upstream did not respond within the keepalive window",
+                        response_id=_websocket_downstream_response_id(request_state),
+                    ),
+                )
+            )
+            return
         try:
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)

@@ -1584,14 +1584,15 @@ class _HTTPBridgeRequestSubmitMixin:
             # upstream already accepted the continuation. Re-sending the same
             # previous_response_id request can fork continuity with duplicate
             # child responses, so only reconnect-without-resend is allowed.
-            # The single exception is proxy-injected anchors on trim-safe
-            # full-resend payloads: dropping the anchor and replaying the
-            # original unanchored request is equivalent to the client's own
-            # retry. Session-level injections do not opt in because their
-            # payload may depend on the anchor for context preservation.
+            # The single exception is a proof-gated, trim-safe full-resend
+            # payload: dropping the anchor and replaying the original
+            # unanchored request is equivalent to the client's own retry.
+            # The proof is deliberately independent of where the anchor came
+            # from; a client-provided full resend may be just as safe as a
+            # durable-anchor injection. Session-level follow-up payloads do
+            # not opt in because their context may depend on the anchor.
             if (
-                not request_state.proxy_injected_previous_response_id
-                or not request_state.fresh_upstream_request_text
+                not request_state.fresh_upstream_request_text
                 or not request_state.fresh_upstream_request_is_retry_safe
             ):
                 return False
@@ -1702,8 +1703,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state = retryable_requests[0]
             model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             if request_state.previous_response_id is not None and not (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
+                request_state.fresh_upstream_request_is_retry_safe
                 and request_state.fresh_upstream_request_text
             ):
                 # Once a continuation is pending upstream, reconnecting without

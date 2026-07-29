@@ -207,6 +207,7 @@ from app.modules.proxy.helpers import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -865,17 +866,52 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_anchor_fingerprint: str | None = None
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
+        durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_prior_output = False
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
-        durable_anchor_trimmable = durable_lookup is not None and _input_prefix_matches_stored_context(
-            payload.input,
-            stored_count=durable_lookup.latest_input_item_count or 0,
-            stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
-        )
-        if durable_lookup is not None and payload_looks_like_full_resend and durable_anchor_trimmable:
-            durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
-            durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
+
+        def classify_durable_full_resend(
+            lookup: DurableBridgeLookup,
+        ) -> tuple[int | None, str | None, bool]:
+            stored_count = lookup.latest_input_item_count
+            if (
+                not payload_looks_like_full_resend
+                or stored_count is None
+                or not _input_prefix_matches_stored_context(
+                    payload.input,
+                    stored_count=stored_count,
+                    stored_fingerprint=lookup.latest_input_full_fingerprint,
+                )
+                or not isinstance(payload.input, list)
+            ):
+                return None, None, False
+            replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                cast(list[JsonValue], payload.input),
+                stored_count=stored_count,
+            )
+            safe_fresh_context = False
+            if replay_projection is not None:
+                safe_fresh_context = responses_input_suffix_retains_prior_output(
+                    replay_projection.input_items,
+                    stored_count=replay_projection.stored_prefix_count,
+                ) or (
+                    lookup.latest_pending_tool_calls is not None
+                    and responses_input_suffix_matches_pending_tool_calls(
+                        replay_projection.input_items,
+                        stored_count=replay_projection.stored_prefix_count,
+                        pending_tool_calls=lookup.latest_pending_tool_calls,
+                    )
+                )
+            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
+
+        if durable_lookup is not None:
+            (
+                durable_full_resend_anchor_count,
+                durable_full_resend_anchor_fingerprint,
+                durable_full_resend_has_safe_fresh_context,
+            ) = classify_durable_full_resend(durable_lookup)
+        durable_anchor_trimmable = durable_full_resend_anchor_count is not None
         durable_model_transition_lookup = (
             durable_lookup
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
@@ -931,7 +967,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
-            if (
+            fresh_reattach_can_use_durable_anchor = (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
@@ -939,7 +975,24 @@ class _HTTPBridgeStreamingMixin:
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
+            )
+            if (
+                fresh_reattach_can_use_durable_anchor
+                and payload_looks_like_full_resend
+                and durable_full_resend_has_safe_fresh_context
             ):
+                # The client already supplied a complete fresh request. Adding
+                # a durable anchor here can strand it on the new WebSocket.
+                _log_http_bridge_event(
+                    "fresh_reattach_full_resend_preserved",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail="outcome=client_unanchored_full_resend",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
+            elif fresh_reattach_can_use_durable_anchor:
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
@@ -955,19 +1008,6 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-                if payload_looks_like_full_resend:
-                    _log_http_bridge_event(
-                        "durable_full_resend_anchor_injected",
-                        bridge_session_key,
-                        account_id=None,
-                        model=payload.model,
-                        detail=(
-                            f"response_id={durable_lookup.latest_response_id} "
-                            f"stored_items={durable_full_resend_anchor_count}"
-                        ),
-                        cache_key_family=bridge_session_key.affinity_kind,
-                        model_class=_extract_model_class(payload.model) if payload.model else None,
-                    )
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=bridge_session_key.affinity_kind,
             key=bridge_session_key.affinity_key,
@@ -1383,8 +1423,46 @@ class _HTTPBridgeStreamingMixin:
                             )
                         else:
                             if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
-                                should_attempt_turn_state_takeover = True
                                 durable_lookup = fresh_turn_state_lookup
+                                if fresh_turn_state_lookup is None:
+                                    durable_full_resend_anchor_count = None
+                                    durable_full_resend_anchor_fingerprint = None
+                                    durable_full_resend_has_safe_fresh_context = False
+                                else:
+                                    (
+                                        durable_full_resend_anchor_count,
+                                        durable_full_resend_anchor_fingerprint,
+                                        durable_full_resend_has_safe_fresh_context,
+                                    ) = classify_durable_full_resend(fresh_turn_state_lookup)
+                                    continuity_preferred_account_id = fresh_turn_state_lookup.account_id
+                                    request_state.preferred_account_id = resolve_required_account_id(
+                                        (
+                                            "refreshed previous response or bridge",
+                                            continuity_preferred_account_id,
+                                        ),
+                                        ("input file", rewritten_file_account_id),
+                                    )
+                                    preferred_account_has_continuity_provenance = (
+                                        continuity_preferred_account_id is not None
+                                        and request_state.preferred_account_id == continuity_preferred_account_id
+                                    )
+                                refreshed_continuity_routable = (
+                                    fresh_turn_state_lookup is None
+                                    or fresh_turn_state_lookup.latest_response_id is None
+                                    or fresh_turn_state_lookup.account_id is not None
+                                )
+                                should_attempt_turn_state_takeover = refreshed_continuity_routable and (
+                                    not payload_looks_like_full_resend
+                                    or (
+                                        fresh_turn_state_lookup is not None
+                                        and fresh_turn_state_lookup.account_id is not None
+                                        and durable_full_resend_anchor_count is not None
+                                        and (
+                                            durable_full_resend_has_safe_fresh_context
+                                            or fresh_turn_state_lookup.latest_response_id is not None
+                                        )
+                                    )
+                                )
                 if (
                     not owner_forward_fresh_replay
                     and not should_attempt_previous_response_recovery
@@ -1523,6 +1601,42 @@ class _HTTPBridgeStreamingMixin:
                 # behavior) and an upstream missing-tool-output error is
                 # classified and masked as a retryable continuity failure.
                 recovery_payload = effective_payload
+                recovery_anchor_input_count: int | None = None
+                recovery_anchor_input_fingerprint: str | None = None
+                if (
+                    not owner_forward_fresh_replay
+                    and not durable_full_resend_has_safe_fresh_context
+                    and recovery_payload.previous_response_id is None
+                    and durable_lookup is not None
+                    and durable_lookup.latest_response_id is not None
+                    and durable_full_resend_anchor_count is not None
+                    and durable_full_resend_anchor_fingerprint is not None
+                    and isinstance(recovery_payload.input, list)
+                    and len(recovery_payload.input) > durable_full_resend_anchor_count
+                ):
+                    recovery_input = cast(list[JsonValue], recovery_payload.input)
+                    recovery_anchor_input_count = len(recovery_input)
+                    recovery_anchor_input_fingerprint = _fingerprint_input_items(recovery_input)
+                    recovery_payload = recovery_payload.model_copy(
+                        update={
+                            "previous_response_id": durable_lookup.latest_response_id,
+                            "input": recovery_input[durable_full_resend_anchor_count:],
+                        }
+                    )
+                    if durable_lookup.latest_response_id != session.last_completed_response_id:
+                        session.last_pending_tool_calls = {}
+                    session.last_completed_response_id = durable_lookup.latest_response_id
+                    session.last_completed_input_count = durable_full_resend_anchor_count
+                    session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
+                    _log_http_bridge_event(
+                        "owner_forward_recovery_anchor_injected",
+                        bridge_session_key,
+                        account_id=durable_lookup.account_id,
+                        model=recovery_payload.model,
+                        detail=f"response_id={durable_lookup.latest_response_id}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(recovery_payload.model) if recovery_payload.model else None,
+                    )
                 recovery_injected_input = _http_bridge_interrupted_tool_outputs_input(
                     session,
                     payload=recovery_payload,
@@ -1565,6 +1679,11 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
                     retry_request_state.excluded_account_ids.update(request_state.excluded_account_ids)
+                    if recovery_anchor_input_count is not None:
+                        retry_request_state.input_item_count = recovery_anchor_input_count
+                        retry_request_state.input_full_fingerprint = recovery_anchor_input_fingerprint
+                        retry_request_state.proxy_injected_previous_response_id = True
+                        retry_request_state.fresh_upstream_request_is_retry_safe = False
 
                     async for event_block in self._stream_http_bridge_session_events(
                         session,
@@ -1593,7 +1712,8 @@ class _HTTPBridgeStreamingMixin:
                 return
         session = session_or_forward
         if (
-            durable_full_resend_anchor_count is not None
+            not durable_full_resend_has_safe_fresh_context
+            and durable_full_resend_anchor_count is not None
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
@@ -1761,7 +1881,9 @@ class _HTTPBridgeStreamingMixin:
                 # keep the replay-safety decision made when the anchor was
                 # injected.
                 request_state.fresh_upstream_request_is_retry_safe = (
-                    True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
+                    (durable_full_resend_anchor_count is None or durable_full_resend_has_safe_fresh_context)
+                    if store_context_trim_applied
+                    else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
         initial_handoff_session = session
         initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None

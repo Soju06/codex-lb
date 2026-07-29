@@ -14,7 +14,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.db.models import Account, AccountStatus
 
 if TYPE_CHECKING:
-    from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+    from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.service import (
     ProxyService,
@@ -80,7 +80,7 @@ async def test_existing_live_sessions_are_reused_during_drain() -> None:
         affinity=_AffinityPolicy(),
         request_model="gpt-5.4",
         account=account,
-        upstream=cast("UpstreamResponsesWebSocket", object()),
+        upstream=cast("UpstreamWebSocket", object()),
         upstream_control=_WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),

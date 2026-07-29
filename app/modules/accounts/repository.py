@@ -649,6 +649,7 @@ class AccountsRepository:
                 latest_response_id=None,
                 latest_input_item_count=None,
                 latest_input_full_fingerprint=None,
+                latest_pending_tool_calls_json=None,
             )
         )
 

@@ -10,6 +10,7 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -587,6 +588,173 @@ def test_full_resend_suffix_rejects_missing_or_misordered_context(
         responses_input_suffix_retains_prior_output(
             [*stored_input, *suffix],
             stored_count=len(stored_input),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "pending_tool_calls", "expected"),
+    [
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+            ],
+            {"call_1": "function_call"},
+            True,
+            id="complete-tool-loop",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "shell",
+                    "input": "pwd",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+                {"type": "custom_tool_call_output", "call_id": "call_2", "output": "/workspace"},
+            ],
+            {"call_1": "function_call", "call_2": "custom_tool_call"},
+            True,
+            id="complete-parallel-tool-loop",
+        ),
+        pytest.param(
+            [{"role": "user", "content": "revise that answer"}],
+            {"call_1": "function_call"},
+            False,
+            id="missing-output",
+        ),
+        pytest.param(
+            [{"type": [], "call_id": "call_1"}],
+            {"call_1": "function_call"},
+            False,
+            id="malformed-item-type",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                }
+            ],
+            {"call_1": "function_call"},
+            False,
+            id="unsettled-call",
+        ),
+        pytest.param(
+            [{"type": "function_call_output", "call_id": "call_1", "output": "orphan"}],
+            {"call_1": "function_call"},
+            False,
+            id="orphan-output",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "partial"},
+            ],
+            {"call_1": "function_call", "call_2": "function_call"},
+            False,
+            id="omitted-parallel-call",
+        ),
+    ],
+)
+def test_full_resend_suffix_accepts_only_self_contained_tool_loops(
+    suffix: list[JsonValue],
+    pending_tool_calls: dict[str, str],
+    expected: bool,
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls=pending_tool_calls,
+        )
+        is expected
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_stored_prefix() -> None:
+    stored_input: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "old"},
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup_again",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "new"},
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_1": "function_call"},
+        )
+        is False
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_unsupported_prefix_item() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "computer_call",
+            "call_id": "call_1",
+            "action": {"type": "screenshot"},
+            "status": "completed",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "new"},
+    ]
+
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+            pending_tool_calls={"call_1": "function_call"},
         )
         is False
     )

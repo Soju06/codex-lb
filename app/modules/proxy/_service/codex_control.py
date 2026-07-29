@@ -18,6 +18,7 @@ from app.core.balancer import (
     TrafficClass,
 )
 from app.core.clients.proxy import (
+    CodexControlRequestPrivacyPolicy,
     CodexControlResponse,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -34,7 +35,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -53,13 +54,47 @@ class _CodexControlServiceProtocol(Protocol):
         api_key: ApiKeyData | None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None: ...
-    async def _ensure_previsible_unary_fresh_with_failover(self, account: Account, **kwargs: Any) -> Account: ...
+    async def _ensure_previsible_unary_fresh_with_failover(
+        self,
+        account: Account,
+        *,
+        deadline: float,
+        request_id: str,
+        kind: str,
+        select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+        strict_account_id: str | None = None,
+        force: bool = False,
+        max_account_attempts: int = 2,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> Account: ...
     async def _retry_previsible_unary_call_failover(
-        self, exc: ProxyResponseError, account: Account, **kwargs: Any
+        self,
+        exc: ProxyResponseError,
+        account: Account,
+        *,
+        deadline: float,
+        select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
+        call_next: Callable[[Account], Awaitable[CodexControlResponse]],
+        strict_account_id: str | None = None,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> tuple[Account, CodexControlResponse] | None: ...
-    async def _ensure_fresh_with_budget_or_auth_error(self, account: Account, *, timeout_seconds: float) -> Account: ...
-    async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None: ...
+    async def _ensure_fresh_with_budget_or_auth_error(
+        self,
+        account: Account,
+        *,
+        force: bool = False,
+        timeout_seconds: float,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> Account: ...
+    async def _handle_proxy_error(
+        self,
+        account: Account,
+        exc: ProxyResponseError,
+        *,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> None: ...
     async def _write_request_log(self, **kwargs: Any) -> None: ...
     async def _resolve_upstream_route_for_account(
         self, account: Account, *, operation: str
@@ -140,11 +175,73 @@ def _routing_strategy(settings: Any) -> RoutingStrategy:
     return cast(Callable[[Any], RoutingStrategy], _service_global("_routing_strategy"))(settings)
 
 
+def _sticky_reallocation_primary_budget_threshold_pct(settings: Any) -> float:
+    return cast(
+        Callable[[Any], float],
+        _service_global("_sticky_reallocation_primary_budget_threshold_pct"),
+    )(settings)
+
+
+def _sticky_reallocation_secondary_budget_threshold_pct(settings: Any) -> float:
+    return cast(
+        Callable[[Any], float],
+        _service_global("_sticky_reallocation_secondary_budget_threshold_pct"),
+    )(settings)
+
+
+def _detached_account_copy(account: Account) -> Account:
+    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
+    return Account(**data)
+
+
 _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
 class _CodexControlMixin:
+    async def _select_codex_control_account_without_budget(
+        self,
+        *,
+        affinity: _AffinityPolicy,
+        api_key: ApiKeyData | None,
+        traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+    ) -> Account | None:
+        proxy = cast(_CodexControlServiceProtocol, self)
+        scoped_account_ids = (
+            set(api_key.assigned_account_ids)
+            if api_key is not None and api_key.account_assignment_scope_enabled
+            else None
+        )
+        settings = await _service_get_settings_cache().get()
+        if _routing_strategy(settings) == "single_account":
+            selected_account_id = (settings.single_account_id or "").strip()
+            if not selected_account_id:
+                return None
+            if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
+                return None
+            scoped_account_ids = {selected_account_id}
+        selection = await proxy._load_balancer.select_account(
+            sticky_key=affinity.selection_key,
+            sticky_kind=affinity.kind,
+            reallocate_sticky=affinity.reallocate_sticky,
+            sticky_source=affinity.codex_session_source,
+            legacy_sticky_key=affinity.legacy_selection_key,
+            sticky_max_age_seconds=affinity.max_age_seconds,
+            account_ids=scoped_account_ids,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            redact_sensitive_details=privacy_policy.redacts_sensitive_details,
+            routing_strategy=_routing_strategy(settings),
+            budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+            secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
+            traffic_class=traffic_class,
+            concurrency_caps=effective_account_concurrency_caps(settings),
+        )
+        if selection.account is None:
+            return None
+        return _detached_account_copy(selection.account)
+
     async def codex_control_request(
         self,
         path: str,
@@ -155,9 +252,16 @@ class _CodexControlMixin:
         headers: Mapping[str, str],
         codex_session_affinity: bool = True,
         api_key: ApiKeyData | None = None,
+        success_gate: Callable[[str, CodexControlResponse], Awaitable[bool]] | None = None,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> CodexControlResponse:
         proxy = cast(_CodexControlServiceProtocol, self)
         filtered = filter_inbound_headers(headers)
+        normalized_path = path.strip("/")
+        effective_privacy_policy = (
+            CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME if normalized_path == "realtime/calls" else privacy_policy
+        )
+        sensitive_realtime_request = effective_privacy_policy.redacts_sensitive_details
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
@@ -180,7 +284,32 @@ class _CodexControlMixin:
         route_endpoint_id: str | None = None
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
-        request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
+        request_kind = f"codex_control_{normalized_path.replace('/', '_')}"
+
+        def _account_id_for_log(account_id: str) -> str:
+            if not sensitive_realtime_request:
+                return account_id
+            return "<redacted>"
+
+        async def _handle_proxy_error(account: Account, exc: ProxyResponseError) -> None:
+            if sensitive_realtime_request:
+                await proxy._handle_proxy_error(
+                    account,
+                    exc,
+                    privacy_policy=effective_privacy_policy,
+                )
+                return
+            await proxy._handle_proxy_error(account, exc)
+
+        async def _finalize_success(
+            successful_account: Account,
+            response: CodexControlResponse,
+        ) -> CodexControlResponse:
+            nonlocal account_id_value, log_status
+            account_id_value = successful_account.id
+            gate_succeeded = success_gate is None or await success_gate(successful_account.id, response)
+            log_status = "success" if gate_succeeded else "error"
+            return response
 
         try:
             selection = await proxy._select_account_with_budget_compatible(
@@ -193,6 +322,7 @@ class _CodexControlMixin:
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=selection_model,
+                redact_sensitive_details=sensitive_realtime_request,
             )
             account = selection.account
             if not account:
@@ -203,6 +333,7 @@ class _CodexControlMixin:
                     if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
                     else TRAFFIC_CLASS_FOREGROUND,
                     prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
+                    privacy_policy=effective_privacy_policy,
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -224,7 +355,7 @@ class _CodexControlMixin:
                         "account_id=%s",
                         request_id,
                         path,
-                        target.id,
+                        _account_id_for_log(target.id),
                     )
                     _raise_proxy_budget_exhausted()
                 route = await proxy._resolve_upstream_route_for_account(target, operation=request_kind)
@@ -246,6 +377,7 @@ class _CodexControlMixin:
                         route=route,
                         allow_direct_egress=route is None,
                         route_trace=route_trace,
+                        privacy_policy=effective_privacy_policy,
                     )
                 finally:
                     if route_trace.mode is not None:
@@ -270,6 +402,7 @@ class _CodexControlMixin:
                     routing_strategy=routing_strategy,
                     model=selection_model,
                     exclude_account_ids=excluded_account_ids,
+                    redact_sensitive_details=sensitive_realtime_request,
                 )
 
             try:
@@ -279,12 +412,12 @@ class _CodexControlMixin:
                     request_id=request_id,
                     kind=request_kind,
                     select_next_account=_select_control_failover,
+                    privacy_policy=effective_privacy_policy,
                 )
                 account_id_value = account.id
                 response = await _call_control(account)
                 await proxy._load_balancer.record_success(account)
-                log_status = "success"
-                return response
+                return await _finalize_success(account, response)
             except RefreshError as refresh_exc:
                 if refresh_exc.is_permanent:
                     failed_account = _refresh_error_failed_account(refresh_exc, account)
@@ -306,12 +439,11 @@ class _CodexControlMixin:
                         deadline=deadline,
                         select_next_account=_select_control_failover,
                         call_next=_call_control,
+                        privacy_policy=effective_privacy_policy,
                     )
                     if failover is not None:
                         account, response = failover
-                        account_id_value = account.id
-                        log_status = "success"
-                        return response
+                        return await _finalize_success(account, response)
                 if exc.status_code == 401:
                     try:
                         remaining_budget = _remaining_budget_seconds(deadline)
@@ -321,7 +453,7 @@ class _CodexControlMixin:
                                 "path=%s account_id=%s",
                                 request_id,
                                 path,
-                                account.id,
+                                _account_id_for_log(account.id),
                             )
                             _raise_proxy_budget_exhausted()
                         try:
@@ -332,20 +464,20 @@ class _CodexControlMixin:
                                 kind=request_kind,
                                 select_next_account=_select_control_failover,
                                 force=True,
+                                privacy_policy=effective_privacy_policy,
                             )
                         except ProxyResponseError as refresh_failover_exc:
                             failed_account = _proxy_response_failed_account(refresh_failover_exc, account)
                             account_id_value = failed_account.id
-                            await proxy._handle_proxy_error(failed_account, refresh_failover_exc)
+                            await _handle_proxy_error(failed_account, refresh_failover_exc)
                             raise
                         account_id_value = account.id
                         try:
                             response = await _call_control(account)
                             await proxy._load_balancer.record_success(account)
-                            log_status = "success"
-                            return response
+                            return await _finalize_success(account, response)
                         except ProxyResponseError as retry_exc:
-                            await proxy._handle_proxy_error(account, retry_exc)
+                            await _handle_proxy_error(account, retry_exc)
                             if retry_exc.status_code == 401:
                                 selection = await proxy._select_account_with_budget(
                                     deadline,
@@ -363,21 +495,28 @@ class _CodexControlMixin:
                                     routing_strategy=routing_strategy,
                                     model=selection_model,
                                     exclude_account_ids={account.id},
+                                    redact_sensitive_details=sensitive_realtime_request,
                                 )
                                 if selection.account is not None:
                                     account = selection.account
                                     account_id_value = account.id
-                                    account = await proxy._ensure_fresh_with_budget_or_auth_error(
-                                        account,
-                                        timeout_seconds=_remaining_budget_seconds(deadline),
-                                    )
+                                    if sensitive_realtime_request:
+                                        account = await proxy._ensure_fresh_with_budget_or_auth_error(
+                                            account,
+                                            timeout_seconds=_remaining_budget_seconds(deadline),
+                                            privacy_policy=effective_privacy_policy,
+                                        )
+                                    else:
+                                        account = await proxy._ensure_fresh_with_budget_or_auth_error(
+                                            account,
+                                            timeout_seconds=_remaining_budget_seconds(deadline),
+                                        )
                                     try:
                                         response = await _call_control(account)
                                         await proxy._load_balancer.record_success(account)
-                                        log_status = "success"
-                                        return response
+                                        return await _finalize_success(account, response)
                                     except ProxyResponseError as failover_exc:
-                                        await proxy._handle_proxy_error(account, failover_exc)
+                                        await _handle_proxy_error(account, failover_exc)
                                         raise
                             raise
                     except RefreshError as refresh_exc:
@@ -391,13 +530,17 @@ class _CodexControlMixin:
                             "Codex control forced refresh/connect failed request_id=%s path=%s account_id=%s",
                             request_id,
                             path,
-                            account.id,
-                            exc_info=True,
+                            _account_id_for_log(account.id),
+                            exc_info=not sensitive_realtime_request,
                         )
-                        _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                        if not sensitive_realtime_request:
+                            failure_message = str(timeout_exc) or "Request to upstream timed out"
+                        else:
+                            failure_message = "Request to upstream failed"
+                        _raise_proxy_unavailable(failure_message)
                 failed_account = _proxy_response_failed_account(exc, account)
                 account_id_value = failed_account.id
-                await proxy._handle_proxy_error(failed_account, exc)
+                await _handle_proxy_error(failed_account, exc)
                 raise
         except ProxyResponseError as exc:
             failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
@@ -421,27 +564,31 @@ class _CodexControlMixin:
             ) from exc
         finally:
             await proxy._write_request_log(
-                account_id=account_id_value,
+                account_id=None if sensitive_realtime_request else account_id_value,
                 api_key=api_key,
                 request_id=request_id,
                 model=None,
                 latency_ms=int((_service_time().monotonic() - start) * 1000),
                 status=log_status,
-                error_code=log_error_code,
-                error_message=log_error_message,
+                error_code=None if sensitive_realtime_request else log_error_code,
+                error_message=None if sensitive_realtime_request else log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
-                failure_phase=failure_metadata.failure_phase,
-                failure_detail=failure_metadata.failure_detail,
-                failure_exception_type=failure_metadata.failure_exception_type,
-                upstream_status_code=failure_metadata.upstream_status_code,
-                upstream_error_code=failure_metadata.upstream_error_code,
-                bridge_stage=failure_metadata.bridge_stage,
-                upstream_proxy_route_mode=route_mode,
-                upstream_proxy_pool_id=route_pool_id,
-                upstream_proxy_endpoint_id=route_endpoint_id,
-                upstream_proxy_fallback_used=route_fallback_used if route_endpoint_id else None,
-                upstream_proxy_fail_closed_reason=route_fail_closed_reason,
+                failure_phase=None if sensitive_realtime_request else failure_metadata.failure_phase,
+                failure_detail=None if sensitive_realtime_request else failure_metadata.failure_detail,
+                failure_exception_type=(
+                    None if sensitive_realtime_request else failure_metadata.failure_exception_type
+                ),
+                upstream_status_code=None if sensitive_realtime_request else failure_metadata.upstream_status_code,
+                upstream_error_code=None if sensitive_realtime_request else failure_metadata.upstream_error_code,
+                bridge_stage=None if sensitive_realtime_request else failure_metadata.bridge_stage,
+                upstream_proxy_route_mode=None if sensitive_realtime_request else route_mode,
+                upstream_proxy_pool_id=None if sensitive_realtime_request else route_pool_id,
+                upstream_proxy_endpoint_id=None if sensitive_realtime_request else route_endpoint_id,
+                upstream_proxy_fallback_used=(
+                    None if sensitive_realtime_request else (route_fallback_used if route_endpoint_id else None)
+                ),
+                upstream_proxy_fail_closed_reason=(None if sensitive_realtime_request else route_fail_closed_reason),
                 useragent=useragent,
                 useragent_group=useragent_group,
-                conversation_id=conversation_id,
+                conversation_id=None if sensitive_realtime_request else conversation_id,
             )

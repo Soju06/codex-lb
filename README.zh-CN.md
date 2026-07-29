@@ -8,11 +8,28 @@ python oauth sqlalchemy dashboard load-balancer openai rate-limit api-proxy code
 
 # codex-lb
 
+![codex-lb](docs/screenshots/banner.jpg)
+
 [English](./README.md) | **简体中文**
 
 > **文档站点（英文，权威版本）**: <https://soju06.github.io/codex-lb/> — 本页内容可能滞后，最新使用说明以英文文档站点为准。
 
 ChatGPT 账户负载均衡器。聚合多个账户、追踪用量、管理 API Key，所有内容在仪表盘中查看。
+
+## 功能特性
+
+<table>
+<tr>
+<td><b>账户池化</b><br>在多个 ChatGPT 账户之间负载均衡</td>
+<td><b>用量追踪</b><br>按账户记录 token、成本及 28 天趋势</td>
+<td><b>API Key</b><br>按 token、成本、时间窗口、模型限流</td>
+</tr>
+<tr>
+<td><b>仪表盘鉴权</b><br>密码 + 可选 TOTP</td>
+<td><b>OpenAI 兼容</b><br>支持 Codex CLI、OpenCode 及任意 OpenAI 客户端</td>
+<td><b>模型自动同步</b><br>从上游拉取可用模型列表</td>
+</tr>
+</table>
 
 | ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |
 |:---:|:---:|
@@ -29,21 +46,6 @@ ChatGPT 账户负载均衡器。聚合多个账户、追踪用量、管理 API K
 | ![dashboard-dark](docs/screenshots/dashboard-dark.jpg) | ![accounts-dark](docs/screenshots/accounts-dark.jpg) | ![settings-dark](docs/screenshots/settings-dark.jpg) |
 
 </details>
-
-## 功能特性
-
-<table>
-<tr>
-<td><b>账户池化</b><br>在多个 ChatGPT 账户之间负载均衡</td>
-<td><b>用量追踪</b><br>按账户记录 token、成本及 28 天趋势</td>
-<td><b>API Key</b><br>按 token、成本、时间窗口、模型限流</td>
-</tr>
-<tr>
-<td><b>仪表盘鉴权</b><br>密码 + 可选 TOTP</td>
-<td><b>OpenAI 兼容</b><br>支持 Codex CLI、OpenCode 及任意 OpenAI 客户端</td>
-<td><b>模型自动同步</b><br>从上游拉取可用模型列表</td>
-</tr>
-</table>
 
 ## 快速开始
 

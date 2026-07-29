@@ -558,6 +558,10 @@ custom rules, the chart preserves their order and adds the codex-lb Service as
 the backend of every rule. Referenced extension resources must be valid for the
 HTTPRoute namespace according to the selected Gateway implementation.
 
+For application-specific Gateway setup, see the
+[Kubernetes deployment guide](../../../docs/deployment/kubernetes.md#application-specific-gateway)
+and the [owning OpenSpec change](../../../openspec/changes/create-application-gateway/).
+
 ### nginx annotations and responses sticky routing
 
 All nginx-specific annotations are gated behind `ingress.nginx.enabled=true` and render as **one coherent set**: the streaming-safety annotations (proxy buffering off, 3600s read/send timeouts, 50m body size, HTTP/1.1) and the sticky-hash annotations always appear together. Enabling ingress on an nginx class without `ingress.nginx.enabled=true` renders no nginx annotations at all — which means the controller's defaults (60s read timeout, 1m body cap) apply and will cut long-lived SSE/WebSocket streams.

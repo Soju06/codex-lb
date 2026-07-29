@@ -53,10 +53,11 @@ jobs:
 
       - name: Set up uv
         if: ${{ steps.release-branch.outputs.branch != '' }}
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Sync uv.lock with the release version
         if: ${{ steps.release-branch.outputs.branch != '' }}

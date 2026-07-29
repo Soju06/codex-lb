@@ -8,6 +8,7 @@ import type { ReportsResponse } from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import { useReports } from "@/features/reports/hooks/use-reports";
+import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/use-report-chart-visibility";
 import { ReportsPage } from "./reports-page";
 
 vi.mock("@/features/accounts/api", () => ({
@@ -527,6 +528,148 @@ describe("ReportsPage", () => {
     const useragentCard = await screen.findByText("Distribution by UserAgent");
 
     expect(modelCard.compareDocumentPosition(useragentCard)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("renders a saved chart subset without changing reports query inputs", async () => {
+    window.localStorage.setItem(
+      REPORT_CHART_VISIBILITY_STORAGE_KEY,
+      JSON.stringify(["costByDay"]),
+    );
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(
+      await screen.findByText("Cost by Day", {
+        selector: "div.text-sm.font-semibold.text-foreground",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Tokens by Day")).not.toBeInTheDocument();
+    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
+    expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
+    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
+    expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
+
+    for (const [filters] of useReportsMock.mock.calls) {
+      expect(filters).not.toHaveProperty("visibleChartIds");
+    }
+  });
+
+  it("renders all five line charts by default", async () => {
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    for (const heading of [
+      "Cost by Day",
+      "Tokens by Day",
+      "Time to First Token",
+      "Tokens per Second",
+      "Queue Wait",
+    ]) {
+      expect(await screen.findByText(heading)).toBeInTheDocument();
+    }
+  });
+
+  it("renders the selected Cost by Day and Queue Wait charts", async () => {
+    window.localStorage.setItem(
+      REPORT_CHART_VISIBILITY_STORAGE_KEY,
+      JSON.stringify(["queueWait", "costByDay"]),
+    );
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(await screen.findByText("Cost by Day")).toBeInTheDocument();
+    expect(await screen.findByText("Queue Wait")).toBeInTheDocument();
+    expect(screen.queryByText("Tokens by Day")).not.toBeInTheDocument();
+    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
+  });
+
+  it("keeps summaries and non-line charts when every line chart is hidden", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    await user.click(screen.getByRole("button", { name: "Charts (5)" }));
+    for (const chartOption of screen.getAllByRole("menuitemcheckbox")) {
+      await user.click(chartOption);
+    }
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByText("Cost by Day")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tokens by Day")).not.toBeInTheDocument();
+    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
+    expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
+    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
+    expect(screen.getByText("Distribution by UserAgent")).toBeInTheDocument();
+    expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
+    expect(window.localStorage.getItem(REPORT_CHART_VISIBILITY_STORAGE_KEY)).toBe(
+      JSON.stringify([]),
+    );
+  });
+
+  it("does not change reports query calls when chart visibility changes", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(
+      <ReportsPage initialFilters={{ model: "gpt-5.1", useragent: "CLI" }} />,
+    );
+
+    await screen.findByText("Cost by Day");
+    const callCountBeforeToggle = useReportsMock.mock.calls.length;
+    const callsBeforeToggle = useReportsMock.mock.calls.slice(-2).map(
+      ([filters, timeZone]) => [filters, timeZone],
+    );
+    await user.click(screen.getByRole("button", { name: "Charts (5)" }));
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: "Queue Wait" }),
+    );
+
+    expect(useReportsMock.mock.calls.length).toBeGreaterThan(callCountBeforeToggle);
+    expect(useReportsMock.mock.calls.slice(-2)).toEqual(callsBeforeToggle);
   });
 
   it("keeps the model and user-agent metric toggles independent", async () => {

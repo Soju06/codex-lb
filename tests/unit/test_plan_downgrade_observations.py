@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 from sqlalchemy.exc import OperationalError, ProgrammingError
@@ -20,12 +21,20 @@ from app.modules.usage.plan_downgrade_observations import (
 pytestmark = pytest.mark.unit
 
 
-def _account(*, refresh_token: str = "refresh-1") -> Account:
+def _account(
+    *,
+    refresh_token: str = "refresh-1",
+    chatgpt_account_id: str | None = "upstream_user",
+    chatgpt_user_id: str | None = "user_1",
+    email: str = "a@example.com",
+    codex_installation_id: str | None = "11111111-1111-1111-1111-111111111111",
+) -> Account:
     encryptor = TokenEncryptor()
-    return Account(
+    account = Account(
         id="acc_fingerprint",
-        chatgpt_account_id="upstream_user",
-        email="a@example.com",
+        chatgpt_account_id=chatgpt_account_id,
+        chatgpt_user_id=chatgpt_user_id,
+        email=email,
         plan_type="plus",
         access_token_encrypted=encryptor.encrypt("access"),
         refresh_token_encrypted=encryptor.encrypt(refresh_token),
@@ -34,74 +43,83 @@ def _account(*, refresh_token: str = "refresh-1") -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+    # Assigned explicitly: the mapped default applies on INSERT, and these
+    # objects are never flushed, so a pre-flush row can legitimately carry
+    # ``None`` here even though the column itself is non-nullable.
+    account.codex_installation_id = cast("str", codex_installation_id)
+    return account
 
 
-def test_credential_fingerprint_is_stable_for_the_same_credential() -> None:
-    account = _account()
-    assert credential_fingerprint(account) == credential_fingerprint(account)
+def test_credential_fingerprint_is_stable_for_the_same_lineage() -> None:
+    """Two reads of one seat must agree, whatever the ciphertext looks like.
 
-
-def test_credential_fingerprint_changes_when_the_credential_is_replaced() -> None:
-    original = credential_fingerprint(_account(refresh_token="refresh-1"))
-    replaced = credential_fingerprint(_account(refresh_token="refresh-2"))
-    assert original != replaced
-
-
-def test_credential_fingerprint_ignores_re_encryption_of_the_same_token() -> None:
-    """The same refresh token must fingerprint identically after re-encryption.
-
-    ``TokenEncryptor`` wraps Fernet, which embeds a random IV, so encrypting one
-    plaintext twice yields different ciphertext. Fingerprinting the ciphertext
-    would therefore report a credential *change* every time the same token is
-    re-encrypted — and a false change discards pending downgrade evidence, so a
-    genuinely expired account could never accumulate two observations and would
-    never converge. Compare the decrypted material instead.
+    ``TokenEncryptor`` wraps Fernet, which embeds a random IV, so the two
+    accounts below hold *different* ciphertext for the same logical seat. The
+    digest must not care: it is taken over seat identity, never token bytes, so
+    re-encryption, key rotation, or an undecryptable row cannot make one seat
+    disagree with itself.
     """
-    encryptor = TokenEncryptor()
     first = _account()
     second = _account()
-    first.refresh_token_encrypted = encryptor.encrypt("identical-refresh-token")
-    second.refresh_token_encrypted = encryptor.encrypt("identical-refresh-token")
-
     assert first.refresh_token_encrypted != second.refresh_token_encrypted, (
         "precondition: encryption is expected to be non-deterministic"
     )
     assert credential_fingerprint(first) == credential_fingerprint(second)
 
 
-def test_credential_fingerprint_distinguishes_undecryptable_material() -> None:
-    """Undecryptable bytes must still compare, and must not collide with plaintext.
+def test_credential_fingerprint_is_unchanged_by_token_rotation() -> None:
+    """Routine rotation must not read as a credential replacement.
 
-    A row written under a rotated or lost encryption key cannot be decrypted. The
-    fingerprint falls back to the raw bytes so equality still works, mirroring
-    ``_refresh_token_material_fingerprint`` in the accounts auth manager.
+    Refresh tokens rotate on every successful token refresh, so a token-derived
+    digest would restart pending downgrade evidence whenever rotation
+    interleaved with usage refresh — postponing a real expiry indefinitely
+    (issue #1456). Rotating every token on the account must leave the
+    fingerprint untouched.
     """
-    first = _account()
-    second = _account()
-    first.refresh_token_encrypted = b"not-fernet-ciphertext"
-    second.refresh_token_encrypted = b"not-fernet-ciphertext"
-    assert credential_fingerprint(first) == credential_fingerprint(second)
+    account = _account(refresh_token="refresh-before")
+    before = credential_fingerprint(account)
 
-    third = _account()
-    third.refresh_token_encrypted = b"different-garbage"
-    assert credential_fingerprint(third) != credential_fingerprint(first)
+    encryptor = TokenEncryptor()
+    account.access_token_encrypted = encryptor.encrypt("access-after")
+    account.refresh_token_encrypted = encryptor.encrypt("refresh-after")
+    account.id_token_encrypted = encryptor.encrypt("id-after")
+
+    assert credential_fingerprint(account) == before
 
 
-def test_credential_fingerprint_does_not_expose_token_material() -> None:
-    """The digest is what gets persisted, so it must not leak the credential."""
-    account = _account(refresh_token="super-secret-refresh-token")
+def test_credential_fingerprint_changes_when_the_seat_identity_changes() -> None:
+    """A row rebound to a different seat must start its own lineage."""
+    base = credential_fingerprint(_account())
+    assert credential_fingerprint(_account(chatgpt_account_id="other_workspace")) != base
+    assert credential_fingerprint(_account(chatgpt_user_id="user_2")) != base
+    assert credential_fingerprint(_account(email="b@example.com")) != base
+    assert credential_fingerprint(_account(codex_installation_id="22222222-2222-2222-2222-222222222222")) != base
+
+
+def test_credential_fingerprint_distinguishes_missing_from_empty_identity() -> None:
+    """``None`` and ``""`` are different identities and must not collide."""
+    missing = credential_fingerprint(_account(chatgpt_account_id=None))
+    empty = credential_fingerprint(_account(chatgpt_account_id=""))
+    assert missing != empty
+
+
+def test_credential_fingerprint_does_not_expose_identity_or_token_material() -> None:
+    """The digest is what gets persisted, so it must not leak its inputs."""
+    account = _account(refresh_token="super-secret-refresh-token", email="leaky@example.com")
     fingerprint = credential_fingerprint(account)
 
     assert "super-secret-refresh-token" not in fingerprint
+    assert "leaky@example.com" not in fingerprint
     assert fingerprint != account.refresh_token_encrypted.hex()
     assert len(fingerprint) == 64
     assert all(character in "0123456789abcdef" for character in fingerprint)
 
 
-def test_credential_fingerprint_handles_empty_material() -> None:
-    account = _account()
-    account.refresh_token_encrypted = b""
-    assert credential_fingerprint(account)
+def test_credential_fingerprint_handles_missing_identity_fields() -> None:
+    account = _account(chatgpt_account_id=None, chatgpt_user_id=None, codex_installation_id=None)
+    fingerprint = credential_fingerprint(account)
+    assert fingerprint
+    assert fingerprint == credential_fingerprint(account)
 
 
 @pytest.mark.parametrize(
@@ -128,7 +146,7 @@ async def test_observe_increments_for_matching_material() -> None:
 
 
 @pytest.mark.asyncio
-async def test_observe_restarts_when_the_credential_changes() -> None:
+async def test_observe_restarts_when_the_lineage_changes() -> None:
     store = InMemoryPlanDowngradeObservationStore()
     assert await store.observe("acc", credential_fingerprint="fp-old", observed_plan_type="free") == 1
     assert await store.observe("acc", credential_fingerprint="fp-new", observed_plan_type="free") == 1
@@ -144,6 +162,11 @@ async def test_observe_holds_its_count_across_a_forced_interleave() -> None:
     released only once every task has entered ``observe`` forces the interleaving
     that a real multi-task refresh can produce, and any implementation that reads
     a count, suspends, then writes it back returns ``1`` from every call.
+
+    This exercises the in-memory store only — the in-process analogue of the
+    database upsert. The single-statement upsert itself is exercised against the
+    real database (concurrently, and on PostgreSQL in the postgres CI job) in
+    ``tests/integration/test_plan_downgrade_observation_store.py``.
     """
     concurrency = 5
     barrier = asyncio.Barrier(concurrency)

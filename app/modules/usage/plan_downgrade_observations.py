@@ -18,33 +18,44 @@ than one replica shares a database:
 ``account_plan_downgrade_observations``, so every replica reads and advances the
 same count.
 
-The stored ``credential_fingerprint`` pins evidence to the token material that
-produced it. Account ids are deterministic (``generate_unique_account_id``) and
-``upsert_account_slot`` updates the existing row in place, so a
-delete-and-re-import or an in-place reauthentication reuses the same account id
-with *new* credentials. Without the fingerprint the new credential would inherit
-the previous one's pending observation and downgrade on its own first ``free``
-payload -- exactly the single-sample trust this feature exists to prevent. The
-fingerprint is a salted HMAC over the *decrypted* refresh-token material (see
-:func:`credential_fingerprint` for why the ciphertext cannot be hashed) and never
-stores or exposes token bytes.
+The stored ``credential_fingerprint`` pins evidence to the credential *lineage*
+that produced it: a salted digest over the account's stable seat identity, never
+over token material. Refresh tokens rotate on every successful token refresh
+(``rotate_tokens`` in the accounts repository), and rotation extends the same
+lineage rather than replacing it, so the digest is unmoved by rotation by
+construction -- token bytes are not an input. Because nothing here decrypts, no
+key rotation, re-encryption, or undecryptable row can perturb the digest either.
+
+Replacing the credential is a different event from rotating it. Account ids are
+deterministic (``generate_unique_account_id``) and ``upsert_account_slot``
+updates the existing row in place, so a delete-and-re-import or an in-place
+reauthentication reuses the same account id with *new* credentials -- and
+evidence gathered under the previous credential must not count toward a
+downgrade for the new one. Every such replacement flows through
+``_apply_account_updates`` in the accounts repository, which discards this
+account's pending evidence in the same transaction via
+:func:`discard_plan_downgrade_observations`; deleting the account drops its row
+through the schema's ``ondelete="CASCADE"``. The fingerprint's restart-at-one
+comparison remains as defense in depth for any path that rebinds a row's seat
+identity without passing through those seams.
 
 Rows are deleted as soon as the downgrade is applied or the evidence is
-invalidated, and the schema's ``ondelete="CASCADE"`` drops them with the account.
+invalidated.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import DateTime, String, bindparam, delete, select, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountPlanDowngradeObservation
 from app.db.session import get_background_session, sqlite_writer_section
@@ -68,62 +79,93 @@ def _is_missing_observations_schema(exc: Exception) -> bool:
     return f"no such table: {_TABLE_NAME}" in message or f'relation "{_TABLE_NAME}" does not exist' in message
 
 
-# Domain separation for the credential digest. The fingerprint only ever needs to
-# answer "is this the same credential as last time?", so a fixed-salt digest is
-# sufficient and keeps the value stable across replicas and restarts (a random
-# per-process salt would make every replica disagree, reintroducing the very
-# divergence this module removes).
-_FINGERPRINT_SALT = b"codex-lb/plan-downgrade-observation/v1"
+# Domain separation for the lineage digest. The fingerprint only ever needs to
+# answer "is this the same credential lineage as last time?", so a fixed-salt
+# digest is sufficient and keeps the value stable across replicas and restarts
+# (a random per-process salt would make every replica disagree, reintroducing
+# the very divergence this module removes). The salt is public by design: the
+# digested fields are non-secret identity metadata, and the salt exists for
+# domain separation, not secrecy. Bumped to v2 when the digest input changed
+# from token material to seat identity, so values from the two schemes can
+# never read as an agreeing lineage.
+_FINGERPRINT_SALT = b"codex-lb/plan-downgrade-observation/v2"
 _FINGERPRINT_LEN = 64
 
 
-def _shared_encryptor() -> TokenEncryptor | None:
-    """Encryptor used to normalize credential material before hashing.
+def credential_fingerprint(account: Account) -> str:
+    """Return a stable, non-reversible fingerprint of an account's credential lineage.
 
-    Deliberately *not* cached: the encryption key is resolved from settings, and
-    caching an instance would keep using a stale key after key rotation (and
-    would leak one test's key into the next). Construction is cheap relative to a
-    usage-refresh cycle, which is the only caller. Returns ``None`` when no key is
-    available so fingerprinting degrades to comparing raw material rather than
-    breaking usage refresh.
+    The digest is taken over the account's stable seat identity -- the ChatGPT
+    workspace and principal identifiers, the email, and the sticky
+    ``codex_installation_id`` -- and deliberately NOT over token material.
+    Refresh tokens rotate on every successful token refresh, so a token-derived
+    digest would read routine rotation as a credential replacement and restart
+    pending downgrade evidence; an account whose token-refresh cadence
+    interleaves with usage refresh would then never accumulate two agreeing
+    observations and a real expiry could be postponed indefinitely (issue
+    #1456). Seat identity survives rotation by construction, and because no
+    input is encrypted there is no decrypt step to fail and no fallback path.
+
+    Credential *replacement* (re-import or in-place reauthentication) does not
+    move this digest either -- the same seat gets new tokens. That event resets
+    pending evidence explicitly instead: every replacement flows through
+    ``_apply_account_updates`` in the accounts repository, which calls
+    :func:`discard_plan_downgrade_observations` in the same transaction.
+
+    ``None`` and empty identity fields are encoded distinctly (JSON), so partial
+    identities still compare equal only to themselves. Only equality ever
+    matters here, never the preimage.
     """
-    try:
-        return TokenEncryptor()
-    except Exception:  # pragma: no cover - key material unavailable
-        logger.warning("Credential fingerprinting could not resolve an encryption key; comparing raw material")
-        return None
-
-
-def credential_fingerprint(account: Account, *, encryptor: TokenEncryptor | None = None) -> str:
-    """Return a stable, non-reversible fingerprint of an account's credentials.
-
-    The digest is taken over the *decrypted* refresh-token material, not the
-    stored ciphertext. ``TokenEncryptor`` wraps Fernet, which embeds a random IV,
-    so the same token encrypts to different bytes every time; hashing ciphertext
-    would report a credential change on every re-encryption, and a false change
-    discards pending downgrade evidence — which would stop a genuinely expired
-    account from ever accumulating two observations. This mirrors
-    ``_refresh_token_material_fingerprint`` in the accounts auth manager, which
-    decrypts for the same reason.
-
-    Material that cannot be decrypted (for example a row written under a rotated
-    encryption key) falls back to the raw bytes so equality comparisons still
-    work. Only equality ever matters here, never the preimage.
-    """
-    material = account.refresh_token_encrypted or b""
-    if isinstance(material, memoryview):  # pragma: no cover - driver dependent
-        material = material.tobytes()
-    material = bytes(material)
-    resolved = encryptor if encryptor is not None else _shared_encryptor()
-    if resolved is not None and material:
-        try:
-            material = resolved.decrypt(material).encode("utf-8")
-        except Exception:
-            # Undecryptable material still needs to compare equal to itself, so
-            # fall back to the stored bytes rather than failing the refresh.
-            pass
+    material = json.dumps(
+        [
+            account.chatgpt_account_id,
+            account.chatgpt_user_id,
+            account.email,
+            account.codex_installation_id,
+        ],
+        separators=(",", ":"),
+    ).encode("utf-8")
     digest = hmac.new(_FINGERPRINT_SALT, material, hashlib.sha256).hexdigest()
     return digest[:_FINGERPRINT_LEN]
+
+
+# Logged at most once per process: an unmigrated database hits this on every
+# credential replacement until the migration applies, and the first warning
+# carries all the signal.
+_discard_schema_missing_logged = False
+
+
+async def discard_plan_downgrade_observations(session: AsyncSession, account_id: str) -> None:
+    """Discard pending downgrade evidence inside the caller's transaction.
+
+    Called by the accounts repository wherever fresh credential material is
+    applied to an existing account row (re-import or in-place reauthentication):
+    evidence gathered under the previous credential must not count toward a
+    downgrade for the new one, so the new credential's first ``free`` payload
+    can never land a downgrade on a single sample. Running inside the caller's
+    transaction makes the discard atomic with the credential replacement.
+
+    The ``DELETE`` runs in a SAVEPOINT so a database whose migration has not
+    applied yet degrades to a warning instead of poisoning the caller's
+    transaction (PostgreSQL aborts the whole transaction on a failed statement)
+    and failing the import or reauthentication itself.
+    """
+    global _discard_schema_missing_logged
+    try:
+        async with session.begin_nested():
+            await session.execute(
+                delete(AccountPlanDowngradeObservation).where(AccountPlanDowngradeObservation.account_id == account_id)
+            )
+    except (OperationalError, ProgrammingError) as exc:
+        if not _is_missing_observations_schema(exc):
+            raise
+        if not _discard_schema_missing_logged:
+            _discard_schema_missing_logged = True
+            logger.warning(
+                "Plan-downgrade observation table is unavailable; credential replacement proceeds "
+                "without discarding pending evidence until the database is migrated table=%s",
+                _TABLE_NAME,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,9 +202,9 @@ class PlanDowngradeObservationStorePort(Protocol):
 # single statement, so two concurrent refreshes for one account cannot both read
 # the same prior count and lose an increment (a read-then-write pair has an await
 # between the two halves and is not safe across replicas either way). The
-# fingerprint check lives inside the same statement: matching material increments,
-# replaced material restarts at one. Mirrors the conditional-upsert approach in
-# ``app/modules/accounts/refresh_claims.py``.
+# fingerprint check lives inside the same statement: a matching lineage
+# increments, a changed lineage restarts at one. Mirrors the conditional-upsert
+# approach in ``app/modules/accounts/refresh_claims.py``.
 _OBSERVE_SQL_TEMPLATE = """
     INSERT INTO account_plan_downgrade_observations (
         account_id, observations, credential_fingerprint, observed_plan_type,
@@ -240,12 +282,21 @@ class PlanDowngradeObservationStore:
 
         One statement decides between "increment" and "restart at one", so
         concurrent refreshes for the same account cannot lose an increment and a
-        replaced credential still resets the sequence.
+        changed credential lineage still resets the sequence.
         """
         try:
             async with sqlite_writer_section():
                 async with get_background_session() as session:
-                    statement = text(_OBSERVE_SQL_TEMPLATE.format(table=_TABLE_NAME))
+                    # Bind types are explicit so both drivers receive the same
+                    # shapes: asyncpg in particular must see the naive UTC
+                    # ``utcnow()`` values as a plain (timezone-less) TIMESTAMP
+                    # rather than inferring a type for a textual parameter.
+                    statement = text(_OBSERVE_SQL_TEMPLATE.format(table=_TABLE_NAME)).bindparams(
+                        bindparam("account_id", type_=String()),
+                        bindparam("fingerprint", type_=String()),
+                        bindparam("plan_type", type_=String()),
+                        bindparam("now", type_=DateTime()),
+                    )
                     result = await session.execute(
                         statement,
                         {
@@ -308,7 +359,21 @@ class PlanDowngradeObservationStore:
             )
 
     async def clear(self, account_id: str) -> None:
+        """Discard pending evidence, touching the writer path only when a row exists.
+
+        Every workspace-less refresh that reports a paid plan clears here, and on
+        a healthy account there is almost never a pending row -- so the common
+        case is a cheap primary-key read with no writer lock, no ``DELETE``, and
+        no ``COMMIT``. A row inserted concurrently after the read survives until
+        the next paid observation, exactly as it would have survived an
+        unconditional ``DELETE`` that committed before that insert: the gate
+        changes the cost of the no-op case, not the semantics.
+        """
         try:
+            async with get_background_session() as session:
+                existing = await session.get(AccountPlanDowngradeObservation, account_id)
+            if existing is None:
+                return
             async with sqlite_writer_section():
                 async with get_background_session() as session:
                     await session.execute(

@@ -1027,14 +1027,16 @@ async def _free_plan_downgrade_is_confirmed(
     fingerprint = credential_fingerprint(account)
     store = _plan_downgrade_observation_store()
     # One atomic step records the observation and returns the resulting count.
-    # Evidence whose credential fingerprint no longer matches is restarted at one
-    # inside the same operation: account ids are deterministic, so a
-    # delete-and-re-import or an in-place reauthentication reuses this id with new
-    # token material, and inheriting the old evidence would let the new
-    # credential's very first ``free`` payload land a downgrade on a single
-    # sample. Doing this as a read followed by a write would leave an await
-    # between the two halves, letting concurrent refreshes for one account lose an
-    # increment.
+    # The fingerprint digests the account's stable seat identity, not token
+    # material, so routine token rotation between two observations does not
+    # restart the sequence and a real expiry still converges (#1456). Credential
+    # replacement (re-import or in-place reauthentication) resets pending
+    # evidence at the replacement site itself -- the accounts repository
+    # discards it in the same transaction that applies the fresh material --
+    # while the fingerprint comparison here restarts the count for any
+    # remaining path that rebinds the row's seat identity. Doing this as a read
+    # followed by a write would leave an await between the two halves, letting
+    # concurrent refreshes for one account lose an increment.
     observations = await store.observe(
         account.id,
         credential_fingerprint=fingerprint,

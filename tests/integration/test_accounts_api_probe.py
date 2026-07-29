@@ -391,6 +391,85 @@ async def test_pending_downgrade_evidence_is_persisted_for_all_replicas(async_cl
 
 
 @pytest.mark.asyncio
+async def test_reimport_clears_pending_downgrade_evidence(async_client, monkeypatch):
+    """Re-importing onto the existing row must reset its pending downgrade.
+
+    Product-path assertion for the replaced-credential review item on #1456:
+    with overwrite-on-import enabled (`importWithoutOverwrite: false`), account
+    ids are deterministic and re-importing the same account applies fresh token
+    material to the existing row. The evidence gathered before the re-import
+    must be discarded — otherwise the new credential's first `free` payload
+    would confirm a downgrade on a single sample. Asserted through the same
+    `/api/accounts` response the dashboard reads. (With the default
+    import-without-overwrite behavior a re-import creates a separate row instead
+    and replaces no credential, so the original row's evidence rightly stands.)
+    """
+    from sqlalchemy import select
+
+    from app.db.models import AccountPlanDowngradeObservation
+    from app.db.session import get_background_session
+
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        return UsagePayload.model_validate({"plan_type": "free"})
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+
+    settings = await async_client.put("/api/settings", json={"importWithoutOverwrite": False})
+    assert settings.status_code == 200, settings.text
+    assert settings.json()["importWithoutOverwrite"] is False
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-reimport-evidence@example.com",
+        account_id="acc_probe_reimport_evidence",
+        plan_type="plus",
+    )
+
+    async def _observation_counts() -> list[int]:
+        async with get_background_session() as session:
+            result = await session.execute(
+                select(AccountPlanDowngradeObservation.observations).where(
+                    AccountPlanDowngradeObservation.account_id == account_id
+                )
+            )
+            return [row[0] for row in result.all()]
+
+    first = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert first.status_code == 200, first.text
+    assert await _observation_counts() == [1]
+
+    # The operator re-imports the same account: same deterministic id, fresh
+    # credential material applied to the existing row.
+    reimported_id = await _import_test_account(
+        async_client,
+        email="probe-reimport-evidence@example.com",
+        account_id="acc_probe_reimport_evidence",
+        plan_type="plus",
+    )
+    assert reimported_id == account_id
+    assert await _observation_counts() == [], "re-import must discard evidence from the previous credential"
+
+    second = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert second.status_code == 200, second.text
+
+    listing = await async_client.get("/api/accounts")
+    account = next(item for item in listing.json()["accounts"] if item["accountId"] == account_id)
+    assert account["planType"] == "plus", "the first post-re-import observation must not downgrade"
+    assert await _observation_counts() == [1]
+
+    third = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert third.status_code == 200, third.text
+
+    listing = await async_client.get("/api/accounts")
+    account = next(item for item in listing.json()["accounts"] if item["accountId"] == account_id)
+    assert account["planType"] == "free", "the re-imported credential converges on its own second observation"
+
+
+@pytest.mark.asyncio
 async def test_probe_uses_default_model_when_body_omitted(async_client, monkeypatch):
     captured: dict = {}
 

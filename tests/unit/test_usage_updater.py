@@ -2592,8 +2592,15 @@ def _replica_module() -> Any:
 
     A separate module instance gives the guard its own module globals, so any
     coherence these tests observe comes from the shared observation store rather
-    than from one process's memory — exactly the distinction the review asked
-    about.
+    than from either module's memory. Be precise about what that proves: in the
+    unit harness the shared store is a single in-process
+    ``InMemoryPlanDowngradeObservationStore`` (installed by the autouse conftest
+    fixture), so these tests demonstrate that the guard reads and advances one
+    shared sequence — the observation-ordering logic — not that the state is
+    durable across processes. The durable, database-backed half of the claim is
+    exercised in ``tests/integration/test_plan_downgrade_observation_store.py``
+    and asserted through the product path in
+    ``tests/integration/test_accounts_api_probe.py``.
     """
     import importlib.util
 
@@ -2693,14 +2700,61 @@ async def test_paid_payload_on_another_replica_clears_pending_downgrade(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_replaced_credential_restarts_free_downgrade_confirmation(monkeypatch) -> None:
-    """A new credential must not inherit the previous one's pending evidence.
+async def test_token_rotation_between_observations_still_confirms_downgrade(monkeypatch) -> None:
+    """Routine token rotation must not restart the confirmation count.
 
-    Account ids are deterministic and `upsert_account_slot` updates the existing
-    row, so delete-and-re-import (or an in-place reauthentication) reuses the id
-    with new token material. Regression for the second review item on #1456:
-    inheriting the old evidence let the new credential's very first `free`
-    payload downgrade the account on a single sample.
+    Refresh tokens rotate on every successful token refresh, so an account whose
+    token-refresh cadence interleaves with usage refresh rotates between the two
+    required `free` observations as a matter of course. If rotation read as a
+    credential replacement, such an account would restart at one forever and the
+    #1456 downgrade would be postponed indefinitely. Rotation extends the same
+    credential lineage; the second observation must confirm.
+    """
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.usage.updater.fetch_usage",
+        _free_downgrade_payload_factory(["free", "free"]),
+    )
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    account = _make_account("acc_rotated", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "plus"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.force_refresh(account)
+    assert await _pending_observations(account.id) == 1
+    assert account.plan_type == "plus"
+
+    # Same seat, routinely rotated material: every token ciphertext changes.
+    encryptor = TokenEncryptor()
+    account.access_token_encrypted = encryptor.encrypt("access-rotated")
+    account.refresh_token_encrypted = encryptor.encrypt("refresh-rotated")
+    account.id_token_encrypted = encryptor.encrypt("id-rotated")
+
+    await updater.force_refresh(account)
+    assert account.plan_type == "free", "rotation must not restart the confirmation count"
+
+
+@pytest.mark.asyncio
+async def test_rebound_seat_identity_restarts_free_downgrade_confirmation(monkeypatch) -> None:
+    """Evidence must not carry across a change of the account's seat identity.
+
+    The fingerprint digests the seat identity, so this is the store-level
+    defense in depth for any path that rebinds a row to a different upstream
+    seat without deleting it. The ordinary replacement events reset pending
+    evidence at their own seams and are covered where they live: re-import and
+    in-place reauthentication discard evidence in the accounts repository
+    transaction (`tests/integration/test_repositories.py`,
+    `tests/integration/test_accounts_api_probe.py`), and account deletion drops
+    the row through `ondelete="CASCADE"`.
     """
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings
@@ -2716,7 +2770,7 @@ async def test_replaced_credential_restarts_free_downgrade_confirmation(monkeypa
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
 
-    account = _make_account("acc_reimported", "upstream_user", email="same@example.com")
+    account = _make_account("acc_rebound", "upstream_user", email="same@example.com")
     account.workspace_id = None
     account.plan_type = "plus"
     accounts_repo.accounts_by_id[account.id] = account
@@ -2725,15 +2779,14 @@ async def test_replaced_credential_restarts_free_downgrade_confirmation(monkeypa
     assert await _pending_observations(account.id) == 1
     assert account.plan_type == "plus"
 
-    # Same deterministic id, brand-new token material.
-    encryptor = TokenEncryptor()
-    account.refresh_token_encrypted = encryptor.encrypt("refresh-after-reimport")
+    # The same row now reports a different upstream seat.
+    account.chatgpt_account_id = "another_upstream_seat"
 
     await updater.force_refresh(account)
-    assert account.plan_type == "plus", "a replaced credential must not inherit pending evidence"
+    assert account.plan_type == "plus", "a rebound seat must not inherit pending evidence"
     assert await _pending_observations(account.id) == 1
 
-    # The new credential converges on its own second observation.
+    # The rebound seat converges on its own second observation.
     await updater.force_refresh(account)
     assert account.plan_type == "free"
 

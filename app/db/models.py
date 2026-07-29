@@ -1659,15 +1659,22 @@ class AccountPlanDowngradeObservation(Base):
     any replica clears the evidence for all of them, and two ``free`` samples
     split across replicas still converge.
 
-    ``credential_fingerprint`` pins the evidence to the token material that
-    produced it. Account ids are deterministic, so a delete-and-re-import or an
-    in-place reauthentication reuses the same id with new credentials; comparing
-    fingerprints makes that new credential start its own count instead of
-    inheriting the previous one's. It is a salted digest, never token material.
+    ``credential_fingerprint`` pins the evidence to the credential lineage that
+    produced it: a fixed-salt digest over the account's stable seat identity
+    (workspace and principal identifiers, email, ``codex_installation_id``),
+    deliberately not over token material -- refresh tokens rotate on every
+    token refresh, and rotation must not read as a credential replacement.
+    Account ids are deterministic, so a delete-and-re-import or an in-place
+    reauthentication reuses the same id with new credentials; those replacements
+    discard this row explicitly (the accounts repository deletes it in the same
+    transaction that applies the fresh credentials), and the fingerprint
+    comparison restarts the count for any remaining path that rebinds the row's
+    seat identity.
 
-    The row holds no secrets and is deleted as soon as the downgrade is applied
-    or the evidence is invalidated. ``ondelete="CASCADE"`` drops it with the
-    account.
+    The row holds no secrets: a count, a plan value, timestamps, and the
+    non-reversible identity digest, stored outside the encrypted token columns.
+    It is deleted as soon as the downgrade is applied or the evidence is
+    invalidated. ``ondelete="CASCADE"`` drops it with the account.
     """
 
     __tablename__ = "account_plan_downgrade_observations"

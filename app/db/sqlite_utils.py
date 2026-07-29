@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -15,6 +17,16 @@ class IntegrityCheck:
 class SqliteIntegrityCheckMode(str, Enum):
     QUICK = "quick"
     FULL = "full"
+
+
+@contextmanager
+def sqlite_connection(path: str | Path) -> Iterator[sqlite3.Connection]:
+    connection = sqlite3.connect(str(path))
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def sqlite_db_path_from_url(url: str) -> Path | None:
@@ -51,7 +63,7 @@ def check_sqlite_integrity(
         return IntegrityCheck(ok=True, details=None)
 
     try:
-        with sqlite3.connect(str(path)) as conn:
+        with sqlite_connection(path) as conn:
             cursor = conn.execute(_integrity_check_pragma(mode))
             rows = [row[0] for row in cursor.fetchall()]
     except sqlite3.DatabaseError as exc:

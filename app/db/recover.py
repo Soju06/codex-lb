@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from app.core.config.settings import get_settings
-from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_db_path_from_url
+from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def _default_output_path(source: Path) -> Path:
 
 def _load_dump(source: Path) -> str:
     try:
-        with sqlite3.connect(str(source)) as conn:
+        with sqlite_connection(source) as conn:
             return "\n".join(conn.iterdump())
     except sqlite3.DatabaseError as exc:
         message = f"failed to read sqlite dump: {exc}"
@@ -49,7 +49,7 @@ def _load_dump(source: Path) -> str:
 
 def _write_dump(output: Path, dump: str) -> None:
     try:
-        with sqlite3.connect(str(output)) as conn:
+        with sqlite_connection(output) as conn:
             conn.execute("PRAGMA foreign_keys=OFF")
             conn.executescript(dump)
             conn.execute("PRAGMA foreign_keys=ON")

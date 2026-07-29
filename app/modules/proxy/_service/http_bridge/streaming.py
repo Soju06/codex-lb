@@ -2588,7 +2588,47 @@ class _HTTPBridgeStreamingMixin:
                 and request_state.fresh_upstream_request_text
             )
 
+        async def startup_continuity_cooldown_terminal_event() -> str | None:
+            if (
+                session.key.strength != "hard"
+                or not continuity_bound_without_safe_replay()
+                or request_state.response_id is not None
+                or request_state.response_event_count > 0
+            ):
+                return None
+            retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+            if retry_cooldown_seconds <= 0:
+                return None
+            if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
+                stream_idle_timeout_total.labels(surface="http_bridge").inc()
+            _record_continuity_fail_closed(
+                surface="http_bridge",
+                reason="retry_circuit_cooldown_continuity_bound",
+                previous_response_id=request_state.previous_response_id,
+                session_id=downstream_turn_state or request_state.session_id,
+            )
+            logger.info(
+                "HTTP bridge stream idle timeout fail-closed before submit without safe replay "
+                "request_id=%s retry_after_seconds=%.1f",
+                request_state.request_id,
+                retry_cooldown_seconds,
+            )
+            return format_sse_event(
+                cast(
+                    Mapping[str, JsonValue],
+                    response_failed_event(
+                        "stream_idle_timeout",
+                        "Upstream did not respond within the keepalive window",
+                        response_id=_websocket_downstream_response_id(request_state),
+                    ),
+                )
+            )
+
         while True:
+            startup_terminal_event = await startup_continuity_cooldown_terminal_event()
+            if startup_terminal_event is not None:
+                yield startup_terminal_event
+                return
             try:
                 if account_neutral_recovery:
                     await self._submit_http_bridge_request(

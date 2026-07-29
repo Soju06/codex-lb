@@ -24,7 +24,7 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
-    expect(screen.getAllByText("10% maximum used · 90% reserved").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("10% maximum used · 90% reserved")).toHaveLength(1);
     expect(screen.getByText("Off")).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "Enable usage limit" }));
@@ -42,7 +42,7 @@ describe("AccountUsageLimitControl", () => {
       percent: 12.5,
     });
 
-    await user.click(screen.getByRole("button", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Clear saved limit" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: false,
       percent: null,
@@ -67,10 +67,12 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
+    expect(screen.queryByText(/usage reporting is delayed/i)).not.toBeInTheDocument();
     await user.type(
       screen.getByRole("spinbutton", { name: "Maximum used percent" }),
       "10",
     );
+    expect(screen.getByText(/usage reporting is delayed/i)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Set and enable" }));
 
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
@@ -94,6 +96,6 @@ describe("AccountUsageLimitControl", () => {
     );
 
     expect(screen.getByText("Reached · routing blocked")).toBeInTheDocument();
-    expect(screen.getByText(/requests already in flight can move actual usage past/i)).toBeInTheDocument();
+    expect(screen.getByText(/in-flight requests may briefly exceed/i)).toBeInTheDocument();
   });
 });

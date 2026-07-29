@@ -1,4 +1,3 @@
-import { Gauge, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -63,13 +62,13 @@ export function AccountUsageLimitControl({
       aria-label={t("accounts.usageLimit.aria")}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
-          <Gauge className="h-4 w-4 shrink-0 text-muted-foreground" />
-          {t("accounts.usageLimit.title")}
-        </div>
+        <h3 className="text-sm font-medium">{t("accounts.usageLimit.title")}</h3>
         {configuredPercent !== null ? (
           <div className="flex items-center gap-2">
             <UsageLimitStateBadge state={account.usageLimitState ?? "disabled"} />
+            <span className="text-xs text-muted-foreground">
+              {t("common.states.enabled")}
+            </span>
             <Switch
               aria-label={t("accounts.usageLimit.enableAria")}
               checked={account.usageLimitEnabled ?? false}
@@ -85,18 +84,14 @@ export function AccountUsageLimitControl({
         ) : null}
       </div>
 
-      {configuredPercent !== null ? (
-        <p className="text-xs font-medium">
-          {t("accounts.usageLimit.summary", {
-            maximum: formatPercent(configuredPercent),
-            reserved: formatPercent(100 - configuredPercent),
-          })}
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          {t("accounts.usageLimit.description")}
-        </p>
-      )}
+      <p className={configuredPercent === null ? "text-xs text-muted-foreground" : "text-xs font-medium"}>
+        {configuredPercent === null
+          ? t("accounts.usageLimit.description")
+          : t("accounts.usageLimit.summary", {
+              maximum: formatPercent(configuredPercent),
+              reserved: formatPercent(100 - configuredPercent),
+            })}
+      </p>
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <label className="min-w-0 flex-1 space-y-1" htmlFor={inputId}>
@@ -140,27 +135,9 @@ export function AccountUsageLimitControl({
             ? t("accounts.usageLimit.setAndEnable")
             : t("common.actions.save")}
         </Button>
-        {configuredPercent !== null ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-8 gap-1.5 text-xs"
-            disabled={disabled}
-            onClick={() =>
-              onChange(account.accountId, {
-                enabled: false,
-                percent: null,
-              })
-            }
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            {t("common.actions.remove")}
-          </Button>
-        ) : null}
       </div>
 
-      {validDraft ? (
+      {validDraft && draftChanged ? (
         <p className="text-xs text-muted-foreground">
           {t("accounts.usageLimit.summary", {
             maximum: formatPercent(parsedDraft),
@@ -168,9 +145,23 @@ export function AccountUsageLimitControl({
           })}
         </p>
       ) : null}
-      <p className="text-xs text-muted-foreground">
-        {t("accounts.usageLimit.delayedWarning")}
-      </p>
+      {configuredPercent !== null || draft.trim() !== "" ? (
+        <p className="text-xs text-muted-foreground">
+          {t("accounts.usageLimit.delayedWarning")}
+        </p>
+      ) : null}
+      {configuredPercent !== null ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 w-fit px-2 text-xs text-muted-foreground"
+          disabled={disabled}
+          onClick={() => onChange(account.accountId, { enabled: false, percent: null })}
+        >
+          {t("accounts.usageLimit.clearSavedLimit")}
+        </Button>
+      ) : null}
     </section>
   );
 }

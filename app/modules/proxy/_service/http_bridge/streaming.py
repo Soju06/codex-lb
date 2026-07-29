@@ -2775,20 +2775,33 @@ class _HTTPBridgeStreamingMixin:
                                 retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(
                                     session
                                 )
-                                if retry_cooldown_seconds > 0 and continuity_bound_without_safe_replay():
+                                fresh_replay_is_safe = bool(
+                                    request_state.fresh_upstream_request_is_retry_safe
+                                    and request_state.fresh_upstream_request_text
+                                )
+                                continuity_bound = continuity_bound_without_safe_replay()
+                                if retry_cooldown_seconds > 0 and (
+                                    continuity_bound
+                                    or (session.key.strength == "hard" and not fresh_replay_is_safe)
+                                ):
                                     if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                         stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                     _record_continuity_fail_closed(
                                         surface="http_bridge",
-                                        reason="retry_circuit_cooldown_continuity_bound",
+                                        reason=(
+                                            "retry_circuit_cooldown_continuity_bound"
+                                            if continuity_bound
+                                            else "retry_circuit_cooldown_no_safe_replay"
+                                        ),
                                         previous_response_id=request_state.previous_response_id,
                                         session_id=downstream_turn_state or request_state.session_id,
                                     )
                                     logger.info(
-                                        "HTTP bridge stream idle timeout fail-closed for continuity-bound request "
-                                        "request_id=%s retry_after_seconds=%.1f",
+                                        "HTTP bridge stream idle timeout fail-closed without safe replay "
+                                        "request_id=%s retry_after_seconds=%.1f continuity_bound=%s",
                                         request_state.request_id,
                                         retry_cooldown_seconds,
+                                        continuity_bound,
                                     )
                                     yield format_sse_event(
                                         cast(

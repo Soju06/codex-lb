@@ -206,7 +206,7 @@ async def _retry_http_bridge_recovery_settlement(
     request_fingerprint: str,
     response_id: str | None,
 ) -> None:
-    """Keep a completed journal row fenced until durable settlement succeeds."""
+    """Keep a response-observed journal row fenced until durable settlement succeeds."""
 
     for delay_seconds in _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS:
         await asyncio.sleep(delay_seconds)
@@ -1688,7 +1688,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         )
 
         if (
-            event_type == "response.completed"
+            event_type.startswith("response.")
             and matched_request_state is not None
             and matched_request_state.recovery_attempt_fingerprint is not None
             and recovery_attempt_session_id is not None

@@ -231,6 +231,14 @@ class _HTTPBridgeRetryCircuitMixin:
                             state.persisted_updated_at_epoch,
                             persisted.updated_at_epoch,
                         )
+                        # This write is now the durable baseline for the
+                        # captured local failure. A failure recorded while
+                        # the write was in flight still has a later
+                        # monotonic timestamp and will remain dominant.
+                        state.last_durable_load_monotonic = max(
+                            state.last_durable_load_monotonic,
+                            now_monotonic,
+                        )
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
                     self._http_bridge_retry_circuit_persisted_keys.add(session.key)

@@ -20447,16 +20447,21 @@ async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset(
 async def test_http_bridge_retry_circuit_refreshes_conflict_merged_persisted_state() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-conflict-merged-circuit")
+    loaded = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
     service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(
-            return_value=SimpleNamespace(
-                consecutive_failures=2,
-                cooldown_until_epoch=time.time() + 60.0,
-                last_detail="stream_incomplete",
-                updated_at_epoch=time.time(),
-            )
-        ),
+        lookup_retry_circuit=AsyncMock(return_value=loaded),
+        persist_retry_circuit=AsyncMock(return_value=persisted),
     )
 
     await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")

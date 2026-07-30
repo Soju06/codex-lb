@@ -1618,6 +1618,25 @@ def _http_bridge_durable_release_allowed(service: Any, session: Any) -> bool:
     )
 
 
+async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
+    await asyncio.gather(task, return_exceptions=True)
+
+
+def _cancel_and_track_cancelled_task(
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+    cleanup_tasks: set[asyncio.Task[None]] | None,
+    cancel_task: bool = True,
+) -> None:
+    if cancel_task:
+        task.cancel()
+    cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    if cleanup_tasks is not None:
+        cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(cleanup_tasks.discard)
+
+
 async def _persist_http_bridge_replacement_account(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,

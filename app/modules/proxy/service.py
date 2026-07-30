@@ -143,6 +143,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _build_http_bridge_prewarm_text as _build_http_bridge_prewarm_text,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _cancel_and_track_cancelled_task as _cancel_and_track_cancelled_task,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner as _durable_bridge_lookup_active_owner,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -786,10 +789,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
 
-async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
-    await asyncio.gather(task, return_exceptions=True)
-
-
 async def _await_cancelled_task(
     task: asyncio.Task[_TaskResultT],
     *,
@@ -803,7 +802,11 @@ async def _await_cancelled_task(
     # starts, making a cancellation-resistant child look synchronously
     # cancelled and defeating the bounded deferred-drain path.
     if not task.done():
-        await asyncio.sleep(0)
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
+            raise
     task.cancel()
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
@@ -813,10 +816,7 @@ async def _await_cancelled_task(
         return True
     except TimeoutError:
         logger.warning("Timed out waiting for %s cancellation", label)
-        cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
-        if cleanup_tasks is not None:
-            cleanup_tasks.add(cleanup_task)
-            cleanup_task.add_done_callback(cleanup_tasks.discard)
+        _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
         return False
     return True
 

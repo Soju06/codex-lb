@@ -52,7 +52,9 @@ from app.core.openai.requests import (
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.time import utcnow
 from app.db.models import (
+    HttpBridgeSessionState,
     StickySessionKind,
 )
 from app.modules.api_keys.service import (
@@ -1024,7 +1026,10 @@ class _HTTPBridgeStreamingMixin:
                             session_id=durable_lookup.session_id,
                             request_fingerprint=durable_recovery_attempt_fingerprint,
                         )
-                        if existing_attempt is not None:
+                        if existing_attempt is not None and (
+                            durable_lookup.state != HttpBridgeSessionState.ACTIVE
+                            or not durable_lookup.lease_is_active(now=utcnow())
+                        ):
                             claimed = await self._durable_bridge.mark_recovery_attempt_replayed(
                                 session_id=durable_lookup.session_id,
                                 api_key_id=bridge_session_key.api_key_id,

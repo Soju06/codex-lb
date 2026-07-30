@@ -929,6 +929,8 @@ async def _websocket_has_active_drain_work(
     pending_lock: anyio.Lock,
     upstream_control: _WebSocketUpstreamControl | None,
 ) -> bool:
+    if upstream_control is not None and upstream_control.replay_request_state is not None:
+        return True
     terminal_task = upstream_control.terminal_message_task if upstream_control is not None else None
     if terminal_task is not None and not terminal_task.done():
         return True

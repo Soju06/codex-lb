@@ -11,7 +11,7 @@ import ssl
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
@@ -25537,6 +25537,231 @@ async def test_proxy_responses_websocket_delivers_active_terminal_before_drain_c
     assert emitted_types == ["response.created", "response.completed"]
     assert downstream.close_calls == [(1012, "Server is draining")]
     assert upstream.closed is True
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS", 0.01)
+
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": "replay through drain",
+            "stream": True,
+        },
+        separators=(",", ":"),
+    )
+    staged_replay = asyncio.Event()
+    drain_predicate_seen = asyncio.Event()
+    release_first_reader = asyncio.Event()
+    drain_observations: list[tuple[int, bool]] = []
+
+    class _DrainReplayDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.receive_count = 0
+            self.closed = asyncio.Event()
+            self.sent_text: list[str] = []
+            self.close_calls: list[tuple[int, str | None]] = []
+
+        async def receive(self) -> dict[str, object]:
+            self.receive_count += 1
+            if self.receive_count == 1:
+                return {"type": "websocket.receive", "text": request_text}
+            await self.closed.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            self.close_calls.append((code, reason))
+            self.closed.set()
+
+    class _DrainReplayUpstreamWebSocket:
+        def __init__(self, *, completes_turn: bool) -> None:
+            self.completes_turn = completes_turn
+            self.messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
+            self.sent_text: list[str] = []
+            self.closed = False
+
+        async def receive(self) -> SimpleNamespace:
+            return await self.messages.get()
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            if not self.completes_turn:
+                return
+            self.messages.put_nowait(
+                SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_staged_drain", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    data=None,
+                    close_code=None,
+                    error=None,
+                )
+            )
+            self.messages.put_nowait(
+                SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_staged_drain",
+                                "status": "completed",
+                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                    data=None,
+                    close_code=None,
+                    error=None,
+                )
+            )
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+    downstream = _DrainReplayDownstreamWebSocket()
+    retired_upstream = _DrainReplayUpstreamWebSocket(completes_turn=False)
+    replacement_upstream = _DrainReplayUpstreamWebSocket(completes_turn=True)
+    account = _make_account("acc_ws_staged_drain")
+    connect_count = 0
+    relay_count = 0
+    relay_upstream_messages = service._relay_upstream_websocket_messages
+
+    async def connect(*_args: object, **_kwargs: object):
+        nonlocal connect_count
+        connect_count += 1
+        return account, retired_upstream if connect_count == 1 else replacement_upstream
+
+    async def stage_first_replay(
+        *args: object,
+        pending_requests: deque[proxy_service._WebSocketRequestState],
+        pending_lock: anyio.Lock,
+        upstream_control: proxy_service._WebSocketUpstreamControl,
+        **kwargs: object,
+    ) -> None:
+        nonlocal relay_count
+        relay_count += 1
+        if relay_count > 1:
+            await relay_upstream_messages(
+                *args,
+                pending_requests=pending_requests,
+                pending_lock=pending_lock,
+                upstream_control=upstream_control,
+                **kwargs,
+            )
+            return
+
+        while True:
+            async with pending_lock:
+                if pending_requests and pending_requests[0].response_create_sent_at is not None:
+                    upstream_control.replay_request_state = pending_requests.popleft()
+                    break
+            await asyncio.sleep(0)
+        terminal_task = asyncio.create_task(asyncio.sleep(0))
+        await terminal_task
+        upstream_control.terminal_message_task = terminal_task
+        upstream_control.reconnect_requested = True
+        staged_replay.set()
+        await release_first_reader.wait()
+
+    has_active_drain_work = websocket_mixin._websocket_has_active_drain_work
+
+    async def observe_staged_replay_drain(
+        pending_requests: deque[proxy_service._WebSocketRequestState],
+        *,
+        pending_lock: anyio.Lock,
+        upstream_control: proxy_service._WebSocketUpstreamControl | None,
+    ) -> bool:
+        result = await has_active_drain_work(
+            pending_requests,
+            pending_lock=pending_lock,
+            upstream_control=upstream_control,
+        )
+        terminal_task = upstream_control.terminal_message_task if upstream_control is not None else None
+        if (
+            not drain_predicate_seen.is_set()
+            and shutdown_state.is_draining()
+            and upstream_control is not None
+            and upstream_control.replay_request_state is not None
+            and terminal_task is not None
+            and terminal_task.done()
+        ):
+            async with pending_lock:
+                drain_observations.append((len(pending_requests), result))
+            drain_predicate_seen.set()
+        return result
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(service, "_relay_upstream_websocket_messages", stage_first_replay)
+    monkeypatch.setattr(websocket_mixin, "_websocket_has_active_drain_work", observe_staged_replay_drain)
+
+    shutdown_state.reset()
+    scope_task = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, downstream),
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            api_key=None,
+        )
+    )
+    try:
+        await asyncio.wait_for(staged_replay.wait(), timeout=1.0)
+        shutdown_state.set_draining(True)
+        await asyncio.wait_for(drain_predicate_seen.wait(), timeout=1.0)
+
+        assert drain_observations == [(0, True)]
+        assert downstream.close_calls == []
+        assert not scope_task.done()
+
+        release_first_reader.set()
+        await asyncio.wait_for(scope_task, timeout=2.0)
+    finally:
+        release_first_reader.set()
+        if not scope_task.done():
+            scope_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await scope_task
+        shutdown_state.reset()
+
+    assert connect_count == 2
+    assert len(retired_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    assert json.loads(replacement_upstream.sent_text[0])["type"] == "response.create"
+    emitted_types = [json.loads(text)["type"] for text in downstream.sent_text]
+    assert emitted_types == ["response.created", "response.completed"]
+    assert all("stream_incomplete" not in text for text in downstream.sent_text)
+    assert downstream.close_calls == [(1012, "Server is draining")]
+    assert retired_upstream.closed is True
+    assert replacement_upstream.closed is True
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["status"] == "success"

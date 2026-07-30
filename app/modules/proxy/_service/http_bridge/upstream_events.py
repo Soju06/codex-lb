@@ -1733,6 +1733,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and recovery_attempt_owner_epoch is not None
             and (event_type == "response.completed" or not matched_request_state.recovery_attempt_event_observed)
         ):
+            settlement_marked = False
             for settlement_attempt in range(3):
                 try:
                     marked = await self._durable_bridge.mark_recovery_attempt_replayed(
@@ -1744,6 +1745,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         response_id=response_id,
                     )
                     if marked:
+                        settlement_marked = True
                         break
                     if settlement_attempt == 2:
                         _schedule_http_bridge_recovery_settlement_retry(
@@ -1754,7 +1756,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                             owner_epoch=recovery_attempt_owner_epoch,
                             request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                             response_id=response_id,
-                            release_origin_lease=recovery_attempt_session_id != session.durable_session_id,
+                            release_origin_lease=(
+                                recovery_attempt_session_id != session.durable_session_id
+                                and event_type == "response.completed"
+                            ),
                         )
                 except Exception:
                     if settlement_attempt == 2:
@@ -1767,10 +1772,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                             owner_epoch=recovery_attempt_owner_epoch,
                             request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                             response_id=response_id,
-                            release_origin_lease=recovery_attempt_session_id != session.durable_session_id,
+                            release_origin_lease=(
+                                recovery_attempt_session_id != session.durable_session_id
+                                and event_type == "response.completed"
+                            ),
                         )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))
+            if (
+                settlement_marked
+                and event_type == "response.completed"
+                and recovery_attempt_session_id != session.durable_session_id
+            ):
+                try:
+                    await self._durable_bridge.release_live_session(
+                        session_id=recovery_attempt_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=recovery_attempt_owner_epoch,
+                        draining=False,
+                    )
+                except Exception:
+                    logger.debug("Failed to release HTTP bridge recovery origin lease", exc_info=True)
             matched_request_state.recovery_attempt_event_observed = True
 
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:

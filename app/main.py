@@ -523,7 +523,8 @@ async def lifespan(app: FastAPI):
         if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
             try:
                 await proxy_service.drain_persistence_tasks(
-                    timeout_seconds=max(settings.shutdown_drain_timeout_seconds, 300.0)
+                    timeout_seconds=settings.shutdown_drain_timeout_seconds,
+                    task_name_prefixes=("http-bridge-recovery-settlement-",),
                 )
             except Exception:
                 logger.warning("Failed to pre-drain proxy settlement tasks during shutdown", exc_info=True)

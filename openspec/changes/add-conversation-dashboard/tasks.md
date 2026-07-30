@@ -25,9 +25,10 @@
   representative model by `request_count DESC, latest DESC, model lexical ASC`
   and use deterministic representative ordering and safe nullable/multiple
   API-key handling.
-- [x] 2.4 Add the authenticated list route with only `limit`, `offset`, and
-  `search`, stable `lastRequest DESC, normalized conversation ID ASC` order,
-  and pagination metadata.
+- [x] 2.4 Add the authenticated list route with `limit`, `offset`, `search`,
+  legacy `since`, and server-authoritative `timeframe` parameters, stable
+  `lastRequest DESC, normalized conversation ID ASC` order, and pagination
+  metadata.
 - [x] 2.5 Add backend integration tests for pagination, stable ordering,
   blank-ID exclusion, `warmup`/`limit_warmup`/soft-delete exclusion, search
   whole-conversation aggregation, case-insensitive normalized-ID and
@@ -59,10 +60,10 @@
 - [x] 4.1 Add a styled Radix-style selector using `ChevronDown`, with Request
   Logs as the default and URL-backed `view=conversations` selection.
 - [x] 4.2 Add the Conversations view; query the list endpoint using `limit`,
-  `offset`, and `search`, and retain established loading, error, empty, and
-  pagination behavior without date/timeframe controls. Keep separate URL-backed
-  query state for Request Logs and Conversations, so switching views neither
-  reinterprets nor clears the other view's state.
+  `offset`, `search`, and the server-authoritative `timeframe` parameter, and
+  retain established loading, error, empty, and pagination behavior. Keep
+  separate URL-backed query state for Request Logs and Conversations, so
+  switching views neither reinterprets nor clears the other view's state.
 - [x] 4.3 Render the conversation list columns Last request, Conversation,
   Accounts,
   API key, Models, Tokens, Cost, and Details. Render account/model remainder as a
@@ -120,8 +121,10 @@
   scope; no global pre-window-ID query or anti-join is used.
 - [x] 8.2 Serve the conversation listing `total` from the same short-TTL
   per-signature cache as the request-log listing total (`_recent_count_cache`),
-  keyed by `search` and `since` (excluding `limit`/`offset`); the 30 s TTL
-  constant and bounded eviction are reused unchanged.
+  keyed by `search` and semantic window identity (`timeframe` in
+  server-authoritative mode or effective `since` in legacy mode), excluding
+  `limit`/`offset`; the 30 s TTL constant and bounded eviction are reused
+  unchanged.
 - [x] 8.3 Add backend integration tests: a conversation spanning the `since`
   boundary is included when active in the window while a conversation with no
   in-window activity is excluded; `since` composes with search and pagination;
@@ -133,12 +136,13 @@
   unbounded "all") rendered at the dashboard top-right, shown only while the
   Conversations view is active, mirroring the overview timeframe selector. The
   value persists as URL-backed `conversationTimeframe`, resets pagination to
-  offset 0 on change, and is converted client-side to a `now − Nd` ISO timestamp
-  sent to the list endpoint as `since`.
+  offset 0 on change, and is sent to the list endpoint as the symbolic
+  server-authoritative `timeframe` parameter without a browser-generated `since`.
 - [x] 8.5 Add frontend tests: the selector's options and default, URL-backed
-  `conversationTimeframe` persistence, `since` param derivation, pagination
-  reset on change, and per-view state independence (switching to Request Logs
-  and back restores the retained Conversations selector state).
+  `conversationTimeframe` persistence, `timeframe` serialization without
+  `since`, pagination reset on change, refetch stability, and per-view state
+  independence (switching to Request Logs and back restores the retained
+  Conversations selector state).
 - [x] 8.6 Run targeted backend and frontend suites, `openspec validate --specs`,
   `openspec validate add-conversation-dashboard --type change --strict`, and
   `git diff --check`.

@@ -74,8 +74,8 @@
 ### Rolling timeframe review follow-up
 
 - `cd frontend && bun x vitest run src/features/dashboard/hooks/use-conversations.test.ts`:
-  passed (`11 tests`), including a regression proving the captured `since`
-  remains stable across refetches.
+  passed (`11 tests`), including regressions proving refetches send the same
+  symbolic `timeframe` and no browser-generated `since`.
 - `cd frontend && bun x vitest run src/features/dashboard src/__integration__/dashboard-flow.test.tsx`:
   passed (`23 files, 268 tests`).
 - `.venv/bin/python -m pytest tests/integration/test_conversations_api.py

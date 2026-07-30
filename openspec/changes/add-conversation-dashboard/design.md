@@ -20,8 +20,9 @@ Covers:
 Does not cover conversation inference/backfill for historical rows or any change
 to proxy routing, request-log capture, or conversation-ID detection. A bounded
 day-range selector (`1d`/`7d`/`30d`, default `7d`, no unbounded "all") drives the
-list `since` parameter and caps activity lookback. Summary aggregates for
-selected conversations intentionally retain eligible history.
+list's server-authoritative `timeframe` parameter and caps activity lookback.
+Summary aggregates for selected conversations intentionally retain eligible
+history.
 
 Capability ownership for this change is `frontend-architecture`; no
 `proxy-runtime-observability` change-level delta is retained.
@@ -39,17 +40,21 @@ Capability ownership for this change is `frontend-architecture`; no
   rows (`deleted_at IS NULL`), keeping list, detail, and dashboard conversation
   totals consistent.
 - **Search selects conversations before aggregation.** The list accepts `limit`,
-  `offset`, `search`, and `since`. Search is case-insensitive and checks the
+  `offset`, `search`, legacy `since`, and server-authoritative `timeframe`.
+  Search is case-insensitive and checks the
   normalized conversation ID and every eligible row's user-agent family. Once a
   conversation matches, all eligible rows in that conversation are aggregated;
   rows that did not contain the matching text remain included.
-- **Bounded `since` and activity semantics.** The API supplies a rolling
-  30-day default when `since` is omitted and caps explicitly older values at
-  that bound. Incoming timezone-aware values are converted to naive UTC. A
-  conversation qualifies when any eligible row has `requested_at >= since`, so
-  long-running conversations remain visible while active in the selected
-  window. The grouped summary uses the raw conversation ID and aggregates all
-  eligible rows for a selected conversation, including rows before `since`;
+- **Bounded windows and activity semantics.** The API supplies a rolling 30-day
+  default when no window is supplied and caps explicitly older legacy `since`
+  values at that bound. Incoming timezone-aware `since` values are converted to
+  naive UTC. Dashboard `timeframe` values are resolved by the server from the
+  shared overview configuration, and `timeframe` and `since` are mutually
+  exclusive. A conversation qualifies when any eligible row has
+  `requested_at >= effective_since`, so long-running conversations remain
+  visible while active in the selected window. The grouped summary uses the raw
+  conversation ID and aggregates all eligible rows for a selected conversation,
+  including rows before `effective_since`;
   membership is enforced by an in-window aggregate condition rather than a
   global pre-window ID set or anti-join. After page membership is selected, the
   account, API-key, and model facet queries use the same full eligible-row
@@ -57,7 +62,7 @@ Capability ownership for this change is `frontend-architecture`; no
   entire conversation rather than only its recent activity. The grouped total
   is display-only pagination metadata and is served from the same short-TTL
   per-signature cache as the request-log listing total (issue #1340), keyed by
-  `search` and `since`.
+  `search` and semantic window identity (`timeframe` or effective `since`).
 - **List order is stable.** Groups are ordered by `lastRequest DESC`, then
   normalized conversation ID ASC; pagination is applied after this order.
 - **Representative selection is deterministic.** Representatives use
@@ -116,18 +121,16 @@ unbounded "all") is rendered at the top-right of the dashboard page, alongside
 the refresh action, shown only while the Conversations view is active. It
 mirrors the existing dashboard overview timeframe selector's values and default.
 The selected value is persisted in the URL as `conversationTimeframe`, resets
-pagination to offset 0 on change, and is converted client-side to a
-`now − Nd` ISO timestamp sent to the list endpoint as `since`. This bounds
+pagination to offset 0 on change, and is sent to the list endpoint as the
+symbolic `timeframe` parameter. The server derives the effective activity window
+from its own UTC clock; the browser does not generate `since`. This bounds
 activity membership while summary and page-facet aggregates for selected
 conversations intentionally retain eligible history. While Conversations is
 active, the dashboard overview/statistics query uses this same selected
 conversation timeframe, even when the independently retained overview
 timeframe differs in the URL. The short-TTL grouped-count cache (pre-grouping
-`total`) avoids recomputing pagination metadata on every repeated poll.
-The timestamp is captured with the current filter state and reused by polling,
-focus, and manual refetches until that state changes, keeping the cache
-signature stable for the short TTL while preserving the selected rolling
-window.
+`total`) avoids recomputing pagination metadata on every repeated poll, with a
+stable semantic key for unchanged search and timeframe state.
 
 The detail dialog puts conversation ID/start/latest on row one and account
 count/total elapsed/dominant user-agent on row two. Its displayed model/effort
@@ -155,11 +158,13 @@ with pagination controls so the operator can return to an earlier page.
   conversation that spans the boundary (included) and one with no in-window
   activity (excluded), plus search/pagination composition, the agreement between
   list and overview conversation counts when rows are soft-deleted, and the
-  short-TTL grouped-count cache behavior under a positive TTL.
+  short-TTL grouped-count cache behavior under a positive TTL, including
+  server-authoritative timeframe identity.
 - Frontend coverage asserts the Request Logs default, title-styled selector URL
   state with no duplicate right-side selector, no conversation free-text filter
   input, the day-range selector (options, default, URL-backed
-  `conversationTimeframe`, `since` param derivation, pagination reset, and
+  `conversationTimeframe`, `timeframe` serialization without browser-generated
+  `since`, pagination reset, and
   per-view state independence), independent retained URL query state, exact
   reordered list columns, shared request-log time presentation, human-readable
   account labels, subordinate cached tokens, absence of the conversation-ID copy

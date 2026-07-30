@@ -3,8 +3,13 @@
 ### Requirement: Dashboard conversation listing
 
 The authenticated dashboard MUST expose `GET /api/conversations`. The list
-endpoint MUST accept `limit`, `offset`, `search`, and `since` query parameters.
-When `since` is omitted, the server MUST apply a rolling 30-day lower bound;
+endpoint MUST accept `limit`, `offset`, `search`, `since`, and `timeframe` query
+parameters. The server-authoritative `timeframe` parameter MUST accept `1d`,
+`7d`, or `30d`; when it is supplied, the server MUST derive the activity window
+from the shared dashboard timeframe configuration and the client MUST NOT
+substitute a browser-clock-generated `since` value. `timeframe` and `since` MUST
+not be supplied together. When `since` is omitted, the server MUST apply a
+rolling 30-day lower bound;
 explicitly older `since` values MUST be capped at that same bound, and incoming
 timezone-aware datetimes MUST be normalized to naive UTC before querying. It
 MUST aggregate eligible `request_logs` rows by the raw, non-empty
@@ -209,23 +214,27 @@ database contention this repository has previously optimized away.
 The conversation listing total MUST be served from the same short-TTL
 per-filter-signature cache as the request-log listing total (fixed 30 s TTL
 application constant; bounded LRU-ish eviction; per-instance). The cache
-signature MUST include every dimension that changes the grouped count —
-`search`, `since`, `limit`, and `offset` MUST be excluded from the signature
-while `search` and `since` MUST be included — so two requests with different
-`since` or `search` values MUST NOT reuse one another's cached total.
+signature MUST include every dimension that changes the grouped count: `search`
+and the semantic window identity MUST be included, using
+`("timeframe", timeframe)` for server-authoritative timeframe requests and
+`("since", effective_since)` for legacy `since` requests. `limit` and `offset`
+MUST be excluded from the signature because the total is page-independent. Two
+requests with different search text or window identities MUST NOT reuse one
+another's cached total.
 
 #### Scenario: Repeated polls reuse the cached conversation total
 
 - **GIVEN** the conversation listing has computed a total for a given
-  `search` and `since` signature
+  `search` and semantic window signature
 - **WHEN** the dashboard polls the same endpoint within the TTL with the same
   signature
 - **THEN** the grouped count MUST NOT be recomputed
 - **AND** the response total MUST equal the previously computed value
 
-#### Scenario: Different since signatures isolate cached conversation totals
+#### Scenario: Different window signatures isolate cached conversation totals
 
-- **GIVEN** two listing requests differ only by the `since` window
+- **GIVEN** two listing requests differ only by their timeframe or legacy
+  `since` window
 - **WHEN** their totals are served through the cache
 - **THEN** each request MUST use its own cache entry and grouped total
 
@@ -318,9 +327,10 @@ The view MUST render a day-range selector with exactly three options — `1d`,
 `7d`, and `30d` — placed at the top-right of the dashboard page alongside the
 refresh action and shown only while the Conversations view is active. The
 selector MUST default to `7d`. The selected value MUST be persisted in the URL
-as `conversationTimeframe`, MUST drive the list endpoint's `since` query
-parameter (each option maps to a `now − Nd` ISO timestamp sent as `since`), and
-MUST reset pagination to offset 0 on change. The selector's values and default
+as `conversationTimeframe`, MUST drive the list endpoint's `timeframe` query
+parameter using the same symbolic key (the server derives the effective window),
+and MUST NOT generate a browser-clock-derived `since` parameter. It MUST reset
+pagination to offset 0 on change. The selector's values and default
 MUST mirror the dashboard overview timeframe selector, with no unbounded
 "all" option. The view MUST use the list endpoint's
 established loading, error, empty, and pagination behavior.
@@ -395,13 +405,13 @@ zero MUST NOT render pagination controls.
 - **AND** smaller muted `+ N more` account/model secondary lines and cached
   tokens as a subordinate line are rendered
 
-#### Scenario: Conversation day selector persists in the URL and drives since
+#### Scenario: Conversation day selector persists in the URL and drives timeframe
 
 - **WHEN** the operator changes the Conversations day selector from `7d` to `30d`
 - **THEN** the URL gains `conversationTimeframe=30d` (or drops the param when the
   default `7d` is selected)
-- **AND** the list endpoint is called with a `since` query parameter equal to
-  `now − 30d` as an ISO timestamp
+- **AND** the list endpoint is called with `timeframe=30d`
+- **AND** the list endpoint does not receive a browser-clock-derived `since`
 - **AND** pagination resets to offset 0
 
 #### Scenario: Conversation timeframe drives active dashboard statistics
@@ -410,7 +420,7 @@ zero MUST NOT render pagination controls.
   `overviewTimeframe` is absent or has a different value
 - **WHEN** the operator opens the Conversations view
 - **THEN** the statistics-card overview query uses the `30d` timeframe
-- **AND** the conversation list uses its corresponding `since` value
+- **AND** the conversation list uses `timeframe=30d`
 - **AND** the independently retained overview timeframe remains unchanged
   for the Request Logs view
 

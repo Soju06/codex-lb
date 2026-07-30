@@ -39,8 +39,11 @@ Open **Dashboard**, use the view selector next to the Requests heading, and
 choose **Conversations**. The view supports:
 
 - Activity windows of `1d`, `7d`, or `30d` (the default is `7d`)
-- Search by conversation ID or user-agent family
 - Pagination
+
+The dashboard view does not expose a free-text search control. API clients may
+search by conversation ID or user-agent family using the `search` parameter
+documented below.
 
 The conversation table shows:
 

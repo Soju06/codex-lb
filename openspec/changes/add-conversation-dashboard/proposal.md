@@ -12,7 +12,7 @@ conversation view is needed.
 
 - Add an authenticated dashboard API `GET /api/conversations` returning paginated
   conversation aggregates derived from `request_logs`, with `limit`, `offset`,
-  `search`, and `since` parameters.
+  `search`, legacy `since`, and server-authoritative `timeframe` parameters.
 - The list response rows contain exactly `conversationId`, `lastRequest`,
   `representativeAccount`, `remainingAccountCount`, `apiKeyId`,
   `apiKeyName`, `representativeModel`, `remainingModelCount`,

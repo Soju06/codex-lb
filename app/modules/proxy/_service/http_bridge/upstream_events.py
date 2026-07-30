@@ -231,6 +231,7 @@ async def _retry_http_bridge_recovery_settlement(
     owner_epoch: int,
     request_fingerprint: str,
     response_id: str | None,
+    release_origin_lease: bool,
 ) -> None:
     """Keep a response-observed journal row fenced until durable settlement succeeds."""
 
@@ -251,7 +252,7 @@ async def _retry_http_bridge_recovery_settlement(
                 request_fingerprint=request_fingerprint,
                 response_id=response_id,
             )
-            if marked:
+            if marked and release_origin_lease:
                 try:
                     await service._durable_bridge.release_live_session(
                         session_id=session_id,
@@ -261,6 +262,7 @@ async def _retry_http_bridge_recovery_settlement(
                     )
                 except Exception:
                     logger.debug("Failed to release HTTP bridge recovery origin lease", exc_info=True)
+            if marked:
                 return
             logger.warning("HTTP bridge recovery settlement owner fence rejected; retrying")
         except Exception:
@@ -1730,6 +1732,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and matched_request_state.recovery_attempt_fingerprint is not None
             and recovery_attempt_session_id is not None
             and recovery_attempt_owner_epoch is not None
+            and (event_type == "response.completed" or not matched_request_state.recovery_attempt_event_observed)
         ):
             for settlement_attempt in range(3):
                 try:
@@ -1752,6 +1755,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             owner_epoch=recovery_attempt_owner_epoch,
                             request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                             response_id=response_id,
+                            release_origin_lease=recovery_attempt_session_id != session.durable_session_id,
                         )
                 except Exception:
                     if settlement_attempt == 2:
@@ -1764,9 +1768,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                             owner_epoch=recovery_attempt_owner_epoch,
                             request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                             response_id=response_id,
+                            release_origin_lease=recovery_attempt_session_id != session.durable_session_id,
                         )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))
+            matched_request_state.recovery_attempt_event_observed = True
 
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
@@ -1865,6 +1871,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             owner_epoch=recovery_attempt_owner_epoch,
                             request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                             response_id=response_id,
+                            release_origin_lease=recovery_attempt_session_id != session.durable_session_id,
                         )
                 except Exception:
                     if settlement_attempt == 2:
@@ -1877,6 +1884,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             owner_epoch=recovery_attempt_owner_epoch,
                             request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                             response_id=response_id,
+                            release_origin_lease=recovery_attempt_session_id != session.durable_session_id,
                         )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))

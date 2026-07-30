@@ -834,6 +834,7 @@ class _WebSocketRequestState:
     recovery_attempt_fingerprint: str | None = None
     recovery_attempt_session_id: str | None = None
     recovery_attempt_owner_epoch: int | None = None
+    recovery_attempt_event_observed: bool = False
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto

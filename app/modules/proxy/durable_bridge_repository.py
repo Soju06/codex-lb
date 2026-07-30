@@ -739,7 +739,9 @@ class DurableBridgeRepository:
                 )
                 self._session.add(attempt)
             elif attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
-                return _to_recovery_attempt_snapshot(attempt)
+                snapshot = _to_recovery_attempt_snapshot(attempt)
+                await self._session.rollback()
+                return snapshot
             else:
                 attempt.request_id = request_id
                 attempt.account_id = account_id
@@ -755,6 +757,18 @@ class DurableBridgeRepository:
                 # locked by SQLite). Re-read the winner and use its durable
                 # state instead of surfacing a transient uniqueness failure.
                 await self._session.rollback()
+                owner_exists = await self._session.scalar(
+                    select(HttpBridgeSessionRecord.id)
+                    .where(
+                        HttpBridgeSessionRecord.id == session_id,
+                        HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                        HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    )
+                    .with_for_update()
+                )
+                if owner_exists is None:
+                    await self._session.rollback()
+                    return None
                 attempt = await self._session.scalar(
                     select(HttpBridgeRecoveryAttemptRecord)
                     .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
@@ -763,7 +777,9 @@ class DurableBridgeRepository:
                 if attempt is None:
                     raise
                 if attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
-                    return _to_recovery_attempt_snapshot(attempt)
+                    snapshot = _to_recovery_attempt_snapshot(attempt)
+                    await self._session.rollback()
+                    return snapshot
                 attempt.request_id = request_id
                 attempt.account_id = account_id
                 attempt.model = model

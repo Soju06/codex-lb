@@ -1551,10 +1551,43 @@ class _WebSocketMixin:
                         if upstream_control is not None:
                             upstream_control.reconnect_requested = True
                         if upstream_reader is not None:
-                            await _facade()._await_cancelled_task(
+                            reader_cancelled = await _facade()._await_cancelled_task(
                                 upstream_reader,
                                 label="proxy websocket upstream reader",
                             )
+                            if not reader_cancelled:
+                                _facade().logger.warning(
+                                    "Refusing websocket replay because the retired upstream reader "
+                                    "did not stop request_id=%s",
+                                    request_state.request_log_id or request_state.request_id,
+                                )
+                                replay_request_state = None
+                                await proxy._fail_pending_websocket_requests(
+                                    account=account,
+                                    account_id_value=account.id,
+                                    pending_requests=deque([request_state]),
+                                    pending_lock=anyio.Lock(),
+                                    error_code="upstream_reader_cancellation_failed",
+                                    error_message="Upstream websocket reader did not stop before replay",
+                                    api_key=api_key,
+                                    websocket=websocket,
+                                    client_send_lock=client_send_lock,
+                                    response_create_gate=response_create_gate,
+                                    downstream_activity=downstream_activity,
+                                    penalize_account=False,
+                                )
+                                downstream_activity.mark_disconnected()
+                                try:
+                                    await websocket.close(
+                                        code=1011,
+                                        reason="upstream reader did not stop before replay",
+                                    )
+                                except Exception:
+                                    _facade().logger.debug(
+                                        "Failed to close downstream websocket after reader cancellation failure",
+                                        exc_info=True,
+                                    )
+                                break
                             upstream_reader = None
                         upstream_control = None
                         if upstream is not None:

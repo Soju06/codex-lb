@@ -39,6 +39,9 @@ replacement connection, preserve the exact request including any continuation
 anchor, and re-register it on the replacement reader. A sibling request,
 response lifecycle evidence, downstream-visible output, or an exhausted replay
 count MUST suppress this recovery and retain existing terminal settlement.
+If cancellation of the retired reader cannot be confirmed, the proxy MUST fail
+the claimed request, close the downstream socket, retain cleanup ownership of
+the old reader, and MUST NOT open a replacement connection.
 
 Any failure raised after the adapter invokes its send primitive remains
 dispatch-ambiguous and MUST retain the existing fail-closed behavior without an
@@ -107,6 +110,15 @@ observed while awaiting the stale receive task's cancellation.
 - **WHEN** the replacement socket is also closed before dispatch
 - **THEN** the proxy does not attempt another reconnect and resend
 - **AND** it applies existing terminal settlement
+
+#### Scenario: Direct WebSocket reader cancellation failure suppresses replay
+
+- **GIVEN** a direct WebSocket request is claimed for closed-before-send
+  recovery
+- **WHEN** cancellation of the retired upstream reader cannot be confirmed
+- **THEN** the proxy terminally fails the claimed request and closes downstream
+- **AND** it retains the old reader for cleanup
+- **AND** it does not open a replacement connection
 
 #### Scenario: Completed receive wins cancellation
 

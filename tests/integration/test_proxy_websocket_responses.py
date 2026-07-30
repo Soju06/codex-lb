@@ -7539,11 +7539,15 @@ def test_backend_responses_websocket_emits_terminal_failure_when_upstream_send_b
     assert log_calls[0]["status"] == "error"
 
 
-@pytest.mark.parametrize("replacement_succeeds", [True, False])
+@pytest.mark.parametrize(
+    ("replacement_succeeds", "reader_cancellation_succeeds"),
+    [(True, True), (False, True), (True, False)],
+)
 def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
     app_instance,
     monkeypatch,
     replacement_succeeds,
+    reader_cancellation_succeeds,
 ):
     first_response_id = "resp_ws_closed_warm_first"
     second_response_id = "resp_ws_closed_warm_second"
@@ -7609,6 +7613,7 @@ def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
     upstreams = [first_upstream, replacement_upstream]
     account = SimpleNamespace(id="acct_ws_closed_warm")
     connect_count = 0
+    cancellation_failure_injected = False
 
     class _FakeSettingsCache:
         async def get(self):
@@ -7664,6 +7669,17 @@ def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    original_await_cancelled_task = proxy_module._await_cancelled_task
+
+    async def controlled_await_cancelled_task(task, **kwargs):
+        nonlocal cancellation_failure_injected
+        if not reader_cancellation_succeeds and not cancellation_failure_injected:
+            cancellation_failure_injected = True
+            task.cancel()
+            return False
+        return await original_await_cancelled_task(task, **kwargs)
+
+    monkeypatch.setattr(proxy_module, "_await_cancelled_task", controlled_await_cancelled_task)
 
     first_request = {
         "type": "response.create",
@@ -7688,12 +7704,19 @@ def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
             first_upstream.closed_before_send = True
 
             websocket.send_text(json.dumps(compacted_continuation))
-            second_events = [json.loads(websocket.receive_text()) for _ in range(2 if replacement_succeeds else 1)]
+            second_events = [
+                json.loads(websocket.receive_text())
+                for _ in range(2 if replacement_succeeds and reader_cancellation_succeeds else 1)
+            ]
 
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
-    assert connect_count == 2
+    assert connect_count == (2 if reader_cancellation_succeeds else 1)
     assert len(first_upstream.sent_text) == 1
-    if replacement_succeeds:
+    if not reader_cancellation_succeeds:
+        assert [event["type"] for event in second_events] == ["response.failed"]
+        assert second_events[0]["response"]["error"]["code"] == "upstream_reader_cancellation_failed"
+        assert replacement_upstream.sent_text == []
+    elif replacement_succeeds:
         assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
         assert len(replacement_upstream.sent_text) == 1
         assert json.loads(replacement_upstream.sent_text[0])["previous_response_id"] == first_response_id

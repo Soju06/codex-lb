@@ -31,3 +31,5 @@
       compacted-continuation regression for a closed warm socket.
 - [x] 3.5 Add direct WebSocket regression coverage for transparent
       closed-before-send continuation recovery.
+- [x] 3.6 Prove a retired direct WebSocket reader that does not confirm
+      cancellation suppresses replay and is retained for cleanup.

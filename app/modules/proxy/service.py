@@ -2106,6 +2106,7 @@ _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
     "no tool output found for function call call_",
     "no tool output found for custom tool call call_",
     "no tool output found for apply patch call call_",
+    "no tool output found for tool search call call_",
 )
 
 

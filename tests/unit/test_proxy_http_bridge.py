@@ -6375,6 +6375,53 @@ async def test_create_http_bridge_session_preserves_proxy_failure_when_no_replac
 
 
 @pytest.mark.asyncio
+async def test_create_http_bridge_session_idle_close_error_is_not_treated_as_dead_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    account = cast(Any, SimpleNamespace(id="acc-proxy-idle", status=AccountStatus.ACTIVE, plan_type="plus"))
+    lease = proxy_service.AccountLease("lease-bridge-idle", account.id, "stream", time.monotonic())
+    record_error_backoff = AsyncMock()
+    idle_error = ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "Upstream websocket closed while idle"),
+        failure_phase="upstream",
+        failure_detail="stream_idle_timeout",
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=_bridge_selection_settings())),
+    )
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=proxy_service.AccountSelection(account=account, error_message=None, lease=lease)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(side_effect=idle_error))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", record_error_backoff)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-proxy-idle", None),
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="sid-proxy-idle"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+        )
+
+    # An idle disconnect is not provable pre-dispatch evidence: no account
+    # exclusion, no transient-backoff health write.
+    assert exc_info.value is idle_error
+    record_error_backoff.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

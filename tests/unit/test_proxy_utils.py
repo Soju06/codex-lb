@@ -13910,6 +13910,32 @@ def _pre_dispatch_proxy_connect_error(
     )
 
 
+def test_is_confirmed_pre_dispatch_transport_error_requires_provable_connect_provenance():
+    assert proxy_module.is_confirmed_pre_dispatch_transport_error(_pre_dispatch_proxy_connect_error()) is True
+    ambiguous = proxy_service.ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "dispatch outcome is unknown"),
+        failure_phase="upstream",
+        failure_detail="transport_error",
+    )
+    assert proxy_module.is_confirmed_pre_dispatch_transport_error(ambiguous) is False
+    non_connect = proxy_service.ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", "body read failed"),
+        failure_phase="body_read",
+        retryable_same_contract=True,
+    )
+    assert proxy_module.is_confirmed_pre_dispatch_transport_error(non_connect) is False
+    process_network = proxy_service.ProxyResponseError(
+        502,
+        openai_error("proxy_network_unavailable", "host lost DNS"),
+        failure_phase="connect",
+        retryable_same_contract=True,
+    )
+    # Host-wide network loss keeps its account-neutral recovery path.
+    assert proxy_module.is_confirmed_pre_dispatch_transport_error(process_network) is False
+
+
 @pytest.mark.asyncio
 async def test_stream_responses_confirmed_proxy_connect_failure_fails_over_after_lease_release(monkeypatch):
     settings = _make_proxy_settings()

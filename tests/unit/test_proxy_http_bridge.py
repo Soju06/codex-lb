@@ -166,6 +166,42 @@ class _SilentTrackingUpstream:
         self.closed = True
 
 
+class _CreatedOnCancelUpstream:
+    def __init__(self) -> None:
+        self.receive_started = asyncio.Event()
+        self.cancel_races = 0
+        self.receive_calls = 0
+        self.closed = False
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        self.receive_calls += 1
+        self.receive_started.set()
+        try:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        except asyncio.CancelledError:
+            if self.receive_calls != 1:
+                raise
+            self.cancel_races += 1
+            return UpstreamWebSocketMessage(
+                kind="text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp-cancel-race",
+                            "object": "response",
+                            "status": "in_progress",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
     request_state = _make_eventless_http_bridge_owner()
 
@@ -18554,6 +18590,7 @@ async def test_http_bridge_eventless_timeout_retries_once_on_fresh_same_account_
             session,
             request_state=owner,
             require_same_account=True,
+            require_preferred_account=True,
         )
         assert replacement_upstream.sent_texts == [owner.request_text]
         assert old_upstream.receive_cancellations == 1
@@ -18645,6 +18682,7 @@ async def test_http_bridge_eventless_retry_second_timeout_settles_and_retires_on
         session,
         request_state=owner,
         require_same_account=True,
+        require_preferred_account=True,
     )
     assert replacement_upstream.sent_texts == [owner.request_text]
     assert old_upstream.receive_cancellations == 1
@@ -18663,6 +18701,59 @@ async def test_http_bridge_eventless_retry_second_timeout_settles_and_retires_on
         reason="missing_response_created_timeout",
         session=session,
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_timeout_processes_response_created_that_wins_cancel_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _CreatedOnCancelUpstream()
+    session = _make_bridge_session(key_value="eventless-created-cancel-race")
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.01,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner = _make_eventless_http_bridge_owner(
+        request_id="req-eventless-created-cancel-race",
+        sent_at=time.monotonic() - 1.0,
+    )
+    owner.started_at = time.monotonic()
+    owner.response_create_gate = gate
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    async with session.pending_lock:
+        session.pending_requests.append(owner)
+        session.queued_request_count = 1
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    try:
+        await asyncio.wait_for(upstream.receive_started.wait(), timeout=1.0)
+        for _ in range(100):
+            if owner.response_id == "resp-cancel-race":
+                break
+            await asyncio.sleep(0.01)
+
+        assert owner.response_id == "resp-cancel-race"
+        assert owner.response_event_count == 1
+        assert owner.awaiting_response_created is False
+        assert owner.replay_count == 0
+        assert upstream.cancel_races == 1
+        assert upstream.receive_calls >= 2
+        assert gate.locked() is False
+        retry_precreated.assert_not_awaited()
+    finally:
+        reader_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader_task
 
 
 @pytest.mark.asyncio

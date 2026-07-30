@@ -24,9 +24,12 @@ watchdog and leave existing timeout behavior unchanged.
 When the first owner-side deadline expires, the proxy MUST recheck eligibility,
 cancel the stale receive wait, and attempt one transparent replay only through
 the existing pre-created replay safety and ownership rules and only when the
-eventless owner is the session's sole pending request. Hard-affinity work MUST
-remain on the required account, account-scoped file ownership MUST be preserved,
-and a continuation MUST be replayed only from an explicitly retained retry-safe
+eventless owner is the session's sole pending request. If the receive completes
+while cancellation is attempted, the proxy MUST process that result and MUST
+NOT replay the request. A replay MUST use the account whose response-create
+concurrency lease the request holds. Hard-affinity work MUST remain on the
+required account, account-scoped file ownership MUST be preserved, and a
+continuation MUST be replayed only from an explicitly retained retry-safe
 full-resend body. The retry MUST NOT extend the original request budget or mark
 the selected account unhealthy solely because `response.created` was missing.
 
@@ -45,6 +48,13 @@ attempt a second replay.
 - **THEN** the proxy cancels the stale receive and safely replays the request at
   most once on a fresh upstream socket
 - **AND** a successful replay continues the original downstream stream
+
+#### Scenario: Completed receive wins cancellation
+
+- **GIVEN** an eventless gate owner reaches its deadline
+- **WHEN** its pending upstream receive completes as cancellation is attempted
+- **THEN** the proxy processes the completed receive through the normal path
+- **AND** it does not replay the request
 
 #### Scenario: A pending sibling prevents socket replacement
 
@@ -69,6 +79,14 @@ attempt a second replay.
 - **WHEN** the owner-side deadline elapses
 - **THEN** the telemetry does not refresh or suppress the deadline
 - **AND** the proxy applies the same one-replay policy
+
+#### Scenario: Eventless retry keeps its leased account
+
+- **GIVEN** an eventless gate owner holds an account-scoped response-create
+  lease
+- **WHEN** the owner is safely replayed
+- **THEN** the fresh socket uses the same account
+- **AND** the resend does not bypass per-account concurrency admission
 
 #### Scenario: Response lifecycle evidence suppresses the narrow watchdog
 

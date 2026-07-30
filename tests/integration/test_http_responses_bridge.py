@@ -8107,6 +8107,7 @@ async def test_v1_responses_http_bridge_retries_once_before_response_created(
     first_upstream = _PrecreatedCloseUpstreamWebSocket() if first_failure == "close" else _SilentUpstreamWebSocket()
     upstreams = [first_upstream, _FakeBridgeUpstreamWebSocket()]
     connect_count = 0
+    preferred_account_ids: list[str | None] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -8127,7 +8128,7 @@ async def test_v1_responses_http_bridge_retries_once_before_response_created(
         api_key=None,
         preferred_account_id=None,
     ):
-        del preferred_account_id
+        preferred_account_ids.append(preferred_account_id)
         del (
             self,
             deadline,
@@ -8182,6 +8183,8 @@ async def test_v1_responses_http_bridge_retries_once_before_response_created(
     assert connect_count == 2
     assert len(first_upstream.sent_text) == 1
     assert len(upstreams[1].sent_text) == 1
+    if first_failure == "silent":
+        assert preferred_account_ids == [None, account.id]
 
 
 @pytest.mark.asyncio

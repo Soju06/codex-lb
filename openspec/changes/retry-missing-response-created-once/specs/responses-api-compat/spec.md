@@ -13,10 +13,13 @@ missing-`response.created` deadline, the service MUST cancel the old receive
 wait and MAY transparently replay once only when the existing pre-created
 replay predicate proves there is no matched response lifecycle, upstream model
 output, downstream sequence, or downstream-visible output and the eventless
-owner is the session's sole pending request. The replay MUST preserve
+owner is the session's sole pending request. The service MUST process an
+upstream receive result that completes while cancellation is attempted and
+MUST NOT replay that accepted request. The replay MUST remain on the account
+whose response-create concurrency lease the request holds and MUST preserve
 hard-affinity and account-scoped file ownership. A request carrying
-`previous_response_id` MUST fail closed unless the proxy retained an explicitly
-retry-safe full-resend body that can be replayed without the anchor.
+`previous_response_id` MUST fail closed unless the proxy retained an
+explicitly retry-safe full-resend body that can be replayed without the anchor.
 
 If that replay succeeds, the original downstream stream MUST continue without
 a terminal event. If replay is ineligible, reconnect/resend fails, or the
@@ -34,6 +37,14 @@ missing acknowledgement.
 - **AND** the downstream stream receives no terminal failure for the first
   timeout
 
+#### Scenario: Response acknowledgement wins the cancellation race
+
+- **GIVEN** an eventless HTTP bridge request reaches its first deadline
+- **WHEN** the pending upstream receive completes as cancellation is attempted
+- **THEN** the service processes that completed result through the normal event
+  path
+- **AND** it does not replay the request
+
 #### Scenario: Continuity without a safe full resend is not replayed
 
 - **GIVEN** an eventless HTTP bridge request carries `previous_response_id`
@@ -48,6 +59,13 @@ missing acknowledgement.
 - **WHEN** it is eligible for the one transparent replay
 - **THEN** the replacement connection uses the required owner account
 - **AND** the file reference is not moved to an account that does not own it
+
+#### Scenario: Replay preserves the account concurrency lease
+
+- **GIVEN** an eventless request holds an account-scoped response-create lease
+- **WHEN** it is eligible for the one transparent replay
+- **THEN** the replacement socket uses that same account
+- **AND** the resend does not consume capacity on an unleased account
 
 #### Scenario: Pending sibling blocks transparent replay
 

@@ -610,33 +610,52 @@ class _HTTPBridgeUpstreamEventsMixin:
                             async with session.pending_lock:
                                 if receive_task is not None and receive_task.done():
                                     continue
-                                expired_owner = any(
-                                    deadline is not None and deadline <= now
-                                    for request_state in session.pending_requests
-                                    if (
-                                        deadline := _http_bridge_eventless_precreated_deadline(
-                                            request_state,
-                                            stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                                eventless_owner = next(
+                                    (
+                                        request_state
+                                        for request_state in session.pending_requests
+                                        if (
+                                            deadline := _http_bridge_eventless_precreated_deadline(
+                                                request_state,
+                                                stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
+                                            )
                                         )
-                                    )
-                                    is not None
+                                        is not None
+                                        and deadline <= now
+                                    ),
+                                    None,
                                 )
-                                if not expired_owner:
+                                if eventless_owner is None:
                                     continue
                                 pending_count = len(session.pending_requests)
                                 can_retry_eventless_owner = pending_count == 1
                             receive_cancelled = True
                             if receive_task is not None:
-                                receive_cancelled = await _cancel_http_bridge_reader_child(
-                                    receive_task,
-                                    label="HTTP bridge upstream receive before missing response.created retry",
-                                )
-                                if receive_cancelled:
+                                cancel_requested = receive_task.cancel()
+                                if not cancel_requested:
+                                    continue
+                                try:
+                                    await receive_task
+                                except asyncio.CancelledError:
                                     receive_task = None
+                                except Exception:
+                                    # Preserve the completed task so the next
+                                    # loop iteration raises it outside the
+                                    # lifecycle lock and uses normal cleanup.
+                                    continue
+                                else:
+                                    # A response may win the cancellation race.
+                                    # Leave the completed task in place so the
+                                    # next loop iteration processes its result.
+                                    continue
                             retried = False
                             if can_retry_eventless_owner and receive_cancelled:
                                 try:
-                                    retried = await self._retry_http_bridge_precreated_request(session)
+                                    retried = await self._retry_http_bridge_precreated_request(
+                                        session,
+                                        request_state=eventless_owner,
+                                        require_current_account=True,
+                                    )
                                 except UpstreamWebSocketTransportError:
                                     logger.warning(
                                         "HTTP bridge missing response.created retry transport failed",

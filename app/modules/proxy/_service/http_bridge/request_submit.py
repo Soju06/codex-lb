@@ -1530,12 +1530,13 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState | None = None,
+        require_current_account: bool = False,
     ) -> bool:
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
-        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
+        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard" or require_current_account
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1556,6 +1557,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+            if require_current_account:
+                request_state.preferred_account_id = session.account.id
             if request_state.previous_response_id is not None and not (
                 request_state.proxy_injected_previous_response_id
                 and request_state.fresh_upstream_request_is_retry_safe
@@ -1611,7 +1614,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
-                if account_neutral_recovery:
+                if account_neutral_recovery or require_current_account:
                     request_state.preferred_account_id = session.account.id
                 elif not request_state.file_required_preferred_account and not hard_owner_bound:
                     request_state.preferred_account_id = None
@@ -1637,6 +1640,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session,
                     request_state=request_state,
                     require_same_account=True,
+                    require_preferred_account=require_current_account,
                 )
             elif require_preferred_reconnect:
                 await self._reconnect_http_bridge_session(

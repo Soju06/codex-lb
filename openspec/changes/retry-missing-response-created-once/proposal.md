@@ -13,6 +13,9 @@ instead of using its existing pre-visible replay path.
 - On the first eventless timeout, cancel the old receive wait and attempt one
   replay through the existing pre-created replay guards and fresh-socket
   reconnect path.
+- Process an upstream event that wins the receive-cancellation race instead of
+  discarding it, and keep the replay on the account whose concurrency lease the
+  request already holds.
 - Continue the original downstream stream when replay succeeds.
 - Preserve the current account-neutral terminal settlement and whole-session
   retirement when replay is unsafe, reconnect/resend fails, or the replay also

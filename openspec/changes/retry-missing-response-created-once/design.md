@@ -49,10 +49,17 @@ replay helper only when the eventless owner is the session's sole pending
 request. A successful reconnect/resend returns control to the same reader loop,
 which waits on the replacement socket while the downstream request stays open.
 
+Cancellation is conditional on the receive task still being pending. If
+`response.created` or another upstream result wins that race, the reader leaves
+the completed task intact and processes it through the normal event path
+instead of replaying.
+
 The helper's existing `replay_count` bound makes this a single recovery
-attempt. Hard-affinity sessions reconnect on the same account. Continuations
-are replayed only from an explicitly retained retry-safe full-resend body, and
-file ownership continues to require the preferred account.
+attempt. This timeout recovery reconnects on the current account because the
+request still holds that account's response-create concurrency lease.
+Continuations are replayed only from an explicitly retained retry-safe
+full-resend body, and file ownership continues to require the preferred
+account.
 
 ### 3. Retire only after recovery is unavailable or exhausted
 
@@ -70,6 +77,8 @@ the acknowledgement was missing.
   downstream-visible output was observed, client-side tools or other
   downstream effects have not run; the bounded replay may spend extra upstream
   compute but does not duplicate downstream effects.
+- **The acknowledgement completes while cancellation begins.** The completed
+  receive remains authoritative and is processed normally; no replay occurs.
 - **The request is continuity- or file-bound without safe replay evidence.**
   The existing helper declines replay and the request fails closed at 30
   seconds.
@@ -85,6 +94,8 @@ the acknowledgement was missing.
 
 A request sends at monotonic time 1,000 and receives no matched response event.
 At 1,030 the reader cancels the old receive and safely resends once on a fresh
-socket. If `response.created` arrives at 1,032, the original downstream stream
-continues normally. If the fresh socket is still eventless at 1,060, the proxy
-returns the existing explicit timeout and retires the bridge.
+same-account socket. If the original receive completes during cancellation,
+that result is processed and no replay occurs. If `response.created` arrives
+from the replacement at 1,032, the original downstream stream continues
+normally. If the fresh socket is still eventless at 1,060, the proxy returns
+the existing explicit timeout and retires the bridge.

@@ -624,6 +624,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 if not expired_owner:
                                     continue
                                 pending_count = len(session.pending_requests)
+                                can_retry_eventless_owner = pending_count == 1
+                            receive_cancelled = True
+                            if receive_task is not None:
+                                receive_cancelled = await _cancel_http_bridge_reader_child(
+                                    receive_task,
+                                    label="HTTP bridge upstream receive before missing response.created retry",
+                                )
+                                if receive_cancelled:
+                                    receive_task = None
+                            retried = False
+                            if can_retry_eventless_owner and receive_cancelled:
+                                try:
+                                    retried = await self._retry_http_bridge_precreated_request(session)
+                                except UpstreamWebSocketTransportError:
+                                    logger.warning(
+                                        "HTTP bridge missing response.created retry transport failed",
+                                        exc_info=True,
+                                    )
+                            if retried:
+                                continue
+                            async with session.pending_lock:
                                 for request_state in session.pending_requests:
                                     if request_state.failure_phase_override is None:
                                         request_state.failure_phase_override = "upstream"
@@ -631,16 +652,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                                         request_state.failure_detail_override = (
                                             _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
                                         )
-                            # Claim the session before cancelling receive so a
+                            # Claim the session before terminal settlement so a
                             # gate waiter cannot reopen this ambiguous socket.
                             session.closed = True
-                            if receive_task is not None:
-                                receive_cancelled = await _cancel_http_bridge_reader_child(
-                                    receive_task,
-                                    label="HTTP bridge upstream receive after missing response.created",
-                                )
-                                if receive_cancelled:
-                                    receive_task = None
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,

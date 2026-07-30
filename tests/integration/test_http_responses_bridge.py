@@ -8094,14 +8094,18 @@ async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(asy
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before_response_created(
+@pytest.mark.parametrize("first_failure", ["close", "silent"])
+async def test_v1_responses_http_bridge_retries_once_before_response_created(
     async_client,
     monkeypatch,
+    first_failure,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
+    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
     account_id = await _import_account(async_client, "acc_http_bridge_retry", "http-bridge-retry@example.com")
     account = await _get_account(account_id)
-    upstreams = [_PrecreatedCloseUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+    first_upstream = _PrecreatedCloseUpstreamWebSocket() if first_failure == "close" else _SilentUpstreamWebSocket()
+    upstreams = [first_upstream, _FakeBridgeUpstreamWebSocket()]
     connect_count = 0
 
     async def fake_select_account_with_budget(
@@ -8176,6 +8180,8 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
 
     assert response.status_code == 200
     assert connect_count == 2
+    assert len(first_upstream.sent_text) == 1
+    assert len(upstreams[1].sent_text) == 1
 
 
 @pytest.mark.asyncio

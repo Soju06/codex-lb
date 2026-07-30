@@ -20257,6 +20257,41 @@ async def test_http_bridge_retry_circuit_refreshes_persisted_state_after_initial
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_preserves_newer_local_failure_on_durable_refresh() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-local-newer-than-durable-refresh")
+    now_monotonic = time.monotonic()
+    local_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+        consecutive_failures=2,
+        cooldown_until=now_monotonic + 90.0,
+        last_detail="stream_idle_timeout",
+        last_touched_monotonic=now_monotonic,
+        last_failure_monotonic=now_monotonic,
+        last_durable_load_monotonic=now_monotonic - 10.0,
+        persisted_updated_at_epoch=time.time() - 10.0,
+    )
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = local_state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(
+            return_value=SimpleNamespace(
+                consecutive_failures=1,
+                cooldown_until_epoch=time.time() + 1.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time(),
+            )
+        )
+    )
+
+    await service._load_http_bridge_retry_circuit(hard_session)
+
+    assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key] is local_state
+    assert local_state.consecutive_failures == 2
+    assert local_state.cooldown_until >= now_monotonic + 89.0
+    assert local_state.last_detail == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_drops_local_state_after_durable_clear() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-replica-cleared-circuit")

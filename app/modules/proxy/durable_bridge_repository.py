@@ -794,16 +794,24 @@ class DurableBridgeRepository:
         request_fingerprint: str,
         response_id: str | None = None,
     ) -> bool:
-        owner_exists = await self._session.scalar(
-            select(HttpBridgeSessionRecord.id).where(
-                HttpBridgeSessionRecord.id == session_id,
-                HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                HttpBridgeSessionRecord.owner_epoch == owner_epoch,
-            )
-        )
-        if owner_exists is None:
-            return False
         async with sqlite_writer_section():
+            # Keep the owner fence and journal transition in one transaction.
+            # PostgreSQL's row lock prevents a concurrent takeover from
+            # advancing the epoch between the check and the state update;
+            # sqlite_writer_section provides the equivalent writer
+            # serialization for SQLite.
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
             result = await self._session.execute(
                 update(HttpBridgeRecoveryAttemptRecord)
                 .where(

@@ -152,14 +152,18 @@ class _HTTPBridgeRetryCircuitMixin:
             if state is None:
                 state = _HTTPBridgeRetryCircuitState(last_touched_monotonic=now_monotonic)
                 self._http_bridge_retry_circuits[session.key] = state
-            if persisted.updated_at_epoch > state.persisted_updated_at_epoch:
+            local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
+            if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
                 state.cooldown_until = persisted_cooldown_until
                 state.last_detail = persisted.last_detail
             else:
                 state.consecutive_failures = max(state.consecutive_failures, max(0, persisted.consecutive_failures))
                 state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                state.last_detail = persisted.last_detail or state.last_detail
+                if local_failure_is_newer:
+                    state.last_detail = state.last_detail or persisted.last_detail
+                else:
+                    state.last_detail = persisted.last_detail or state.last_detail
             state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
@@ -210,14 +214,18 @@ class _HTTPBridgeRetryCircuitMixin:
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
-                        if persisted.updated_at_epoch > state.persisted_updated_at_epoch:
+                        local_failure_is_newer = state.last_failure_monotonic > state.last_durable_load_monotonic
+                        if persisted.updated_at_epoch > state.persisted_updated_at_epoch and not local_failure_is_newer:
                             state.consecutive_failures = max(0, persisted.consecutive_failures)
                             state.cooldown_until = persisted_cooldown_until
                             state.last_detail = persisted.last_detail
                         else:
                             state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
                             state.cooldown_until = max(state.cooldown_until, persisted_cooldown_until)
-                            state.last_detail = persisted.last_detail or state.last_detail
+                            if local_failure_is_newer:
+                                state.last_detail = state.last_detail or persisted.last_detail
+                            else:
+                                state.last_detail = persisted.last_detail or state.last_detail
                         state.persisted_updated_at_epoch = max(
                             state.persisted_updated_at_epoch,
                             persisted.updated_at_epoch,

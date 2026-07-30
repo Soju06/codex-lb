@@ -235,7 +235,6 @@ async def _retry_http_bridge_recovery_settlement(
                 owner_epoch=owner_epoch,
                 request_fingerprint=request_fingerprint,
                 response_id=response_id,
-                allow_owner_change=True,
             )
             if marked:
                 try:
@@ -1719,16 +1718,27 @@ class _HTTPBridgeUpstreamEventsMixin:
         ):
             for settlement_attempt in range(3):
                 try:
-                    await self._durable_bridge.mark_recovery_attempt_replayed(
+                    marked = await self._durable_bridge.mark_recovery_attempt_replayed(
                         session_id=recovery_attempt_session_id,
                         api_key_id=session.key.api_key_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                         owner_epoch=recovery_attempt_owner_epoch,
                         request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                         response_id=response_id,
-                        allow_owner_change=True,
                     )
-                    break
+                    if marked:
+                        break
+                    if settlement_attempt == 2:
+                        _schedule_http_bridge_recovery_settlement_retry(
+                            self,
+                            session,
+                            session_id=recovery_attempt_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=recovery_attempt_owner_epoch,
+                            request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
+                            response_id=response_id,
+                        )
                 except Exception:
                     if settlement_attempt == 2:
                         logger.warning("Failed to settle HTTP bridge recovery attempt", exc_info=True)
@@ -1823,16 +1833,27 @@ class _HTTPBridgeUpstreamEventsMixin:
             # identical retry cannot turn it into an account-neutral replay.
             for settlement_attempt in range(3):
                 try:
-                    await self._durable_bridge.mark_recovery_attempt_replayed(
+                    marked = await self._durable_bridge.mark_recovery_attempt_replayed(
                         session_id=recovery_attempt_session_id,
                         api_key_id=session.key.api_key_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                         owner_epoch=recovery_attempt_owner_epoch,
                         request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                         response_id=response_id,
-                        allow_owner_change=True,
                     )
-                    break
+                    if marked:
+                        break
+                    if settlement_attempt == 2:
+                        _schedule_http_bridge_recovery_settlement_retry(
+                            self,
+                            session,
+                            session_id=recovery_attempt_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=recovery_attempt_owner_epoch,
+                            request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
+                            response_id=response_id,
+                        )
                 except Exception:
                     if settlement_attempt == 2:
                         logger.warning("Failed to settle deterministic HTTP bridge recovery attempt", exc_info=True)

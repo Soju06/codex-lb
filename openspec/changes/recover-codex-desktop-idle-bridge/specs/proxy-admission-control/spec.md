@@ -2,7 +2,7 @@
 
 ### Requirement: Stuck HTTP bridge response-create gate sessions are retired
 
-The proxy MUST retain the existing waiter-triggered retirement behavior for stale HTTP bridge response-create gate owners and MUST additionally enforce an owner-side deadline for a visible HTTP request whose current upstream `response.create` send remains completely eventless before `response.created`. The owner-side deadline MUST be measured from a monotonic timestamp recorded immediately before the current upstream send, MUST use the smaller of the configured stuck-gate retirement threshold and 240 seconds, MUST run without a second gate waiter, and MUST remain active when periodic SSE keepalives are disabled.
+The proxy MUST retain the existing waiter-triggered retirement behavior for stale HTTP bridge response-create gate owners and MUST additionally enforce an owner-side deadline for a visible HTTP request whose current upstream `response.create` send remains completely eventless before `response.created`. The owner-side deadline MUST be measured from a monotonic timestamp recorded immediately before the current upstream send, MUST use the smaller of the configured stuck-gate retirement threshold and 60 seconds, MUST run without a second gate waiter, and MUST remain active when periodic SSE keepalives are disabled.
 
 The owner-side watchdog MUST apply only while the request owns the response-create gate, awaits `response.created`, has neither a response id nor recorded `response.created` latency, has received no matched `response.*` lifecycle event, and has produced no downstream-visible output or sequence evidence. Non-response telemetry such as `codex.rate_limits` MUST NOT suppress this watchdog. Any matched `response.*` lifecycle event, response-created milestone, or downstream-visible evidence MUST suppress the owner-side watchdog and leave existing timeout behavior unchanged.
 
@@ -13,7 +13,7 @@ When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a
 - **GIVEN** a visible HTTP bridge request owns the response-create gate
 - **AND** its current `response.create` send produced no matched `response.*` event, response id, or downstream-visible output
 - **AND** no second request waits for the gate
-- **WHEN** the smaller of the configured stuck threshold and 240 seconds elapses after the current send
+- **WHEN** the smaller of the configured stuck threshold and 60 seconds elapses after the current send
 - **THEN** the proxy emits an explicit terminal failure and retires the bridge session
 - **AND** recovery occurs before the native client's 300-second parsed-event idle timeout
 

@@ -1761,7 +1761,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             response_id=response_id,
                             release_origin_lease=(
                                 recovery_attempt_session_id != session.durable_session_id
-                                and event_type == "response.completed"
+                                and event_type in {"response.completed", "response.failed"}
                             ),
                         )
                 except Exception:
@@ -1778,7 +1778,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             response_id=response_id,
                             release_origin_lease=(
                                 recovery_attempt_session_id != session.durable_session_id
-                                and event_type == "response.completed"
+                                and event_type in {"response.completed", "response.failed"}
                             ),
                         )
                     else:

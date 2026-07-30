@@ -797,10 +797,8 @@ async def _await_cancelled_task(
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
     caller_task = asyncio.current_task()
-    # Give a newly-created child one scheduling turn before cancelling it.
-    # Without this yield, asyncio can cancel a task before its coroutine body
-    # starts, making a cancellation-resistant child look synchronously
-    # cancelled and defeating the bounded deferred-drain path.
+    # Give a new child one scheduling turn before cancellation so
+    # cancellation-resistant tasks enter the deferred-drain path.
     if not task.done():
         try:
             await asyncio.sleep(0)
@@ -812,6 +810,7 @@ async def _await_cancelled_task(
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
     except asyncio.CancelledError:
         if caller_task is not None and caller_task.cancelling():
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
             raise
         return True
     except TimeoutError:

@@ -82,6 +82,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
     _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
+    _http_bridge_durable_release_allowed,
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
     _http_bridge_has_durable_recovery_anchor,
@@ -1660,7 +1661,7 @@ class _HTTPBridgeMixin(
             logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
         finally:
             session.account_lease = None
-        if release_durable_session and session.durable_session_id and session.durable_owner_epoch:
+        if release_durable_session and _http_bridge_durable_release_allowed(self, session):
             try:
                 await self._durable_bridge.release_live_session(
                     session_id=session.durable_session_id,

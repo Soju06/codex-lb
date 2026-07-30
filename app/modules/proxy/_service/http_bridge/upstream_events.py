@@ -46,6 +46,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+    _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
@@ -198,7 +199,10 @@ _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS = 10.0
 
 async def _wait_for_http_bridge_recovery_settlement_retry(
     service: Any,
-    session: Any,
+    *,
+    session_id: str,
+    owner_epoch: int,
+    api_key_id: str | None,
     delay_seconds: float,
 ) -> None:
     remaining = max(0.0, delay_seconds)
@@ -207,14 +211,19 @@ async def _wait_for_http_bridge_recovery_settlement_retry(
         remaining -= _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS
         try:
             async with service._http_bridge_lock:
-                await service._refresh_durable_http_bridge_session(session)
+                await service._durable_bridge.renew_live_session(
+                    session_id=session_id,
+                    api_key_id=api_key_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=owner_epoch,
+                    lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                )
         except Exception:
             logger.debug("Failed to refresh HTTP bridge lease during settlement backoff", exc_info=True)
 
 
 async def _retry_http_bridge_recovery_settlement(
     service: Any,
-    session: Any,
     *,
     session_id: str,
     api_key_id: str | None,
@@ -226,7 +235,13 @@ async def _retry_http_bridge_recovery_settlement(
     """Keep a response-observed journal row fenced until durable settlement succeeds."""
 
     for delay_seconds in _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS:
-        await _wait_for_http_bridge_recovery_settlement_retry(service, session, delay_seconds)
+        await _wait_for_http_bridge_recovery_settlement_retry(
+            service,
+            session_id=session_id,
+            owner_epoch=owner_epoch,
+            api_key_id=api_key_id,
+            delay_seconds=delay_seconds,
+        )
         try:
             marked = await service._durable_bridge.mark_recovery_attempt_replayed(
                 session_id=session_id,
@@ -259,13 +274,13 @@ async def _retry_http_bridge_recovery_settlement(
 
 def _schedule_http_bridge_recovery_settlement_retry(
     service: Any,
-    session: Any,
     **kwargs: Any,
 ) -> None:
     task = asyncio.create_task(
-        _retry_http_bridge_recovery_settlement(service, session, **kwargs),
+        _retry_http_bridge_recovery_settlement(service, **kwargs),
         name=f"http-bridge-recovery-settlement-{_hash_identifier(kwargs['request_fingerprint'])}",
     )
+    setattr(task, "_http_bridge_recovery_session_id", kwargs["session_id"])
     service._background_cleanup_tasks.add(task)
 
     def _discard(done_task: asyncio.Task[Any]) -> None:
@@ -1731,7 +1746,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if settlement_attempt == 2:
                         _schedule_http_bridge_recovery_settlement_retry(
                             self,
-                            session,
                             session_id=recovery_attempt_session_id,
                             api_key_id=session.key.api_key_id,
                             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
@@ -1744,7 +1758,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         logger.warning("Failed to settle HTTP bridge recovery attempt", exc_info=True)
                         _schedule_http_bridge_recovery_settlement_retry(
                             self,
-                            session,
                             session_id=recovery_attempt_session_id,
                             api_key_id=session.key.api_key_id,
                             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
@@ -1846,7 +1859,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if settlement_attempt == 2:
                         _schedule_http_bridge_recovery_settlement_retry(
                             self,
-                            session,
                             session_id=recovery_attempt_session_id,
                             api_key_id=session.key.api_key_id,
                             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
@@ -1859,7 +1871,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         logger.warning("Failed to settle deterministic HTTP bridge recovery attempt", exc_info=True)
                         _schedule_http_bridge_recovery_settlement_retry(
                             self,
-                            session,
                             session_id=recovery_attempt_session_id,
                             api_key_id=session.key.api_key_id,
                             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,

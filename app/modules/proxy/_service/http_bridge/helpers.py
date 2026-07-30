@@ -1607,6 +1607,17 @@ def _http_bridge_durable_lease_ttl_seconds() -> float:
     return float(RING_STALE_THRESHOLD_SECONDS)
 
 
+def _http_bridge_durable_release_allowed(service: Any, session: Any) -> bool:
+    session_id = getattr(session, "durable_session_id", None)
+    owner_epoch = getattr(session, "durable_owner_epoch", None)
+    if session_id is None or owner_epoch is None:
+        return False
+    return not any(
+        not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == session_id
+        for task in service._background_cleanup_tasks
+    )
+
+
 async def _persist_http_bridge_replacement_account(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,

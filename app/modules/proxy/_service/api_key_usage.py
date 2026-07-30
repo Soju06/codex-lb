@@ -14,6 +14,7 @@ from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.utils.request_id import get_request_id
+from app.db.models import Account
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
@@ -60,6 +61,7 @@ def _api_key_reservation_heartbeat_seconds() -> float:
 class _ApiKeyUsageServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
     _background_cleanup_tasks: set[asyncio.Task[None]]
+    _load_balancer: Any
 
 
 def _normalize_service_tier_value(value: Any) -> str | None:
@@ -131,6 +133,30 @@ class _ApiKeyUsageMixin:
     ) -> None:
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await self._release_websocket_reservation(request_state.api_key_reservation)
+        request_state.api_key_reservation = None
+        lifecycle = request_state.deferred_account_backoff_lifecycle
+        if lifecycle is not None:
+            lifecycle.settlement_confirmed = True
+        pending_backoffs = (
+            lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
+        )
+        if pending_backoffs:
+            await self._drain_deferred_account_error_backoffs(pending_backoffs)
+
+    async def _drain_deferred_account_error_backoffs(
+        self,
+        pending_backoffs: dict[str, Account],
+    ) -> None:
+        if not pending_backoffs:
+            return
+        proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        while pending_backoffs:
+            account_id, account = pending_backoffs.popitem()
+            try:
+                await proxy._load_balancer.record_error_backoff(account)
+            except BaseException:
+                pending_backoffs.setdefault(account_id, account)
+                raise
 
     async def _maybe_touch_api_key_reservation(
         self,
@@ -368,9 +394,10 @@ class _ApiKeyUsageMixin:
                 )
                 return False
 
-        # Detach unconditionally instead of shield-awaiting: the tracking
-        # callback already schedules a release when settlement fails or is
-        # cancelled, the caller's finally-net skips via
+        # Detach unconditionally instead of shield-awaiting: failed or cancelled
+        # settlements release through the tracking callback (detached callers)
+        # or the synchronous fallback below (ordering-sensitive callers), while
+        # the caller's finally-net skips via
         # usage_settlement_transferred, and reservations keep counting toward
         # limits until finalized/released, so a briefly-lagging settlement can
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
@@ -383,16 +410,36 @@ class _ApiKeyUsageMixin:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
+            release_on_failure=not wait_for_settlement,
         )
         if wait_for_settlement:
             # Ordering-sensitive callers (the websocket error path) must
             # commit the settlement before load-balancer health writes; they
             # opt into waiting while everything else stays detached.
+            settlement_committed = False
             with anyio.CancelScope(shield=True):
-                try:
-                    await asyncio.shield(task)
-                except Exception:  # failures release via the tracking callback
-                    pass
+                while True:
+                    try:
+                        settlement_committed = await asyncio.shield(task)
+                        break
+                    except asyncio.CancelledError:
+                        # Shield keeps caller cancellation from cancelling the
+                        # settlement task. Wait until that task is actually done
+                        # before a fallback release can touch the same reservation.
+                        if task.cancelled():
+                            break
+                    except Exception:
+                        break
+                if not settlement_committed:
+                    # Ordering-sensitive callers cannot let the subsequent
+                    # health write race a background fallback. Await the release
+                    # here so the reservation is no longer live on return.
+                    return await self._release_unsettled_stream_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        request_id=request_id,
+                    )
+            return True
         return True
 
     def _track_stream_usage_settlement_task(
@@ -402,9 +449,17 @@ class _ApiKeyUsageMixin:
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
+        release_on_failure: bool = True,
     ) -> None:
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         proxy._background_cleanup_tasks.add(cast(asyncio.Task[None], task))
+
+        async def _release_after_failed_settlement() -> None:
+            await self._release_unsettled_stream_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
 
         def _settlement_done(done_task: asyncio.Task[bool]) -> None:
             proxy._background_cleanup_tasks.discard(cast(asyncio.Task[None], done_task))
@@ -416,16 +471,12 @@ class _ApiKeyUsageMixin:
                     api_key.id,
                     request_id,
                 )
-                release_coro = self._release_unsettled_stream_api_key_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
-                self._schedule_cancel_safe_cleanup(
-                    release_coro,
-                    action="release_stream_api_key_reservation_after_cancelled_settlement",
-                    request_id=request_id,
-                )
+                if release_on_failure:
+                    self._schedule_cancel_safe_cleanup(
+                        _release_after_failed_settlement(),
+                        action="release_stream_api_key_reservation_after_cancelled_settlement",
+                        request_id=request_id,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Stream API key settlement task failed key_id=%s request_id=%s",
@@ -434,14 +485,9 @@ class _ApiKeyUsageMixin:
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
             else:
-                if not settled:
-                    release_coro = self._release_unsettled_stream_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        request_id=request_id,
-                    )
+                if not settled and release_on_failure:
                     self._schedule_cancel_safe_cleanup(
-                        release_coro,
+                        _release_after_failed_settlement(),
                         action="release_stream_api_key_reservation_after_failed_settlement",
                         request_id=request_id,
                     )
@@ -481,7 +527,7 @@ class _ApiKeyUsageMixin:
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
-    ) -> None:
+    ) -> bool:
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         with anyio.CancelScope(shield=True):
             try:
@@ -490,6 +536,7 @@ class _ApiKeyUsageMixin:
                     await api_keys_service.release_usage_reservation(
                         api_key_reservation.reservation_id,
                     )
+                return True
             except Exception:
                 logger.warning(
                     "Failed to release stream API key reservation key_id=%s request_id=%s",
@@ -497,3 +544,4 @@ class _ApiKeyUsageMixin:
                     request_id,
                     exc_info=True,
                 )
+                return False

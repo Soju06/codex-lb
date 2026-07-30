@@ -166,6 +166,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_precreated_replay_fallback,
     _copy_websocket_route_metadata_to_session,
+    _DeferredAccountBackoffLifecycle,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
@@ -363,6 +364,8 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None,
+        defer_account_health_writes: bool = False,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -395,6 +398,8 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None,
+        defer_account_health_writes: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -426,6 +431,8 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
         exclude_account_ids: Collection[str] | None = None,
+        deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None,
+        defer_account_health_writes: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
@@ -1486,6 +1493,8 @@ class _HTTPBridgeMixin(
                     "request_usage_budget": request_usage_budget,
                     "request_deadline": request_deadline,
                     "exclude_account_ids": exclude_account_ids,
+                    "deferred_account_backoff_lifecycle": deferred_account_backoff_lifecycle,
+                    "defer_account_health_writes": defer_account_health_writes,
                 }
                 try:
                     create_signature = inspect.signature(create_session)
@@ -1502,6 +1511,8 @@ class _HTTPBridgeMixin(
                         "request_deadline",
                         "exclude_account_ids",
                         "preferred_account_is_continuity_owner",
+                        "deferred_account_backoff_lifecycle",
+                        "defer_account_health_writes",
                     ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
@@ -1723,6 +1734,8 @@ class _HTTPBridgeMixin(
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None,
+        defer_account_health_writes: bool = False,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -1853,6 +1866,8 @@ class _HTTPBridgeMixin(
                     selected_account_lease,
                     exc,
                     required_account=require_preferred_account and selected_is_preferred,
+                    deferred_account_backoff_lifecycle=deferred_account_backoff_lifecycle,
+                    defer_account_health_write=defer_account_health_writes,
                 ):
                     selected_account_lease = None
                     continue
@@ -1887,6 +1902,8 @@ class _HTTPBridgeMixin(
                         selected_account_lease,
                         retry_exc,
                         required_account=require_preferred_account and selected_is_preferred,
+                        deferred_account_backoff_lifecycle=deferred_account_backoff_lifecycle,
+                        defer_account_health_write=defer_account_health_writes,
                     ):
                         selected_account_lease = None
                         continue

@@ -2241,6 +2241,13 @@ class _WebSocketMixin:
     ) -> tuple[Account | None, UpstreamWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+
+        async def _record_or_defer_confirmed_route_backoff(account: Account) -> None:
+            if request_state.api_key_reservation is not None:
+                request_state.deferred_account_error_backoffs.setdefault(account.id, account)
+                return
+            await proxy._load_balancer.record_error_backoff(account)
+
         if (
             request_state.useragent is None
             and request_state.useragent_group is None
@@ -2424,7 +2431,7 @@ class _WebSocketMixin:
                     await proxy._load_balancer.release_account_lease(selected_stream_lease)
                     selected_stream_lease = None
                     if confirmed_pre_dispatch:
-                        await proxy._load_balancer.record_error_backoff(account)
+                        await _record_or_defer_confirmed_route_backoff(account)
                     last_failover_exc = exc
                     last_failover_account = account
                     excluded_account_ids.add(account.id)
@@ -2435,7 +2442,7 @@ class _WebSocketMixin:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
                 if confirmed_pre_dispatch:
-                    await proxy._load_balancer.record_error_backoff(account)
+                    await _record_or_defer_confirmed_route_backoff(account)
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
@@ -4688,8 +4695,7 @@ class _WebSocketMixin:
 
         if request_state.draining_until_terminal:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
-            await proxy._release_websocket_reservation(request_state.api_key_reservation)
-            request_state.api_key_reservation = None
+            await proxy._release_websocket_request_state_reservation(request_state)
             return
 
         if request_state.latency_first_token_ms is None:
@@ -4769,25 +4775,41 @@ class _WebSocketMixin:
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await _release_websocket_response_create_gate(request_state, response_create_gate)
-        await proxy._settle_stream_api_key_usage(
+        lifecycle = request_state.deferred_account_backoff_lifecycle
+        settlement_confirmed = await proxy._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
             settlement,
             response_id,
             # The reservation must be settled before the load-balancer
             # health write below (settlement-ordering invariant).
-            wait_for_settlement=settlement.account_health_error,
+            wait_for_settlement=(
+                lifecycle is not None
+                or settlement.account_health_error
+                or bool(request_state.deferred_account_error_backoffs)
+            ),
         )
-        if settlement.account_health_error:
-            await proxy._handle_stream_error(
-                account,
-                _stream_settlement_error_payload(settlement),
-                settlement.error_code or "upstream_error",
+        if settlement_confirmed:
+            request_state.api_key_reservation = None
+            if lifecycle is not None:
+                lifecycle.settlement_confirmed = True
+            pending_backoffs = (
+                lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
             )
+            if pending_backoffs:
+                await proxy._drain_deferred_account_error_backoffs(pending_backoffs)
+        if settlement.account_health_error:
+            if settlement_confirmed:
+                await proxy._handle_stream_error(
+                    account,
+                    _stream_settlement_error_payload(settlement),
+                    settlement.error_code or "upstream_error",
+                )
             upstream_control.reconnect_requested = True
             upstream_control.retire_after_drain = True
         elif settlement.record_success:
-            await proxy._load_balancer.record_success(account)
+            if settlement_confirmed:
+                await proxy._load_balancer.record_success(account)
             for remembered_response_id in _websocket_continuity_response_ids(request_state, response_id):
                 proxy._remember_websocket_previous_response_owner(
                     previous_response_id=remembered_response_id,
@@ -5035,23 +5057,6 @@ class _WebSocketMixin:
                     penalty_message = request_state.error_message_override or error_message
                     break
 
-        if (
-            remaining
-            and penalize_account
-            and account is not None
-            and isinstance(account, Account)
-            and penalty_code is not None
-        ):
-            try:
-                await proxy._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
-            except Exception:
-                _facade().logger.warning(
-                    "Failed to record websocket pending-request health penalty account_id=%s error_code=%s",
-                    account_id_value,
-                    penalty_code,
-                    exc_info=True,
-                )
-
         last_index = len(remaining) - 1
         for index, request_state in enumerate(remaining):
             proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
@@ -5172,6 +5177,23 @@ class _WebSocketMixin:
                 sticky=request_state.affinity_policy.key is not None or request_state.previous_response_id is not None,
                 status=status,
             )
+
+        if (
+            remaining
+            and penalize_account
+            and account is not None
+            and isinstance(account, Account)
+            and penalty_code is not None
+        ):
+            try:
+                await proxy._handle_stream_error(account, {"message": penalty_message or error_message}, penalty_code)
+            except Exception:
+                _facade().logger.warning(
+                    "Failed to record websocket pending-request health penalty account_id=%s error_code=%s",
+                    account_id_value,
+                    penalty_code,
+                    exc_info=True,
+                )
 
     async def _emit_websocket_terminal_error(
         self,

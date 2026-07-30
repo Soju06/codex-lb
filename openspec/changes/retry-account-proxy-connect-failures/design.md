@@ -48,18 +48,32 @@ reallocated so the replacement selection does not immediately loop back.
 
 A confirmed dead account route is stronger evidence than a generic transient
 stream error. It raises the account to the existing transient error-backoff
-floor immediately (`record_error_backoff`, shared `ERROR_BACKOFF_THRESHOLD`):
-30 seconds at the floor, exponentially bounded by the existing 300-second
-cap. It does not pause, deactivate, rate-limit, or quota-penalize the
-account, and it replaces — not stacks onto — the generic single-error health
-write for the same failure.
+floor (`record_error_backoff`, shared `ERROR_BACKOFF_THRESHOLD`): 30 seconds
+at the floor, exponentially bounded by the existing 300-second cap. It does
+not pause, deactivate, rate-limit, or quota-penalize the account, and it
+replaces — not stacks onto — the generic single-error health write for the
+same failure.
 
 Per-account response-create and stream leases are released before recording
 the backoff. The downstream API-key reservation is request-scoped rather than
 account-scoped, so an internal pre-dispatch failover keeps that single
-reservation alive instead of releasing and racing to reacquire it. The normal
-terminal finalizer settles or releases it exactly once after the replacement
-attempt or final failure.
+reservation alive instead of releasing and racing to reacquire it. Because
+account-health mutation must not race a live reservation, keyed requests queue
+the dead-route floor and apply it only after the normal terminal finalizer has
+settled or released that singular reservation. Startup failure and cancellation
+paths release the reservation before draining the same queue. A failed terminal
+settlement may fall back to release, but only a confirmed settlement or release
+authorizes the queued health write; if both fail, the reservation and backoff
+remain pending rather than racing an account-health mutation.
+
+The HTTP bridge transfers settlement ownership to a request state only after
+its upstream submit call returns successfully. Outer startup cleanup releases
+only the current unowned lifecycle. Each lifecycle generation owns its own
+backoff queue, and terminal finalizers drain only that generation after its
+settlement is confirmed. A newer retry therefore cannot drain an older failed
+settlement's queue, and a late older finalizer cannot drain the newer queue.
+Queue entries are claimed before the asynchronous health write so concurrent
+terminal and outer cleanup cannot apply the same floor twice.
 
 ## Non-goals
 

@@ -48,9 +48,7 @@ from app.core.openai.requests import (
 from app.core.types import JsonValue
 from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import (
-    StickySessionKind,
-)
+from app.db.models import StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
@@ -144,6 +142,8 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds_from_message,
+    _DeferredAccountBackoffLifecycle,
+    _DeferredAccountBackoffTracker,
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
@@ -658,6 +658,7 @@ class _HTTPBridgeStreamingMixin:
             return
 
         request_scope_id = ensure_request_scope_id()
+        deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         try:
             async for line in self._stream_via_http_bridge(
                 payload,
@@ -685,14 +686,40 @@ class _HTTPBridgeStreamingMixin:
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 capacity_startup_wait_event=capacity_startup_wait_event,
                 capacity_startup_ready_event=capacity_startup_ready_event,
+                deferred_account_backoff_tracker=deferred_account_backoff_tracker,
             ):
                 yield line
         finally:
             with anyio.CancelScope(shield=True):
-                await _release_http_bridge_unanchored_handoffs_for_request(
-                    self,
-                    request_scope_id=request_scope_id,
-                )
+                try:
+                    lifecycle = deferred_account_backoff_tracker.current_lifecycle
+                    if lifecycle is not None:
+                        pending_backoffs = lifecycle.pending_backoffs
+                        if lifecycle.settlement_confirmed:
+                            await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                        elif not lifecycle.settlement_owned and (
+                            pending_backoffs or lifecycle.reservation != api_key_reservation
+                        ):
+                            # Session creation can fail before the request is
+                            # submitted. Until submit returns, this wrapper owns
+                            # the current lifecycle and may release exactly that
+                            # reservation. Once ownership transfers, the request
+                            # finalizer is the only safe settlement owner.
+                            try:
+                                await self._release_websocket_reservation(lifecycle.reservation)
+                            except Exception:
+                                logger.warning(
+                                    "Failed to release HTTP bridge API key reservation before deferred backoff",
+                                    exc_info=True,
+                                )
+                            else:
+                                lifecycle.settlement_confirmed = True
+                                await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                finally:
+                    await _release_http_bridge_unanchored_handoffs_for_request(
+                        self,
+                        request_scope_id=request_scope_id,
+                    )
 
     async def _stream_via_http_bridge(
         self: Any,
@@ -722,11 +749,14 @@ class _HTTPBridgeStreamingMixin:
         enforce_openai_sdk_contract: bool = True,
         capacity_startup_wait_event: asyncio.Event | None = None,
         capacity_startup_ready_event: asyncio.Event | None = None,
+        deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        if deferred_account_backoff_tracker is None:
+            deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         bridge_payload = payload.to_payload()
         bridge_client_metadata = _response_create_client_metadata(
             bridge_payload,
@@ -738,6 +768,33 @@ class _HTTPBridgeStreamingMixin:
         )
         if bridge_client_metadata is not None or "client_metadata" in bridge_payload:
             payload = payload.model_copy(update={"client_metadata": bridge_client_metadata})
+
+        def begin_bridge_lifecycle(
+            reservation: ApiKeyUsageReservationData | None,
+        ) -> _DeferredAccountBackoffLifecycle:
+            previous_lifecycle = deferred_account_backoff_tracker.current_lifecycle
+            same_reservation = bool(
+                previous_lifecycle is not None
+                and (
+                    previous_lifecycle.reservation is reservation
+                    or (
+                        previous_lifecycle.reservation is not None
+                        and reservation is not None
+                        and previous_lifecycle.reservation.reservation_id == reservation.reservation_id
+                    )
+                )
+            )
+            pending_backoffs = (
+                previous_lifecycle.pending_backoffs
+                if previous_lifecycle is not None and not previous_lifecycle.settlement_owned and same_reservation
+                else {}
+            )
+            lifecycle = _DeferredAccountBackoffLifecycle(
+                reservation=reservation,
+                pending_backoffs=pending_backoffs,
+            )
+            deferred_account_backoff_tracker.current_lifecycle = lifecycle
+            return lifecycle
 
         def prepare_bridge_request(
             request_payload: ResponsesRequest,
@@ -765,7 +822,24 @@ class _HTTPBridgeStreamingMixin:
                 )
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event
+            lifecycle = begin_bridge_lifecycle(request_state.api_key_reservation)
+            request_state.deferred_account_error_backoffs = lifecycle.pending_backoffs
+            request_state.deferred_account_backoff_tracker = deferred_account_backoff_tracker
+            request_state.deferred_account_backoff_lifecycle = lifecycle
             return request_state, text_data
+
+        async def release_unowned_bridge_lifecycle(
+            lifecycle: _DeferredAccountBackoffLifecycle | None,
+            request_state: _WebSocketRequestState | None,
+        ) -> None:
+            if lifecycle is None or lifecycle.settlement_owned:
+                return
+            if request_state is not None:
+                await self._release_websocket_request_state_reservation(request_state)
+                return
+            await self._release_websocket_reservation(lifecycle.reservation)
+            lifecycle.settlement_confirmed = True
+            await self._drain_deferred_account_error_backoffs(lifecycle.pending_backoffs)
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -1344,6 +1418,8 @@ class _HTTPBridgeStreamingMixin:
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,
                     exclude_account_ids=fresh_replay_excluded_account_ids or None,
+                    deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                    defer_account_health_writes=request_state.api_key_reservation is not None,
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
@@ -1609,6 +1685,8 @@ class _HTTPBridgeStreamingMixin:
                             session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
                         if owner_unavailable_allows_account_neutral_replay(capacity_exc):
@@ -1716,6 +1794,7 @@ class _HTTPBridgeStreamingMixin:
                         request_scope_id=owner_recovery_scope_id,
                     )
                 retry_request_state: _WebSocketRequestState | None = None
+                retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
                     retry_reservation_reacquired = False
@@ -1729,6 +1808,7 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=estimate_api_key_request_usage(recovery_payload),
                         )
                         retry_reservation_reacquired = True
+                        retry_unowned_lifecycle = begin_bridge_lifecycle(retry_api_key_reservation)
 
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
@@ -1762,7 +1842,18 @@ class _HTTPBridgeStreamingMixin:
                         yield event_block
                 except BaseException:
                     if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                        await self._release_websocket_reservation(retry_api_key_reservation)
+                        retry_lifecycle = (
+                            retry_request_state.deferred_account_backoff_lifecycle
+                            if retry_request_state is not None
+                            else retry_unowned_lifecycle
+                        )
+                        try:
+                            await release_unowned_bridge_lifecycle(retry_lifecycle, retry_request_state)
+                        except Exception:
+                            logger.warning(
+                                "Failed to release owner-recovery HTTP bridge reservation",
+                                exc_info=True,
+                            )
                     raise
                 finally:
                     if owner_recovery_scope_id is not None:
@@ -2042,6 +2133,8 @@ class _HTTPBridgeStreamingMixin:
                             request_deadline=request_deadline,
                             session_header_fallback_key=session_header_fallback_key,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2146,6 +2239,8 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=request_state.request_usage_budget,
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2335,6 +2430,8 @@ class _HTTPBridgeStreamingMixin:
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                         request_deadline=request_deadline,
                         exclude_account_ids=request_state.excluded_account_ids or None,
+                        deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                        defer_account_health_writes=request_state.api_key_reservation is not None,
                     )
                 except ProxyResponseError as capacity_exc:
                     wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2371,6 +2468,8 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     request_scope_id=local_recovery_scope_id,
                 )
+            retry_request_state: _WebSocketRequestState | None = None
+            retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
             try:
                 retry_api_key_reservation = api_key_reservation
                 retry_reservation_reacquired = False
@@ -2384,6 +2483,7 @@ class _HTTPBridgeStreamingMixin:
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                     )
                     retry_reservation_reacquired = True
+                    retry_unowned_lifecycle = begin_bridge_lifecycle(retry_api_key_reservation)
 
                 retry_request_state, retry_text_data = prepare_bridge_request(
                     retry_payload,
@@ -2416,7 +2516,18 @@ class _HTTPBridgeStreamingMixin:
                         pass
             except BaseException:
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                    await self._release_websocket_reservation(retry_api_key_reservation)
+                    retry_lifecycle = (
+                        retry_request_state.deferred_account_backoff_lifecycle
+                        if retry_request_state is not None
+                        else retry_unowned_lifecycle
+                    )
+                    try:
+                        await release_unowned_bridge_lifecycle(retry_lifecycle, retry_request_state)
+                    except Exception:
+                        logger.warning(
+                            "Failed to release local-recovery HTTP bridge reservation",
+                            exc_info=True,
+                        )
                 raise
             finally:
                 if local_recovery_scope_id is not None:
@@ -2495,6 +2606,9 @@ class _HTTPBridgeStreamingMixin:
                         text_data=text_data,
                         queue_limit=queue_limit,
                     )
+                lifecycle = request_state.deferred_account_backoff_lifecycle
+                if lifecycle is not None:
+                    lifecycle.settlement_owned = True
             except ProxyResponseError as exc:
                 if request_state.bridge_soft_capacity_reroute_allowed:
                     raise

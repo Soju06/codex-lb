@@ -18,6 +18,20 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD = 2
 _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
+    {
+        "stream_incomplete",
+        "clean_close",
+        "stream_idle_timeout",
+        "upstream_keepalive_timeout",
+        # A missing response.created is the strongest signal that the
+        # upstream socket is unusable: no response event was observed before
+        # the client-safe deadline, so retrying the same hard key can recreate
+        # the exact failing request in a tight loop.
+        "missing_response_created_timeout",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -29,6 +43,7 @@ class _HTTPBridgeRetryCircuitState:
     persisted_updated_at_epoch: float = 0.0
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
+    half_open_until: float = 0.0
 
 
 def _initialize_http_bridge_retry_circuit(service: Any) -> None:
@@ -120,9 +135,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     current_local_state is not None
                     and current_local_state.last_failure_monotonic > current_local_state.last_durable_load_monotonic
                 )
-                if (
-                    current_local_state is None
-                    or (current_local_state is stale_local_state and not local_state_is_newer)
+                if current_local_state is None or (
+                    current_local_state is stale_local_state and not local_state_is_newer
                 ):
                     self._http_bridge_retry_circuits.pop(session.key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
@@ -191,9 +205,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 ),
             )
             if persisted is not None:
-                persisted_cooldown_until = now_monotonic + max(
-                    0.0, persisted.cooldown_until_epoch - now_wall
-                )
+                persisted_cooldown_until = now_monotonic + max(0.0, persisted.cooldown_until_epoch - now_wall)
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
@@ -238,8 +250,19 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.cooldown_until <= now:
+                if (
+                    state is not None
+                    and state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                    and state.half_open_until > now
+                    and not allow_fresh_hard_account_switch
+                    and not allow_proof_gated_continuity_replay
+                ):
+                    if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+                        http_bridge_retry_circuit_total.labels(outcome="suppressed").inc()
+                    return False
                 if state is not None and state.cooldown_until > 0:
                     state.cooldown_until = 0.0
+                    state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
                     logger.info(
                         "http_bridge_retry_circuit event=half_open bridge_kind=%s bridge_key=%s failures=%s",
                         session.key.affinity_kind,
@@ -300,7 +323,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
     ) -> None:
-        if session.key.strength != "hard" or detail not in {"stream_incomplete", "clean_close", "stream_idle_timeout"}:
+        if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return
 
         await self._load_http_bridge_retry_circuit(session)
@@ -316,6 +339,7 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             state.last_touched_monotonic = now
             state.last_failure_monotonic = now
+            state.half_open_until = 0.0
             state.consecutive_failures += 1
             state.last_detail = detail
             if state.consecutive_failures >= threshold:
@@ -352,9 +376,7 @@ class _HTTPBridgeRetryCircuitMixin:
             self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
             self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
             expected_updated_at_epoch = (
-                state.persisted_updated_at_epoch
-                if state is not None and state.persisted_updated_at_epoch > 0
-                else None
+                state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
         try:
             # Clearing is idempotent and must be attempted even when the

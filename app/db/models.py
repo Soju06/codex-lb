@@ -1682,6 +1682,11 @@ class HttpBridgeSessionState(str, Enum):
     CLOSED = "closed"
 
 
+class HttpBridgeRecoveryAttemptState(str, Enum):
+    UNKNOWN = "unknown"
+    REPLAYED = "replayed"
+
+
 class HttpBridgeSessionRecord(Base):
     __tablename__ = "http_bridge_sessions"
 
@@ -1748,6 +1753,49 @@ class HttpBridgeSessionRecord(Base):
             "api_key_scope",
             name="uq_http_bridge_sessions_session_key",
         ),
+    )
+
+
+class HttpBridgeRecoveryAttemptRecord(Base):
+    __tablename__ = "http_bridge_recovery_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("http_bridge_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    replay_safe: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    state: Mapped[HttpBridgeRecoveryAttemptState] = mapped_column(
+        SqlEnum(
+            HttpBridgeRecoveryAttemptState,
+            name="http_bridge_recovery_attempt_state",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=HttpBridgeRecoveryAttemptState.UNKNOWN,
+        server_default=text("'unknown'"),
+        nullable=False,
+    )
+    response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "request_fingerprint",
+            name="uq_http_bridge_recovery_attempts_session_fingerprint",
+        ),
+        Index("idx_http_bridge_recovery_attempts_state", "state", "updated_at"),
     )
 
 

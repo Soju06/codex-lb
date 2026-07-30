@@ -190,6 +190,8 @@ from app.modules.proxy.ring_membership import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+_HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
+_http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float] = {}
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # A healthy upstream acknowledges response.create promptly. Keep the
 # eventless watchdog well below the client retry budget so a dead socket cannot
@@ -312,14 +314,28 @@ def _http_bridge_pending_count_nowait(
     except Exception as exc:
         if type(exc).__name__ not in {"WouldBlock", "RuntimeError"}:
             raise
-        logger.warning(
-            "http_bridge_pending_count_unavailable context=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+        warning_key = (
             context,
             session.key.affinity_kind,
             _hash_identifier(session.key.affinity_key),
-            session.account.id,
-            session.request_model,
         )
+        now = time.monotonic()
+        last_logged = _http_bridge_pending_count_warning_last_logged.get(warning_key)
+        if last_logged is None or now - last_logged >= _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS:
+            _http_bridge_pending_count_warning_last_logged[warning_key] = now
+            if len(_http_bridge_pending_count_warning_last_logged) > 2048:
+                cutoff = now - _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS * 2
+                for key, timestamp in tuple(_http_bridge_pending_count_warning_last_logged.items()):
+                    if timestamp < cutoff:
+                        _http_bridge_pending_count_warning_last_logged.pop(key, None)
+            logger.warning(
+                "http_bridge_pending_count_unavailable context=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+                context,
+                session.key.affinity_kind,
+                warning_key[2],
+                session.account.id,
+                session.request_model,
+            )
         return None
     try:
         request_counts_against_queue = _service_global("_http_bridge_request_counts_against_queue")

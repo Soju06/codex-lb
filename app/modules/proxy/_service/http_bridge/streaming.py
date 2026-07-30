@@ -208,6 +208,7 @@ from app.modules.proxy.continuity import (
     without_http_bridge_session_affinity_headers,
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
+from app.modules.proxy.durable_bridge_repository import durable_bridge_hash
 from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
@@ -227,13 +228,9 @@ _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
     """Return whether retrying would require replaying an unsafe continuation."""
     if request_state.previous_response_id is not None:
-        return not (
-            request_state.fresh_upstream_request_is_retry_safe
-            and request_state.fresh_upstream_request_text
-        )
+        return not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
     return request_state.hard_continuity_anchor and not (
-        request_state.fresh_upstream_request_is_retry_safe
-        and request_state.fresh_upstream_request_text
+        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
     )
 
 
@@ -938,6 +935,8 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_prior_output = False
+        durable_recovery_attempt_fingerprint: str | None = None
+        durable_recovery_attempt_available = False
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
 
@@ -981,6 +980,38 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_anchor_fingerprint,
                 durable_full_resend_has_safe_fresh_context,
             ) = classify_durable_full_resend(durable_lookup)
+        if (
+            durable_full_resend_has_safe_fresh_context
+            and durable_full_resend_anchor_count is not None
+            and isinstance(payload.input, list)
+        ):
+            replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                cast(list[JsonValue], payload.input),
+                stored_count=durable_full_resend_anchor_count,
+            )
+            if replay_projection is not None:
+                durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
+                    payload
+                ).model_copy(update={"input": replay_projection.input_items})
+                durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
+                    durable_full_resend_fresh_payload
+                )
+                _fresh_state, fresh_replay_text = prepare_bridge_request(
+                    _http_bridge_payload_without_previous_response_id(payload)
+                )
+                del _fresh_state
+                durable_recovery_attempt_fingerprint = durable_bridge_hash(fresh_replay_text)
+                if durable_lookup is not None and durable_full_resend_is_account_neutral:
+                    try:
+                        durable_recovery_attempt_available = (
+                            await self._durable_bridge.lookup_recovery_attempt(
+                                session_id=durable_lookup.session_id,
+                                request_fingerprint=durable_recovery_attempt_fingerprint,
+                            )
+                            is not None
+                        )
+                    except Exception:
+                        logger.warning("Failed to load HTTP bridge recovery attempt", exc_info=True)
         durable_anchor_trimmable = durable_full_resend_anchor_count is not None
         durable_model_transition_lookup = (
             durable_lookup
@@ -1221,15 +1252,19 @@ class _HTTPBridgeStreamingMixin:
             # suffix retains the prior output/tool context. Capture the
             # verified anchor-free body so a retry can use it without sending
             # previous_response_id again.
-            client_full_resend_payload = _http_bridge_payload_without_previous_response_id(
-                untrimmed_effective_payload
-            )
+            client_full_resend_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
             _fresh_state, client_full_resend_fresh_upstream_request_text = prepare_bridge_request(
                 client_full_resend_payload
             )
             del _fresh_state
             request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
             request_state.fresh_upstream_request_is_retry_safe = True
+        if (
+            durable_recovery_attempt_fingerprint is not None
+            and durable_full_resend_is_account_neutral is True
+            and request_state.fresh_upstream_request_is_retry_safe
+        ):
+            request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         session_creation_headers = (
@@ -2048,6 +2083,7 @@ class _HTTPBridgeStreamingMixin:
         )
         try:
             yielded_any = False
+            durable_recovery_fresh_replay = False
             async for event_block in session_events:
                 yield event_block
                 yielded_any = True
@@ -2266,6 +2302,50 @@ class _HTTPBridgeStreamingMixin:
                     except Exception:
                         pass
                 return
+            if (
+                durable_recovery_attempt_available
+                and durable_recovery_attempt_fingerprint is not None
+                and durable_lookup is not None
+                and request_state.response_event_count == 0
+                and request_state.previous_response_id is not None
+            ):
+                try:
+                    marked = await self._durable_bridge.mark_recovery_attempt_replayed(
+                        session_id=durable_lookup.session_id,
+                        api_key_id=bridge_session_key.api_key_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=durable_lookup.owner_epoch,
+                        request_fingerprint=durable_recovery_attempt_fingerprint,
+                    )
+                except Exception:
+                    marked = False
+                    logger.warning("Failed to fence HTTP bridge recovery attempt", exc_info=True)
+                if marked:
+                    durable_recovery_fresh_replay = True
+                    _log_http_bridge_event(
+                        "durable_recovery_fresh_replay",
+                        bridge_session_key,
+                        account_id=session.account.id,
+                        model=effective_payload.model,
+                        detail="outcome=new_account_neutral_upstream_session",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                        owner_check_applied=True,
+                    )
+                    await self._reset_http_bridge_session_after_local_terminal_error(
+                        session,
+                        error_code="stream_incomplete",
+                        error_message="Upstream websocket closed before response.completed",
+                    )
+                    switch_to_account_neutral_replay()
+                    recovery_path = "durable_recovery_fresh_replay"
+                    retry_payload = effective_payload
+                    retry_previous_response_id = None
+                    retry_request_stage = "durable_recovery"
+                    retry_preferred_account_id = None
+                    allow_previous_response_recovery_rebind = False
+                else:
+                    durable_recovery_attempt_available = False
             is_context_overflow = _http_bridge_is_context_overflow_error(exc)
             should_rollover_after_context_overflow = _http_bridge_should_rollover_after_context_overflow(
                 exc,
@@ -2284,6 +2364,7 @@ class _HTTPBridgeStreamingMixin:
                 not should_attempt_previous_response_recovery
                 and not should_rollover_after_context_overflow
                 and not should_attempt_context_overflow_fresh_turn_recovery
+                and not durable_recovery_fresh_replay
             ):
                 if is_context_overflow:
                     _log_http_bridge_event(
@@ -2298,7 +2379,9 @@ class _HTTPBridgeStreamingMixin:
                     )
                 raise
 
-            if should_attempt_context_overflow_fresh_turn_recovery:
+            if durable_recovery_fresh_replay:
+                pass
+            elif should_attempt_context_overflow_fresh_turn_recovery:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="context_overflow_fresh_turn").inc()
                 _log_http_bridge_event(
@@ -2650,6 +2733,17 @@ class _HTTPBridgeStreamingMixin:
             # non-streaming collector.
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
+            if propagate_http_errors:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_request_timeout",
+                        "HTTP responses session bridge is cooling down after repeated upstream "
+                        "timeouts; retry shortly.",
+                        error_type="server_error",
+                    ),
+                    retry_after_seconds=max(1, math.ceil(retry_cooldown_seconds)),
+                )
             return format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
@@ -2781,6 +2875,17 @@ class _HTTPBridgeStreamingMixin:
             # gate, reservation, and pending queue entry while marking the
             # upstream handoff for retirement.
             await self._detach_http_bridge_request(session, request_state=request_state)
+            if propagate_http_errors:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_request_timeout",
+                        "HTTP responses session bridge is cooling down after repeated upstream "
+                        "timeouts; retry shortly.",
+                        error_type="server_error",
+                    ),
+                    retry_after_seconds=max(1, math.ceil(initial_retry_cooldown_seconds)),
+                )
             yield terminal_event
             return
         try:
@@ -2900,8 +3005,7 @@ class _HTTPBridgeStreamingMixin:
                                 )
                                 continuity_bound = continuity_bound_without_safe_replay()
                                 if retry_cooldown_seconds > 0 and (
-                                    continuity_bound
-                                    or (session.key.strength == "hard" and not fresh_replay_is_safe)
+                                    continuity_bound or (session.key.strength == "hard" and not fresh_replay_is_safe)
                                 ):
                                     if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                         stream_idle_timeout_total.labels(surface="http_bridge").inc()
@@ -2961,9 +3065,7 @@ class _HTTPBridgeStreamingMixin:
                                         break
                                     circuit_keepalive_waiting = True
                                     keepalive_count = 0
-                                    circuit_keepalive_until = (
-                                        _service_time().monotonic() + retry_cooldown_seconds
-                                    )
+                                    circuit_keepalive_until = _service_time().monotonic() + retry_cooldown_seconds
                                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                                         http_bridge_retry_circuit_total.labels(outcome="keepalive").inc()
                                     logger.info(

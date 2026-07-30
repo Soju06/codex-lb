@@ -28,9 +28,7 @@ def test_http_bridge_continuity_bound_without_safe_replay() -> None:
     )
     ordinary_request = replace(unsafe_continuation, previous_response_id=None)
 
-    assert http_bridge_streaming_module._http_bridge_continuity_bound_without_safe_replay(
-        unsafe_continuation
-    )
+    assert http_bridge_streaming_module._http_bridge_continuity_bound_without_safe_replay(unsafe_continuation)
     assert not http_bridge_streaming_module._http_bridge_continuity_bound_without_safe_replay(safe_full_resend)
     assert http_bridge_streaming_module._http_bridge_continuity_bound_without_safe_replay(hard_turn_state)
     assert not http_bridge_streaming_module._http_bridge_continuity_bound_without_safe_replay(ordinary_request)

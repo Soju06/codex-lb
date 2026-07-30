@@ -188,7 +188,14 @@ def _relay_receive_error_code(error_code: str) -> str | None:
 
     # Relay owners map an absent code to their established stream_incomplete
     # contract. Leaking the adapter's generic fallback would bypass that path.
-    return error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+    return error_code if error_code in {PROCESS_NETWORK_UNAVAILABLE_CODE, "upstream_keepalive_timeout"} else None
+
+
+def _is_keepalive_timeout_close(exc: ConnectionClosedError) -> bool:
+    """Classify peer/proxy heartbeat failures without exposing socket details."""
+
+    reason = _close_reason_from_exception(exc)
+    return "keepalive ping timeout" in f"{exc} {reason or ''}".lower()
 
 
 async def _rotate_after_websocket_network_failure(error_code: str) -> None:
@@ -275,6 +282,11 @@ class WebsocketsUpstreamWebSocket:
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
+            relay_error_code = (
+                "upstream_keepalive_timeout"
+                if _is_keepalive_timeout_close(exc)
+                else _relay_receive_error_code(error_code)
+            )
             # ConnectionClosedError describes an incomplete close handshake,
             # not generic transport provenance. Let Responses relay owners map
             # it to stream_incomplete while live relays preserve received closes.
@@ -286,7 +298,7 @@ class WebsocketsUpstreamWebSocket:
                     if self._preserve_close_semantics
                     else str(exc)
                 ),
-                error_code=_relay_receive_error_code(error_code),
+                error_code=relay_error_code,
             )
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)

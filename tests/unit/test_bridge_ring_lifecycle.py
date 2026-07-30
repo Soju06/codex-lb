@@ -31,7 +31,12 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, durable_bridge_hash
+from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+from app.modules.proxy.durable_bridge_repository import (
+    DurableBridgeAliasRegistration,
+    DurableBridgeRepository,
+    durable_bridge_hash,
+)
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit

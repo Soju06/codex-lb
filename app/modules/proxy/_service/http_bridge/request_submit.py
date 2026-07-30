@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 from collections import deque
 from dataclasses import replace
@@ -181,6 +182,7 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    durable_bridge_hash,
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -585,6 +587,78 @@ class _HTTPBridgeRequestSubmitMixin:
         request_scope_id: str,
         recovery_turn_state: str | None = None,
     ) -> None:
+        # Eventless upstream timeouts retire the current socket.  A client
+        # reconnect can otherwise create a fresh socket for the same hard key
+        # and submit the identical request repeatedly while the retry circuit
+        # is cooling down.  Gate new submissions before any reconnect/send so
+        # the circuit turns this into a bounded 503 instead of another
+        # response.create attempt.  A proof-gated full resend remains allowed
+        # because it is the client's own replay-safe request, not an opaque
+        # continuation replay.
+        allow_proof_gated_continuity_replay = bool(
+            request_state.previous_response_id is not None
+            and request_state.fresh_upstream_request_is_retry_safe
+            and request_state.fresh_upstream_request_text
+            and request_state.response_event_count == 0
+            and request_state.replay_count == 0
+        )
+        if not await self._http_bridge_precreated_retry_allowed(
+            session,
+            allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
+        ):
+            retry_after_seconds = max(
+                1,
+                math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
+            )
+            _log_http_bridge_event(
+                "submit_retry_circuit_suppressed",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="hard_key_cooldown",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            raise ProxyResponseError(
+                503,
+                openai_error(
+                    "upstream_request_timeout",
+                    "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly.",
+                ),
+                retry_after_seconds=retry_after_seconds,
+            )
+        # Persist the recovery checkpoint only after the retry circuit has
+        # admitted this request. A client reconnect suppressed by the
+        # cooldown must not create or refresh a journal entry for a request
+        # that was never dispatched upstream.
+        if (
+            request_state.fresh_upstream_request_is_retry_safe
+            and request_state.fresh_upstream_request_text
+            and request_state.replay_count == 0
+            and request_state.recovery_attempt_fingerprint is None
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            attempt_fingerprint = durable_bridge_hash(request_state.fresh_upstream_request_text)
+            try:
+                attempt = await self._durable_bridge.record_recovery_attempt(
+                    session_id=session.durable_session_id,
+                    api_key_id=session.key.api_key_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    request_fingerprint=attempt_fingerprint,
+                    request_id=request_state.request_id,
+                    account_id=session.account.id,
+                    model=request_state.model,
+                    replay_safe=True,
+                )
+                if attempt is not None:
+                    request_state.recovery_attempt_fingerprint = attempt_fingerprint
+            except Exception:
+                # The journal is an additional recovery fence. A persistence
+                # failure must not block the original request, but it must
+                # also not claim that a migration checkpoint exists.
+                logger.warning("Failed to record HTTP bridge recovery attempt", exc_info=True)
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
@@ -1503,7 +1577,9 @@ class _HTTPBridgeRequestSubmitMixin:
         active_states = [
             # A draining request still owns terminal response continuity.  It
             # must keep the session alive while stale holders are cleaned up.
-            state for state in pending_states if state not in stale_states
+            state
+            for state in pending_states
+            if state not in stale_states
         ]
         if stale_states and active_states:
             return stale_states, False
@@ -1591,10 +1667,7 @@ class _HTTPBridgeRequestSubmitMixin:
             # client-provided full resend is as safe as a durable injection.
             # Session-level follow-ups do not opt in because their context may
             # depend on the anchor.
-            if (
-                not request_state.fresh_upstream_request_text
-                or not request_state.fresh_upstream_request_is_retry_safe
-            ):
+            if not request_state.fresh_upstream_request_text or not request_state.fresh_upstream_request_is_retry_safe:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
@@ -1734,8 +1807,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state = retryable_requests[0]
             model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             if request_state.previous_response_id is not None and not (
-                request_state.fresh_upstream_request_is_retry_safe
-                and request_state.fresh_upstream_request_text
+                request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
@@ -1809,20 +1881,14 @@ class _HTTPBridgeRequestSubmitMixin:
                 # Account-scoped uploaded files cannot be replayed on a
                 # different owner. Keep the preferred account mandatory for
                 # both silent recovery and clean-close recovery.
-                require_preferred_reconnect = (
-                    account_neutral_recovery or request_state.file_required_preferred_account
-                )
+                require_preferred_reconnect = account_neutral_recovery or request_state.file_required_preferred_account
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
                 if account_neutral_recovery:
                     request_state.preferred_account_id = session.account.id
                 elif not request_state.file_required_preferred_account:
-                    if (
-                        hard_owner_bound
-                        and not model_fallback_replay
-                        and not fresh_hard_request_account_switch_allowed
-                    ):
+                    if hard_owner_bound and not model_fallback_replay and not fresh_hard_request_account_switch_allowed:
                         request_state.preferred_account_id = session.account.id
                     else:
                         request_state.preferred_account_id = None
@@ -1883,11 +1949,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     request_state.clean_close_retry_result = False
                     return False
-            if (
-                hard_owner_bound
-                and not model_fallback_replay
-                and not fresh_hard_request_account_switch_allowed
-            ):
+            if hard_owner_bound and not model_fallback_replay and not fresh_hard_request_account_switch_allowed:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,

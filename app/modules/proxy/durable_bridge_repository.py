@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
+    HttpBridgeRecoveryAttemptRecord,
+    HttpBridgeRecoveryAttemptState,
     HttpBridgeRetryCircuit,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
@@ -34,6 +36,7 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_sessions",
     "http_bridge_session_aliases",
     "http_bridge_retry_circuits",
+    "http_bridge_recovery_attempts",
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _PURGE_CLOSED_BATCH_SIZE = 500
@@ -137,6 +140,18 @@ class DurableBridgeRetryCircuitSnapshot:
     cooldown_until_epoch: float
     last_detail: str | None
     updated_at_epoch: float
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeRecoveryAttemptSnapshot:
+    session_id: str
+    request_fingerprint: str
+    request_id: str
+    account_id: str | None
+    model: str | None
+    replay_safe: bool
+    state: HttpBridgeRecoveryAttemptState
+    response_id: str | None
 
 
 class DurableBridgeRepository:
@@ -256,10 +271,13 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (conflict_failures >= threshold, func.greatest(
-                    cooldown_floor,
-                    merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
-                )),
+                (
+                    conflict_failures >= threshold,
+                    func.greatest(
+                        cooldown_floor,
+                        merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                    ),
+                ),
                 else_=0.0,
             )
             statement = insert_statement.on_conflict_do_update(
@@ -319,10 +337,13 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (conflict_failures >= threshold, func.max(
-                    cooldown_floor,
-                    merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
-                )),
+                (
+                    conflict_failures >= threshold,
+                    func.max(
+                        cooldown_floor,
+                        merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                    ),
+                ),
                 else_=0.0,
             )
             statement = insert_statement.on_conflict_do_update(
@@ -407,9 +428,7 @@ class DurableBridgeRepository:
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
         async with sqlite_writer_section():
-            await self._session.execute(
-                delete(HttpBridgeRetryCircuit).where(*conditions)
-            )
+            await self._session.execute(delete(HttpBridgeRetryCircuit).where(*conditions))
             await self._session.commit()
 
     async def get_session_by_id(self, session_id: str) -> DurableBridgeSessionSnapshot | None:
@@ -673,6 +692,132 @@ class DurableBridgeRepository:
             owner_epoch=owner_epoch,
             values=values,
         )
+
+    async def record_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        request_id: str,
+        account_id: str | None,
+        model: str | None,
+        replay_safe: bool,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        """Record a safe request before dispatch so an ambiguous outcome is recoverable."""
+
+        owner_exists = await self._session.scalar(
+            select(HttpBridgeSessionRecord.id).where(
+                HttpBridgeSessionRecord.id == session_id,
+                HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+            )
+        )
+        if owner_exists is None:
+            return None
+        async with sqlite_writer_section():
+            attempt = await self._session.scalar(
+                select(HttpBridgeRecoveryAttemptRecord)
+                .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
+                .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
+                .with_for_update()
+            )
+            if attempt is None:
+                attempt = HttpBridgeRecoveryAttemptRecord(
+                    session_id=session_id,
+                    request_fingerprint=request_fingerprint,
+                    request_id=request_id,
+                    account_id=account_id,
+                    model=model,
+                    replay_safe=replay_safe,
+                    state=HttpBridgeRecoveryAttemptState.UNKNOWN,
+                )
+                self._session.add(attempt)
+            elif attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
+                return _to_recovery_attempt_snapshot(attempt)
+            else:
+                attempt.request_id = request_id
+                attempt.account_id = account_id
+                attempt.model = model
+                attempt.replay_safe = replay_safe
+                attempt.state = HttpBridgeRecoveryAttemptState.UNKNOWN
+                attempt.response_id = None
+            try:
+                await self._session.commit()
+            except IntegrityError:
+                # A concurrent owner may have inserted the same fingerprint
+                # after our initial SELECT (the absent-row case cannot be
+                # locked by SQLite). Re-read the winner and use its durable
+                # state instead of surfacing a transient uniqueness failure.
+                await self._session.rollback()
+                attempt = await self._session.scalar(
+                    select(HttpBridgeRecoveryAttemptRecord)
+                    .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
+                    .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
+                )
+                if attempt is None:
+                    raise
+                if attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
+                    return _to_recovery_attempt_snapshot(attempt)
+                attempt.request_id = request_id
+                attempt.account_id = account_id
+                attempt.model = model
+                attempt.replay_safe = replay_safe
+                attempt.state = HttpBridgeRecoveryAttemptState.UNKNOWN
+                attempt.response_id = None
+                await self._session.commit()
+            await self._session.refresh(attempt)
+            return _to_recovery_attempt_snapshot(attempt)
+
+    async def lookup_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        request_fingerprint: str,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        attempt = await self._session.scalar(
+            select(HttpBridgeRecoveryAttemptRecord)
+            .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
+            .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
+            .where(HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN)
+            .where(HttpBridgeRecoveryAttemptRecord.replay_safe.is_(True))
+        )
+        return _to_recovery_attempt_snapshot(attempt) if attempt is not None else None
+
+    async def mark_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        response_id: str | None = None,
+    ) -> bool:
+        owner_exists = await self._session.scalar(
+            select(HttpBridgeSessionRecord.id).where(
+                HttpBridgeSessionRecord.id == session_id,
+                HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+            )
+        )
+        if owner_exists is None:
+            return False
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeRecoveryAttemptRecord)
+                .where(
+                    HttpBridgeRecoveryAttemptRecord.session_id == session_id,
+                    HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
+                    HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN,
+                )
+                .values(
+                    state=HttpBridgeRecoveryAttemptState.REPLAYED,
+                    response_id=response_id,
+                )
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
     async def _execute_fenced_session_update(
         self,
@@ -1381,7 +1526,8 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
             text(
                 "SELECT name FROM sqlite_master "
                 "WHERE type = 'table' "
-                "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits')"
+                "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
+                "'http_bridge_recovery_attempts')"
             )
         )
     else:
@@ -1390,7 +1536,8 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' "
                 "AND table_name IN ("
-                "'http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits'"
+                "'http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
+                "'http_bridge_recovery_attempts'"
                 ")"
             )
         )
@@ -1483,6 +1630,21 @@ def _to_snapshot_required(row: HttpBridgeSessionRecord) -> DurableBridgeSessionS
     if snapshot is None:
         raise RuntimeError("Expected durable bridge session snapshot")
     return snapshot
+
+
+def _to_recovery_attempt_snapshot(
+    row: HttpBridgeRecoveryAttemptRecord,
+) -> DurableBridgeRecoveryAttemptSnapshot:
+    return DurableBridgeRecoveryAttemptSnapshot(
+        session_id=row.session_id,
+        request_fingerprint=row.request_fingerprint,
+        request_id=row.request_id,
+        account_id=row.account_id,
+        model=row.model,
+        replay_safe=bool(row.replay_safe),
+        state=row.state,
+        response_id=row.response_id,
+    )
 
 
 def _to_retry_circuit_snapshot(row: HttpBridgeRetryCircuit | None) -> DurableBridgeRetryCircuitSnapshot | None:

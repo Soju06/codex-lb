@@ -1587,6 +1587,25 @@ class _HTTPBridgeUpstreamEventsMixin:
                 completed_usage = None
                 completed_empty_prewarm = False
 
+        if (
+            event_type == "response.completed"
+            and matched_request_state is not None
+            and matched_request_state.recovery_attempt_fingerprint is not None
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            try:
+                await self._durable_bridge.mark_recovery_attempt_replayed(
+                    session_id=session.durable_session_id,
+                    api_key_id=session.key.api_key_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
+                    response_id=response_id,
+                )
+            except Exception:
+                logger.warning("Failed to settle HTTP bridge recovery attempt", exc_info=True)
+
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated

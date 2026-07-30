@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
@@ -6,8 +7,10 @@ from collections import deque
 from collections.abc import Collection
 from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
+
 import aiohttp
 import anyio
+
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -82,8 +85,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
     _http_bridge_has_durable_recovery_anchor,
-    _http_bridge_inflight_creation_count,
     _http_bridge_incompatible_model_fork_key,
+    _http_bridge_inflight_creation_count,
     _http_bridge_key_strength,
     _http_bridge_locally_owned_fork_key,
     _http_bridge_models_compatible,
@@ -108,10 +111,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _mark_http_bridge_reader_handoff_reconnect_failed,
-    _persist_http_bridge_previous_response_alias,
-    _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
-    _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _refresh_reused_http_bridge_session_with_handoff,
@@ -150,11 +150,11 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_precreated_replay_fallback,
+    _complete_http_bridge_handoff,
     _copy_websocket_route_metadata_to_session,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
-    _complete_http_bridge_handoff,
     _sleep_for_account_selection_recovery,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
@@ -207,11 +207,14 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
 )
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, AccountLease
+
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+
+
 class _HTTPBridgeMixin(
     _HTTPBridgeStreamingMixin,
     _HTTPBridgeSessionRegistryMixin,
@@ -241,6 +244,7 @@ class _HTTPBridgeMixin(
                 action="http_bridge_session_close",
                 request_id=_hash_identifier(session.key.affinity_key),
             )
+
     async def _drain_http_bridge_background_cleanup_tasks(self, *, reason: str) -> None:
         tasks = [
             task
@@ -266,6 +270,7 @@ class _HTTPBridgeMixin(
                 len(tasks),
                 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
             )
+
     async def _fail_http_bridge_inflight_session_creation(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -289,6 +294,7 @@ class _HTTPBridgeMixin(
                 inflight_future.set_exception(exc)
                 inflight_future.exception()
             return True
+
     async def _evict_http_bridge_inflight_waiter(
         self,
         inflight_future: asyncio.Future["_HTTPBridgeSession"],
@@ -309,6 +315,7 @@ class _HTTPBridgeMixin(
                 inflight_future.set_exception(exc)
                 inflight_future.exception()
             return stale_key
+
     @overload
     async def _get_or_create_http_bridge_session(
         self,
@@ -428,6 +435,7 @@ class _HTTPBridgeMixin(
                         skip_registration_gate = True
             if not skip_registration_gate:
                 import app.core.startup as startup_module
+
                 registered = await startup_module.wait_for_bridge_registration(
                     timeout_seconds=settings.upstream_connect_timeout_seconds,
                 )
@@ -455,6 +463,7 @@ class _HTTPBridgeMixin(
         force_durable_takeover_after_detach = used_session_header_fallback = False
         locally_owned_fork_key: _HTTPBridgeSessionKey | None = None
         model_transition_parent_key: _HTTPBridgeSessionKey | None = None
+
         def bind_account_neutral_recovery_owner(session: _HTTPBridgeSession) -> None:
             nonlocal preferred_account_id
             if not is_http_bridge_account_neutral_replay(
@@ -466,6 +475,7 @@ class _HTTPBridgeMixin(
                 ("requested continuity owner", preferred_account_id),
                 ("local account-neutral recovery", session.account.id),
             )
+
         while True:
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
                 kind=key.affinity_kind,
@@ -1279,7 +1289,8 @@ class _HTTPBridgeMixin(
                         if len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self) >= max_sessions:
                             if _http_bridge_inflight_creation_count(self):
                                 capacity_wait_future = next(
-                                    future for future in self._http_bridge_inflight_sessions.values()
+                                    future
+                                    for future in self._http_bridge_inflight_sessions.values()
                                     if not getattr(future, "_http_bridge_handoff", False)
                                 )
                             else:
@@ -1288,7 +1299,9 @@ class _HTTPBridgeMixin(
                                     key,
                                     account_id=None,
                                     model=request_model,
-                                    pending_count=len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self),
+                                    pending_count=(
+                                        len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self)
+                                    ),
                                     cache_key_family=key.affinity_kind,
                                     model_class=_extract_model_class(request_model) if request_model else None,
                                 )
@@ -1555,6 +1568,7 @@ class _HTTPBridgeMixin(
                     else None,
                 )
             return created_session
+
     async def close_all_http_bridge_sessions(self) -> None:
         async with self._http_bridge_lock:
             sessions_to_close = list(self._http_bridge_sessions.values())
@@ -1578,6 +1592,7 @@ class _HTTPBridgeMixin(
         for session in sessions_to_close:
             await self._close_http_bridge_session(session)
         await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+
     async def mark_http_bridge_draining(self) -> None:
         try:
             await self._durable_bridge.mark_instance_draining(
@@ -1585,6 +1600,7 @@ class _HTTPBridgeMixin(
             )
         except Exception:
             logger.warning("Failed to mark durable HTTP bridge sessions draining", exc_info=True)
+
     def _prune_http_bridge_sessions_locked(self) -> list["_HTTPBridgeSession"]:
         now = _service_time().monotonic()
         stale_keys: list[_HTTPBridgeSessionKey] = []
@@ -1621,6 +1637,7 @@ class _HTTPBridgeMixin(
                 )
                 sessions_to_close.append(session)
         return sessions_to_close
+
     async def _close_http_bridge_session(
         self,
         session: "_HTTPBridgeSession",
@@ -1656,7 +1673,11 @@ class _HTTPBridgeMixin(
             if upstream_reader is asyncio.current_task():
                 session.upstream_reader = None
             else:
-                await _await_cancelled_task(upstream_reader, label="http bridge upstream reader", cleanup_tasks=self._background_cleanup_tasks)
+                await _await_cancelled_task(
+                    upstream_reader,
+                    label="http bridge upstream reader",
+                    cleanup_tasks=self._background_cleanup_tasks,
+                )
                 if session.upstream_reader is upstream_reader:
                     session.upstream_reader = None
         try:
@@ -1687,6 +1708,7 @@ class _HTTPBridgeMixin(
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+
     async def _create_http_bridge_session(
         self,
         key: "_HTTPBridgeSessionKey",
@@ -1967,6 +1989,7 @@ class _HTTPBridgeMixin(
         _copy_websocket_route_metadata_to_session(session, request_state)
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
+
     async def _reconnect_http_bridge_session(
         self,
         session: "_HTTPBridgeSession",
@@ -1998,7 +2021,11 @@ class _HTTPBridgeMixin(
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 try:
-                    cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader", cleanup_tasks=self._background_cleanup_tasks)
+                    cancelled = await _await_cancelled_task(
+                        old_reader,
+                        label="http bridge upstream reader",
+                        cleanup_tasks=self._background_cleanup_tasks,
+                    )
                 except BaseException:
                     session.closed = True
                     _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
@@ -2064,6 +2091,7 @@ class _HTTPBridgeMixin(
             preferred_candidate_id = None
         selected_account_lease: AccountLease | None = None
         selected_account_model_replacement = False
+
         def record_selected_account_takeover(
             selected_account_id: str | None, preferred_account_id: str | None = session.account.id
         ) -> None:
@@ -2071,6 +2099,7 @@ class _HTTPBridgeMixin(
                 preferred_account_id=preferred_account_id,
                 selected_account_id=selected_account_id,
             )
+
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
             lease = selected_account_lease
@@ -2085,6 +2114,7 @@ class _HTTPBridgeMixin(
             except BaseException:
                 complete_failed_handoff()
                 raise
+
         async def abandon_selected_account_retry(selected_account: Any) -> None:
             nonlocal preferred_candidate_id
             if hard_close_account_bound or selected_account_model_replacement:
@@ -2094,6 +2124,7 @@ class _HTTPBridgeMixin(
             excluded_account_ids.add(selected_account.id)
             preferred_candidate_id = None
             await release_selected_account_lease()
+
         async def open_replacement_upstream(selected_account: Any, selected_headers: dict[str, str]) -> Any:
             try:
                 return await self._open_upstream_websocket_with_budget(
@@ -2105,10 +2136,12 @@ class _HTTPBridgeMixin(
             except Exception:
                 session.closed = True
                 raise
+
         def complete_failed_handoff() -> None:
             session.closed = True
             _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+
         def require_bound_account() -> None:
             try:
                 _require_http_bridge_bound_account_not_excluded(
@@ -2117,6 +2150,7 @@ class _HTTPBridgeMixin(
             except BaseException:
                 complete_failed_handoff()
                 raise
+
         while True:
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
             try:
@@ -2324,6 +2358,7 @@ class _HTTPBridgeMixin(
                 await release_selected_account_lease()
                 complete_failed_handoff()
                 raise
+
         async def abort_selected_handoff() -> None:
             session.closed = True
             try:
@@ -2343,6 +2378,7 @@ class _HTTPBridgeMixin(
                 except BaseException:
                     logger.debug("Failed to release HTTP bridge old account lease", exc_info=True)
             complete_failed_handoff()
+
         try:
             if owner_rebind_affinity is not None:
                 await self._claim_http_bridge_replacement_before_swap(

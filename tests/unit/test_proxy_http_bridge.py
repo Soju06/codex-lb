@@ -19637,7 +19637,9 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == {"acc-rejected"}
     reconnect.assert_awaited_once()
-    assert reconnect.await_args.kwargs["require_same_account"] is False
+    reconnect_call = reconnect.await_args
+    assert reconnect_call is not None
+    assert reconnect_call.kwargs["request_state"] is request_state
 
 
 @pytest.mark.asyncio
@@ -19674,7 +19676,9 @@ async def test_retry_http_bridge_fresh_hard_request_excludes_silent_account(
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == {"acc-silent"}
     reconnect.assert_awaited_once()
-    assert reconnect.await_args.kwargs["require_same_account"] is False
+    reconnect_call = reconnect.await_args
+    assert reconnect_call is not None
+    assert reconnect_call.kwargs["request_state"] is request_state
 
 
 @pytest.mark.asyncio
@@ -20005,6 +20009,32 @@ async def test_http_bridge_retry_circuit_backoff_is_scoped_to_repeated_hard_keys
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_allows_only_one_half_open_probe() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-half-open")
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now - 1.0,
+            last_detail="missing_response_created_timeout",
+            last_touched_monotonic=now,
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert (
+        await service._http_bridge_precreated_retry_allowed(
+            hard_session,
+            allow_proof_gated_continuity_replay=True,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_allows_fresh_hard_account_switch_during_cooldown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
@@ -20113,9 +20143,7 @@ async def test_http_bridge_retry_circuit_purges_expired_persisted_state() -> Non
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-expired-circuit")
     expired_updated_at = (
-        time.time()
-        - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
-        - 1.0
+        time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
@@ -20154,9 +20182,7 @@ async def test_http_bridge_retry_circuit_keeps_newer_local_failure_after_stale_p
     cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = local_state
     cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
     expired_updated_at = (
-        time.time()
-        - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
-        - 1.0
+        time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
@@ -20190,9 +20216,7 @@ async def test_http_bridge_retry_circuit_keeps_local_state_when_stale_purge_fail
     cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = local_state
     cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
     expired_updated_at = (
-        time.time()
-        - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
-        - 1.0
+        time.time() - http_bridge_retry_circuit_module.DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS - 1.0
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
@@ -20286,20 +20310,21 @@ async def test_http_bridge_retry_circuit_clear_retries_after_lookup_failure() ->
 async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-replica-reset-lineage")
+    now_epoch = time.time()
     reset = SimpleNamespace(
         consecutive_failures=0,
         cooldown_until_epoch=0.0,
         last_detail=None,
-        updated_at_epoch=200.0,
+        updated_at_epoch=now_epoch,
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(
             side_effect=[
                 SimpleNamespace(
                     consecutive_failures=3,
-                    cooldown_until_epoch=time.time() + 60.0,
+                    cooldown_until_epoch=now_epoch + 60.0,
                     last_detail="stream_incomplete",
-                    updated_at_epoch=100.0,
+                    updated_at_epoch=now_epoch - 1.0,
                 ),
                 reset,
             ]
@@ -20309,7 +20334,7 @@ async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset(
                 consecutive_failures=1,
                 cooldown_until_epoch=0.0,
                 last_detail="stream_incomplete",
-                updated_at_epoch=300.0,
+                updated_at_epoch=now_epoch + 1.0,
             )
         ),
     )
@@ -20319,8 +20344,8 @@ async def test_http_bridge_retry_circuit_replaces_local_state_after_newer_reset(
 
     state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
     assert state.consecutive_failures == 1
-    assert state.persisted_updated_at_epoch == 300.0
-    assert service._durable_bridge.persist_retry_circuit.await_args.kwargs["base_updated_at_epoch"] == 200.0
+    assert state.persisted_updated_at_epoch == now_epoch + 1.0
+    assert service._durable_bridge.persist_retry_circuit.await_args.kwargs["base_updated_at_epoch"] == now_epoch
 
 
 @pytest.mark.asyncio
@@ -20359,6 +20384,72 @@ async def test_http_bridge_retry_circuit_counts_stream_idle_timeout() -> None:
     await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_idle_timeout")
 
     assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key].consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_counts_missing_response_created_timeout() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-missing-response-created-circuit")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(
+        hard_session,
+        detail="missing_response_created_timeout",
+    )
+    await service._record_http_bridge_retry_circuit_failure(
+        hard_session,
+        detail="missing_response_created_timeout",
+    )
+
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    assert state.consecutive_failures == 2
+    assert state.last_detail == "missing_response_created_timeout"
+    assert state.cooldown_until > time.monotonic()
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-submit-cooldown")
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now + 60.0,
+            last_detail="missing_response_created_timeout",
+            last_touched_monotonic=now,
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-cooldown",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"hello"}',
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            hard_session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=8,
+            request_scope_id="scope-submit-cooldown",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+    assert exc_info.value.retry_after_seconds >= 60
+    assert hard_session.queued_request_count == 0
 
 
 @pytest.mark.asyncio
@@ -20638,7 +20729,7 @@ async def test_http_bridge_eventless_timeout_force_retires_with_admission_waiter
 
     assert retired is True
     assert session.closed is True
-    retire.assert_awaited_once_with(session, detail="missing_response_created_timeout")
+    retire.assert_awaited_once_with(session, detail="missing_response_created_timeout", response_events_seen=0)
     fail_pending_await_args = fail_pending.await_args
     assert fail_pending_await_args is not None
     assert fail_pending_await_args.kwargs["penalize_account"] is False
@@ -20662,7 +20753,7 @@ async def test_http_bridge_reader_failure_retires_without_waiters_when_notificat
             error_message="closed",
         )
 
-    retire.assert_awaited_once_with(session, detail="stream_incomplete")
+    retire.assert_awaited_once_with(session, detail="stream_incomplete", response_events_seen=0)
 
 
 @pytest.mark.asyncio

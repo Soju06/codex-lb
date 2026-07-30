@@ -757,6 +757,7 @@ _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
 _HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS = 0.5
 _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS = 10.0
 
+
 def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
     settings = settings or get_settings()
     raw_timeout = getattr(
@@ -769,6 +770,7 @@ def _proxy_admission_wait_timeout_seconds(settings: Any | None = None) -> float:
     except (TypeError, ValueError):
         timeout = _DEFAULT_PROXY_ADMISSION_WAIT_TIMEOUT_SECONDS
     return max(0.001, timeout)
+
 
 # Maximum time (seconds) to wait for a prewarm upstream response before
 # giving up and letting the actual request proceed without prewarming.
@@ -783,8 +785,10 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
+
 async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
     await asyncio.gather(task, return_exceptions=True)
+
 
 async def _await_cancelled_task(
     task: asyncio.Task[_TaskResultT],
@@ -794,6 +798,12 @@ async def _await_cancelled_task(
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
     caller_task = asyncio.current_task()
+    # Give a newly-created child one scheduling turn before cancelling it.
+    # Without this yield, asyncio can cancel a task before its coroutine body
+    # starts, making a cancellation-resistant child look synchronously
+    # cancelled and defeating the bounded deferred-drain path.
+    if not task.done():
+        await asyncio.sleep(0)
     task.cancel()
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
@@ -809,6 +819,7 @@ async def _await_cancelled_task(
             cleanup_task.add_done_callback(cleanup_tasks.discard)
         return False
     return True
+
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
@@ -902,6 +913,7 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
 
+
 def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
     if budget is None:
         return 0.0
@@ -920,6 +932,7 @@ def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
     if value is None:
         return default
     return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
+
 
 class ProxyService(
     _ApiKeyUsageMixin,
@@ -1364,7 +1377,7 @@ class ProxyService(
                                 f" created_ms={state.latency_response_created_ms}"
                                 f" dsvis={state.downstream_visible}"
                                 f" age={max(0.0, now - state.started_at):.0f}"
-                                f" gate_wait_age={max(0.0, now - state.response_create_gate_wait_started_at) if state.response_create_gate_wait_started_at is not None else None}"
+                                f" gate_wait_age={max(0.0, now - state.response_create_gate_wait_started_at) if state.response_create_gate_wait_started_at is not None else None}"  # noqa: E501
                             )
                             for state in pending_states
                         ),

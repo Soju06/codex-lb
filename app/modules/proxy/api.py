@@ -724,6 +724,12 @@ _CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
     }
 )
 
+# A hard HTTP-bridge circuit is opened only after an ambiguous upstream turn
+# failure. The caller must not immediately replay that turn, but it should
+# also not have to guess when a new attempt is safe. Advertise a short,
+# bounded retry interval on the one-shot 503 response.
+_HTTP_BRIDGE_RETRY_AFTER_SECONDS = "60"
+
 
 def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if key.lower() in _CODEX_CONTROL_RESPONSE_HEADERS}
@@ -6142,11 +6148,14 @@ def _stream_startup_error_response(
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
         status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        startup_headers = dict(headers)
+        if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
+            startup_headers.setdefault("Retry-After", str(error.retry_after_seconds))
         return _logged_error_json_response(
             request,
             status_code,
             envelope.model_dump(mode="json", exclude_none=True),
-            headers=headers,
+            headers=startup_headers,
         )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(
@@ -6202,6 +6211,8 @@ def _logged_error_json_response(
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
+    elif status_code == 503 and code == "upstream_request_timeout":
+        effective_headers.setdefault("Retry-After", _HTTP_BRIDGE_RETRY_AFTER_SECONDS)
     log_error_response(
         logger,
         request,

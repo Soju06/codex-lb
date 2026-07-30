@@ -15,6 +15,7 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeRecoveryAttemptSnapshot,
     DurableBridgeRepository,
     DurableBridgeRetryCircuitSnapshot,
     DurableBridgeSessionSnapshot,
@@ -366,6 +367,64 @@ class DurableBridgeSessionCoordinator:
         if snapshot is None:
             return None
         return _to_lookup(snapshot)
+
+    async def record_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        request_id: str,
+        account_id: str | None,
+        model: str | None,
+        replay_safe: bool,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).record_recovery_attempt(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+                request_id=request_id,
+                account_id=account_id,
+                model=model,
+                replay_safe=replay_safe,
+            )
+
+    async def lookup_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        request_fingerprint: str,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).lookup_recovery_attempt(
+                session_id=session_id,
+                request_fingerprint=request_fingerprint,
+            )
+
+    async def mark_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        response_id: str | None = None,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).mark_recovery_attempt_replayed(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+                response_id=response_id,
+            )
 
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:

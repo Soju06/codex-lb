@@ -36569,6 +36569,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_
         request_state=request_state,
         restart_reader=True,
         require_same_account=False,
+        require_preferred_account=False,
     )
     send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
     assert send_request_ids == ["archive_bridge_retry_fresh"]
@@ -36767,6 +36768,7 @@ async def test_retry_http_bridge_precreated_request_keeps_hard_session_owner_bou
         session,
         request_state=request_state,
         require_same_account=True,
+        require_preferred_account=False,
     )
     assert request_state.preferred_account_id is None
     assert request_state.excluded_account_ids == set()

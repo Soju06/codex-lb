@@ -1,0 +1,2 @@
+# Normalize text files to LF to stop CRLF-only dirty churn.
+* text=auto eol=lf

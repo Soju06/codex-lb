@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
+import pickle
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -7486,6 +7488,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         "_http_bridge_payload_is_account_neutral_fresh_replay",
         account_neutral_classifier,
     )
+    get_or_create = AsyncMock(return_value=session)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(
         service,
@@ -7493,7 +7496,6 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         AsyncMock(return_value=forwardable_owner),
     )
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
-    get_or_create = AsyncMock(return_value=session)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
@@ -7552,6 +7554,172 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         assert request_state.proxy_injected_previous_response_id is True
         assert request_state.fresh_upstream_request_is_retry_safe is False
     account_neutral_classifier.assert_not_called()
+    create_call = get_or_create.await_args
+    assert create_call is not None
+    create_kwargs = create_call.kwargs
+    create_headers = {key.lower(): value for key, value in create_kwargs["headers"].items()}
+    create_affinity = cast(proxy_service._AffinityPolicy, create_kwargs["affinity"])
+    if preserves_full_resend and not forwardable_owner:
+        assert "x-codex-session-id" not in create_headers
+        assert create_affinity.kind == proxy_service.StickySessionKind.CODEX_SESSION
+        assert create_affinity.key is None
+        assert create_affinity.codex_session_source is None
+        assert create_kwargs["session_header_fallback_key"] is None
+        assert create_kwargs["preferred_account_id"] == "acc-1"
+        assert create_kwargs["preferred_account_has_continuity_provenance"] is True
+    else:
+        assert create_headers["x-codex-session-id"] == "sid-123"
+        assert create_affinity.key == "sid-123"
+        assert create_affinity.codex_session_source == "session_header"
+
+
+def test_verified_durable_full_resend_proof_is_sealed_immutable_and_request_bound() -> None:
+    stored_input_items: list[proxy_service.JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {"role": "user", "content": "hello"},
+    ]
+    full_input = [
+        *stored_input_items,
+        {"role": "assistant", "content": "hello back"},
+        {"role": "user", "content": "follow up"},
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": full_input,
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-proof",
+        canonical_kind="session_header",
+        canonical_key="sid-proof",
+        api_key_scope="__anonymous__",
+        account_id="acc-proof",
+        owner_instance_id=None,
+        owner_epoch=3,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state="http_turn_proof",
+        latest_response_id="resp-proof",
+        latest_input_item_count=len(stored_input_items),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
+        model="gpt-5.4",
+    )
+
+    with pytest.raises(TypeError, match="created only by the verifier"):
+        http_bridge_streaming_module._VerifiedDurableFullResend(
+            _token=object(),
+            durable_session_id=durable_lookup.session_id,
+            owner_account_id=cast(str, durable_lookup.account_id),
+            latest_response_id=cast(str, durable_lookup.latest_response_id),
+            stored_input_item_count=len(stored_input_items),
+            stored_input_fingerprint=cast(str, durable_lookup.latest_input_full_fingerprint),
+            full_input_fingerprint=proxy_service._fingerprint_input_items(full_input),
+            pending_tool_calls=None,
+        )
+
+    proof = http_bridge_streaming_module._verify_durable_full_resend(payload, durable_lookup)
+    assert proof is not None
+    assert proof.matches(payload, durable_lookup) is True
+    assert copy.copy(proof) is proof
+    assert copy.deepcopy(proof) is proof
+    with pytest.raises(AttributeError, match="immutable"):
+        proof._owner_account_id = "acc-forged"  # type: ignore[misc]
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(proof)
+
+    changed_payload = payload.model_copy(
+        update={
+            "input": [
+                *stored_input_items,
+                {"role": "assistant", "content": "different output"},
+                {"role": "user", "content": "follow up"},
+            ]
+        }
+    )
+    assert proof.matches(changed_payload, durable_lookup) is False
+    substituted_durable_lookups = (
+        replace(durable_lookup, session_id="sess-other"),
+        replace(durable_lookup, account_id="acc-other"),
+        replace(durable_lookup, latest_response_id="resp-other"),
+        replace(durable_lookup, latest_input_item_count=len(stored_input_items) + 1),
+        replace(durable_lookup, latest_input_full_fingerprint="fingerprint-other"),
+        replace(durable_lookup, latest_pending_tool_calls={"call-other": "function_call"}),
+    )
+    assert all(proof.matches(payload, lookup) is False for lookup in substituted_durable_lookups)
+
+    incomplete_payload = payload.model_copy(
+        update={"input": [*stored_input_items, {"role": "user", "content": "follow up"}]}
+    )
+    assert http_bridge_streaming_module._verify_durable_full_resend(incomplete_payload, durable_lookup) is None
+
+
+def test_verified_durable_full_resend_accepts_response_bound_pending_tool_calls() -> None:
+    stored_input_items: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": "look that up"},
+    ]
+    full_input: list[proxy_service.JsonValue] = [
+        *stored_input_items,
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "result",
+        },
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": full_input,
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-tool-proof",
+        canonical_kind="session_header",
+        canonical_key="sid-tool-proof",
+        api_key_scope="__anonymous__",
+        account_id="acc-proof",
+        owner_instance_id=None,
+        owner_epoch=3,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.CLOSED,
+        latest_turn_state="http_turn_tool_proof",
+        latest_response_id="resp-tool-proof",
+        latest_input_item_count=len(stored_input_items),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(stored_input_items),
+        model="gpt-5.4",
+        latest_pending_tool_calls={"call-1": "function_call"},
+    )
+
+    proof = http_bridge_streaming_module._verify_durable_full_resend(payload, durable_lookup)
+
+    assert proof is not None
+    assert proof.matches(payload, durable_lookup) is True
+    assert (
+        proof.matches(
+            payload,
+            replace(durable_lookup, latest_pending_tool_calls={"call-other": "function_call"}),
+        )
+        is False
+    )
+    assert (
+        http_bridge_streaming_module._verify_durable_full_resend(
+            payload,
+            replace(durable_lookup, latest_pending_tool_calls=None),
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

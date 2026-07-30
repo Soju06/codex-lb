@@ -220,6 +220,155 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
+class _VerifiedDurableFullResend:
+    """Immutable proof that one payload contains a durable turn's complete context."""
+
+    _durable_session_id: str
+    _full_input_fingerprint: str
+    _latest_response_id: str
+    _owner_account_id: str
+    _pending_tool_calls: tuple[tuple[str, str], ...] | None
+    _stored_input_fingerprint: str
+    _stored_input_item_count: int
+    __slots__ = (
+        "_durable_session_id",
+        "_full_input_fingerprint",
+        "_latest_response_id",
+        "_owner_account_id",
+        "_pending_tool_calls",
+        "_stored_input_fingerprint",
+        "_stored_input_item_count",
+    )
+    __construction_token = object()
+
+    def __init__(
+        self,
+        *,
+        _token: object,
+        durable_session_id: str,
+        owner_account_id: str,
+        latest_response_id: str,
+        stored_input_item_count: int,
+        stored_input_fingerprint: str,
+        full_input_fingerprint: str,
+        pending_tool_calls: tuple[tuple[str, str], ...] | None,
+    ) -> None:
+        if _token is not self.__construction_token:
+            raise TypeError("verified durable full resend proofs are created only by the verifier")
+        object.__setattr__(self, "_durable_session_id", durable_session_id)
+        object.__setattr__(self, "_owner_account_id", owner_account_id)
+        object.__setattr__(self, "_latest_response_id", latest_response_id)
+        object.__setattr__(self, "_stored_input_item_count", stored_input_item_count)
+        object.__setattr__(self, "_stored_input_fingerprint", stored_input_fingerprint)
+        object.__setattr__(self, "_full_input_fingerprint", full_input_fingerprint)
+        object.__setattr__(self, "_pending_tool_calls", pending_tool_calls)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("verified durable full resend proofs are immutable")
+
+    def __copy__(self) -> "_VerifiedDurableFullResend":
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> "_VerifiedDurableFullResend":
+        return self
+
+    def __reduce_ex__(self, _protocol: object) -> str | tuple[Any, ...]:
+        raise TypeError("verified durable full resend proofs cannot be serialized")
+
+    @property
+    def stored_input_item_count(self) -> int:
+        return self._stored_input_item_count
+
+    def matches(
+        self,
+        payload: ResponsesRequest,
+        durable_lookup: DurableBridgeLookup | None,
+    ) -> bool:
+        input_items = payload.input
+        return (
+            isinstance(input_items, list)
+            and durable_lookup is not None
+            and durable_lookup.session_id == self._durable_session_id
+            and durable_lookup.account_id == self._owner_account_id
+            and durable_lookup.latest_response_id == self._latest_response_id
+            and durable_lookup.latest_input_item_count == self._stored_input_item_count
+            and durable_lookup.latest_input_full_fingerprint == self._stored_input_fingerprint
+            and _pending_tool_calls_identity(durable_lookup.latest_pending_tool_calls) == self._pending_tool_calls
+            and _fingerprint_input_items(cast(list[JsonValue], input_items)) == self._full_input_fingerprint
+        )
+
+    @classmethod
+    def _verify(
+        cls,
+        payload: ResponsesRequest,
+        durable_lookup: DurableBridgeLookup,
+    ) -> "_VerifiedDurableFullResend | None":
+        owner_account_id = durable_lookup.account_id
+        latest_response_id = durable_lookup.latest_response_id
+        stored_count = durable_lookup.latest_input_item_count
+        stored_fingerprint = durable_lookup.latest_input_full_fingerprint
+        if (
+            owner_account_id is None
+            or latest_response_id is None
+            or stored_count is None
+            or stored_fingerprint is None
+            or not _http_bridge_payload_looks_like_full_resend(payload)
+            or not isinstance(payload.input, list)
+            or not _input_prefix_matches_stored_context(
+                payload.input,
+                stored_count=stored_count,
+                stored_fingerprint=stored_fingerprint,
+            )
+        ):
+            return None
+        input_items = cast(list[JsonValue], payload.input)
+        replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+            input_items,
+            stored_count=stored_count,
+        )
+        pending_tool_calls = durable_lookup.latest_pending_tool_calls
+        if replay_projection is None:
+            return None
+        safe_fresh_context = responses_input_suffix_retains_prior_output(
+            replay_projection.input_items,
+            stored_count=replay_projection.stored_prefix_count,
+        ) or (
+            pending_tool_calls is not None
+            and responses_input_suffix_matches_pending_tool_calls(
+                replay_projection.input_items,
+                stored_count=replay_projection.stored_prefix_count,
+                pending_tool_calls=pending_tool_calls,
+            )
+        )
+        if not safe_fresh_context:
+            return None
+        return cls(
+            _token=cls.__construction_token,
+            durable_session_id=durable_lookup.session_id,
+            owner_account_id=owner_account_id,
+            latest_response_id=latest_response_id,
+            stored_input_item_count=stored_count,
+            stored_input_fingerprint=stored_fingerprint,
+            full_input_fingerprint=_fingerprint_input_items(input_items),
+            pending_tool_calls=_pending_tool_calls_identity(pending_tool_calls),
+        )
+
+
+def _pending_tool_calls_identity(
+    pending_tool_calls: Mapping[str, str] | None,
+) -> tuple[tuple[str, str], ...] | None:
+    return None if pending_tool_calls is None else tuple(sorted(pending_tool_calls.items()))
+
+
+def _verify_durable_full_resend(
+    payload: ResponsesRequest,
+    durable_lookup: DurableBridgeLookup | None,
+) -> _VerifiedDurableFullResend | None:
+    if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
+        return None
+    return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+
+
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
     return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
 
@@ -907,6 +1056,8 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_prior_output = False
+        durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
+        durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
 
@@ -1020,17 +1171,36 @@ class _HTTPBridgeStreamingMixin:
                 and payload_looks_like_full_resend
                 and durable_full_resend_has_safe_fresh_context
             ):
-                # The client already supplied a complete fresh request. Adding
-                # a durable anchor here can strand it on the new WebSocket.
-                _log_http_bridge_event(
-                    "fresh_reattach_full_resend_preserved",
-                    bridge_session_key,
-                    account_id=durable_lookup.account_id,
-                    model=payload.model,
-                    detail="outcome=client_unanchored_full_resend",
-                    cache_key_family=bridge_session_key.affinity_kind,
-                    model_class=_extract_model_class(payload.model) if payload.model else None,
-                )
+                if durable_full_resend_proof is not None and durable_full_resend_proof.matches(payload, durable_lookup):
+                    durable_full_resend_fresh_bridge_proof = durable_full_resend_proof
+                    # The client already supplied a proved complete fresh
+                    # request. Adding a durable anchor here can strand it on
+                    # the new WebSocket.
+                    _log_http_bridge_event(
+                        "fresh_reattach_full_resend_preserved",
+                        bridge_session_key,
+                        account_id=durable_lookup.account_id,
+                        model=payload.model,
+                        detail="outcome=client_unanchored_full_resend",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
+                else:
+                    effective_payload = payload.model_copy(
+                        update={"previous_response_id": durable_lookup.latest_response_id}
+                    )
+                    proxy_injected_previous_response_id = True
+                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                    del _fresh_request_state
+                    _log_http_bridge_event(
+                        "fresh_reattach_anchor_injected",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=f"response_id={durable_lookup.latest_response_id}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
             elif fresh_reattach_can_use_durable_anchor:
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
@@ -1055,6 +1225,30 @@ class _HTTPBridgeStreamingMixin:
             affinity = _AffinityPolicy()
             incoming_turn_state_header = None
             session_header_fallback_key = None
+        owner_bound_full_resend_ignores_broad_session = (
+            not forwarded_request
+            and durable_full_resend_fresh_bridge_proof is not None
+            and durable_full_resend_fresh_bridge_proof.matches(payload, durable_lookup)
+            and affinity.codex_session_source == "session_header"
+        )
+        if owner_bound_full_resend_ignores_broad_session:
+            # The durable owner remains required through request_state below.
+            # Remove only the broad client alias that can resolve a stale raw
+            # compatibility row; keep CODEX_SESSION semantics so the new
+            # bridge can anchor later incremental turns to its fresh response.
+            affinity = _AffinityPolicy(kind=StickySessionKind.CODEX_SESSION)
+            incoming_session_header = None
+            session_header_fallback_key = None
+            _log_http_bridge_event(
+                "fresh_reattach_broad_session_owner_ignored",
+                bridge_session_key,
+                account_id=durable_lookup.account_id if durable_lookup is not None else None,
+                model=payload.model,
+                detail=(f"stored_items={durable_full_resend_fresh_bridge_proof.stored_input_item_count}"),
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
@@ -1179,7 +1373,9 @@ class _HTTPBridgeStreamingMixin:
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         session_creation_headers = (
-            without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
+            without_http_bridge_session_affinity_headers(headers)
+            if account_neutral_recovery or owner_bound_full_resend_ignores_broad_session
+            else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
         unanchored_fork_spill_attempted = False

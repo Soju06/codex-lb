@@ -210,14 +210,13 @@ async def _wait_for_http_bridge_recovery_settlement_retry(
         await asyncio.sleep(min(remaining, _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS))
         remaining -= _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS
         try:
-            async with service._http_bridge_lock:
-                await service._durable_bridge.renew_live_session(
-                    session_id=session_id,
-                    api_key_id=api_key_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=owner_epoch,
-                    lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                )
+            await service._durable_bridge.renew_live_session(
+                session_id=session_id,
+                api_key_id=api_key_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=owner_epoch,
+                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+            )
         except Exception:
             logger.debug("Failed to refresh HTTP bridge lease during settlement backoff", exc_info=True)
 
@@ -1845,6 +1844,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and matched_request_state.recovery_attempt_fingerprint is not None
             and recovery_attempt_session_id is not None
             and recovery_attempt_owner_epoch is not None
+            and not matched_request_state.recovery_attempt_event_observed
         ):
             # An explicit deterministic failure is terminal evidence for the
             # journaled request, not an ambiguous transport outcome. Consume

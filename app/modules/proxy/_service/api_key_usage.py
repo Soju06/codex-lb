@@ -397,6 +397,7 @@ class _ApiKeyUsageMixin:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
+                    retry_persistence_failures=True,
                 )
                 self._schedule_cancel_safe_cleanup(
                     release_coro,
@@ -416,6 +417,7 @@ class _ApiKeyUsageMixin:
                         api_key=api_key,
                         api_key_reservation=api_key_reservation,
                         request_id=request_id,
+                        retry_persistence_failures=True,
                     )
                     self._schedule_cancel_safe_cleanup(
                         release_coro,
@@ -458,6 +460,7 @@ class _ApiKeyUsageMixin:
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
+        retry_persistence_failures: bool = False,
     ) -> None:
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         retry_attempt = 1
@@ -472,6 +475,14 @@ class _ApiKeyUsageMixin:
                         )
                 return
             except Exception:
+                if not retry_persistence_failures:
+                    logger.warning(
+                        "Failed to release stream API key reservation key_id=%s request_id=%s",
+                        api_key.id,
+                        request_id,
+                        exc_info=True,
+                    )
+                    return
                 logger.warning(
                     "Failed to release stream API key reservation key_id=%s request_id=%s "
                     "retry_attempt=%d retry_delay_seconds=%.2f",

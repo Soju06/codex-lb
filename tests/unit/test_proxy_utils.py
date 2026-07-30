@@ -27342,10 +27342,20 @@ async def test_proxy_responses_websocket_relay_uses_stream_specific_request_budg
     upstream.send_text.assert_awaited_once()
 
 
+@pytest.mark.parametrize("release_read_fails", [False, True])
 @pytest.mark.asyncio
-async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_fails(monkeypatch):
+async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_fails(
+    monkeypatch,
+    release_read_fails: bool,
+):
     request_logs = _RequestLogsRecorder()
-    get_usage_reservation_mock = AsyncMock(return_value=SimpleNamespace(status="reserved", items=[]))
+    reservation_record = SimpleNamespace(status="reserved", items=[])
+    get_usage_reservation_mock = AsyncMock(
+        side_effect=(
+            [RuntimeError("transient reservation read failure"), reservation_record] if release_read_fails else None
+        ),
+        return_value=reservation_record,
+    )
     transition_usage_reservation_status_mock = AsyncMock(return_value=True)
     settle_usage_reservation_mock = AsyncMock()
     commit_mock = AsyncMock()
@@ -27440,13 +27450,18 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     owner_lookup.assert_awaited_once()
     select_account.assert_not_called()
     get_usage_reservation_mock.assert_awaited_once_with(reservation.reservation_id)
-    transition_usage_reservation_status_mock.assert_awaited_once_with(
-        reservation.reservation_id,
-        expected_status="reserved",
-        new_status="released",
-    )
-    settle_usage_reservation_mock.assert_awaited_once()
-    commit_mock.assert_awaited_once()
+    if release_read_fails:
+        transition_usage_reservation_status_mock.assert_not_awaited()
+        settle_usage_reservation_mock.assert_not_awaited()
+        commit_mock.assert_not_awaited()
+    else:
+        transition_usage_reservation_status_mock.assert_awaited_once_with(
+            reservation.reservation_id,
+            expected_status="reserved",
+            new_status="released",
+        )
+        settle_usage_reservation_mock.assert_awaited_once()
+        commit_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

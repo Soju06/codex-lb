@@ -202,6 +202,114 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
     service._handle_stream_error.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("code", "http_status", "message", "expected"),
+    [
+        (
+            "invalid_request_error",
+            400,
+            "No tool output found for function call call_abc.",
+            True,
+        ),
+        (
+            "invalid_request_error",
+            400,
+            "No tool output found for custom tool call call_abc.",
+            True,
+        ),
+        (
+            "invalid_request_error",
+            400,
+            "No tool output found for apply patch call call_abc.",
+            True,
+        ),
+        (
+            "invalid_request_error",
+            None,
+            "No tool output found for function call call_abc.",
+            True,
+        ),
+        # A model-entitlement rejection is account scoped and must stay
+        # penalizing even though it shares the invalid_request_error code.
+        (
+            "invalid_request_error",
+            400,
+            "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.",
+            False,
+        ),
+        ("invalid_request_error", 400, None, False),
+        # Only a genuine 400 proves upstream rejected the payload itself.
+        (
+            "invalid_request_error",
+            500,
+            "No tool output found for function call call_abc.",
+            False,
+        ),
+        ("server_error", 400, "No tool output found for function call call_abc.", False),
+    ],
+)
+def test_is_account_neutral_request_rejection(
+    code: str,
+    http_status: int | None,
+    message: str | None,
+    expected: bool,
+) -> None:
+    assert (
+        streaming_helpers_module._is_account_neutral_request_rejection(
+            code=code,
+            http_status=http_status,
+            message=message,
+        )
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_tool_output_rejection_does_not_penalize_account() -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": "No tool output found for custom tool call call_poisoned."},
+        "invalid_request_error",
+        400,
+    )
+
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_scoped_invalid_request_error_still_penalizes_account() -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account."},
+        "invalid_request_error",
+        400,
+    )
+
+    load_balancer.record_error.assert_awaited_once()
+
+
 def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
     token = set_request_id("req_previous_response")
     try:

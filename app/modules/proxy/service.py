@@ -2109,16 +2109,22 @@ _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
 )
 
 
+def _is_missing_tool_output_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
+
+
 def _is_missing_tool_output_error(
     *,
     code: str | None,
     param: str | None,
     message: str | None,
 ) -> bool:
-    if code != "invalid_request_error" or param != "input" or message is None:
+    if code != "invalid_request_error" or param != "input":
         return False
-    normalized = " ".join(message.lower().split())
-    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
+    return _is_missing_tool_output_message(message)
 
 
 def _is_previous_response_not_found_error(

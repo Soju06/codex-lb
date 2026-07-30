@@ -69,8 +69,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
-    _await_task_deferring_cancellation,
-    _close_http_bridge_session_bounded,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
@@ -1614,7 +1612,6 @@ class _HTTPBridgeMixin(
             if session.closed:
                 stale_keys.append(key)
                 continue
-            # The request owns this idle session until submit makes activity visible.
             if getattr(session, "unanchored_reservation_id", None) is not None:
                 continue
             pending_count = self._http_bridge_pending_count_nowait(session, context="idle_prune")
@@ -2433,7 +2430,7 @@ class _HTTPBridgeMixin(
             session.key,
             account_id=account.id,
             model=session.request_model,
-            detail=(f"selected_account_id={account.id}, durable_session_id={session.durable_session_id}"),
+            detail=f"selected_account_id={account.id}, durable_session_id={session.durable_session_id}",
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )

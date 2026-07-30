@@ -198,7 +198,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_MAX_COUNT = 1
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
- 
+
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"

@@ -37047,6 +37047,8 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejecte
     assert request_state.error_code_override == "upstream_rejected_input"
     assert request_state.error_http_status_override == 502
     assert "close_code=1000" in (request_state.error_message_override or "")
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_prewarm_completion_does_not_clear_retry_circuit(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

@@ -652,8 +652,30 @@ class _HTTPBridgeRequestSubmitMixin:
                     model=request_state.model,
                     replay_safe=True,
                 )
-                if attempt is not None:
-                    request_state.recovery_attempt_fingerprint = attempt_fingerprint
+                if attempt is None:
+                    # ``None`` is the durable owner fence rejecting this
+                    # worker, not an unavailable journal (which raises and
+                    # is handled below). Never dispatch from a stale owner.
+                    session.closed = True
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    _record_continuity_fail_closed(
+                        surface="http_bridge",
+                        reason="recovery_attempt_owner_fence_rejected",
+                        previous_response_id=request_state.previous_response_id,
+                        session_id=request_state.session_id,
+                        upstream_error_code="bridge_continuity_persistence_failed",
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "HTTP responses session ownership changed; retry the request.",
+                        ),
+                    )
+                request_state.recovery_attempt_fingerprint = attempt_fingerprint
+            except ProxyResponseError:
+                raise
             except Exception:
                 # The journal is an additional recovery fence. A persistence
                 # failure must not block the original request, but it must

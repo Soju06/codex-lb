@@ -16508,6 +16508,58 @@ async def test_recovery_submit_alias_persistence_failure_retires_before_send() -
 
 
 @pytest.mark.asyncio
+async def test_recovery_submit_owner_fence_rejection_retires_before_send() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    close = AsyncMock()
+    session = _make_bridge_session(key_value="owner-fence-rejection")
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=close),
+    )
+    session.durable_session_id = "durable-owner-fence-rejection"
+    session.durable_owner_epoch = 2
+    service._http_bridge_sessions[session.key] = session
+    record_recovery_attempt = AsyncMock(return_value=None)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            lookup_retry_circuit=AsyncMock(return_value=None),
+            record_recovery_attempt=record_recovery_attempt,
+            release_live_session=AsyncMock(return_value=None),
+        ),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-owner-fence-rejection",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}',
+        fresh_upstream_request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}',
+        fresh_upstream_request_is_retry_safe=True,
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    record_recovery_attempt.assert_awaited_once()
+    send_text.assert_not_awaited()
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
 async def test_recovery_submit_cancellation_after_alias_commit_restores_previous_owner() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = _make_account_neutral_replay_session_key("alias-commit-cancel")

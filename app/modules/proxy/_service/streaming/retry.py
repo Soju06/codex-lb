@@ -373,6 +373,7 @@ class _StreamingRetryMixin:
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
         pending_post_refresh_transient_penalties: list[tuple[Account, UpstreamError, str, int, int]] = []
+        deferred_account_error_backoffs: dict[str, Account] = {}
         post_refresh_transient_replacement_selected = False
         require_security_work_authorized = False
         account_leases: list[AccountLease] = []
@@ -424,18 +425,21 @@ class _StreamingRetryMixin:
             apply_pending_penalty = post_refresh_transient_replacement_selected and bool(
                 pending_post_refresh_transient_penalties
             )
+            wait_for_health_write = apply_pending_penalty or bool(deferred_account_error_backoffs)
+            settle_kwargs = {"wait_for_settlement": True} if wait_for_health_write else {}
+            settled_result = await proxy._settle_stream_api_key_usage(
+                api_key,
+                api_key_reservation,
+                current_settlement,
+                request_id,
+                **settle_kwargs,
+            )
+            if not settled_result:
+                return False
+            await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
             if apply_pending_penalty:
-                settled_result = await proxy._settle_stream_api_key_usage(
-                    api_key,
-                    api_key_reservation,
-                    current_settlement,
-                    request_id,
-                    wait_for_settlement=True,
-                )
                 pending_penalties = list(pending_post_refresh_transient_penalties)
                 pending_post_refresh_transient_penalties.clear()
-                if not settled_result:
-                    return False
                 for pending_penalty in pending_penalties:
                     (
                         failed_account,
@@ -452,23 +456,24 @@ class _StreamingRetryMixin:
                     )
                     if transient_retry_count > 1:
                         await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
-                return True
-            return await proxy._settle_stream_api_key_usage(
-                api_key,
-                api_key_reservation,
-                current_settlement,
-                request_id,
-            )
+            return settled_result
+
+        async def _record_or_defer_confirmed_route_backoff(account: Account) -> None:
+            if api_key is not None and api_key_reservation is not None:
+                deferred_account_error_backoffs.setdefault(account.id, account)
+                return
+            await proxy._load_balancer.record_error_backoff(account)
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
         ) -> bool:
             nonlocal post_refresh_transient_replacement_selected, settled
-            if pending_post_refresh_transient_penalties:
+            if pending_post_refresh_transient_penalties or deferred_account_error_backoffs:
                 # A failed replacement selection still ends the request. Mark
                 # it as terminal so the deferred failure is settled and
                 # recorded before this path returns or re-raises.
-                post_refresh_transient_replacement_selected = True
+                if pending_post_refresh_transient_penalties:
+                    post_refresh_transient_replacement_selected = True
                 settled = await _settle_stream_usage_before_pending_penalty(current_settlement)
                 return settled
             return True
@@ -580,6 +585,12 @@ class _StreamingRetryMixin:
                     ):
                         yield line
                 except ProxyResponseError as exc:
+                    if is_confirmed_pre_dispatch_transport_error(exc):
+                        # Keep dispatch provenance intact for the outer account
+                        # failover handler. Converting this into the generic
+                        # transient wrapper would authorize same-account replay
+                        # and lose the confirmed dead-route backoff semantics.
+                        raise
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(
                         error.code if error else None,
@@ -1349,6 +1360,13 @@ class _StreamingRetryMixin:
                     post_refresh_transient_replacement_selected = True
 
                 account_id_value = account.id
+                if last_pre_dispatch_transport_error is not None:
+                    # The preserved connect failure is only authoritative when
+                    # replacement selection is empty. Once another account is
+                    # actually attempted, its terminal outcome takes precedence.
+                    if last_transient_exc is last_pre_dispatch_transport_error:
+                        last_transient_exc = None
+                    last_pre_dispatch_transport_error = None
                 if last_account_model_rejection is not None and account.id != last_account_model_rejection_account_id:
                     # The original 400 is only the fallback when account
                     # selection cannot produce a replacement. Once this
@@ -1946,7 +1964,7 @@ class _StreamingRetryMixin:
                                     # error at a time.
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
-                                    await proxy._load_balancer.record_error_backoff(account)
+                                    await _record_or_defer_confirmed_route_backoff(account)
                                     can_try_other_account = (
                                         not require_preferred_account
                                         and account.id != file_preferred_account_id
@@ -2493,6 +2511,56 @@ class _StreamingRetryMixin:
                             if _facade()._is_account_neutral_error_code(error_code):
                                 await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                                 raise
+                            if is_confirmed_pre_dispatch_transport_error(retry_exc):
+                                # This retry still failed before dispatch. Handle
+                                # the proven dead route before the generic
+                                # failover policy: that policy does not know
+                                # about hard account ownership and may otherwise
+                                # cross a previous-response, turn-state, file, or
+                                # single-account boundary.
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
+                                await _record_or_defer_confirmed_route_backoff(account)
+                                last_transient_exc = retry_exc
+                                last_pre_dispatch_transport_error = retry_exc
+
+                                verified_owner_replay_moved = False
+                                if (
+                                    attempt < max_attempts - 1
+                                    and routing_strategy != "single_account"
+                                    and file_preferred_account_id is None
+                                    and turn_state_owner_account_id is None
+                                ):
+                                    verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
+                                        account_id=account.id,
+                                        outcome="owner_post_refresh_proxy_connect_failure",
+                                    )
+
+                                can_try_other_account = bool(
+                                    attempt < max_attempts - 1
+                                    and routing_strategy != "single_account"
+                                    and file_preferred_account_id is None
+                                    and turn_state_owner_account_id is None
+                                    and not require_preferred_account
+                                )
+                                if can_try_other_account:
+                                    excluded_account_ids.add(account.id)
+                                    if not verified_owner_replay_moved:
+                                        affinity = replace(affinity, reallocate_sticky=True)
+                                    _facade().logger.info(
+                                        "Retrying post-refresh stream after confirmed pre-dispatch proxy "
+                                        "connect failure request_id=%s account_id=%s attempt=%d",
+                                        request_id,
+                                        account.id,
+                                        attempt + 1,
+                                    )
+                                    continue
+
+                                # Hard ownership or an exhausted attempt budget:
+                                # stop here. The shared terminal path settles the
+                                # reservation, drains the deferred backoff floor,
+                                # and preserves this sanitized failure.
+                                break
                             current_error_payload = _upstream_error_from_openai(error)
                             current_error_code = error_code or "upstream_error"
                             classified = classify_upstream_failure(
@@ -2522,24 +2590,12 @@ class _StreamingRetryMixin:
                                 action,
                             )
                             if action == "failover_next":
-                                if is_confirmed_pre_dispatch_transport_error(retry_exc):
-                                    # Confirmed dead proxy route on the
-                                    # post-refresh attempt: release the lease
-                                    # first, then apply the bounded transient
-                                    # backoff floor instead of a single generic
-                                    # error, and preserve the sanitized failure
-                                    # for terminal rendering.
-                                    await _release_tracked_stream_lease(current_account_lease)
-                                    current_account_lease = None
-                                    await proxy._load_balancer.record_error_backoff(account)
-                                    last_pre_dispatch_transport_error = retry_exc
-                                else:
-                                    await proxy._handle_stream_error(
-                                        account,
-                                        current_error_payload,
-                                        current_error_code,
-                                        http_status=retry_exc.status_code,
-                                    )
+                                await proxy._handle_stream_error(
+                                    account,
+                                    current_error_payload,
+                                    current_error_code,
+                                    http_status=retry_exc.status_code,
+                                )
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
@@ -2574,7 +2630,12 @@ class _StreamingRetryMixin:
                             failed_account is account
                             for failed_account, *_rest in pending_post_refresh_transient_penalties
                         )
-                        health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+                        ordered_settlement_required = bool(
+                            pending_post_refresh_transient_penalties or deferred_account_error_backoffs
+                        )
+                        health_write_allowed = True
+                        if ordered_settlement_required:
+                            health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         if (
                             health_write_allowed
                             and settlement.account_health_error
@@ -2587,7 +2648,11 @@ class _StreamingRetryMixin:
                             )
                         elif health_write_allowed and settlement.record_success:
                             await proxy._load_balancer.record_success(account)
-                        if not settled and not settlement.usage_settlement_transferred:
+                        if (
+                            not settled
+                            and not ordered_settlement_required
+                            and not settlement.usage_settlement_transferred
+                        ):
                             settled = await _settle_stream_usage_before_pending_penalty(settlement)
                         upstream_transport_metric_status = settlement.status
                         _record_upstream_transport_metric_once(settlement.status)
@@ -2774,11 +2839,17 @@ class _StreamingRetryMixin:
                 and api_key is not None
                 and api_key_reservation is not None
             ):
-                release_coro = proxy._release_unsettled_stream_api_key_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
+
+                async def _release_reservation_then_drain_backoffs() -> None:
+                    released = await proxy._release_unsettled_stream_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        request_id=request_id,
+                    )
+                    if released:
+                        await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
+
+                release_coro = _release_reservation_then_drain_backoffs()
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     proxy._schedule_cancel_safe_cleanup(
@@ -2788,3 +2859,5 @@ class _StreamingRetryMixin:
                     )
                 else:
                     await release_coro
+            elif settled and deferred_account_error_backoffs:
+                await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)

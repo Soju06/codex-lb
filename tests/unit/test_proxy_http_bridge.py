@@ -476,6 +476,60 @@ async def test_submit_http_bridge_request_early_failure_releases_published_hando
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("submit_succeeds", [True, False])
+async def test_http_bridge_submit_transfers_settlement_ownership_only_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+    submit_succeeds: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-bridge-submit-owner",
+        key_id="key-bridge-submit-owner",
+        model="gpt-5.6-sol",
+    )
+    lifecycle = proxy_support_module._DeferredAccountBackoffLifecycle(reservation=reservation)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-submit-owner",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        deferred_account_backoff_lifecycle=lifecycle,
+    )
+
+    async def submit(*_args: object, **_kwargs: object) -> None:
+        if not submit_succeeds:
+            raise RuntimeError("send failed before submit returned")
+        assert request_state.event_queue is not None
+        request_state.event_queue.put_nowait(None)
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock(return_value=False))
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=4,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+        request_deadline=time.monotonic() + 10,
+    )
+
+    if submit_succeeds:
+        assert [event async for event in stream] == []
+    else:
+        with pytest.raises(RuntimeError, match="send failed"):
+            async for _ in stream:
+                pass
+
+    assert lifecycle.settlement_owned is submit_succeeds
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_request_cleanup_releases_pre_submit_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -528,6 +582,163 @@ async def test_http_bridge_request_cleanup_releases_pre_submit_handoff(
         reset_request_scope_id(request_scope_token)
 
     assert session.unanchored_reservation_id is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_owned_terminal_lifecycle_skips_outer_startup_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-bridge-owned",
+        key_id="key-bridge-owned",
+        model="gpt-5.6-sol",
+    )
+    account = cast(Any, SimpleNamespace(id="acc-bridge-owned"))
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+    )
+
+    async def terminal_before_finalizer(*_args: object, **kwargs: object):
+        tracker = cast(
+            proxy_support_module._DeferredAccountBackoffTracker,
+            kwargs["deferred_account_backoff_tracker"],
+        )
+        lifecycle = proxy_support_module._DeferredAccountBackoffLifecycle(
+            reservation=reservation,
+            pending_backoffs={account.id: account},
+            settlement_owned=True,
+        )
+        tracker.current_lifecycle = lifecycle
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace())),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *_args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_stream_via_http_bridge", terminal_before_finalizer)
+    release_reservation = AsyncMock()
+    drain_backoffs = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+    monkeypatch.setattr(service, "_drain_deferred_account_error_backoffs", drain_backoffs)
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_http_bridge_or_retry(
+            payload,
+            {},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    release_reservation.assert_not_awaited()
+    drain_backoffs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_http_bridge_startup_fallback_releases_current_lifecycle_before_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    release_fails: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    original_reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-bridge-original",
+        key_id="key-bridge-startup",
+        model="gpt-5.6-sol",
+    )
+    current_reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-bridge-current",
+        key_id="key-bridge-startup",
+        model="gpt-5.6-sol",
+    )
+    account = cast(Any, SimpleNamespace(id="acc-bridge-startup"))
+    runtime_config = SimpleNamespace(
+        enabled=True,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+        prompt_cache_idle_ttl_seconds=120.0,
+    )
+    tracker_seen: proxy_support_module._DeferredAccountBackoffTracker | None = None
+    order: list[str] = []
+
+    async def fail_before_submit(*_args: object, **kwargs: object):
+        nonlocal tracker_seen
+        tracker_seen = cast(
+            proxy_support_module._DeferredAccountBackoffTracker,
+            kwargs["deferred_account_backoff_tracker"],
+        )
+        tracker_seen.current_lifecycle = proxy_support_module._DeferredAccountBackoffLifecycle(
+            reservation=current_reservation,
+            pending_backoffs={account.id: account},
+        )
+        raise RuntimeError("startup failed")
+        yield ""
+
+    async def release_reservation(reservation: object) -> None:
+        assert reservation is current_reservation
+        order.append("release")
+        if release_fails:
+            raise RuntimeError("release failed")
+
+    async def drain_backoffs(pending: dict[str, object]) -> None:
+        assert order == ["release"]
+        order.append("backoff")
+        pending.clear()
+
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace())),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module, "_service_get_settings", _make_app_settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *_args: runtime_config)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fail_before_submit)
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+    monkeypatch.setattr(service, "_drain_deferred_account_error_backoffs", drain_backoffs)
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "test", "input": "hello"}
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        async for _ in service._stream_http_bridge_or_retry(
+            payload,
+            {},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=original_reservation,
+            suppress_text_done_events=False,
+        ):
+            pass
+
+    assert tracker_seen is not None
+    assert order == (["release"] if release_fails else ["release", "backoff"])
+    assert tracker_seen.current_lifecycle is not None
+    assert tracker_seen.current_lifecycle.settlement_confirmed is not release_fails
+    assert bool(tracker_seen.current_lifecycle.pending_backoffs) is release_fails
 
 
 @pytest.mark.asyncio
@@ -6213,7 +6424,7 @@ def _bridge_selection_settings() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_create_http_bridge_session_fails_over_confirmed_proxy_connect_after_lease_release(
+async def test_create_http_bridge_session_defers_confirmed_proxy_backoff_until_reservation_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -6225,6 +6436,13 @@ async def test_create_http_bridge_session_fails_over_confirmed_proxy_connect_aft
     reallocate_flags: list[bool] = []
     released_leases: list[proxy_service.AccountLease] = []
     backed_off_accounts: list[object] = []
+    settlement_order: list[str] = []
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-http-bridge-proxy-failover",
+        key_id="key-http-bridge-proxy-failover",
+        model="gpt-5.4",
+    )
+    lifecycle = proxy_support_module._DeferredAccountBackoffLifecycle(reservation=reservation)
     upstream = cast(Any, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
 
     async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
@@ -6244,6 +6462,12 @@ async def test_create_http_bridge_session_fails_over_confirmed_proxy_connect_aft
         backed_off_accounts.append(account)
         # The dead route's stream lease must settle before the health write.
         assert lease_a in released_leases
+        assert settlement_order == ["settle"]
+        settlement_order.append("backoff")
+
+    async def release_reservation(candidate: object) -> None:
+        assert candidate is reservation
+        settlement_order.append("settle")
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(
@@ -6261,6 +6485,7 @@ async def test_create_http_bridge_session_fails_over_confirmed_proxy_connect_aft
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(service._load_balancer, "record_error_backoff", record_error_backoff)
     monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
     monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", AsyncMock())
 
     session = await service._create_http_bridge_session(
@@ -6270,12 +6495,21 @@ async def test_create_http_bridge_session_fails_over_confirmed_proxy_connect_aft
         api_key=None,
         request_model="gpt-5.4",
         idle_ttl_seconds=120.0,
+        deferred_account_backoff_lifecycle=lifecycle,
+        defer_account_health_writes=True,
     )
+
+    assert backed_off_accounts == []
+    assert lifecycle.pending_backoffs == {account_a.id: account_a}
+    await service._release_websocket_reservation(reservation)
+    lifecycle.settlement_confirmed = True
+    await service._drain_deferred_account_error_backoffs(lifecycle.pending_backoffs)
 
     assert session.account is account_b
     assert selections == [set(), {account_a.id}]
     assert reallocate_flags == [False, True]
     assert backed_off_accounts == [account_a]
+    assert settlement_order == ["settle", "backoff"]
     assert lease_a in released_leases
     assert lease_b not in released_leases
 

@@ -14,6 +14,7 @@ from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.utils.request_id import get_request_id
+from app.db.models import Account
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
@@ -60,6 +61,7 @@ def _api_key_reservation_heartbeat_seconds() -> float:
 class _ApiKeyUsageServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
     _background_cleanup_tasks: set[asyncio.Task[None]]
+    _load_balancer: Any
 
 
 def _normalize_service_tier_value(value: Any) -> str | None:
@@ -131,6 +133,30 @@ class _ApiKeyUsageMixin:
     ) -> None:
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await self._release_websocket_reservation(request_state.api_key_reservation)
+        request_state.api_key_reservation = None
+        lifecycle = request_state.deferred_account_backoff_lifecycle
+        if lifecycle is not None:
+            lifecycle.settlement_confirmed = True
+        pending_backoffs = (
+            lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
+        )
+        if pending_backoffs:
+            await self._drain_deferred_account_error_backoffs(pending_backoffs)
+
+    async def _drain_deferred_account_error_backoffs(
+        self,
+        pending_backoffs: dict[str, Account],
+    ) -> None:
+        if not pending_backoffs:
+            return
+        proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        while pending_backoffs:
+            account_id, account = pending_backoffs.popitem()
+            try:
+                await proxy._load_balancer.record_error_backoff(account)
+            except BaseException:
+                pending_backoffs.setdefault(account_id, account)
+                raise
 
     async def _maybe_touch_api_key_reservation(
         self,

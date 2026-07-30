@@ -275,7 +275,14 @@ def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_d
     selection_exclusions: list[set[str]] = []
     connect_accounts: list[str] = []
     backed_off_accounts: list[str] = []
+    settlement_order: list[str] = []
+    settlement_wait_flags: list[bool] = []
     handle_connect_error = AsyncMock()
+    reservation = proxy_module.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_proxy_failover",
+        key_id="key_ws_proxy_failover",
+        model="gpt-5.4",
+    )
     proxy_connect_error = proxy_module.ProxyResponseError(
         502,
         proxy_module.openai_error("upstream_unavailable", "sanitized websocket proxy failure"),
@@ -310,7 +317,19 @@ def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_d
 
     async def fake_record_error_backoff(self, account):
         del self
+        assert settlement_order == ["settle"]
+        settlement_order.append("backoff")
         backed_off_accounts.append(account.id)
+
+    async def fake_reserve_websocket_api_key_usage(self, *_args, **_kwargs):
+        del self
+        return reservation
+
+    async def fake_settle_stream_api_key_usage(self, *_args, **kwargs):
+        del self
+        settlement_wait_flags.append(bool(kwargs.get("wait_for_settlement")))
+        settlement_order.append("settle")
+        return True
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -326,6 +345,16 @@ def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_d
         fake_try_open_websocket_connect_attempt,
     )
     monkeypatch.setattr(proxy_module.ProxyService, "_handle_websocket_connect_error", handle_connect_error)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_reserve_websocket_api_key_usage",
+        fake_reserve_websocket_api_key_usage,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_settle_stream_api_key_usage",
+        fake_settle_stream_api_key_usage,
+    )
     monkeypatch.setattr(proxy_module.LoadBalancer, "record_error_backoff", fake_record_error_backoff)
 
     request_payload = {
@@ -347,6 +376,8 @@ def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_d
     assert connect_accounts == [accounts[0].id, accounts[1].id]
     assert selection_exclusions == [set(), {accounts[0].id}]
     assert backed_off_accounts == [accounts[0].id]
+    assert settlement_order == ["settle", "backoff"]
+    assert settlement_wait_flags == [True]
     # The confirmed dead route skips the generic single-error health write.
     handle_connect_error.assert_not_awaited()
 

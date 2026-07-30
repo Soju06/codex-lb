@@ -753,6 +753,19 @@ class _HTTPBridgeCompletedDeliveryScope:
     terminal_enqueued: bool = False
 
 
+@dataclass(slots=True)
+class _DeferredAccountBackoffLifecycle:
+    reservation: ApiKeyUsageReservationData | None
+    pending_backoffs: dict[str, Account] = field(default_factory=dict)
+    settlement_owned: bool = False
+    settlement_confirmed: bool = False
+
+
+@dataclass(slots=True)
+class _DeferredAccountBackoffTracker:
+    current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -907,6 +920,13 @@ class _WebSocketRequestState:
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
+    # Confirmed pre-dispatch account-route failures must not mutate account
+    # health while this request's API-key reservation is still live. The
+    # account objects are keyed by id so repeated connect attempts cannot
+    # stack the same backoff floor more than once before settlement.
+    deferred_account_error_backoffs: dict[str, Account] = field(default_factory=dict)
+    deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None
+    deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None

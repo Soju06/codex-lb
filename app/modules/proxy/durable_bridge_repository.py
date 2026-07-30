@@ -855,17 +855,19 @@ class DurableBridgeRepository:
             if owner_exists is None:
                 await self._session.rollback()
                 return False
+            values: dict[str, object] = {"state": HttpBridgeRecoveryAttemptState.REPLAYED}
+            if response_id is not None:
+                values["response_id"] = response_id
             result = await self._session.execute(
                 update(HttpBridgeRecoveryAttemptRecord)
                 .where(
                     HttpBridgeRecoveryAttemptRecord.session_id == session_id,
                     HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
-                    HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN,
+                    HttpBridgeRecoveryAttemptRecord.state.in_(
+                        (HttpBridgeRecoveryAttemptState.UNKNOWN, HttpBridgeRecoveryAttemptState.REPLAYED)
+                    ),
                 )
-                .values(
-                    state=HttpBridgeRecoveryAttemptState.REPLAYED,
-                    response_id=response_id,
-                )
+                .values(**values)
             )
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))

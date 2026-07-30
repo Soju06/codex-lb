@@ -677,11 +677,28 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.recovery_attempt_fingerprint = attempt_fingerprint
             except ProxyResponseError:
                 raise
-            except Exception:
-                # The journal is an additional recovery fence. A persistence
-                # failure must not block the original request, but it must
-                # also not claim that a migration checkpoint exists.
-                logger.warning("Failed to record HTTP bridge recovery attempt", exc_info=True)
+            except Exception as exc:
+                # The journal is an additional recovery fence. Without a
+                # durable UNKNOWN row, an ambiguous send cannot be claimed by
+                # another owner, so fail closed instead of dispatching an
+                # unjournaled recovery-safe request.
+                session.closed = True
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="recovery_attempt_persistence_failed",
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="bridge_continuity_persistence_failed",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed",
+                        "Recovered response continuity could not be persisted; retry the request.",
+                    ),
+                ) from exc
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(

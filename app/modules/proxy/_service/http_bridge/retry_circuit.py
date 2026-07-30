@@ -64,9 +64,9 @@ class _HTTPBridgeRetryCircuitMixin:
             self._http_bridge_retry_circuit_loaded_keys.discard(key)
             self._http_bridge_retry_circuit_persisted_keys.discard(key)
 
-    async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
+    async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> bool:
         if session.key.strength != "hard":
-            return
+            return True
 
         now_monotonic = time.monotonic()
         async with self._http_bridge_retry_circuit_lock:
@@ -89,7 +89,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 _hash_identifier(session.key.affinity_key),
                 exc_info=True,
             )
-            return
+            return False
 
         if persisted is None:
             # A durable miss clears state loaded from another replica, but it
@@ -106,7 +106,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuits.pop(session.key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-            return
+            return True
 
         now_epoch = time.time()
         if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
@@ -129,7 +129,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 # Keep a newer process-local circuit when persistence is
                 # unavailable. The next failure can still open the local
                 # circuit even though the expired durable row remains.
-                return
+                return False
             async with self._http_bridge_retry_circuit_lock:
                 current_local_state = self._http_bridge_retry_circuits.get(session.key)
                 local_state_is_newer = bool(
@@ -142,7 +142,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuits.pop(session.key, None)
                     self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
                     self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
-            return
+            return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
         persisted_cooldown_until = now_monotonic + cooldown_remaining
@@ -168,6 +168,7 @@ class _HTTPBridgeRetryCircuitMixin:
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
             self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+        return True
 
     async def _persist_http_bridge_retry_circuit(
         self: Any,
@@ -380,7 +381,7 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return
 
-        await self._load_http_bridge_retry_circuit(session)
+        durable_load_succeeded = await self._load_http_bridge_retry_circuit(session)
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.pop(session.key, None)
             self._http_bridge_retry_circuit_loaded_keys.discard(session.key)
@@ -388,6 +389,12 @@ class _HTTPBridgeRetryCircuitMixin:
             expected_updated_at_epoch = (
                 state.persisted_updated_at_epoch if state is not None and state.persisted_updated_at_epoch > 0 else None
             )
+        # A confirmed miss has no version fence to protect a row created
+        # concurrently, so leave the durable row untouched when no state was
+        # observed. Preserve the existing best-effort clear on read failures,
+        # which is still useful for settling a row after a transient outage.
+        if state is None or (durable_load_succeeded and expected_updated_at_epoch is None):
+            return
         try:
             # Clearing is idempotent and must be attempted even when the
             # preceding lookup failed; a successful request should settle

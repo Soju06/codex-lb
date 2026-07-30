@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, RequestKind, RequestLog
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -20,6 +21,18 @@ pytestmark = pytest.mark.integration
 def _assert_no_seeded_sensitive_values(response, values: tuple[str, ...]) -> None:
     serialized = response.text
     assert all(value not in serialized for value in values)
+
+
+def _distinct_candidate_fragments(statements: list[str]) -> list[str]:
+    return [
+        match.group(0)
+        for statement in statements
+        for match in re.finditer(
+            r"SELECT DISTINCT REQUEST_LOGS\.CONVERSATION_ID.*?\)\s+AS",
+            statement.upper(),
+            flags=re.DOTALL,
+        )
+    ]
 
 
 def _account(account_id: str) -> Account:
@@ -1095,6 +1108,174 @@ async def test_since_filter_composes_with_search(async_client, db_setup):
     body = response.json()
     assert [row["conversationId"] for row in body["conversations"]] == ["conv-search-match"]
     assert body["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_conversation_membership_candidates_are_bounded_before_full_history_aggregation(db_setup):
+    base = utcnow().replace(microsecond=0)
+    since = base - timedelta(days=7)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="bounded-active-old",
+                account_id="bounded-active-account",
+                model="bounded-active-model",
+                reasoning_effort=None,
+                input_tokens=10,
+                output_tokens=1,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=1.0,
+                requested_at=base - timedelta(days=60),
+                conversation_id="bounded-active",
+            ),
+            _ConversationSeed(
+                request_id="bounded-active-recent",
+                account_id="bounded-active-account",
+                model="bounded-active-model",
+                reasoning_effort=None,
+                input_tokens=20,
+                output_tokens=2,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=2.0,
+                requested_at=base - timedelta(days=1),
+                conversation_id="bounded-active",
+            ),
+            _ConversationSeed(
+                request_id="bounded-inactive-old",
+                account_id="bounded-inactive-account",
+                model="bounded-inactive-model",
+                reasoning_effort=None,
+                input_tokens=30,
+                output_tokens=3,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=30,
+                cost_usd=3.0,
+                requested_at=base - timedelta(days=60),
+                conversation_id="bounded-inactive",
+            ),
+        ]
+    )
+
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        async with SessionLocal() as session:
+            result = await RequestLogsRepository(session).list_conversations(since=since)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert result.total == 1
+    assert [summary.conversation_id for summary in result.summaries] == ["bounded-active"]
+    assert result.summaries[0].request_count == 2
+    assert result.summaries[0].cost_usd == pytest.approx(3.0)
+
+    candidate_fragments = _distinct_candidate_fragments(statements)
+    assert candidate_fragments
+    assert any("REQUEST_LOGS.REQUESTED_AT >= " in fragment for fragment in candidate_fragments)
+    emitted_sql = "\n".join(statements).lower()
+    assert "having count" not in emitted_sql
+    assert "conversation_id in (select" in emitted_sql
+
+
+@pytest.mark.asyncio
+async def test_conversation_search_candidates_are_bounded_to_activity_window(db_setup):
+    base = utcnow().replace(microsecond=0)
+    since = base - timedelta(days=7)
+    await _seed_conversation_rows(
+        [
+            _ConversationSeed(
+                request_id="bounded-search-old",
+                account_id="bounded-search-account",
+                model="bounded-search-model",
+                reasoning_effort=None,
+                input_tokens=10,
+                output_tokens=1,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=10,
+                cost_usd=1.0,
+                requested_at=base - timedelta(days=60),
+                conversation_id="bounded-search",
+                useragent_group="other-agent",
+            ),
+            _ConversationSeed(
+                request_id="bounded-search-recent",
+                account_id="bounded-search-account",
+                model="bounded-search-model",
+                reasoning_effort=None,
+                input_tokens=20,
+                output_tokens=2,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=20,
+                cost_usd=2.0,
+                requested_at=base - timedelta(days=1),
+                conversation_id="bounded-search",
+                useragent_group="needle-agent",
+            ),
+            _ConversationSeed(
+                request_id="bounded-search-old-match",
+                account_id="bounded-search-old-match-account",
+                model="bounded-search-old-match-model",
+                reasoning_effort=None,
+                input_tokens=30,
+                output_tokens=3,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=30,
+                cost_usd=3.0,
+                requested_at=base - timedelta(days=60),
+                conversation_id="bounded-search-old-match",
+                useragent_group="needle-agent",
+            ),
+            _ConversationSeed(
+                request_id="bounded-search-old-match-recent",
+                account_id="bounded-search-old-match-account",
+                model="bounded-search-old-match-model",
+                reasoning_effort=None,
+                input_tokens=40,
+                output_tokens=4,
+                cached_input_tokens=None,
+                reasoning_tokens=0,
+                latency_ms=40,
+                cost_usd=4.0,
+                requested_at=base - timedelta(days=1),
+                conversation_id="bounded-search-old-match",
+                useragent_group="other-agent",
+            ),
+        ]
+    )
+
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        async with SessionLocal() as session:
+            result = await RequestLogsRepository(session).list_conversations(since=since, search="needle")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert result.total == 1
+    assert result.summaries[0].conversation_id == "bounded-search"
+    assert result.summaries[0].request_count == 2
+    candidate_fragments = _distinct_candidate_fragments(statements)
+    assert candidate_fragments
+    assert any("REQUEST_LOGS.REQUESTED_AT >= " in fragment for fragment in candidate_fragments)
+    assert any("REQUEST_LOGS.USERAGENT_GROUP" in fragment for fragment in candidate_fragments)
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@
 
 Earlier versions of `list_conversations()` qualified a conversation for a `since` window only when its **earliest** `request_logs` row fell inside the window, enforced by a correlated `has_pre_window_row` subquery that excluded any conversation with a row predating `since`. This conflicted with the dashboard activity and trends aggregations (`aggregate_conversations_by_bucket`, `_aggregate_activity`), which have always counted conversations by **any** row in the window. The two views disagreed about what conversations belonged to a range, and a long-running conversation that started before the window but was still active inside it was invisible to the listing.
 
-The change removed the gate and replaced it with a `HAVING COUNT(requested_at >= since) > 0` filter, so a conversation qualifies when it has at least one in-window row. This brought the listing into agreement with the dashboard aggregations. The semantic shift is **BREAKING** for any caller that relied on "started in window" semantics — totals, pagination, and facets for a given `since` value all change.
+The change removed the gate and now first selects distinct eligible conversation IDs with `requested_at >= since`, so a conversation qualifies when it has at least one in-window row. The full-history summary then aggregates only rows belonging to those candidate IDs. This brings the listing into agreement with the dashboard aggregations without making every poll group the entire retained history. The semantic shift is **BREAKING** for any caller that relied on "started in window" semantics — totals, pagination, and facets for a given `since` value all change.
 
 **Alternative considered and rejected:** keep the gate, fix the dashboard aggregations to match. Rejected because "activity in window" is the more useful operator mental model for a conversations listing — an operator investigating recent traffic wants to see conversations that were recently active, including ones that started earlier.
 
@@ -24,12 +24,13 @@ The change removed the gate and replaced it with a `HAVING COUNT(requested_at >=
 
 - **No stored entity.** Conversations cannot be created, updated, or deleted directly. Their existence and shape are entirely a function of `request_logs` content. Soft-deleting `request_logs` rows (via `deleted_at`) removes them from the derived view.
 - **30-day lookback cap.** `_CONVERSATION_MAX_LOOKBACK = timedelta(days=30)` bounds the effective `since` for both bare and explicit requests. It bounds **activity** lookback, not start lookback. Operators needing longer history must query `request_logs` directly.
-- **Performance.** The listing query groups by the raw `conversation_id` over
-  eligible `request_logs` rows and applies an in-window `HAVING` count filter;
-  no global pre-window distinct query or correlated anti-join is needed. Page
-  facets add the `since` bound and raw conversation-ID page filter, while detail
-  queries use raw equality, preserving the plain `conversation_id` index access
-  path for those targeted reads.
+- **Performance.** The listing first discovers distinct active conversation IDs
+  with the `requested_at` bound, then groups eligible full-history rows only for
+  those IDs through the indexed `conversation_id` predicate. Search predicates
+  participate in the same bounded candidate phase. Page facets use the selected
+  IDs while retaining full-history semantics, and detail queries use raw
+  equality, preserving the plain `conversation_id` index access path for those
+  targeted reads.
 - **Soft-delete / warmup exclusion.** The underlying `request_logs` filters exclude soft-deleted rows and warmup kinds; the derived conversation view inherits those exclusions automatically.
 
 ## Failure modes / edge cases

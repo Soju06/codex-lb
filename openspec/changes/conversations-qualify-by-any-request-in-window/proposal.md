@@ -22,9 +22,9 @@ The `/api/conversations` listing endpoint today treats a conversation as "in win
 
 ## Impact
 
-- **Code**: ~15 lines in `app/modules/request_logs/repository.py` (delete/invert the `has_pre_window_row` subquery in `list_conversations()`). `service.py` and `api.py` are pass-through and need no change. `get_conversation_details()` needs no change.
+- **Code**: `list_conversations()` in `app/modules/request_logs/repository.py` discovers bounded activity/search candidates before aggregating full history for selected IDs. `service.py` and `api.py` are pass-through and need no change. `get_conversation_details()` needs no change.
 - **API contract**: `/api/conversations` response shape is unchanged, but `since` filtering semantics change. Clients/dashboards relying on "started in window" will see different row sets.
-- **Performance**: neutral-to-better — removes a correlated subquery from the hot path.
+- **Performance**: the activity membership phase is bounded by a `DISTINCT conversation_id` query filtered by `requested_at >= since`; the subsequent summary/facet aggregation still reads full eligible history only for those candidate IDs. Search uses the same bounded candidate phase.
 - **Tests**: ~15–30 assertions across ~5 files must be rewritten. The primary one is `tests/integration/test_conversations_api.py:818` (`test_since_filter_excludes_conversation_started_before_window`), which directly encodes the current first-request gate and must be inverted to assert inclusion. Other count/pagination tests that assume first-request gating need their fixtures/expectations updated.
 - **Consistency**: brings the conversations list into agreement with `aggregate_conversations_by_bucket` and `_aggregate_activity`, which already count by any-in-window. Worth recording in the capability context as a fix, not just a behavior change.
 - **Unaffected**: proxy follow-up/owner resolution (`find_latest_owner_record_for_response_id` → `_resolve_websocket_previous_response_owner`) uses `request_id` matching, not conversation grouping — untouched. `request_logs` write path and `conversation_id` header extraction are untouched.

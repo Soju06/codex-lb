@@ -216,22 +216,26 @@ class RequestLogsRepository:
         timeframe: str | None = None,
     ) -> ConversationListResult:
         conversation_id = RequestLog.conversation_id
-        conditions = self._conversation_conditions()
-        if search and search.strip():
-            pattern = f"%{_escape_like(search.strip())}%"
-            matching_ids = (
-                select(conversation_id.label("conversation_id"))
-                .where(
-                    *conditions,
-                    or_(
-                        conversation_id.ilike(pattern, escape="\\"),
-                        RequestLog.useragent_group.ilike(pattern, escape="\\"),
-                    ),
+        base_conditions = self._conversation_conditions()
+        search_value = search.strip() if search and search.strip() else None
+        candidate_conditions = [*base_conditions]
+        if since is not None:
+            candidate_conditions.append(RequestLog.requested_at >= since)
+        if search_value is not None:
+            pattern = f"%{_escape_like(search_value)}%"
+            candidate_conditions.append(
+                or_(
+                    conversation_id.ilike(pattern, escape="\\"),
+                    RequestLog.useragent_group.ilike(pattern, escape="\\"),
                 )
-                .distinct()
-                .subquery()
             )
-            conditions = [*conditions, conversation_id.in_(select(matching_ids.c.conversation_id))]
+        if since is not None or search_value is not None:
+            candidate_ids = (
+                select(conversation_id.label("conversation_id")).where(*candidate_conditions).distinct().subquery()
+            )
+            conditions = [*base_conditions, conversation_id.in_(select(candidate_ids.c.conversation_id))]
+        else:
+            conditions = base_conditions
 
         output = self._conversation_output_expr()
         cached = self._conversation_cached_expr()
@@ -250,8 +254,6 @@ class RequestLogsRepository:
             .where(*summary_conditions)
             .group_by(conversation_id)
         )
-        if since is not None:
-            summary_stmt = summary_stmt.having(func.count().filter(RequestLog.requested_at >= since) > 0)
         summary_subquery = summary_stmt.subquery()
         filtered_summary_stmt = select(summary_subquery)
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
@@ -304,7 +306,7 @@ class RequestLogsRepository:
         api_key_facets: list[ConversationFacet] = []
         model_facets: list[ConversationFacet] = []
         if page_ids:
-            # The summary HAVING clause already selected conversations with
+            # Candidate-ID membership already selected conversations with
             # activity in the window. Facets must describe the same full
             # eligible conversation rows as that summary, including history
             # before `since`.

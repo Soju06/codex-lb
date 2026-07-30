@@ -1,6 +1,6 @@
 ## 1. Core Repository Change
 
-- [x] 1.1 In `app/modules/request_logs/repository.py` `list_conversations()` (~lines 203-324), remove the `has_pre_window_row` correlated subquery (~lines 249-264) so a conversation is qualified by having at least one in-window `requested_at` row rather than by its earliest row being inside the window. Preserve the existing `requested_at >= since` aggregation filter so the "at least one in-window row" invariant still holds.
+- [x] 1.1 In `app/modules/request_logs/repository.py` `list_conversations()` (~lines 203-324), remove the `has_pre_window_row` correlated subquery (~lines 249-264) so a conversation is qualified by having at least one in-window `requested_at` row rather than by its earliest row being inside the window. Preserve the "at least one in-window row" invariant with bounded distinct candidate IDs, then aggregate full history only for those IDs.
 - [x] 1.2 Verify `get_conversation_details()` (~lines 361-438) needs no change — it already aggregates all eligible logs for a conversation ID regardless of window. Add an inline comment if useful to document that the detail path is intentionally window-agnostic.
 - [x] 1.3 Confirm `list_conversations()` in `app/modules/request_logs/service.py` (~lines 194-209) and the endpoint in `app/modules/request_logs/api.py` (~lines 132-149) need no change (pass-through). Leave the 30-day `_CONVERSATION_MAX_LOOKBACK` cap intact.
 
@@ -25,3 +25,17 @@
 - [ ] 4.2 Include before/after evidence (command output or dashboard screenshots) demonstrating a long-running conversation now appears in a recent window where it previously did not. Required because this is a dashboard-visible contract change.
 - [x] 4.3 Run the focused test suite: `uv run pytest tests/integration/test_conversations_api.py tests/unit/test_request_logs_repository.py tests/unit/test_request_logs_service.py -q` and ensure green.
 - [x] 4.4 Run `openspec validate --specs` to confirm the merged spec tree is well-formed before merge.
+
+## 5. Bound Activity Candidate Discovery
+
+- [x] 5.1 Add a bounded `DISTINCT conversation_id` candidate query in
+  `list_conversations()` using the effective `since` and all eligibility
+  predicates, then constrain the full-history summary and facets with those
+  candidate IDs instead of a grouped `HAVING` membership filter.
+- [x] 5.2 Apply the same `requested_at >= since` bound to search candidate
+  discovery while preserving full-history aggregates for selected IDs.
+- [x] 5.3 Add regression coverage that captures the emitted query shape,
+  proves inactive history is pruned before grouping, proves surfaced summaries
+  retain pre-window history, and covers the bounded search candidate path.
+- [x] 5.4 Run focused conversation tests, OpenSpec validation, and backend
+  static checks; record the evidence before marking this section complete.

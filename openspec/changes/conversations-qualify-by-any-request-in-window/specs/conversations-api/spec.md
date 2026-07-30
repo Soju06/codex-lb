@@ -62,3 +62,31 @@ The membership rule used by `/api/conversations` (any in-window request qualifie
 - **WHEN** the dashboard activity aggregation for the window does not count `conv-b`
 - **AND** the operator requests `GET /api/conversations?since=<window start>`
 - **THEN** the conversations list also excludes `conv-b`
+
+### Requirement: Conversation membership candidate discovery is bounded
+
+When the conversations list has an effective `since` value, the repository
+MUST discover qualifying conversation IDs from eligible rows with
+`requested_at >= since` before aggregating the list page. The candidate query
+MUST select distinct IDs and MUST include the active search predicate when a
+search term is supplied. The summary and facet aggregates MUST constrain their
+full-history eligible-row scans to those candidate IDs; they MUST NOT use an
+unbounded grouped summary with a `HAVING` activity filter as the membership
+gate.
+
+The full-history aggregate semantics remain unchanged for each selected ID:
+`firstRequest`, request counts, token totals, costs, and facets MUST include
+all eligible rows for that conversation, including rows older than `since`.
+
+#### Scenario: Inactive history is pruned before summary aggregation
+- **GIVEN** `conv-a` has eligible rows before and after `since`
+- **AND** `conv-b` has eligible rows only before `since`
+- **WHEN** the operator requests the conversation list for that `since`
+- **THEN** candidate discovery includes `conv-a` and excludes `conv-b` before the grouped summary
+- **AND** `conv-a`'s summary still includes its pre-window rows
+
+#### Scenario: Search candidate discovery uses the activity window
+- **GIVEN** an eligible active conversation has a matching search value on a row at or after `since`
+- **WHEN** the operator searches the conversation list for that value
+- **THEN** the distinct search candidate query is constrained by `requested_at >= since`
+- **AND** the returned conversation's aggregate still includes all of its eligible history

@@ -1481,23 +1481,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                 completed_empty_prewarm = False
 
         if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
-            # Record the completed response id regardless of input shape so
-            # subsequent turns (including ones that never populated
-            # input_item_count, e.g. string inputs) can still reuse this
-            # anchor for continuity lookups.
-            if response_id is not None:
-                session.last_completed_response_id = response_id
-                session.last_completed_response_store = terminal_request_state.response_store
-                # Remember which tool-call items the completed response left
-                # pending so an anchored follow-up that omits their outputs
-                # (interrupted turn) can receive synthetic interrupted
-                # outputs instead of an upstream missing-tool-output 400.
-                session.last_pending_tool_calls = dict(terminal_request_state.pending_tool_call_types)
-            # Prefix trimming is only meaningful for list-shaped inputs, so
-            # keep the input-count / fingerprint update scoped to that path.
-            if terminal_request_state.input_item_count > 0:
-                session.last_completed_input_count = terminal_request_state.input_item_count
-                session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
+            async with session.lifecycle_lock:
+                # Record the completed response id regardless of input shape so
+                # subsequent turns (including ones that never populated
+                # input_item_count, e.g. string inputs) can still reuse this
+                # anchor for continuity lookups.
+                if response_id is not None:
+                    session.last_completed_response_id = response_id
+                    session.last_completed_response_store = terminal_request_state.response_store
+                    # Remember which tool-call items the completed response left
+                    # pending so an anchored follow-up that omits their outputs
+                    # (interrupted turn) can receive synthetic interrupted
+                    # outputs instead of an upstream missing-tool-output 400.
+                    session.last_pending_tool_calls = dict(terminal_request_state.pending_tool_call_types)
+                # Prefix trimming is only meaningful for list-shaped inputs, so
+                # keep the input-count / fingerprint update scoped to that path.
+                if terminal_request_state.input_item_count > 0:
+                    session.last_completed_input_count = terminal_request_state.input_item_count
+                    session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

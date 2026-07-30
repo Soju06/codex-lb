@@ -17660,6 +17660,167 @@ async def test_submit_http_bridge_request_revalidates_proxy_anchor_after_gate_wa
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_completion_provenance_waits_for_atomic_anchor_validation_and_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BlockingSendUpstream:
+        def __init__(self) -> None:
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.sent_texts: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.send_started.set()
+            await self.release_send.wait()
+            self.sent_texts.append(text)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
+            self.release_send.set()
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    completion_registration_finished = asyncio.Event()
+
+    async def register_previous_response_id(
+        target_session: proxy_service._HTTPBridgeSession,
+        response_id: str,
+        *,
+        input_item_count: int | None = None,
+        input_full_fingerprint: str | None = None,
+        pending_tool_calls: dict[str, str] | None = None,
+    ) -> bool:
+        assert response_id == "resp-completing"
+        assert input_item_count == 3
+        assert input_full_fingerprint == "fingerprint-completing"
+        assert pending_tool_calls == {"call-completing": "function_call"}
+        assert target_session is session
+        completion_registration_finished.set()
+        return True
+
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous_response_id)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    completing_request = proxy_service._WebSocketRequestState(
+        request_id="req-completing",
+        response_id="resp-completing",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_store=False,
+        input_item_count=3,
+        input_full_fingerprint="fingerprint-completing",
+        pending_tool_call_types={"call-completing": "function_call"},
+        added_tool_call_types={"call-completing": "function_call"},
+        transport="http",
+        skip_request_log=True,
+    )
+    anchored_text = json.dumps(
+        {
+            "type": "response.create",
+            "previous_response_id": "resp-anchor-before-send",
+            "input": [{"role": "user", "content": "follow up"}],
+        },
+        separators=(",", ":"),
+    )
+    anchored_request = proxy_service._WebSocketRequestState(
+        request_id="req-anchor-concurrent-completion",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text=anchored_text,
+        previous_response_id="resp-anchor-before-send",
+        response_store=False,
+        proxy_injected_previous_response_id=True,
+        transport="http",
+        skip_request_log=True,
+    )
+    upstream = _BlockingSendUpstream()
+    session = _make_bridge_session(
+        key_value="bridge-anchor-concurrent-completion",
+        pending_requests=deque([completing_request]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    session.last_completed_response_id = "resp-anchor-before-send"
+    session.last_completed_response_store = False
+    session.last_completed_input_count = 1
+    session.last_completed_input_prefix_fingerprint = "fingerprint-before-send"
+    session.last_pending_tool_calls = {"call-before-send": "function_call"}
+    service._http_bridge_sessions[session.key] = session
+
+    submit_task = asyncio.create_task(
+        service._submit_http_bridge_request(
+            session,
+            request_state=anchored_request,
+            text_data=anchored_text,
+            queue_limit=8,
+        )
+    )
+    completion_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(upstream.send_started.wait(), timeout=1.0)
+        completion_task = asyncio.create_task(
+            service._process_http_bridge_upstream_text(
+                session,
+                json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp-completing",
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "function_call",
+                                    "call_id": "call-completing",
+                                    "name": "lookup",
+                                    "arguments": "{}",
+                                }
+                            ],
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await asyncio.wait_for(completion_registration_finished.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert completion_task.done() is False
+        assert session.last_completed_response_id == "resp-anchor-before-send"
+        assert session.last_completed_response_store is False
+        assert session.last_completed_input_count == 1
+        assert session.last_completed_input_prefix_fingerprint == "fingerprint-before-send"
+        assert session.last_pending_tool_calls == {"call-before-send": "function_call"}
+    finally:
+        upstream.release_send.set()
+        await asyncio.wait_for(submit_task, timeout=1.0)
+        if completion_task is not None:
+            await asyncio.wait_for(completion_task, timeout=1.0)
+
+    assert upstream.sent_texts == [anchored_text]
+    assert session.last_completed_response_id == "resp-completing"
+    assert session.last_completed_response_store is False
+    assert session.last_completed_input_count == 3
+    assert session.last_completed_input_prefix_fingerprint == "fingerprint-completing"
+    assert session.last_pending_tool_calls == {"call-completing": "function_call"}
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=anchored_request,
+        gate_acquired=True,
+        request_enqueued=True,
+        counted_in_queue=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_rejects_state_after_response_event() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     send_text = AsyncMock()

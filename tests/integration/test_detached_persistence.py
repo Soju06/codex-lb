@@ -3,9 +3,17 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository, UsageReservationData
+from app.modules.api_keys.service import (
+    ApiKeyCreateData,
+    ApiKeyRequestUsageBudget,
+    ApiKeysService,
+    LimitRuleInput,
+)
 from app.modules.proxy import service as proxy_service_module
 
 pytestmark = pytest.mark.integration
@@ -103,6 +111,105 @@ async def test_drain_persistence_tasks_reports_timeout():
     finally:
         task.cancel()
         service._request_log_tasks.discard(task)
+
+
+@pytest.mark.asyncio
+async def test_failed_detached_settlement_retries_failed_release_until_persisted(raw_client, monkeypatch):
+    import asyncio
+
+    _, app = raw_client
+
+    async with SessionLocal() as session:
+        api_keys = ApiKeysService(ApiKeysRepository(session))
+        created = await api_keys.create_key(
+            ApiKeyCreateData(
+                name="detached-release-retry",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(
+                        limit_type="total_tokens",
+                        limit_window="weekly",
+                        max_value=100,
+                    )
+                ],
+            )
+        )
+        api_key = await api_keys.get_key_by_id(created.id)
+        reservation = await api_keys.enforce_limits_for_request(
+            created.id,
+            request_model="gpt-5.5",
+            request_usage_budget=ApiKeyRequestUsageBudget(
+                input_tokens=4,
+                output_tokens=6,
+            ),
+        )
+
+    original_get_reservation = ApiKeysRepository.get_usage_reservation
+    reservation_read_attempts = 0
+    retry_started = asyncio.Event()
+    allow_retry = asyncio.Event()
+
+    async def fail_first_two_reservation_reads(
+        self: ApiKeysRepository,
+        reservation_id: str,
+    ) -> UsageReservationData | None:
+        nonlocal reservation_read_attempts
+        if reservation_id == reservation.reservation_id:
+            reservation_read_attempts += 1
+            if reservation_read_attempts <= 2:
+                raise OperationalError(
+                    "read usage reservation",
+                    {},
+                    Exception("transient persistence connection failure"),
+                )
+            if reservation_read_attempts == 3:
+                retry_started.set()
+                await allow_retry.wait()
+        return await original_get_reservation(self, reservation_id)
+
+    monkeypatch.setattr(ApiKeysRepository, "get_usage_reservation", fail_first_two_reservation_reads)
+
+    settlement = proxy_service_module._StreamSettlement(
+        status="success",
+        model="gpt-5.5",
+        input_tokens=4,
+        output_tokens=6,
+    )
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(app)
+    assert await service._settle_stream_api_key_usage(
+        api_key,
+        reservation,
+        settlement,
+        request_id="req_detached_release_retry",
+    )
+    drain_task = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=2))
+    retry_wait_task = asyncio.create_task(retry_started.wait())
+    done, _ = await asyncio.wait(
+        {retry_wait_task, drain_task},
+        timeout=1,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    retry_was_tracked = retry_wait_task in done and not drain_task.done()
+    allow_retry.set()
+    if not retry_wait_task.done():
+        retry_wait_task.cancel()
+    await asyncio.gather(retry_wait_task, return_exceptions=True)
+    assert await drain_task
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        stored = await original_get_reservation(repo, reservation.reservation_id)
+        limits = await repo.get_limits_by_key(created.id)
+
+    assert stored is not None
+    assert stored.status == "released"
+    assert len(limits) == 1
+    assert limits[0].current_value == 0
+    assert reservation_read_attempts == 3
+    assert retry_was_tracked is True
 
 
 @pytest.mark.asyncio

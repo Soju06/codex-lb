@@ -174,11 +174,13 @@ When an upstream websocket closes while one or more streamed response requests
 are pending and have not reached a terminal event, the proxy MUST record a
 transient upstream error for the account before signaling failure for those
 pending requests, except when the close carries a classified process-wide
-network failure or is a clean close (`close_code = 1000`) before any
-`response.*` event. Clean pre-response closes MUST remain account-neutral while
-using the bounded clean-close retry and retry-circuit handling above. A
-classified process-wide network failure MUST remain account neutral and use its
-network error code. For other closes, the proxy MUST surface
+network failure, is a clean close (`close_code = 1000`) before any
+`response.*` event, or carries the classified per-socket
+`upstream_keepalive_timeout` transport error. Clean pre-response closes and
+keepalive timeouts MUST remain account-neutral while using the bounded retry
+and retry-circuit handling above. A classified process-wide network failure
+MUST remain account neutral and use its network error code. For other closes,
+the proxy MUST surface
 `stream_incomplete` to affected pending requests.
 
 #### Scenario: clean pre-response close does not penalize the account

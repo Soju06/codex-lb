@@ -675,6 +675,8 @@ class _HTTPBridgeRequestSubmitMixin:
                         ),
                     )
                 request_state.recovery_attempt_fingerprint = attempt_fingerprint
+                request_state.recovery_attempt_session_id = session.durable_session_id
+                request_state.recovery_attempt_owner_epoch = session.durable_owner_epoch
             except ProxyResponseError:
                 raise
             except Exception as exc:

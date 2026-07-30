@@ -725,7 +725,8 @@ def _http_bridge_eventless_precreated_deadline(
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
-    return sent_at + min(
+    activity_at = request_state.last_upstream_activity_at
+    return max(sent_at, activity_at or sent_at) + min(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
     )

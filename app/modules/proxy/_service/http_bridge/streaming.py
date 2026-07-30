@@ -72,6 +72,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_previous_response_owner_unavailable,
@@ -956,6 +957,8 @@ class _HTTPBridgeStreamingMixin:
         durable_recovery_attempt_fingerprint: str | None = None
         durable_recovery_attempt_available = False
         durable_recovery_attempt_claimed = False
+        durable_recovery_attempt_session_id: str | None = None
+        durable_recovery_attempt_owner_epoch: int | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
 
@@ -1034,11 +1037,40 @@ class _HTTPBridgeStreamingMixin:
                             durable_lookup.state != HttpBridgeSessionState.ACTIVE
                             or not durable_lookup.lease_is_active(now=utcnow())
                         ):
+                            claim_instance_id = _service_get_settings().http_responses_session_bridge_instance_id
+                            claim_owner_epoch = durable_lookup.owner_epoch
+                            owner_is_current = (
+                                durable_lookup.owner_instance_id == claim_instance_id
+                                and durable_lookup.lease_is_active(now=utcnow())
+                            )
+                            if not owner_is_current:
+                                claimed_session = await self._durable_bridge.claim_live_session(
+                                    session_key_kind=durable_lookup.canonical_kind,
+                                    session_key_value=durable_lookup.canonical_key,
+                                    api_key_id=bridge_session_key.api_key_id,
+                                    instance_id=claim_instance_id,
+                                    lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                                    account_id=durable_lookup.account_id,
+                                    model=payload.model,
+                                    service_tier=None,
+                                    latest_turn_state=durable_lookup.latest_turn_state,
+                                    latest_response_id=None,
+                                    allow_takeover=True,
+                                )
+                                if claimed_session.owner_instance_id != claim_instance_id:
+                                    raise ProxyResponseError(
+                                        502,
+                                        openai_error(
+                                            "bridge_continuity_persistence_failed",
+                                            "HTTP responses recovery ownership changed; retry the request.",
+                                        ),
+                                    )
+                                claim_owner_epoch = claimed_session.owner_epoch
                             claimed = await self._durable_bridge.mark_recovery_attempt_replayed(
                                 session_id=durable_lookup.session_id,
                                 api_key_id=bridge_session_key.api_key_id,
-                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                                owner_epoch=durable_lookup.owner_epoch,
+                                instance_id=claim_instance_id,
+                                owner_epoch=claim_owner_epoch,
                                 request_fingerprint=durable_recovery_attempt_fingerprint,
                             )
                             if not claimed:
@@ -1051,6 +1083,8 @@ class _HTTPBridgeStreamingMixin:
                                 )
                             durable_recovery_attempt_claimed = True
                             durable_recovery_attempt_available = False
+                            durable_recovery_attempt_session_id = durable_lookup.session_id
+                            durable_recovery_attempt_owner_epoch = claim_owner_epoch
                         elif existing_attempt is None:
                             # No prior attempt owns this fingerprint. The
                             # request-submit path will journal it immediately
@@ -1437,6 +1471,8 @@ class _HTTPBridgeStreamingMixin:
         if durable_recovery_attempt_claimed:
             switch_to_account_neutral_replay()
             request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
+            request_state.recovery_attempt_session_id = durable_recovery_attempt_session_id
+            request_state.recovery_attempt_owner_epoch = durable_recovery_attempt_owner_epoch
 
         if required_continuity_owner_missing:
             owner_unavailable = ProxyResponseError(
@@ -2605,6 +2641,8 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if durable_recovery_fresh_replay and durable_recovery_attempt_fingerprint is not None:
                     retry_request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
+                    retry_request_state.recovery_attempt_session_id = request_state.recovery_attempt_session_id
+                    retry_request_state.recovery_attempt_owner_epoch = request_state.recovery_attempt_owner_epoch
                 _apply_http_bridge_downstream_turn_state(
                     retry_request_state,
                     downstream_turn_state=downstream_turn_state,

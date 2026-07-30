@@ -978,6 +978,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
             if matched_request_state is not None:
                 now = _service_time().monotonic()
+                matched_request_state.last_upstream_activity_at = now
                 if matched_request_state.latency_first_upstream_event_ms is None:
                     matched_request_state.latency_first_upstream_event_ms = int(
                         max(0.0, now - matched_request_state.started_at) * 1000
@@ -1597,19 +1598,30 @@ class _HTTPBridgeUpstreamEventsMixin:
                 completed_usage = None
                 completed_empty_prewarm = False
 
+        recovery_attempt_session_id = (
+            matched_request_state.recovery_attempt_session_id
+            if matched_request_state is not None and matched_request_state.recovery_attempt_session_id is not None
+            else session.durable_session_id
+        )
+        recovery_attempt_owner_epoch = (
+            matched_request_state.recovery_attempt_owner_epoch
+            if matched_request_state is not None and matched_request_state.recovery_attempt_owner_epoch is not None
+            else session.durable_owner_epoch
+        )
+
         if (
             event_type == "response.completed"
             and matched_request_state is not None
             and matched_request_state.recovery_attempt_fingerprint is not None
-            and session.durable_session_id is not None
-            and session.durable_owner_epoch is not None
+            and recovery_attempt_session_id is not None
+            and recovery_attempt_owner_epoch is not None
         ):
             try:
                 await self._durable_bridge.mark_recovery_attempt_replayed(
-                    session_id=session.durable_session_id,
+                    session_id=recovery_attempt_session_id,
                     api_key_id=session.key.api_key_id,
                     instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
+                    owner_epoch=recovery_attempt_owner_epoch,
                     request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                     response_id=response_id,
                 )
@@ -1685,8 +1697,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             settlement_event_type in {"response.failed", "error"}
             and matched_request_state is not None
             and matched_request_state.recovery_attempt_fingerprint is not None
-            and session.durable_session_id is not None
-            and session.durable_owner_epoch is not None
+            and recovery_attempt_session_id is not None
+            and recovery_attempt_owner_epoch is not None
         ):
             # An explicit deterministic failure is terminal evidence for the
             # journaled request, not an ambiguous transport outcome. Consume
@@ -1694,10 +1706,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             # identical retry cannot turn it into an account-neutral replay.
             try:
                 await self._durable_bridge.mark_recovery_attempt_replayed(
-                    session_id=session.durable_session_id,
+                    session_id=recovery_attempt_session_id,
                     api_key_id=session.key.api_key_id,
                     instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
+                    owner_epoch=recovery_attempt_owner_epoch,
                     request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                     response_id=response_id,
                 )

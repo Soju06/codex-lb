@@ -194,9 +194,9 @@ _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
 _http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float] = {}
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # A healthy upstream acknowledges response.create promptly. Keep the
-# eventless watchdog well below the client retry budget so a dead socket cannot
-# hold a request for minutes before the bridge retires it.
-_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 30.0
+# Keep the owner-side watchdog within the client-safe contract while honoring
+# the configured stuck-gate threshold when it is shorter.
+_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 

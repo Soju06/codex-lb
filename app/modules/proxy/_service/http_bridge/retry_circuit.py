@@ -393,7 +393,7 @@ class _HTTPBridgeRetryCircuitMixin:
         # concurrently, so leave the durable row untouched when no state was
         # observed. Preserve the existing best-effort clear on read failures,
         # which is still useful for settling a row after a transient outage.
-        if state is None or (durable_load_succeeded and expected_updated_at_epoch is None):
+        if durable_load_succeeded and (state is None or expected_updated_at_epoch is None):
             return
         try:
             # Clearing is idempotent and must be attempted even when the

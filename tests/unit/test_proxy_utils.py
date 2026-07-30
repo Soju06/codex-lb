@@ -4955,6 +4955,7 @@ def _make_proxy_settings(*, trace_channels: frozenset[str] = frozenset()) -> Sim
         proxy_account_response_create_limit=4,
         proxy_account_stream_limit=8,
         proxy_account_stream_recovery_reserve=1,
+        proxy_api_key_fair_share_congestion_threshold_pct=0,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
         proxy_admission_wait_timeout_seconds=10.0,

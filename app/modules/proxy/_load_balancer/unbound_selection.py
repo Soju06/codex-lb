@@ -35,6 +35,10 @@ from app.modules.proxy._load_balancer.types import (
     RuntimeState,
 )
 from app.modules.proxy.account_cache import AccountSelectionCache
+from app.modules.proxy.fair_share import (
+    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+    fair_share_denial_message,
+)
 from app.modules.quota_planner.logic import build_routing_costs
 
 # Preserve the established observability surface while implementation moves to
@@ -70,6 +74,8 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    api_key_id: str | None = None
+    api_key_stream_fair_share_threshold_pct: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +111,8 @@ async def run_unbound_selection_path(
     redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    api_key_id = request.api_key_id
+    fair_share_threshold_pct = request.api_key_stream_fair_share_threshold_pct
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
@@ -148,6 +156,15 @@ async def run_unbound_selection_path(
                     now=datetime.now(timezone.utc),
                 )
             )
+            fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
+                api_key_id=api_key_id,
+                lease_kind=lease_kind,
+                candidate_account_ids=[state.account_id for state in states],
+                caps=caps,
+                stream_reserve_slots=stream_reserve_slots,
+                threshold_pct=fair_share_threshold_pct,
+                redact_sensitive_details=redact_sensitive_details,
+            )
             selection_states = _filter_states_for_account_caps(
                 states,
                 lease_kind=lease_kind,
@@ -159,7 +176,13 @@ async def run_unbound_selection_path(
                     selection_states,
                     traffic_class=traffic_class,
                 )
-            if not selection_states and states:
+            if fair_share_denial is not None:
+                # Gate and acquire share this lock section, so the denial is
+                # atomic — no commit-phase re-check is needed on this path.
+                selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
+                error_message = fair_share_denial_message(fair_share_denial)
+                result = SelectionResult(None, error_message)
+            elif not selection_states and states:
                 selection_error_code = _account_cap_error_code(lease_kind)
                 error_message = _account_cap_error_message(lease_kind, caps)
                 result = SelectionResult(None, error_message)
@@ -259,6 +282,7 @@ async def run_unbound_selection_path(
                             # here would make the CAS fail while still
                             # consuming the quiet interval.
                             record_selection=not selected_reserved_probe,
+                            api_key_id=api_key_id,
                         )
                     selected_snapshot = _clone_account(selected)
                     selected_snapshot.status = result.account.status

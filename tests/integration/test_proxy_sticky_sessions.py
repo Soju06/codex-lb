@@ -117,6 +117,7 @@ def _install_proxy_settings_cache(
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
         proxy_account_stream_recovery_reserve=1,
+        proxy_api_key_fair_share_congestion_threshold_pct=0,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
     )

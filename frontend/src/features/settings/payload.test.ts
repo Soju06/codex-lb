@@ -227,6 +227,7 @@ describe("buildSettingsUpdateRequest", () => {
       proxyAccountResponseCreateLimit: 0,
       proxyAccountStreamLimit: 12,
       proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       totpConfigured: false,
@@ -239,6 +240,7 @@ describe("buildSettingsUpdateRequest", () => {
     expect(payload.proxyAccountResponseCreateLimit).toBeUndefined();
     expect(payload.proxyAccountStreamLimit).toBeUndefined();
     expect(payload.proxyAccountStreamRecoveryReserve).toBeUndefined();
+    expect(payload.proxyApiKeyFairShareCongestionThresholdPct).toBeUndefined();
   });
 
   it("includes all account capacity limits when they are explicitly edited", () => {
@@ -259,12 +261,14 @@ describe("buildSettingsUpdateRequest", () => {
       proxyAccountResponseCreateLimit: 0,
       proxyAccountStreamLimit: 12,
       proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
     });
 
     expect(payload).toMatchObject({
       proxyAccountResponseCreateLimit: 0,
       proxyAccountStreamLimit: 12,
       proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
     });
   });
 });

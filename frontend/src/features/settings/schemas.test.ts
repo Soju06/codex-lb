@@ -25,6 +25,7 @@ describe("DashboardSettingsSchema", () => {
       proxyAccountResponseCreateLimit: 6,
       proxyAccountStreamLimit: 12,
       proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
       weeklyPaceWorkingDays: "0,1,2,3,4",
       weeklyPaceSmoothingMinutes: 60,
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -66,6 +67,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.proxyAccountResponseCreateLimit).toBe(6);
     expect(parsed.proxyAccountStreamLimit).toBe(12);
     expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
+    expect(parsed.proxyApiKeyFairShareCongestionThresholdPct).toBe(80);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(60);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
@@ -105,6 +107,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.proxyAccountResponseCreateLimit).toBe(4);
     expect(parsed.proxyAccountStreamLimit).toBe(8);
     expect(parsed.proxyAccountStreamRecoveryReserve).toBe(1);
+    expect(parsed.proxyApiKeyFairShareCongestionThresholdPct).toBe(0);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
     expect(parsed.limitWarmupModel).toBe("auto");
@@ -184,6 +187,7 @@ describe("SettingsUpdateRequestSchema", () => {
       proxyAccountResponseCreateLimit: 6,
       proxyAccountStreamLimit: 12,
       proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
       weeklyPaceWorkingDays: "0,1,2,3,4",
       weeklyPaceSmoothingMinutes: 120,
       openaiCacheAffinityMaxAgeSeconds: 120,
@@ -226,6 +230,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.proxyAccountResponseCreateLimit).toBe(6);
     expect(parsed.proxyAccountStreamLimit).toBe(12);
     expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
+    expect(parsed.proxyApiKeyFairShareCongestionThresholdPct).toBe(80);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(120);
     expect(parsed.totpRequiredOnLogin).toBe(true);
@@ -270,6 +275,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.proxyAccountResponseCreateLimit).toBeUndefined();
     expect(parsed.proxyAccountStreamLimit).toBeUndefined();
     expect(parsed.proxyAccountStreamRecoveryReserve).toBeUndefined();
+    expect(parsed.proxyApiKeyFairShareCongestionThresholdPct).toBeUndefined();
     expect(parsed.warmupModel).toBeUndefined();
     expect(parsed.weeklyPaceWorkingDays).toBeUndefined();
     expect(parsed.weeklyPaceSmoothingMinutes).toBeUndefined();
@@ -289,6 +295,22 @@ describe("SettingsUpdateRequestSchema", () => {
       { proxyAccountResponseCreateLimit: -1 },
       { proxyAccountStreamLimit: 1.5 },
       { proxyAccountStreamRecoveryReserve: -1 },
+    ]) {
+      expect(
+        SettingsUpdateRequestSchema.safeParse({
+          stickyThreadsEnabled: false,
+          preferEarlierResetAccounts: true,
+          ...payload,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects out-of-range and fractional fair-share congestion thresholds", () => {
+    for (const payload of [
+      { proxyApiKeyFairShareCongestionThresholdPct: -1 },
+      { proxyApiKeyFairShareCongestionThresholdPct: 1.5 },
+      { proxyApiKeyFairShareCongestionThresholdPct: 101 },
     ]) {
       expect(
         SettingsUpdateRequestSchema.safeParse({

@@ -771,6 +771,10 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    proxy_api_key_fair_share_congestion_threshold_pct: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )

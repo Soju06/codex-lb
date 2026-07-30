@@ -504,6 +504,7 @@ export function createDashboardSettings(
 		proxyAccountResponseCreateLimit: 4,
 		proxyAccountStreamLimit: 8,
 		proxyAccountStreamRecoveryReserve: 1,
+		proxyApiKeyFairShareCongestionThresholdPct: 0,
 		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
 		weeklyPaceSmoothingMinutes: 30,
 		openaiCacheAffinityMaxAgeSeconds: 300,

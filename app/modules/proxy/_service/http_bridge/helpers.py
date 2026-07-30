@@ -2330,6 +2330,8 @@ def _http_bridge_should_attempt_soft_affinity_reroute(
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
+    # api_key_stream_fair_share is deliberately absent: the fair-share gate
+    # is per-key and pool-wide, so rerouting to another account cannot help.
     return error.get("code") in {
         "bridge_queue_full",
         "response_create_gate_timeout",

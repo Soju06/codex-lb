@@ -25,6 +25,7 @@ class RuntimeState:
     inflight_streams: int = 0
     leased_tokens: float = 0.0
     leases: dict[str, AccountLease] | None = None
+    stream_key_inflight: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,7 @@ class AccountLease:
     kind: AccountLeaseKind
     acquired_at: float
     estimated_tokens: float = 0.0
+    api_key_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,6 +18,7 @@ from app.core.auth.refresh import RefreshError, is_transient_refresh_contention,
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
@@ -82,7 +83,9 @@ _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
-_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset(
+    {"account_response_create_cap", "account_stream_cap", "api_key_stream_fair_share"}
+)
 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
@@ -1387,7 +1390,20 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
 
 
 def _is_local_account_cap_code(code: str | None) -> bool:
-    return code in {"account_response_create_cap", "account_stream_cap"}
+    return code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+
+
+def _api_key_fair_share_threshold_pct_from_settings(settings: object) -> int:
+    """Resolve the fair-share congestion threshold, tolerating stale snapshots.
+
+    Cached settings snapshots taken before the field existed lack it; fall
+    back to the live settings object the same way the stream recovery reserve
+    resolution in ``ProxyService`` does.
+    """
+    threshold = getattr(settings, "proxy_api_key_fair_share_congestion_threshold_pct", None)
+    if threshold is None:
+        return get_settings().proxy_api_key_fair_share_congestion_threshold_pct
+    return int(threshold)
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:

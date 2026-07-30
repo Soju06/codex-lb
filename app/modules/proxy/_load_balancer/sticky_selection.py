@@ -33,6 +33,11 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
+from app.modules.proxy.fair_share import (
+    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+    FairShareDecision,
+    fair_share_denial_message,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
@@ -113,7 +118,20 @@ class StickySelectionOwner(Protocol):
         kind: AccountLeaseKind,
         estimated_tokens: float,
         record_selection: bool = True,
+        api_key_id: str | None = None,
     ) -> AccountLease: ...
+
+    def _api_key_stream_fair_share_denial_locked(
+        self,
+        *,
+        api_key_id: str | None,
+        lease_kind: AccountLeaseKind | None,
+        candidate_account_ids: Collection[str],
+        caps: AccountConcurrencyCaps,
+        stream_reserve_slots: int,
+        threshold_pct: int,
+        redact_sensitive_details: bool = False,
+    ) -> FairShareDecision | None: ...
 
     def _reserve_due_probe_locked(
         self,
@@ -204,6 +222,8 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    api_key_id: str | None = None
+    api_key_stream_fair_share_threshold_pct: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +281,8 @@ async def run_sticky_selection_path(
     redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    api_key_id = request.api_key_id
+    fair_share_threshold_pct = request.api_key_stream_fair_share_threshold_pct
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
@@ -353,6 +375,18 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
+            # Fair share is measured against the full candidate pool, before
+            # hard-sticky narrows selection to the owner account.
+            fair_share_candidate_ids = [state.account_id for state in states]
+            fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
+                api_key_id=api_key_id,
+                lease_kind=lease_kind,
+                candidate_account_ids=fair_share_candidate_ids,
+                caps=caps,
+                stream_reserve_slots=stream_reserve_slots,
+                threshold_pct=fair_share_threshold_pct,
+                redact_sensitive_details=redact_sensitive_details,
+            )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
                 # constraint, not a preference. Scope, exclusions,
@@ -403,7 +437,13 @@ async def run_sticky_selection_path(
                 )
             probe_reservation: ProbeReservation | None = None
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
-        if hard_sticky and not selection_states:
+        if fair_share_denial is not None:
+            # Denial parks in the transport capacity-wait loop like a cap
+            # denial. Sticky DB work, mapping mutation, and probe
+            # reservation are all skipped so mappings are preserved.
+            selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
+            result = SelectionResult(None, fair_share_denial_message(fair_share_denial))
+        elif hard_sticky and not selection_states:
             selection_error_code = "hard_affinity_saturated"
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
         elif not selection_states and states:
@@ -552,6 +592,26 @@ async def run_sticky_selection_path(
                 ):
                     selection_error_code = _account_cap_error_code(lease_kind)
                     error_message = _account_cap_error_message(lease_kind, caps)
+                elif (
+                    lease_kind is not None
+                    and (
+                        fair_share_recheck := owner._api_key_stream_fair_share_denial_locked(
+                            api_key_id=api_key_id,
+                            lease_kind=lease_kind,
+                            candidate_account_ids=fair_share_candidate_ids,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                            threshold_pct=fair_share_threshold_pct,
+                            redact_sensitive_details=redact_sensitive_details,
+                        )
+                    )
+                    is not None
+                ):
+                    # Sticky DB work runs between the filter-phase gate and
+                    # this commit section; concurrent selections for one key
+                    # could otherwise overshoot the share.
+                    selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
+                    error_message = fair_share_denial_message(fair_share_recheck)
                 else:
                     selection_admitted = True
                     if lease_kind is not None:
@@ -562,6 +622,7 @@ async def run_sticky_selection_path(
                             # Keep the reservation token intact until
                             # persistence commits the recovery admission.
                             record_selection=not selected_reserved_probe,
+                            api_key_id=api_key_id,
                         )
 
             if not probe_reservation_invalidated:

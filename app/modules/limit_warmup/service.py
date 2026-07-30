@@ -686,6 +686,8 @@ def _build_candidate(
         return None
     if before.reset_at is None or after.reset_at is None:
         return None
+    if (before.window or "primary") != (after.window or "primary"):
+        return None
     if before.used_percent < exhausted_threshold_percent:
         return None
     if after.used_percent >= 100.0:

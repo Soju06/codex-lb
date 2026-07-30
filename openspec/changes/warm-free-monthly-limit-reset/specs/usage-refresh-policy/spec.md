@@ -27,6 +27,15 @@ selected usage row.
 - **THEN** the system uses the secondary usage row
 - **AND** it does not substitute an unrelated monthly row
 
+#### Scenario: First monthly sample is not treated as a reset
+
+- **GIVEN** a free-plan account has no previous monthly usage sample
+- **AND** its latest secondary sample is exhausted
+- **WHEN** background usage refresh records the account's first monthly sample
+- **THEN** the system does not compare the secondary and monthly `reset_at`
+  values as one window
+- **AND** it does not send a reset-confirmed warm-up for that transition
+
 #### Scenario: Scheduler scopes monthly snapshots to the selected account
 
 - **GIVEN** multiple accounts are eligible for background usage refresh

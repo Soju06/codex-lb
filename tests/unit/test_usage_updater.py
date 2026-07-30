@@ -16,6 +16,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.usage.models import UsagePayload
+from app.core.usage.refresh_scheduler import _select_long_window_entries
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
@@ -399,8 +400,7 @@ def test_usage_refresh_scheduler_selects_monthly_long_window_for_free_accounts()
         recorded_at=datetime.now(tz=timezone.utc),
     )
 
-    selector = getattr(refresh_scheduler_module, "_select_long_window_entries", lambda **_: {})
-    selected = selector(
+    selected = _select_long_window_entries(
         accounts=[free_account, plus_account],
         monthly_entries={free_account.id: monthly},
         secondary_entries={free_account.id: free_secondary, plus_account.id: plus_secondary},

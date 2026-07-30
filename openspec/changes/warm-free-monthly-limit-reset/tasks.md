@@ -6,6 +6,8 @@
   secondary usage.
 - [x] 1.3 Prove an exhausted-to-reset monthly transition sends one warm-up and
   persists a monthly attempt.
+- [x] 1.4 Prove a secondary-to-monthly transition cannot produce a false
+  reset-confirmed warm-up.
 
 ## 2. Implementation
 
@@ -15,6 +17,8 @@
   invoking limit warm-up.
 - [x] 2.3 Preserve the selected usage row's canonical window on the warm-up
   attempt.
+- [x] 2.4 Reject reset comparisons whose before and after samples represent
+  different canonical windows.
 
 ## 3. Verification
 

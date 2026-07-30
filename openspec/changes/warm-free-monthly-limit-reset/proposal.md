@@ -12,6 +12,8 @@ receive.
   each selected-account scheduler slice.
 - Select the plan-applicable long window for warm-up comparison: monthly for
   plans with monthly capacity, otherwise secondary.
+- Require the before and after samples to represent the same canonical window
+  before treating a `reset_at` jump as a confirmed reset.
 - Persist a monthly reset warm-up attempt with `window="monthly"`.
 - Add regressions for scheduler query scope, window selection, and the
   consumer-visible warm-up attempt.

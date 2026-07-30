@@ -1401,6 +1401,19 @@ class _WebSocketMixin:
                             key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
                         }
                     connect_headers = _facade()._headers_with_turn_state(filtered_headers, upstream_turn_state)
+                    retained_connect_kwargs: dict[str, Any] = {}
+                    if (
+                        account is not None
+                        and account_lease is not None
+                        and request_state.dispatch_absent_replay_account_id == account.id
+                    ):
+                        # This replay already owns the account's stream slot.
+                        # Hand that exact lease to reconnect selection so a
+                        # competing request cannot take it between sockets.
+                        retained_connect_kwargs = {
+                            "retained_account": account,
+                            "retained_stream_lease": account_lease,
+                        }
                     account, upstream = await proxy._connect_proxy_websocket(
                         connect_headers,
                         sticky_key=request_affinity.selection_key,
@@ -1415,7 +1428,10 @@ class _WebSocketMixin:
                         api_key=api_key,
                         client_send_lock=client_send_lock,
                         websocket=websocket,
+                        **retained_connect_kwargs,
                     )
+                    if retained_connect_kwargs:
+                        account_lease = None
                     if upstream is None or account is None:
                         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         if request_state_registered:
@@ -1599,8 +1615,6 @@ class _WebSocketMixin:
                                     exc_info=True,
                                 )
                         upstream = None
-                        await release_current_account_lease()
-                        account = None
                         continue
                     # send_str/send_bytes may fail after handing bytes to the
                     # kernel. Delivery is uncertain, so replay could duplicate
@@ -2115,6 +2129,8 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None = None,
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
+        retained_account: Account | None = None,
+        retained_stream_lease: AccountLease | None = None,
     ) -> tuple[Account | None, UpstreamWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -2155,32 +2171,38 @@ class _WebSocketMixin:
                 or turn_state_owner_required
                 or dispatch_absent_owner_required
             )
-            try:
-                account = await proxy._select_websocket_connect_account(
-                    deadline,
-                    sticky_key=sticky_key,
-                    sticky_kind=sticky_kind,
-                    prefer_earlier_reset=prefer_earlier_reset,
-                    prefer_earlier_reset_window=prefer_earlier_reset_window,
-                    routing_strategy=routing_strategy,
-                    model=model,
-                    request_state=request_state,
-                    api_key=api_key,
-                    client_send_lock=client_send_lock,
-                    websocket=websocket,
-                    downstream_activity=downstream_activity,
-                    reallocate_sticky=True if is_retry else reallocate_sticky,
-                    sticky_max_age_seconds=sticky_max_age_seconds,
-                    exclude_account_ids=excluded_account_ids,
-                    preferred_account_id=preferred_account_id,
-                    require_security_work_authorized=request_state.require_security_work_authorized,
-                    require_preferred_account=require_preferred_account,
-                    defer_no_account_error=last_failover_exc is not None and not require_preferred_account,
-                )
-            except _WebSocketConnectFailureEmitted:
-                return None, None
-            selected_stream_lease = request_state.websocket_stream_lease
-            request_state.websocket_stream_lease = None
+            if attempt == 0 and retained_account is not None and retained_stream_lease is not None:
+                account = retained_account
+                selected_stream_lease = retained_stream_lease
+                retained_account = None
+                retained_stream_lease = None
+            else:
+                try:
+                    account = await proxy._select_websocket_connect_account(
+                        deadline,
+                        sticky_key=sticky_key,
+                        sticky_kind=sticky_kind,
+                        prefer_earlier_reset=prefer_earlier_reset,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
+                        routing_strategy=routing_strategy,
+                        model=model,
+                        request_state=request_state,
+                        api_key=api_key,
+                        client_send_lock=client_send_lock,
+                        websocket=websocket,
+                        downstream_activity=downstream_activity,
+                        reallocate_sticky=True if is_retry else reallocate_sticky,
+                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        exclude_account_ids=excluded_account_ids,
+                        preferred_account_id=preferred_account_id,
+                        require_security_work_authorized=request_state.require_security_work_authorized,
+                        require_preferred_account=require_preferred_account,
+                        defer_no_account_error=last_failover_exc is not None and not require_preferred_account,
+                    )
+                except _WebSocketConnectFailureEmitted:
+                    return None, None
+                selected_stream_lease = request_state.websocket_stream_lease
+                request_state.websocket_stream_lease = None
             if account is None:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 if (

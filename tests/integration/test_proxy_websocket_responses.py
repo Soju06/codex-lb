@@ -19,6 +19,7 @@ from app.core.clients import proxy_websocket as proxy_websocket_module
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.load_balancer import AccountLease
 
 pytestmark = pytest.mark.integration
 
@@ -7612,6 +7613,12 @@ def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
     replacement_upstream.closed_before_send = not replacement_succeeds
     upstreams = [first_upstream, replacement_upstream]
     account = SimpleNamespace(id="acct_ws_closed_warm")
+    stream_lease = AccountLease(
+        lease_id="lease_ws_closed_warm",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=0.0,
+    )
     connect_count = 0
     cancellation_failure_injected = False
 
@@ -7641,6 +7648,8 @@ def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
         api_key,
         client_send_lock,
         websocket,
+        retained_account=None,
+        retained_stream_lease=None,
     ):
         del (
             self,
@@ -7661,8 +7670,14 @@ def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
         if connect_count == 1:
             assert request_state.dispatch_absent_replay_account_id == account.id
             assert request_state.preferred_account_id == account.id
+            assert retained_account is account
+            assert retained_stream_lease is stream_lease
+        else:
+            assert retained_account is None
+            assert retained_stream_lease is None
         upstream = upstreams[connect_count]
         connect_count += 1
+        request_state.websocket_stream_lease = stream_lease
         return account, upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)

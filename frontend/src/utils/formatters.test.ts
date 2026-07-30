@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RESET_ERROR_LABEL } from "@/utils/constants";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
+import i18n from "@/i18n";
 import {
   formatChartDateTime,
   formatDateTimeInline,
@@ -65,6 +66,19 @@ describe("formatters", () => {
     expect(formatCompactNumber(1_500_000_000)).toBe("1.5B");
     expect(formatCurrency(12)).toMatch(/^\$/);
     expect(formatNumber("abc")).toBe("--");
+  });
+
+  it("keeps compact K/M/B units stable across locales", async () => {
+    await i18n.changeLanguage("zh-CN");
+    try {
+      expect(formatCompactNumber(10_200)).toBe("10.2K");
+      expect(formatCompactNumber(46_400)).toBe("46.4K");
+      expect(formatCompactNumber(1_500_000)).toBe("1.5M");
+      expect(formatCompactNumber(1_500_000_000)).toBe("1.5B");
+      expect(formatCurrency(12)).toBe("$12.00");
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 
   it("formats percent and rate values", () => {

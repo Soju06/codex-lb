@@ -151,6 +151,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_local_account_cap_code,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _signal_propagated_responses_service_cleanup_ready,
@@ -194,6 +195,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
     _prompt_cache_key_from_request_model,
+    _request_allows_bare_session_cap_spillover,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
@@ -250,6 +252,24 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     return _account_selection_recovery_sleep_seconds_from_message(
         message,
         error_code=code,
+    )
+
+
+def _http_bridge_unanchored_fork_can_spill_on_cap(
+    *,
+    error_code: str | None,
+    affinity_kind: str,
+    original_request_unanchored: bool,
+    payload: ResponsesRequest,
+    preferred_account_id: str | None,
+) -> bool:
+    return (
+        _is_local_account_cap_code(error_code)
+        and affinity_kind == "internal_unanchored_parallel"
+        and original_request_unanchored
+        and preferred_account_id is not None
+        and payload.previous_response_id is None
+        and _request_allows_bare_session_cap_spillover(payload)
     )
 
 
@@ -314,8 +334,13 @@ async def _iter_account_capacity_wait_sse(
     reason: str | None,
     sleep_seconds: float,
     emit_keepalives: bool,
+    request_state: _WebSocketRequestState | None = None,
 ) -> AsyncIterator[str]:
     if not emit_keepalives:
+        if request_state is not None and request_state.capacity_startup_ready_event is not None:
+            request_state.capacity_startup_ready_event.clear()
+        if request_state is not None and request_state.capacity_startup_wait_event is not None:
+            request_state.capacity_startup_wait_event.set()
         _signal_propagated_capacity_startup_wait()
     wait_started_at = _service_time().monotonic()
     remaining_sleep_seconds = sleep_seconds
@@ -523,6 +548,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -546,6 +573,8 @@ class _HTTPBridgeStreamingMixin:
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_startup_wait_event,
+            capacity_startup_ready_event=capacity_startup_ready_event,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -569,6 +598,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -651,6 +682,8 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_startup_wait_event,
+                capacity_startup_ready_event=capacity_startup_ready_event,
             ):
                 yield line
         finally:
@@ -686,6 +719,8 @@ class _HTTPBridgeStreamingMixin:
         rewritten_file_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
@@ -709,7 +744,7 @@ class _HTTPBridgeStreamingMixin:
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
             if bridge_uses_responses_lite:
-                return self._prepare_http_bridge_request(
+                request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -718,14 +753,18 @@ class _HTTPBridgeStreamingMixin:
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
                 )
-            return self._prepare_http_bridge_request(
-                request_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                request_id=request_id,
-                client_ip=client_ip,
-            )
+            else:
+                request_state, text_data = self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                )
+            request_state.capacity_startup_wait_event = capacity_startup_wait_event
+            request_state.capacity_startup_ready_event = capacity_startup_ready_event
+            return request_state, text_data
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -1142,6 +1181,7 @@ class _HTTPBridgeStreamingMixin:
             without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        unanchored_fork_spill_attempted = False
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             nonlocal durable_full_resend_fresh_payload
@@ -1306,6 +1346,29 @@ class _HTTPBridgeStreamingMixin:
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    exc_code, _exc_message = _proxy_error_code_message(exc)
+                    if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
+                        error_code=exc_code,
+                        affinity_kind=bridge_session_key.affinity_kind,
+                        original_request_unanchored=original_request_unanchored,
+                        payload=effective_payload,
+                        preferred_account_id=request_state.preferred_account_id,
+                    ):
+                        unanchored_fork_spill_attempted = True
+                        _log_http_bridge_event(
+                            "unanchored_fork_cap_spill",
+                            bridge_session_key,
+                            account_id=request_state.preferred_account_id,
+                            model=effective_payload.model,
+                            detail=f"reason={exc_code}, outcome=retry_without_preferred_account",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(effective_payload.model)
+                            if effective_payload.model
+                            else None,
+                        )
+                        request_state.preferred_account_id = None
+                        preferred_account_has_continuity_provenance = False
+                        continue
                     wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -1323,6 +1386,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1585,6 +1649,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1995,6 +2060,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -2098,6 +2164,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -2287,6 +2354,7 @@ class _HTTPBridgeStreamingMixin:
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
                     ):
                         yield line
                     if _service_time().monotonic() >= request_deadline:
@@ -2407,6 +2475,7 @@ class _HTTPBridgeStreamingMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
+        request_state.propagate_http_errors = propagate_http_errors
         while True:
             try:
                 if account_neutral_recovery:
@@ -2470,6 +2539,7 @@ class _HTTPBridgeStreamingMixin:
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
                     ):
                         yield line
                 finally:
@@ -2491,6 +2561,10 @@ class _HTTPBridgeStreamingMixin:
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)
             _signal_propagated_capacity_startup_ready()
+            if request_state.capacity_startup_wait_event is not None:
+                request_state.capacity_startup_wait_event.clear()
+            if request_state.capacity_startup_ready_event is not None:
+                request_state.capacity_startup_ready_event.set()
             event_queue = request_state.event_queue
             assert event_queue is not None
             yielded_any = False
@@ -2518,6 +2592,8 @@ class _HTTPBridgeStreamingMixin:
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
+                            if request_state.account_capacity_wait_suppress_keepalive:
+                                continue
                             keepalive_sent = True
                             yielded_any = True
                             downstream_response_id = _websocket_downstream_response_id(request_state)
@@ -2647,3 +2723,4 @@ class _HTTPBridgeStreamingMixin:
             with anyio.CancelScope(shield=True):
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
+                await self._maybe_release_idle_http_bridge_session_lease(session)

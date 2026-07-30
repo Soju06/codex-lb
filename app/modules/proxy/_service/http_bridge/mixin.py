@@ -69,6 +69,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
+    _await_task_deferring_cancellation,
     _close_http_bridge_session_bounded,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
@@ -2081,8 +2082,9 @@ class _HTTPBridgeMixin(
             selected_account_lease = None
             if lease is None:
                 return
-            if lease is session.account_lease:
-                session.account_lease = None
+            async with session.pending_lock:
+                if session.account_lease is not None and lease.lease_id == session.account_lease.lease_id:
+                    session.account_lease = None
             await self._load_balancer.release_account_lease(lease)
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
@@ -2307,15 +2309,22 @@ class _HTTPBridgeMixin(
             await old_upstream.close()
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-        if selected_account_lease is not session.account_lease:
-            await self._load_balancer.release_account_lease(session.account_lease)
-        session.account_lease = selected_account_lease
-        session.account, session.headers, session.upstream = account, connect_headers, upstream
-        session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
-        session.upstream_control = _WebSocketUpstreamControl()
-        session.closed = False
-        session.last_upstream_close_code = None
-        session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+        async with session.pending_lock:
+            replaced_account_lease = session.account_lease
+            session.account_lease = selected_account_lease
+            session.account, session.headers, session.upstream = account, connect_headers, upstream
+            session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
+            session.upstream_control = _WebSocketUpstreamControl()
+            session.closed = False
+            session.last_upstream_close_code = None
+            session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+        if replaced_account_lease is not None and (
+            selected_account_lease is None or selected_account_lease.lease_id != replaced_account_lease.lease_id
+        ):
+            release_task = asyncio.create_task(self._load_balancer.release_account_lease(replaced_account_lease))
+            _, cancellation = await _await_task_deferring_cancellation(release_task)
+            if cancellation is not None:
+                raise cancellation
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(

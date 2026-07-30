@@ -7941,6 +7941,74 @@ async def test_v1_responses_http_bridge_reuses_derived_prompt_cache_key_when_cli
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_terminal_release_admits_second_session_before_idle_ttl(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    app_settings = _make_app_settings(enabled=True, codex_idle_ttl_seconds=900.0).model_copy(
+        update={
+            "proxy_account_stream_limit": 1,
+            "proxy_account_stream_recovery_reserve": 0,
+        }
+    )
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_idle_release",
+        "http-bridge-idle-release@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    upstreams = deque([_FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()])
+
+    async def fake_select_account_with_budget(*_args: object, **_kwargs: object) -> AccountSelection:
+        lease = await service._load_balancer.acquire_account_lease(account.id, kind="stream")
+        if lease is None:
+            return AccountSelection(
+                account=None,
+                error_message="Account stream capacity is exhausted; wait for active streams to finish.",
+                error_code="account_stream_cap",
+            )
+        return AccountSelection(account=account, error_message=None, lease=lease)
+
+    async def fake_ensure_fresh_with_budget(
+        _self: object,
+        target: Account,
+        **_kwargs: object,
+    ) -> Account:
+        return target
+
+    async def fake_connect_responses_websocket(*_args: object, **_kwargs: object) -> _FakeBridgeUpstreamWebSocket:
+        return upstreams.popleft()
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "release the idle stream lease",
+    }
+    first = await async_client.post("/v1/responses", json=payload, headers={"session_id": "idle-release-a"})
+    assert first.status_code == 200
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+    second = await async_client.post("/v1/responses", json=payload, headers={"session_id": "idle-release-b"})
+    assert second.status_code == 200
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+    assert not upstreams
+    assert len(service._http_bridge_sessions) == 2
+    assert all(not session.closed for session in service._http_bridge_sessions.values())
+    assert all(session.idle_ttl_seconds >= 900.0 for session in service._http_bridge_sessions.values())
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(

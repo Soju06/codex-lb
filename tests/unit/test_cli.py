@@ -36,7 +36,36 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
+    assert kwargs["workers"] == 1
     assert kwargs["proxy_headers"] is False
+
+
+def test_main_pins_one_worker_when_web_concurrency_requests_more(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main()
+
+    assert captured["kwargs"]["workers"] == 1
+
+
+def test_main_validates_selected_port_before_loading_uvicorn(monkeypatch):
+    def fail_load_uvicorn():
+        pytest.fail("Uvicorn must not load when the selected port conflicts with the metrics port")
+
+    monkeypatch.setenv("PORT", "2455")
+    monkeypatch.setenv("CODEX_LB_METRICS_PORT", "9090")
+    monkeypatch.setattr(cli, "_load_uvicorn", fail_load_uvicorn)
+
+    with pytest.raises(ValueError, match="metrics_port must not match the main application port \\(9090\\)"):
+        cli.main(["--port", "9090"])
 
 
 def test_main_passes_custom_keep_alive_timeout(monkeypatch):

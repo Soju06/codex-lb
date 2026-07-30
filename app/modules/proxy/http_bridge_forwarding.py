@@ -123,6 +123,7 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        on_response_wait: Callable[[], None] | None = None,
         on_request_dispatched: Callable[[], None] | None = None,
         on_response_rejected: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
@@ -132,6 +133,8 @@ class HTTPBridgeOwnerClient:
             connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
             idle_timeout_seconds=settings.stream_idle_timeout_seconds,
         )
+        if on_response_wait is not None:
+            on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
             request_payload = payload.model_dump_for_forwarding()

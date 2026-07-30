@@ -5048,6 +5048,8 @@ async def _stream_responses(
                 service_cleanup_ready_event=responses_service_cleanup_ready_event
             ):
                 await reservation_cleanup.release(action="terminal compaction response")
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -5068,6 +5070,8 @@ async def _stream_responses(
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_wait_event,
+            capacity_startup_ready_event=capacity_ready_event,
         )
     else:
         stream = context.service.stream_responses(
@@ -5084,8 +5088,6 @@ async def _stream_responses(
         )
     service_stream = stream
     startup_handoff_tasks: list[asyncio.Task[str]] = []
-    capacity_wait_event = asyncio.Event()
-    capacity_ready_event = _CapacityStartupReadyEvent()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     responses_owner_forward_dispatched_token = _bind_propagated_responses_owner_forward_dispatched(

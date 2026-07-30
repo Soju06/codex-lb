@@ -197,6 +197,21 @@ _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
 
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[T],
+) -> tuple[T, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancellation
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancellation = cancellation or exc
+
+
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeRuntimeConfig:
     enabled: bool

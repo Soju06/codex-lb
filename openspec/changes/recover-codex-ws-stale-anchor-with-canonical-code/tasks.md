@@ -10,6 +10,7 @@
 
 ## 3. Coverage (follows sign-off)
 
-- [ ] 3.1 Migrate the ~14 codex-native WebSocket stale-anchor tests from asserting `codex_previous_response_stale` + `"previous_response_not_found" not in payload` to the new contract: `error.code == "previous_response_not_found"` with no `resp_...` id and no raw upstream envelope.
+- [ ] 3.1 Migrate the ~14 codex-native WebSocket stale-anchor tests from asserting `codex_previous_response_stale` + `"previous_response_not_found" not in payload` to the new contract: `error.code == "previous_response_not_found"` with the stale/missing `previous_response_id` and the raw upstream envelope absent. Do not assert the absence of every `resp_...` id: after `response.created` the sanitized event legitimately keeps the current downstream response id for correlation.
 - [ ] 3.2 Assert public `/v1/responses` WebSocket clients still receive `stream_incomplete`.
 - [ ] 3.3 `openspec validate --specs` and focused WebSocket-surface tests pass.
+- [ ] 3.4 Confirm the official Codex client recovers from an application-level `previous_response_not_found` with a controlled single full-context retry (owner confirmation, or a client-level regression), before treating unmodified-client recovery as settled.

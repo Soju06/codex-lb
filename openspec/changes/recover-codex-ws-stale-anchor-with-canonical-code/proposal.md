@@ -6,17 +6,17 @@ On the Codex-native `/backend-api/codex/responses` WebSocket route, when an ephe
 
 ## Why
 
-The requirement `Codex WebSocket stale-anchor failures remain recoverable by a full-context retry` already intends the client to recover on a stable classifier. But standard Codex clients (including the reference pi / pi-ai transport, which retries only on `error.code == "previous_response_not_found"`, and by construction the official Codex client) recover by matching the canonical error code, not by reading a message. Emitting a proxy-specific code silently disables that built-in recovery, turning a recoverable continuity loss into a turn-ending error that needs a manual restart. A client cannot be expected to learn a proxy-specific code, so the fix belongs on the surface that deviated from the canonical contract.
+The requirement `Codex WebSocket stale-anchor failures remain recoverable by a full-context retry` already intends the client to recover on a stable classifier. But standard Codex clients recover by matching the canonical error *code*, not by reading a message: the reference pi / pi-ai transport is confirmed from source to retry only on `error.code == "previous_response_not_found"` and to ignore any other code. The official Codex client is expected to key on the same canonical code; that is a load-bearing assumption this change relies on and asks maintainers to confirm (see `design.md` and task 3.4). Emitting a proxy-specific code silently disables the reference client's built-in recovery, turning a recoverable continuity loss into a turn-ending error that needs a manual restart. A client cannot be expected to learn a proxy-specific code, so the fix belongs on the surface that deviated from the canonical contract.
 
 Reference: pi report [#1529](https://github.com/Soju06/codex-lb/issues/1529).
 
 ## What Changes
 
-- On the Codex-native WebSocket route, stale-anchor continuity failures are surfaced with `error.code = "previous_response_not_found"`, sanitized to remove the raw upstream error envelope and the missing `resp_...` id.
+- On the Codex-native WebSocket route, stale-anchor continuity failures are surfaced with `error.code = "previous_response_not_found"`, sanitized to remove the raw upstream error envelope and the missing (stale) `previous_response_id`. The current downstream response id is preserved for event correlation.
 - The nonstandard `codex_previous_response_stale` classifier is no longer used on this route.
 - Public `/v1/responses` WebSocket clients keep the existing `stream_incomplete` masking; OpenAI-compatible clients do not expect the Codex continuity code.
 - Sibling requirements that currently assert `stream_incomplete` masking for the Codex-native WebSocket route (`Codex WebSocket top-level previous-response errors are masked`, `Codex WebSocket wrapped errors follow official client shape`) are reconciled so their Codex-native scenarios use the canonical `previous_response_not_found` signal while their public `/v1` scenarios keep `stream_incomplete`. This delta modifies the two authoritative requirements; the owner drives the dependent wording per the centralized-continuity requirement.
-- Add WebSocket-surface regression coverage asserting the client-visible code is `previous_response_not_found` with no id or raw upstream envelope leaked.
+- Add WebSocket-surface regression coverage asserting the client-visible code is `previous_response_not_found` with the stale `previous_response_id` and raw upstream envelope absent (the current response id may remain).
 
 ## Capabilities
 

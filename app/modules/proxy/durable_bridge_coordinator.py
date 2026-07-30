@@ -357,6 +357,7 @@ class DurableBridgeSessionCoordinator:
         instance_id: str,
         owner_epoch: int,
         account_id: str,
+        clear_continuity: bool = False,
     ) -> bool:
         del api_key_id
         async with self._session() as session:
@@ -365,6 +366,7 @@ class DurableBridgeSessionCoordinator:
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 account_id=account_id,
+                clear_continuity=clear_continuity,
             )
 
     async def release_live_session(

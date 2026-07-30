@@ -2414,6 +2414,10 @@ class _HTTPBridgeStreamingMixin:
                     logger.warning("Failed to fence HTTP bridge recovery attempt", exc_info=True)
                 if marked:
                     durable_recovery_fresh_replay = True
+                    recovery_origin_session_id = request_state.recovery_attempt_session_id or session.durable_session_id
+                    recovery_origin_owner_epoch = (
+                        request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
+                    )
                     _log_http_bridge_event(
                         "durable_recovery_fresh_replay",
                         bridge_session_key,
@@ -2430,6 +2434,9 @@ class _HTTPBridgeStreamingMixin:
                         error_message="Upstream websocket closed before response.completed",
                     )
                     switch_to_account_neutral_replay()
+                    request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
+                    request_state.recovery_attempt_session_id = recovery_origin_session_id
+                    request_state.recovery_attempt_owner_epoch = recovery_origin_owner_epoch
                     recovery_path = "durable_recovery_fresh_replay"
                     retry_payload = effective_payload
                     retry_previous_response_id = None

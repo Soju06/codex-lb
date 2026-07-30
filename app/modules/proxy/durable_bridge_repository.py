@@ -672,10 +672,20 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         account_id: str,
+        clear_continuity: bool = False,
     ) -> bool:
         """Persist a replacement account only while this worker owns the lease."""
 
         async with sqlite_writer_section():
+            values: dict[str, object] = {"account_id": account_id}
+            if clear_continuity:
+                values.update(
+                    latest_turn_state=None,
+                    latest_response_id=None,
+                    latest_input_item_count=None,
+                    latest_input_full_fingerprint=None,
+                    latest_pending_tool_calls_json=None,
+                )
             result = await self._session.execute(
                 update(HttpBridgeSessionRecord)
                 .where(
@@ -683,8 +693,10 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.owner_instance_id == instance_id,
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
                 )
-                .values(account_id=account_id)
+                .values(**values)
             )
+            if clear_continuity:
+                await self._clear_aliases_for_session(session_id)
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 

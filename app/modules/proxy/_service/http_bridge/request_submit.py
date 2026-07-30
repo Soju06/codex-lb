@@ -982,24 +982,24 @@ class _HTTPBridgeRequestSubmitMixin:
                                 exc_info=True,
                             )
                             recovery_alias_registered = False
-                    if not recovery_alias_registered:
-                        session.closed = True
-                        session.upstream_control.reconnect_requested = True
-                        session.upstream_control.retire_after_drain = True
-                        _record_continuity_fail_closed(
-                            surface="http_bridge",
-                            reason="recovery_alias_registration_failed",
-                            previous_response_id=request_state.previous_response_id,
-                            session_id=request_state.session_id,
-                            upstream_error_code="bridge_continuity_persistence_failed",
-                        )
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "Recovered response continuity could not be persisted; retry the request.",
-                            ),
-                        )
+                        if not recovery_alias_registered:
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                            _record_continuity_fail_closed(
+                                surface="http_bridge",
+                                reason="recovery_alias_registration_failed",
+                                previous_response_id=request_state.previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code="bridge_continuity_persistence_failed",
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "Recovered response continuity could not be persisted; retry the request.",
+                                ),
+                            )
                     if request_state.recovery_attempt_fingerprint is not None:
                         try:
                             owner_lookup = await self._durable_bridge.renew_live_session(

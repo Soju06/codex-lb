@@ -21,6 +21,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_FORWARDED_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
+    HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER,
     HTTP_BRIDGE_RESERVATION_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
@@ -120,6 +121,81 @@ def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
     assert forwarded.context == context
     assert forwarded.context.original_affinity_kind is None
     assert forwarded.context.original_affinity_key is None
+
+
+def test_parse_forwarded_request_preserves_signed_proxy_injected_anchor_provenance() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "follow-up",
+            "previous_response_id": "resp_proxy_injected",
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_123",
+        proxy_injected_previous_response_id=True,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert headers[HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER] == "1"
+    assert headers[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] == "2"
+    assert headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] == "0"
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.proxy_injected_previous_response_id is True
+    assert forwarded.context.signature_version == "2"
+
+
+@pytest.mark.parametrize("tamper", ["add", "add_false", "change", "strip", "strip_full_signature"])
+def test_parse_forwarded_request_rejects_tampered_proxy_injected_anchor_provenance(
+    tamper: str,
+) -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "follow-up",
+            "previous_response_id": "resp_proxy_injected",
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_123",
+        proxy_injected_previous_response_id=tamper not in {"add", "add_false"},
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "add":
+        headers[HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER] = "1"
+    elif tamper == "add_false":
+        headers[HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER] = "0"
+    elif tamper == "change":
+        headers[HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER] = "0"
+    elif tamper == "strip":
+        headers.pop(HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER)
+    else:
+        headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
 
 
 def test_parse_forwarded_request_preserves_signed_file_owner_proof() -> None:

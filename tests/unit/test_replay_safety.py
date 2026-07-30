@@ -10,6 +10,7 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_has_self_contained_tool_continuation_suffix,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
@@ -588,6 +589,268 @@ def test_full_resend_suffix_rejects_missing_or_misordered_context(
         responses_input_suffix_retains_prior_output(
             [*stored_input, *suffix],
             stored_count=len(stored_input),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_1",
+                    "name": "exec",
+                    "input": "pwd",
+                    "status": "completed",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_1",
+                    "output": "/workspace",
+                    "status": "completed",
+                },
+            ],
+            id="immediate-custom-tool-continuation-without-new-user",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Checking the workspace."}],
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "exec",
+                    "input": "git status",
+                    "status": "completed",
+                    "caller": {"type": "direct"},
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_2",
+                    "output": "clean",
+                    "status": "completed",
+                    "caller": {"type": "direct"},
+                },
+                {"type": "message", "role": "developer", "content": "continue safely"},
+                {"type": "message", "role": "user", "content": "continue"},
+            ],
+            id="observed-codex-full-history-shape",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_3",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_3", "output": "result"},
+            ],
+            id="immediate-function-tool-continuation",
+        ),
+    ],
+)
+def test_quarantine_tool_continuation_accepts_only_complete_self_contained_suffix(
+    suffix: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_has_self_contained_tool_continuation_suffix(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+        )
+        is True
+    )
+
+
+def test_quarantine_tool_continuation_keeps_existing_tool_declarations_on_same_account() -> None:
+    stored_input: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "mcp", "server_label": "workspace-tools"}],
+        },
+        {"role": "user", "content": "first question"},
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_1",
+            "name": "exec",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_1",
+            "output": "/workspace",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is False
+    assert (
+        responses_input_has_self_contained_tool_continuation_suffix(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored_input", "suffix"),
+    [
+        pytest.param(
+            [{"role": "user", "content": "first question"}],
+            [{"type": "custom_tool_call_output", "call_id": "call_1", "output": "orphan"}],
+            id="orphan-output",
+        ),
+        pytest.param(
+            [{"role": "user", "content": "first question"}],
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_1",
+                    "name": "exec",
+                    "input": "pwd",
+                }
+            ],
+            id="unresolved-call",
+        ),
+        pytest.param(
+            [{"role": "user", "content": "first question"}],
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "duplicate",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "duplicate",
+                    "name": "exec",
+                    "input": "pwd",
+                },
+                {"type": "function_call_output", "call_id": "duplicate", "output": "result"},
+            ],
+            id="duplicate-call-id",
+        ),
+        pytest.param(
+            [{"role": "user", "content": "first question"}],
+            [
+                {
+                    "type": "computer_call",
+                    "call_id": "call_computer",
+                    "action": {"type": "screenshot"},
+                    "status": "completed",
+                },
+                {
+                    "type": "computer_call_output",
+                    "call_id": "call_computer",
+                    "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AAAA"},
+                },
+            ],
+            id="unsupported-account-scoped-tool",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_boundary",
+                    "name": "exec",
+                    "input": "pwd",
+                }
+            ],
+            [{"type": "custom_tool_call_output", "call_id": "call_boundary", "output": "/workspace"}],
+            id="output-depends-on-prefix-call",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_reused",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_reused", "output": "old"},
+            ],
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_reused",
+                    "name": "lookup_again",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_reused", "output": "new"},
+            ],
+            id="call-id-reused-from-prefix",
+        ),
+        pytest.param(
+            [{"role": "user", "content": "first question"}],
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+            ],
+            id="completed-response-path-is-not-tool-alternative",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "computer_call",
+                    "call_id": "old_computer",
+                    "action": {"type": "screenshot"},
+                    "status": "completed",
+                }
+            ],
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "exec",
+                    "input": "pwd",
+                },
+                {"type": "custom_tool_call_output", "call_id": "call_2", "output": "/workspace"},
+            ],
+            id="whole-history-is-not-self-contained",
+        ),
+    ],
+)
+def test_quarantine_tool_continuation_rejects_incomplete_or_unsafe_history(
+    stored_input: list[JsonValue],
+    suffix: list[JsonValue],
+) -> None:
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_has_self_contained_tool_continuation_suffix(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
         )
         is False
     )

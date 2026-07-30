@@ -1260,6 +1260,9 @@ async def internal_bridge_responses(
         include_rate_limit_headers=False,
         forwarded_request=True,
         forwarded_original_request_unanchored=forwarded_request_context.context.original_request_unanchored,
+        forwarded_proxy_injected_previous_response_id=(
+            forwarded_request_context.context.proxy_injected_previous_response_id
+        ),
         forwarded_legacy_signature=forwarded_request_context.context.signature_version is None,
         forwarded_headers=forwarded_headers,
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
@@ -4796,6 +4799,7 @@ async def _stream_responses(
     include_rate_limit_headers: bool = True,
     forwarded_request: bool = False,
     forwarded_original_request_unanchored: bool = False,
+    forwarded_proxy_injected_previous_response_id: bool = False,
     forwarded_legacy_signature: bool = False,
     forwarded_headers: Mapping[str, str] | None = None,
     forwarded_downstream_turn_state: str | None = None,
@@ -4966,6 +4970,7 @@ async def _stream_responses(
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_proxy_injected_previous_response_id=forwarded_proxy_injected_previous_response_id,
             forwarded_legacy_signature=forwarded_legacy_signature,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,

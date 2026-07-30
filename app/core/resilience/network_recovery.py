@@ -4,7 +4,9 @@ import asyncio
 import errno
 import logging
 import socket
+import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
@@ -37,8 +39,148 @@ _MAX_RETRY_DELAY_SECONDS = 5.0
 # Keep that lifecycle cleanup independently bounded in case client construction
 # or lock acquisition stalls.
 _CONCRETE_FAILED_GENERATION_ROTATION_TIMEOUT_SECONDS = 5.0
+_WEBSOCKET_EGRESS_FAILURE_CORRELATION_WINDOW_SECONDS = 1.0
+_WEBSOCKET_EGRESS_FAILURE_MAX_OBSERVATIONS = 1024
 
 NetworkRecoveryDecision = Literal["not_applicable", "retry", "exhausted"]
+
+
+@dataclass(slots=True)
+class _WebSocketEgressFailureObservation:
+    egress_key: str
+    account_id: str
+    observed_at: float
+    loop: asyncio.AbstractEventLoop
+    waiter: asyncio.Future[bool] | None
+    correlated: bool = False
+
+
+def _resolve_websocket_egress_failure_waiter(
+    waiter: asyncio.Future[bool],
+    result: bool,
+) -> None:
+    if not waiter.done():
+        waiter.set_result(result)
+
+
+class WebSocketEgressFailureCorrelator:
+    """Bound ambiguous no-close failures until cross-account evidence arrives."""
+
+    def __init__(
+        self,
+        *,
+        window_seconds: float = _WEBSOCKET_EGRESS_FAILURE_CORRELATION_WINDOW_SECONDS,
+        max_observations: int = _WEBSOCKET_EGRESS_FAILURE_MAX_OBSERVATIONS,
+    ) -> None:
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        if max_observations <= 0:
+            raise ValueError("max_observations must be positive")
+        self._window_seconds = window_seconds
+        self._max_observations = max_observations
+        self._lock = threading.Lock()
+        self._observations: deque[_WebSocketEgressFailureObservation] = deque()
+
+    async def observe(
+        self,
+        *,
+        egress_key: str | None,
+        account_id: str | None,
+    ) -> bool:
+        """Return whether this failure shares an egress incident with another account."""
+
+        if not egress_key or not account_id:
+            return False
+
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        with self._lock:
+            observed_at = time.monotonic()
+            self._expire_observations_locked(observed_at)
+            while len(self._observations) >= self._max_observations:
+                # Capacity pressure removes correlation evidence, but it must
+                # not let an evicted candidate reach health settlement before
+                # its own bounded judgment window ends.
+                self._observations.popleft().waiter = None
+            observation = _WebSocketEgressFailureObservation(
+                egress_key=egress_key,
+                account_id=account_id,
+                observed_at=observed_at,
+                loop=loop,
+                waiter=waiter,
+            )
+            self._observations.append(observation)
+            matching = [
+                candidate
+                for candidate in self._observations
+                if candidate.egress_key == egress_key and observed_at - candidate.observed_at <= self._window_seconds
+            ]
+            correlated = len({candidate.account_id for candidate in matching}) >= 2
+            if correlated:
+                for candidate in matching:
+                    candidate.correlated = True
+                    self._notify_observation_locked(candidate, result=True)
+
+        if correlated:
+            return True
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(waiter),
+                timeout=self._window_seconds,
+            )
+        except TimeoutError:
+            with self._lock:
+                correlated = observation.correlated
+                if observation.waiter is waiter:
+                    observation.waiter = None
+            waiter.cancel()
+            return correlated
+        except asyncio.CancelledError:
+            with self._lock:
+                if observation.waiter is waiter:
+                    observation.waiter = None
+            waiter.cancel()
+            raise
+
+    def _expire_observations_locked(self, now: float) -> None:
+        while self._observations and now - self._observations[0].observed_at > self._window_seconds:
+            self._notify_observation_locked(self._observations.popleft(), result=False)
+
+    @staticmethod
+    def _notify_observation_locked(
+        observation: _WebSocketEgressFailureObservation,
+        *,
+        result: bool,
+    ) -> None:
+        waiter = observation.waiter
+        if waiter is None:
+            return
+        observation.waiter = None
+        try:
+            observation.loop.call_soon_threadsafe(
+                _resolve_websocket_egress_failure_waiter,
+                waiter,
+                result,
+            )
+        except RuntimeError:
+            # A closed event loop owns no remaining health settlement. The
+            # bounded observation itself still expires normally.
+            return
+
+
+_websocket_egress_failure_correlator = WebSocketEgressFailureCorrelator()
+
+
+async def correlate_websocket_egress_failure(
+    *,
+    egress_key: str | None,
+    account_id: str | None,
+) -> bool:
+    return await _websocket_egress_failure_correlator.observe(
+        egress_key=egress_key,
+        account_id=account_id,
+    )
 
 
 def _exception_chain(exc: BaseException) -> Iterator[BaseException]:

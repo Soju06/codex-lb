@@ -798,6 +798,10 @@ class _WebSocketRequestState:
     precreated_replay_account_id: str | None = None
     skip_request_log: bool = False
     previous_response_id: str | None = None
+    # Persisted-response intent from the validated response.create payload.
+    # ``None`` means the state was constructed outside the normal preparation
+    # path and is not sufficient proof for disconnect-time invalidation.
+    response_store: bool | None = None
     session_id: str | None = None
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
@@ -939,6 +943,10 @@ class _HTTPBridgeSession:
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
+    # Effective store intent for ``last_completed_response_id`` only when that
+    # response completed on the session's current upstream socket. Reconnects
+    # clear this without discarding durable routing or prefix proof.
+    last_completed_response_store: bool | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None

@@ -345,6 +345,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         proxy_api_authorization: str | None,
         file_owner_account_id: str | None = None,
         client_ip: str | None = None,
+        proxy_injected_previous_response_id: bool = False,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(_service_get_settings())
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
@@ -373,6 +374,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     and payload.previous_response_id is None
                 )
             ),
+            proxy_injected_previous_response_id=proxy_injected_previous_response_id,
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
             file_owner_account_id=file_owner_account_id,

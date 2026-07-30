@@ -84,6 +84,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
+    _http_bridge_full_resend_required_error,
     _http_bridge_has_durable_recovery_anchor,
     _http_bridge_incompatible_model_fork_key,
     _http_bridge_key_strength,
@@ -352,6 +353,7 @@ class _HTTPBridgeMixin(
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
         allow_bootstrap_owner_rebind: bool = False,
+        allow_fresh_session_creation: bool = True,
         durable_lookup: DurableBridgeLookup | None = None,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
@@ -384,6 +386,7 @@ class _HTTPBridgeMixin(
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
         allow_bootstrap_owner_rebind: bool = False,
+        allow_fresh_session_creation: bool = True,
         durable_lookup: DurableBridgeLookup | None = None,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
@@ -415,6 +418,7 @@ class _HTTPBridgeMixin(
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
         allow_bootstrap_owner_rebind: bool = False,
+        allow_fresh_session_creation: bool = True,
         durable_lookup: DurableBridgeLookup | None = None,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
@@ -492,6 +496,16 @@ class _HTTPBridgeMixin(
                 ("requested continuity owner", preferred_account_id),
                 ("local account-neutral recovery", session.account.id),
             )
+
+        def fresh_session_creation_rejected_error() -> ProxyResponseError:
+            _record_continuity_fail_closed(
+                surface="http_bridge",
+                reason="fresh_socket_anchor_requires_full_resend",
+                previous_response_id=previous_response_id,
+                session_id=incoming_turn_state or incoming_session_key,
+                upstream_error_code="durable_anchor_from_prior_socket",
+            )
+            return _http_bridge_full_resend_required_error()
 
         while True:
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
@@ -1248,6 +1262,20 @@ class _HTTPBridgeMixin(
                                 model_class=_extract_model_class(request_model) if request_model else None,
                                 owner_check_applied=owner_check_required,
                             )
+                        if (
+                            continuity_error is None
+                            and session_to_return_after_close is None
+                            and owner_forward is None
+                            and not allow_fresh_session_creation
+                        ):
+                            continuity_error = fresh_session_creation_rejected_error()
+                    elif (
+                        session_to_return_after_close is None
+                        and inflight_future is None
+                        and owner_forward is None
+                        and not allow_fresh_session_creation
+                    ):
+                        continuity_error = fresh_session_creation_rejected_error()
                     elif inflight_future is None:
                         while (
                             len(self._http_bridge_sessions) + len(self._http_bridge_inflight_sessions) >= max_sessions
@@ -2295,6 +2323,7 @@ class _HTTPBridgeMixin(
             await self._unregister_http_bridge_turn_states(session)
             await self._unregister_http_bridge_previous_response_ids(session)
             session.last_completed_response_id = None
+            session.last_completed_response_store = None
             session.last_completed_input_count = 0
             session.last_completed_input_prefix_fingerprint = None
             session.last_pending_tool_calls.clear()
@@ -2313,6 +2342,7 @@ class _HTTPBridgeMixin(
             replaced_account_lease = session.account_lease
             session.account_lease = selected_account_lease
             session.account, session.headers, session.upstream = account, connect_headers, upstream
+            session.last_completed_response_store = None
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
             session.upstream_control = _WebSocketUpstreamControl()
             session.closed = False

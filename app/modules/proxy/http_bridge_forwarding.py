@@ -57,6 +57,7 @@ HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_FILE_OWNER_HEADER = "x-codex-bridge-file-owner"
 HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
+HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER = "x-codex-bridge-proxy-injected-previous-response"
 HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
@@ -82,6 +83,7 @@ class HTTPBridgeForwardContext:
     codex_session_affinity: bool
     downstream_turn_state: str | None
     original_request_unanchored: bool = False
+    proxy_injected_previous_response_id: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
     file_owner_account_id: str | None = None
@@ -222,10 +224,16 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
-    signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
+    signature_version = (
+        _HTTP_BRIDGE_SIGNATURE_VERSION_V2
+        if context.original_request_unanchored or context.proxy_injected_previous_response_id
+        else None
+    )
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
-        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
+        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1" if context.original_request_unanchored else "0"
+    if context.proxy_injected_previous_response_id:
+        forwarded[HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER] = "1"
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
@@ -300,6 +308,10 @@ def parse_forwarded_request(
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
     signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
     original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    proxy_injected_value = _optional_header(headers.get(HTTP_BRIDGE_PROXY_INJECTED_PREVIOUS_RESPONSE_HEADER))
+    if proxy_injected_value not in {None, "1"}:
+        return None, _invalid_bridge_forward_signature_error()
+    proxy_injected_previous_response_id = proxy_injected_value == "1"
     if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
         if original_unanchored_value not in {"0", "1"}:
             return None, _invalid_bridge_forward_signature_error()
@@ -308,12 +320,17 @@ def parse_forwarded_request(
         original_request_unanchored = False
     else:
         return None, _invalid_bridge_forward_signature_error()
+    if proxy_injected_previous_response_id and (
+        signature_version != _HTTP_BRIDGE_SIGNATURE_VERSION_V2 or payload.previous_response_id is None
+    ):
+        return None, _invalid_bridge_forward_signature_error()
     context = HTTPBridgeForwardContext(
         origin_instance=headers.get(HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, "").strip() or "unknown",
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
         original_request_unanchored=original_request_unanchored,
+        proxy_injected_previous_response_id=proxy_injected_previous_response_id,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
         file_owner_account_id=_optional_header(headers.get(HTTP_BRIDGE_FILE_OWNER_HEADER)),
@@ -342,6 +359,11 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
+    if context.proxy_injected_previous_response_id:
+        # Proxy-injected provenance controls durable quarantine. Never accept a
+        # forward that claims it through the rolling-upgrade primary fallback,
+        # whose legacy form does not authenticate this additive field.
+        return None, _invalid_bridge_forward_signature_error()
     if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):
         # The rolling-upgrade primary signature does not bind the additive
         # file-owner proof. Never allow a stripped/forged proof to downgrade to
@@ -559,32 +581,37 @@ def _structured_bridge_signing_payload(
     # Canonical structured encoding: object boundaries make field re-packing
     # impossible, the client-IP mode is itself authenticated, and ``protocol``
     # domain-separates the primary and tamper-proofing signatures.
+    signing_context: JsonObject = {
+        "body_digest": body_digest,
+        "client_ip": context.client_ip if include_client_ip else None,
+        "client_ip_present": context.client_ip is not None,
+        "codex_session_affinity": context.codex_session_affinity,
+        "downstream_turn_state": context.downstream_turn_state,
+        "file_owner_account_id": context.file_owner_account_id,
+        "include_client_ip": include_client_ip,
+        "origin_instance": context.origin_instance,
+        "original_affinity_key": context.original_affinity_key,
+        "original_affinity_kind": context.original_affinity_kind,
+        "original_request_unanchored": context.original_request_unanchored,
+        "protocol": protocol,
+        "reservation": (
+            {
+                "id": context.reservation.reservation_id,
+                "key_id": context.reservation.key_id,
+                "model": context.reservation.model,
+            }
+            if context.reservation is not None
+            else None
+        ),
+        "signature_version": signature_version,
+        "target_instance": context.target_instance,
+    }
+    if context.proxy_injected_previous_response_id:
+        # Additive encoding keeps false/absent forwards byte-compatible with
+        # pre-provenance replicas while binding the security-relevant true case.
+        signing_context["proxy_injected_previous_response_id"] = True
     return json.dumps(
-        {
-            "body_digest": body_digest,
-            "client_ip": context.client_ip if include_client_ip else None,
-            "client_ip_present": context.client_ip is not None,
-            "codex_session_affinity": context.codex_session_affinity,
-            "downstream_turn_state": context.downstream_turn_state,
-            "file_owner_account_id": context.file_owner_account_id,
-            "include_client_ip": include_client_ip,
-            "origin_instance": context.origin_instance,
-            "original_affinity_key": context.original_affinity_key,
-            "original_affinity_kind": context.original_affinity_kind,
-            "original_request_unanchored": context.original_request_unanchored,
-            "protocol": protocol,
-            "reservation": (
-                {
-                    "id": context.reservation.reservation_id,
-                    "key_id": context.reservation.key_id,
-                    "model": context.reservation.model,
-                }
-                if context.reservation is not None
-                else None
-            ),
-            "signature_version": signature_version,
-            "target_instance": context.target_instance,
-        },
+        signing_context,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),

@@ -70,6 +70,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
+    _http_bridge_full_resend_required_error,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
@@ -272,6 +273,41 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
     return "normal"
 
 
+async def _inline_http_bridge_image_text(
+    text_data: str,
+    *,
+    image_fetch_session: ImageFetchSession,
+    connect_timeout: float,
+) -> str:
+    if "input_image" not in text_data:
+        return text_data
+    try:
+        payload_dict: dict[str, JsonValue] = json.loads(text_data)
+    except (json.JSONDecodeError, TypeError):
+        return text_data
+    inlined = await _service_inline_input_image_urls()(
+        payload_dict,
+        image_fetch_session,
+        connect_timeout,
+    )
+    inlined = await _inline_top_level_input_image_urls(inlined, image_fetch_session, connect_timeout)
+    remaining_external = _count_external_image_urls(inlined)
+    if remaining_external > 0:
+        raise ProxyResponseError(
+            400,
+            openai_error(
+                "image_download_failed",
+                (
+                    f"Failed to download {remaining_external} external image(s). "
+                    "The upstream API only accepts inline data: URLs. "
+                    "Send images as base64 data URLs (data:image/png;base64,...) "
+                    "or ensure the image URLs are publicly accessible."
+                ),
+            ),
+        )
+    return json.dumps(inlined, ensure_ascii=True, separators=(",", ":"))
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -382,6 +418,7 @@ class _HTTPBridgeRequestSubmitMixin:
             api_key=api_key,
             request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
+            response_store=payload.store,
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
@@ -474,41 +511,33 @@ class _HTTPBridgeRequestSubmitMixin:
         settings = _service_get_settings()
         if not settings.image_inline_fetch_enabled:
             return text_data
-        # Quick string-level pre-check: skip the parse/fetch cycle when the
-        # payload contains no ``input_image`` items with an ``http`` URL.
-        if "input_image" not in text_data:
-            return text_data
-        try:
-            payload_dict: dict[str, JsonValue] = json.loads(text_data)
-        except (json.JSONDecodeError, TypeError):
+        fresh_text = request_state.fresh_upstream_request_text
+        if "input_image" not in text_data and (fresh_text is None or "input_image" not in fresh_text):
             return text_data
         connect_timeout = getattr(settings, "upstream_connect_timeout_seconds", 5.0)
         async with _service_lease_http_session()() as http_session:
             image_fetch_session = _service_as_image_fetch_session()(http_session)
-            inlined = await _service_inline_input_image_urls()(
-                payload_dict,
-                image_fetch_session,
-                connect_timeout,
+            updated_text = await _inline_http_bridge_image_text(
+                text_data,
+                image_fetch_session=image_fetch_session,
+                connect_timeout=connect_timeout,
             )
-            inlined = await _inline_top_level_input_image_urls(inlined, image_fetch_session, connect_timeout)
-        # After inlining, check if any external URLs survived (i.e. fetch
-        # failed).  The upstream WS only accepts data: URLs so sending an
-        # external URL would just cause a silent hang.
-        remaining_external = _count_external_image_urls(inlined)
-        if remaining_external > 0:
-            raise ProxyResponseError(
-                400,
-                openai_error(
-                    "image_download_failed",
-                    (
-                        f"Failed to download {remaining_external} external image(s). "
-                        "The upstream API only accepts inline data: URLs. "
-                        "Send images as base64 data URLs (data:image/png;base64,...) "
-                        "or ensure the image URLs are publicly accessible."
-                    ),
-                ),
+            if fresh_text is None:
+                updated_fresh_text = None
+            elif fresh_text == text_data:
+                updated_fresh_text = updated_text
+            else:
+                updated_fresh_text = await _inline_http_bridge_image_text(
+                    fresh_text,
+                    image_fetch_session=image_fetch_session,
+                    connect_timeout=connect_timeout,
+                )
+        if updated_fresh_text is not None and updated_fresh_text != fresh_text:
+            request_state.fresh_upstream_request_text = updated_fresh_text
+            _enforce_http_bridge_response_create_text_size(
+                request_state,
+                updated_fresh_text,
             )
-        updated_text = json.dumps(inlined, ensure_ascii=True, separators=(",", ":"))
         if updated_text == text_data:
             return text_data
         request_state.request_text = updated_text
@@ -787,6 +816,57 @@ class _HTTPBridgeRequestSubmitMixin:
                         502,
                         openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                     )
+                if request_state.proxy_injected_previous_response_id and (
+                    request_state.previous_response_id is None
+                    or session.last_completed_response_id != request_state.previous_response_id
+                    or session.last_completed_response_store is not False
+                ):
+                    stale_response_id = request_state.previous_response_id
+                    if (
+                        request_state.fresh_upstream_request_is_retry_safe
+                        and request_state.fresh_upstream_request_text is not None
+                    ):
+                        text_data = self._http_bridge_text_with_account_installation_id(
+                            session,
+                            request_state,
+                            request_state.fresh_upstream_request_text,
+                        )
+                        request_state.previous_response_id = None
+                        request_state.proxy_injected_previous_response_id = False
+                        request_state.request_text = text_data
+                        _log_http_bridge_event(
+                            "proxy_anchor_revalidated_before_send",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            detail="outcome=fresh_full_resend",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=(
+                                _extract_model_class(session.request_model) if session.request_model else None
+                            ),
+                            owner_check_applied=True,
+                        )
+                    else:
+                        _record_continuity_fail_closed(
+                            surface="http_bridge",
+                            reason="proxy_injected_anchor_socket_changed_before_send",
+                            previous_response_id=stale_response_id,
+                            session_id=request_state.session_id,
+                            upstream_error_code="durable_anchor_from_prior_socket",
+                        )
+                        _log_http_bridge_event(
+                            "proxy_anchor_revalidated_before_send",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            detail="outcome=continuity_failed_closed",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=(
+                                _extract_model_class(session.request_model) if session.request_model else None
+                            ),
+                            owner_check_applied=True,
+                        )
+                        raise _http_bridge_full_resend_required_error()
                 recovery_receipt: DurableBridgeAliasRegistrationReceipt | None = None
                 upstream_send_started = False
                 try:

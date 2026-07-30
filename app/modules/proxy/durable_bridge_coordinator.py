@@ -43,6 +43,14 @@ class DurableBridgeLookup:
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
 
+    @property
+    def latest_response_anchor_quarantined(self) -> bool:
+        return (
+            self.latest_response_id is None
+            and self.latest_input_item_count is not None
+            and self.latest_input_full_fingerprint is not None
+        )
+
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
             return False
@@ -275,6 +283,25 @@ class DurableBridgeSessionCoordinator:
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 draining=draining,
+            )
+        if snapshot is None:
+            return None
+        return _to_lookup(snapshot)
+
+    async def clear_latest_response_anchor_if_current(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        expected_response_id: str,
+    ) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).clear_latest_response_anchor_if_current(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                expected_response_id=expected_response_id,
             )
         if snapshot is None:
             return None

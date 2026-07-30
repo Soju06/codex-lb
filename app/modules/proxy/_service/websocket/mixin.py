@@ -57,7 +57,9 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
+    UpstreamWebSocketMessage,
     UpstreamWebSocketTransportError,
+    await_pending_websocket_receive_classification,
     filter_inbound_websocket_headers,
 )
 from app.core.errors import (
@@ -3235,6 +3237,7 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
         try:
             while True:
                 receive_timeout = await proxy._next_websocket_receive_timeout(
@@ -3248,18 +3251,31 @@ class _WebSocketMixin:
                 )
                 try:
                     while True:
-                        wait_timeout = None if receive_deadline is None else receive_deadline - time.monotonic()
-                        if wait_timeout is not None and wait_timeout <= 0:
-                            raise asyncio.TimeoutError()
-                        keepalive_interval = getattr(_facade().get_settings(), "sse_keepalive_interval_seconds", 10.0)
-                        if keepalive_interval > 0:
-                            wait_timeout = (
-                                keepalive_interval if wait_timeout is None else min(wait_timeout, keepalive_interval)
+                        if receive_task is not None and receive_task.done():
+                            message = receive_task.result()
+                            receive_task = None
+                        else:
+                            wait_timeout = None if receive_deadline is None else receive_deadline - time.monotonic()
+                            if wait_timeout is not None and wait_timeout <= 0:
+                                raise asyncio.TimeoutError()
+                            keepalive_interval = getattr(
+                                _facade().get_settings(),
+                                "sse_keepalive_interval_seconds",
+                                10.0,
                             )
-                        message = await asyncio.wait_for(
-                            upstream.receive(),
-                            timeout=wait_timeout,
-                        )
+                            if keepalive_interval > 0:
+                                wait_timeout = (
+                                    keepalive_interval
+                                    if wait_timeout is None
+                                    else min(wait_timeout, keepalive_interval)
+                                )
+                            if receive_task is None:
+                                receive_task = asyncio.create_task(upstream.receive())
+                            message = await asyncio.wait_for(
+                                asyncio.shield(receive_task),
+                                timeout=wait_timeout,
+                            )
+                            receive_task = None
                         archive_request_id = await _websocket_archive_request_id_for_message(
                             message,
                             pending_requests=pending_requests,
@@ -3305,6 +3321,8 @@ class _WebSocketMixin:
                                     exc_info=True,
                                 )
                             break
+                        continue
+                    if await await_pending_websocket_receive_classification(receive_task):
                         continue
                     if receive_timeout is None:
                         raise
@@ -3580,6 +3598,17 @@ class _WebSocketMixin:
                 downstream_activity=downstream_activity,
             )
         finally:
+            if receive_task is not None:
+                try:
+                    await _facade()._await_cancelled_task(
+                        receive_task,
+                        label="proxy websocket upstream receive",
+                    )
+                except Exception:
+                    _facade().logger.debug(
+                        "Failed to cancel proxy websocket upstream receive",
+                        exc_info=True,
+                    )
             async with pending_lock:
                 has_pending_requests = bool(pending_requests)
             if not upstream_control.reconnect_requested and has_pending_requests:

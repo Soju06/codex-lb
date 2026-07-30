@@ -1486,6 +1486,264 @@ async def test_durable_bridge_claim_renews_same_owner_epoch(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_clears_expected_latest_response_anchor_and_retains_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-quarantine-anchor",
+        api_key_id="key-quarantine-anchor",
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_quarantine",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    registered = await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id="key-quarantine-anchor",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_poisoned",
+        lease_ttl_seconds=60.0,
+        input_item_count=17,
+        input_full_fingerprint="a" * 64,
+        pending_tool_calls={"call_pending": "custom_tool_call"},
+    )
+    assert registered == DurableBridgeAliasRegistration.REGISTERED
+
+    cleared = await coordinator.clear_latest_response_anchor_if_current(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        expected_response_id="resp_poisoned",
+    )
+
+    assert cleared is not None
+    assert cleared.owner_instance_id == "instance-a"
+    assert cleared.owner_epoch == claimed.owner_epoch
+    assert cleared.latest_response_id is None
+    assert cleared.latest_input_item_count == 17
+    assert cleared.latest_input_full_fingerprint == "a" * 64
+    assert cleared.latest_pending_tool_calls is None
+    assert cleared.latest_response_anchor_quarantined is True
+    by_retained_alias = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-after-quarantine",
+        api_key_id="key-quarantine-anchor",
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_poisoned",
+    )
+    assert by_retained_alias is not None
+    assert by_retained_alias.session_id == claimed.session_id
+    assert by_retained_alias.latest_response_id is None
+    assert by_retained_alias.latest_input_item_count == 17
+    assert by_retained_alias.latest_input_full_fingerprint == "a" * 64
+    assert by_retained_alias.latest_response_anchor_quarantined is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_item_count", "input_full_fingerprint"),
+    [
+        pytest.param(None, None, id="missing-proof"),
+        pytest.param(0, "", id="nonpositive-empty-proof"),
+    ],
+)
+async def test_durable_bridge_anchor_quarantine_without_prefix_proof_stays_fail_closed_until_replaced(
+    coordinator: DurableBridgeSessionCoordinator,
+    input_item_count: int | None,
+    input_full_fingerprint: str | None,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-quarantine-without-proof",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    registered = await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_without_proof",
+        lease_ttl_seconds=60.0,
+        input_item_count=input_item_count,
+        input_full_fingerprint=input_full_fingerprint,
+    )
+    assert registered == DurableBridgeAliasRegistration.REGISTERED
+
+    cleared = await coordinator.clear_latest_response_anchor_if_current(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        expected_response_id="resp_without_proof",
+    )
+
+    assert cleared is not None
+    assert cleared.latest_response_id is None
+    assert cleared.latest_input_item_count is not None
+    assert cleared.latest_input_item_count < 0
+    assert cleared.latest_input_full_fingerprint
+    assert cleared.latest_response_anchor_quarantined is True
+    by_retained_alias = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-after-proofless-quarantine",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_without_proof",
+    )
+    assert by_retained_alias is not None
+    assert by_retained_alias.session_id == claimed.session_id
+    assert by_retained_alias.latest_response_anchor_quarantined is True
+
+    replacement_registered = await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_with_real_proof",
+        lease_ttl_seconds=60.0,
+        input_item_count=4,
+        input_full_fingerprint="d" * 64,
+    )
+    assert replacement_registered == DurableBridgeAliasRegistration.REGISTERED
+    replaced = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-quarantine-without-proof",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert replaced is not None
+    assert replaced.latest_response_id == "resp_with_real_proof"
+    assert replaced.latest_input_item_count == 4
+    assert replaced.latest_input_full_fingerprint == "d" * 64
+    assert replaced.latest_response_anchor_quarantined is False
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_anchor_quarantine_preserves_concurrently_advanced_response(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-quarantine-newer-anchor",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    for response_id, fingerprint, pending_call in (
+        ("resp_old", "a" * 64, "call_old"),
+        ("resp_new", "b" * 64, "call_new"),
+    ):
+        registered = await coordinator.register_previous_response_id(
+            session_id=claimed.session_id,
+            api_key_id=None,
+            instance_id="instance-a",
+            owner_epoch=claimed.owner_epoch,
+            response_id=response_id,
+            lease_ttl_seconds=60.0,
+            input_item_count=9,
+            input_full_fingerprint=fingerprint,
+            pending_tool_calls={pending_call: "function_call"},
+        )
+        assert registered == DurableBridgeAliasRegistration.REGISTERED
+
+    unchanged = await coordinator.clear_latest_response_anchor_if_current(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        expected_response_id="resp_old",
+    )
+
+    assert unchanged is not None
+    assert unchanged.latest_response_id == "resp_new"
+    assert unchanged.latest_input_item_count == 9
+    assert unchanged.latest_input_full_fingerprint == "b" * 64
+    assert unchanged.latest_pending_tool_calls == {"call_new": "function_call"}
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_anchor_quarantine_is_owner_epoch_fenced(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-quarantine-fenced",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    registered = await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_owned_by_replacement",
+        lease_ttl_seconds=60.0,
+        input_item_count=5,
+        input_full_fingerprint="c" * 64,
+        pending_tool_calls={"call_replacement": "apply_patch_call"},
+    )
+    assert registered == DurableBridgeAliasRegistration.REGISTERED
+    replacement = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-quarantine-fenced",
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    unchanged = await coordinator.clear_latest_response_anchor_if_current(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        expected_response_id="resp_owned_by_replacement",
+    )
+
+    assert replacement.owner_epoch == claimed.owner_epoch + 1
+    assert unchanged is not None
+    assert unchanged.owner_instance_id == "instance-b"
+    assert unchanged.owner_epoch == replacement.owner_epoch
+    assert unchanged.latest_response_id == "resp_owned_by_replacement"
+    assert unchanged.latest_input_item_count == 5
+    assert unchanged.latest_input_full_fingerprint == "c" * 64
+    assert unchanged.latest_pending_tool_calls == {"call_replacement": "apply_patch_call"}
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_account_change_advances_epoch_to_fence_stale_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

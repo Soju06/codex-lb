@@ -30,6 +30,10 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
 )
 _PURGE_CLOSED_BATCH_SIZE = 500
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+_DURABLE_ANCHOR_QUARANTINE_SENTINEL_COUNT = -1
+_DURABLE_ANCHOR_QUARANTINE_SENTINEL_FINGERPRINT = sha256(
+    b"codex-lb:durable-anchor-quarantined-without-prefix-proof"
+).hexdigest()
 
 
 class DurableBridgeAliasRegistration(StrEnum):
@@ -406,6 +410,52 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def clear_latest_response_anchor_if_current(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        expected_response_id: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Clear one exact durable recovery anchor with owner fencing.
+
+        The previous-response alias remains registered for explicit continuity
+        lookup. The automatic latest anchor and pending-tool metadata are
+        quarantined while the input count and fingerprint remain as proof that
+        an unanchored recovery must be a verified full-context resend.
+        """
+
+        has_usable_input_proof = and_(
+            HttpBridgeSessionRecord.latest_input_item_count > 0,
+            HttpBridgeSessionRecord.latest_input_full_fingerprint.is_not(None),
+            HttpBridgeSessionRecord.latest_input_full_fingerprint != "",
+        )
+        return await self._execute_fenced_session_update(
+            session_id=session_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            expected_latest_response_id=expected_response_id,
+            values={
+                "latest_response_id": None,
+                "latest_input_item_count": case(
+                    (
+                        has_usable_input_proof,
+                        HttpBridgeSessionRecord.latest_input_item_count,
+                    ),
+                    else_=_DURABLE_ANCHOR_QUARANTINE_SENTINEL_COUNT,
+                ),
+                "latest_input_full_fingerprint": case(
+                    (
+                        has_usable_input_proof,
+                        HttpBridgeSessionRecord.latest_input_full_fingerprint,
+                    ),
+                    else_=_DURABLE_ANCHOR_QUARANTINE_SENTINEL_FINGERPRINT,
+                ),
+                "latest_pending_tool_calls_json": None,
+            },
+        )
+
     async def _execute_fenced_session_update(
         self,
         *,
@@ -413,17 +463,18 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         values: dict[str, object],
+        expected_latest_response_id: str | None = None,
     ) -> DurableBridgeSessionSnapshot | None:
+        predicates = [
+            HttpBridgeSessionRecord.id == session_id,
+            HttpBridgeSessionRecord.owner_instance_id == instance_id,
+            HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+        ]
+        if expected_latest_response_id is not None:
+            predicates.append(HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id)
         async with sqlite_writer_section():
             result = await self._session.execute(
-                update(HttpBridgeSessionRecord)
-                .where(
-                    HttpBridgeSessionRecord.id == session_id,
-                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
-                )
-                .values(**values)
-                .returning(*_SNAPSHOT_COLUMNS)
+                update(HttpBridgeSessionRecord).where(*predicates).values(**values).returning(*_SNAPSHOT_COLUMNS)
             )
             updated_row = result.one_or_none()
             await self._session.commit()

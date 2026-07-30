@@ -188,6 +188,7 @@ from app.modules.proxy.ring_membership import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
+_HTTP_BRIDGE_DURABLE_ANCHOR_QUARANTINE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
@@ -1621,6 +1622,119 @@ async def _persist_http_bridge_previous_response_alias(
     return registered
 
 
+async def _quarantine_http_bridge_durable_anchor(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    request_state: _WebSocketRequestState,
+) -> bool:
+    expected_response_id = request_state.previous_response_id
+    if not request_state.proxy_injected_previous_response_id or expected_response_id is None:
+        return False
+    return await _quarantine_http_bridge_durable_anchor_id(
+        service,
+        session,
+        expected_response_id=expected_response_id,
+    )
+
+
+async def _quarantine_http_bridge_durable_anchor_id(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    expected_response_id: str,
+) -> bool:
+    session_id = session.durable_session_id
+    owner_epoch = session.durable_owner_epoch
+    if session_id is None or owner_epoch is None:
+        outcome = "missing_durable_identity"
+    else:
+        instance_id = _service_get_settings().http_responses_session_bridge_instance_id
+        try:
+            lookup = await asyncio.wait_for(
+                service._durable_bridge.clear_latest_response_anchor_if_current(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    expected_response_id=expected_response_id,
+                ),
+                timeout=_HTTP_BRIDGE_DURABLE_ANCHOR_QUARANTINE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timed out quarantining durable HTTP bridge latest-response anchor timeout_seconds=%.1f",
+                _HTTP_BRIDGE_DURABLE_ANCHOR_QUARANTINE_TIMEOUT_SECONDS,
+            )
+            outcome = "write_timeout"
+        except Exception:
+            logger.warning("Failed to quarantine durable HTTP bridge latest-response anchor", exc_info=True)
+            outcome = "write_error"
+        else:
+            if lookup is None:
+                outcome = "row_missing"
+            elif lookup.owner_instance_id != instance_id or lookup.owner_epoch != owner_epoch:
+                outcome = "owner_fenced"
+            elif lookup.latest_response_id is None:
+                outcome = "cleared"
+            elif lookup.latest_response_id != expected_response_id:
+                outcome = "newer_anchor_preserved"
+            else:
+                outcome = "conditional_clear_missed"
+    _log_http_bridge_event(
+        "durable_anchor_quarantine",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=f"outcome={outcome}",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        owner_check_applied=True,
+    )
+    return outcome == "cleared"
+
+
+def _select_http_bridge_disconnect_anchor_quarantine_response_id(
+    pending_requests: Sequence[_WebSocketRequestState],
+    *,
+    latest_response_id: str | None,
+    latest_response_store: bool | None,
+) -> str | None:
+    """Select one sent connection-local anchor id while the pending lock is held."""
+
+    eligible = [
+        request_state
+        for request_state in pending_requests
+        if request_state.transport == "http"
+        and not request_state.skip_request_log
+        and not request_state.draining_until_terminal
+        and request_state.response_create_sent_at is not None
+        and request_state.response_store is False
+        and request_state.proxy_injected_previous_response_id
+        and request_state.previous_response_id is not None
+    ]
+    gate_owners = [
+        request_state
+        for request_state in eligible
+        if request_state.response_create_gate_acquired and request_state.awaiting_response_created
+    ]
+    if len(gate_owners) == 1:
+        return gate_owners[0].previous_response_id
+    if latest_response_id is not None:
+        for request_state in eligible:
+            if request_state.previous_response_id == latest_response_id:
+                return latest_response_id
+    candidates_by_anchor: dict[str, _WebSocketRequestState] = {}
+    for request_state in eligible:
+        previous_response_id = request_state.previous_response_id
+        if previous_response_id is not None:
+            candidates_by_anchor.setdefault(previous_response_id, request_state)
+    if len(candidates_by_anchor) == 1:
+        return next(iter(candidates_by_anchor))
+    if not candidates_by_anchor and latest_response_id is not None and latest_response_store is False:
+        return latest_response_id
+    return None
+
+
 def _evict_fenced_out_http_bridge_session_locked(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
@@ -1995,6 +2109,19 @@ def _http_bridge_previous_response_error_envelope(
 
 def _http_bridge_continuity_lost_error_envelope() -> OpenAIErrorEnvelope:
     return previous_response_stream_incomplete_error()
+
+
+def _http_bridge_full_resend_required_error() -> ProxyResponseError:
+    payload = openai_error(
+        "continuity_requires_full_resend",
+        (
+            "HTTP bridge continuity cannot resume incrementally. "
+            "Resend the complete conversation context in input or create a new session."
+        ),
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "input"
+    return ProxyResponseError(400, payload)
 
 
 def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelope:

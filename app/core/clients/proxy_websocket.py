@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import threading
+import weakref
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping, NoReturn, Protocol, Sequence, cast
@@ -46,6 +48,7 @@ from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
+    correlate_websocket_egress_failure,
     process_network_error_code,
     rotate_shared_http_transport,
 )
@@ -97,6 +100,7 @@ class _UpstreamWebSocketPolicy:
     retry_routed_network_errors: bool
     enable_direct_ping_timeout: bool
     preserve_close_semantics: bool
+    correlate_no_close_failures: bool
 
 
 _RESPONSES_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
@@ -110,6 +114,7 @@ _RESPONSES_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
     retry_routed_network_errors=True,
     enable_direct_ping_timeout=False,
     preserve_close_semantics=False,
+    correlate_no_close_failures=True,
 )
 _LIVE_SIDEBAND_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
     operation="live websocket",
@@ -122,6 +127,7 @@ _LIVE_SIDEBAND_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
     retry_routed_network_errors=False,
     enable_direct_ping_timeout=True,
     preserve_close_semantics=True,
+    correlate_no_close_failures=False,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +155,10 @@ class UpstreamWebSocketMessage:
     error_code: str | None = None
 
 
+_websocket_receive_classification_lock = threading.Lock()
+_websocket_receive_classification_tasks: weakref.WeakSet[asyncio.Future[Any]] = weakref.WeakSet()
+
+
 class UpstreamWebSocketTransportError(RuntimeError):
     """Credential-safe post-connect transport failure with stable classification."""
 
@@ -171,6 +181,57 @@ def _relay_receive_error_code(error_code: str) -> str | None:
     # Relay owners map an absent code to their established stream_incomplete
     # contract. Leaking the adapter's generic fallback would bypass that path.
     return error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+
+
+def _discard_websocket_receive_classification_task(task: asyncio.Future[Any]) -> None:
+    with _websocket_receive_classification_lock:
+        _websocket_receive_classification_tasks.discard(task)
+
+
+async def _correlate_no_close_receive_error(
+    error_code: str,
+    *,
+    enabled: bool,
+    account_id: str | None,
+    egress_key: str | None,
+) -> str:
+    if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE or not enabled:
+        return error_code
+    classification_owner = asyncio.current_task()
+    if classification_owner is not None:
+        with _websocket_receive_classification_lock:
+            _websocket_receive_classification_tasks.add(classification_owner)
+        classification_owner.add_done_callback(_discard_websocket_receive_classification_task)
+    try:
+        correlated = await correlate_websocket_egress_failure(
+            egress_key=egress_key,
+            account_id=account_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Correlation is a health-classification guard, not a reason to lose
+        # the established stream-incomplete settlement path.
+        logger.warning("Responses websocket egress-failure correlation failed", exc_info=True)
+        return error_code
+    return PROCESS_NETWORK_UNAVAILABLE_CODE if correlated else error_code
+
+
+async def await_pending_websocket_receive_classification(
+    receive_task: asyncio.Task[UpstreamWebSocketMessage] | None,
+) -> bool:
+    """Let an observed no-close failure finish classification before settlement."""
+
+    if receive_task is None:
+        return False
+    if receive_task.done():
+        return True
+    with _websocket_receive_classification_lock:
+        classification_pending = receive_task in _websocket_receive_classification_tasks
+    if not classification_pending:
+        return receive_task.done()
+    await asyncio.shield(receive_task)
+    return True
 
 
 async def _rotate_after_websocket_network_failure(error_code: str) -> None:
@@ -219,10 +280,16 @@ class WebsocketsUpstreamWebSocket:
         *,
         uses_proxy: bool = False,
         preserve_close_semantics: bool = False,
+        correlate_no_close_failures: bool = False,
+        account_id: str | None = None,
+        egress_key: str | None = None,
     ) -> None:
         self._connection = connection
         self._uses_proxy = uses_proxy
         self._preserve_close_semantics = preserve_close_semantics
+        self._correlate_no_close_failures = correlate_no_close_failures
+        self._account_id = account_id
+        self._egress_key = egress_key
 
     async def send_text(self, text: str) -> None:
         try:
@@ -254,6 +321,13 @@ class WebsocketsUpstreamWebSocket:
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
+            if exc.rcvd is None:
+                error_code = await _correlate_no_close_receive_error(
+                    error_code,
+                    enabled=self._correlate_no_close_failures,
+                    account_id=self._account_id,
+                    egress_key=self._egress_key,
+                )
             # ConnectionClosedError describes an incomplete close handshake,
             # not generic transport provenance. Let Responses relay owners map
             # it to stream_incomplete while live relays preserve received closes.
@@ -270,6 +344,12 @@ class WebsocketsUpstreamWebSocket:
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
+            error_code = await _correlate_no_close_receive_error(
+                error_code,
+                enabled=self._correlate_no_close_failures,
+                account_id=self._account_id,
+                egress_key=self._egress_key,
+            )
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=codex_transport_error_message("websocket receive", None, exc),
@@ -310,6 +390,9 @@ class CodexUpstreamWebSocket:
         owns_codex_client: bool = False,
         endpoint_id: str | None = None,
         response_headers: Mapping[str, str] | None = None,
+        correlate_no_close_failures: bool = False,
+        account_id: str | None = None,
+        egress_key: str | None = None,
     ) -> None:
         self._websocket = websocket
         self._context = context
@@ -317,6 +400,10 @@ class CodexUpstreamWebSocket:
         self._owns_codex_client = owns_codex_client
         self._endpoint_id = endpoint_id
         self._response_headers = _normalize_response_headers(response_headers)
+        self._correlate_no_close_failures = correlate_no_close_failures
+        self._account_id = account_id
+        self._egress_key = egress_key
+        self._received_peer_close_frame = False
 
     async def send_text(self, text: str) -> None:
         try:
@@ -340,12 +427,41 @@ class CodexUpstreamWebSocket:
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=True)
             await _rotate_after_websocket_network_failure(error_code)
+            error_code = await _correlate_no_close_receive_error(
+                error_code,
+                enabled=self._correlate_no_close_failures,
+                account_id=self._account_id,
+                egress_key=self._egress_key,
+            )
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
                 error_code=_relay_receive_error_code(error_code),
             )
-        if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
+        if msg.type == aiohttp.WSMsgType.CLOSE:
+            self._received_peer_close_frame = True
+            return UpstreamWebSocketMessage(
+                kind="close",
+                close_code=_aiohttp_ws_close_code(self._websocket, msg),
+                close_reason=_aiohttp_ws_close_reason(msg),
+            )
+        if (
+            msg.type == aiohttp.WSMsgType.CLOSED
+            and not self._received_peer_close_frame
+            and self._correlate_no_close_failures
+        ):
+            error_code = await _correlate_no_close_receive_error(
+                "upstream_unavailable",
+                enabled=self._correlate_no_close_failures,
+                account_id=self._account_id,
+                egress_key=self._egress_key,
+            )
+            return UpstreamWebSocketMessage(
+                kind="error",
+                error="Upstream websocket closed without a peer close frame",
+                error_code=_relay_receive_error_code(error_code),
+            )
+        if msg.type in (aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
             return UpstreamWebSocketMessage(
                 kind="close",
                 close_code=_aiohttp_ws_close_code(self._websocket, msg),
@@ -359,6 +475,12 @@ class CodexUpstreamWebSocket:
                 else "upstream_unavailable"
             )
             await _rotate_after_websocket_network_failure(error_code)
+            error_code = await _correlate_no_close_receive_error(
+                error_code,
+                enabled=self._correlate_no_close_failures,
+                account_id=self._account_id,
+                egress_key=self._egress_key,
+            )
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=(
@@ -682,6 +804,44 @@ def _responses_websocket_url(base_url: str) -> str:
     return urlunparse(parsed._replace(scheme=scheme))
 
 
+def _websocket_egress_key(
+    url: str,
+    *,
+    route_endpoint_id: str | None = None,
+    proxy_url: str | None = None,
+) -> str | None:
+    if route_endpoint_id:
+        return f"routed_proxy:{route_endpoint_id}"
+
+    candidate_url = proxy_url or url
+    parsed = urlparse(candidate_url)
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname
+    if not scheme or not hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        port = {
+            "http": 80,
+            "https": 443,
+            "socks": 1080,
+            "socks4": 1080,
+            "socks4a": 1080,
+            "socks5": 1080,
+            "socks5h": 1080,
+            "ws": 80,
+            "wss": 443,
+        }.get(scheme)
+    if port is None:
+        return None
+    authority_host = f"[{hostname}]" if ":" in hostname else hostname
+    prefix = "environment_proxy" if proxy_url is not None else "direct"
+    return f"{prefix}:{scheme}://{authority_host}:{port}"
+
+
 async def _connect_upstream_websocket(
     headers: dict[str, str],
     access_token: str,
@@ -785,6 +945,12 @@ async def _connect_upstream_websocket(
                 owns_codex_client=owns_codex_client,
                 endpoint_id=endpoint_id,
                 response_headers=_codex_websocket_response_headers(websocket, context),
+                correlate_no_close_failures=policy.correlate_no_close_failures,
+                account_id=account_id,
+                egress_key=_websocket_egress_key(
+                    url,
+                    route_endpoint_id=endpoint_id,
+                ),
             ),
             url=url,
             headers=upstream_headers,
@@ -882,6 +1048,12 @@ async def _connect_upstream_websocket(
             response,
             uses_proxy=proxy_url is not None,
             preserve_close_semantics=policy.preserve_close_semantics,
+            correlate_no_close_failures=policy.correlate_no_close_failures,
+            account_id=account_id,
+            egress_key=_websocket_egress_key(
+                url,
+                proxy_url=proxy_url,
+            ),
         ),
         url=url,
         headers=upstream_headers,

@@ -27,7 +27,11 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketMessage, UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import (
+    UpstreamWebSocketMessage,
+    UpstreamWebSocketTransportError,
+    await_pending_websocket_receive_classification,
+)
 from app.core.errors import response_failed_event
 from app.core.openai.parsing import parse_sse_event_payload
 from app.core.types import JsonValue
@@ -51,7 +55,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
+    _quarantine_http_bridge_durable_anchor,
+    _quarantine_http_bridge_durable_anchor_id,
     _record_http_bridge_stuck_retire,
+    _select_http_bridge_disconnect_anchor_quarantine_response_id,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
@@ -536,8 +543,10 @@ class _HTTPBridgeUpstreamEventsMixin:
         relay_upstream = session.upstream
         receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
         wakeup_task: asyncio.Task[bool] | None = None
+        disconnect_quarantine_response_id: str | None = None
         try:
             while True:
+                disconnect_quarantine_response_id = None
                 # Clear before taking the deadline snapshot. A send before the
                 # clear is represented by its timestamp; a send after it leaves
                 # the event set and wakes the persistent receive wait below.
@@ -595,6 +604,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         wakeup_task = None
 
                 if timed_out:
+                    if await await_pending_websocket_receive_classification(receive_task):
+                        continue
                     if receive_timeout is None:
                         raise RuntimeError("HTTP bridge reader timed out without a timeout contract")
                     if receive_timeout.error_code == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL:
@@ -610,18 +621,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                             async with session.pending_lock:
                                 if receive_task is not None and receive_task.done():
                                     continue
-                                expired_owner = any(
-                                    deadline is not None and deadline <= now
-                                    for request_state in session.pending_requests
-                                    if (
-                                        deadline := _http_bridge_eventless_precreated_deadline(
-                                            request_state,
-                                            stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
-                                        )
+                                expired_owner: _WebSocketRequestState | None = None
+                                for request_state in session.pending_requests:
+                                    deadline = _http_bridge_eventless_precreated_deadline(
+                                        request_state,
+                                        stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
                                     )
-                                    is not None
-                                )
-                                if not expired_owner:
+                                    if deadline is not None and deadline <= now:
+                                        expired_owner = request_state
+                                        break
+                                if expired_owner is None:
                                     continue
                                 pending_count = len(session.pending_requests)
                                 for request_state in session.pending_requests:
@@ -641,6 +650,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 )
                                 if receive_cancelled:
                                     receive_task = None
+                            await _quarantine_http_bridge_durable_anchor(
+                                self,
+                                session,
+                                request_state=expired_owner,
+                            )
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,
@@ -702,8 +716,25 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 async with session.pending_lock:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                    disconnect_quarantine_response_id = _select_http_bridge_disconnect_anchor_quarantine_response_id(
+                        session.pending_requests,
+                        latest_response_id=session.last_completed_response_id,
+                        latest_response_store=session.last_completed_response_store,
+                    )
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
+                if disconnect_quarantine_response_id is not None:
+                    async with session.lifecycle_lock:
+                        quarantined = await _quarantine_http_bridge_durable_anchor_id(
+                            self,
+                            session,
+                            expected_response_id=disconnect_quarantine_response_id,
+                        )
+                        if quarantined and session.last_completed_response_id == disconnect_quarantine_response_id:
+                            session.last_completed_response_id = None
+                            session.last_completed_response_store = None
+                            session.last_pending_tool_calls = {}
+                    disconnect_quarantine_response_id = None
                 retried = False
                 # A process-network receive failure follows a successful send;
                 # replay is not safe merely because output is not visible.
@@ -1456,6 +1487,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+                session.last_completed_response_store = terminal_request_state.response_store
                 # Remember which tool-call items the completed response left
                 # pending so an anchored follow-up that omits their outputs
                 # (interrupted turn) can receive synthetic interrupted

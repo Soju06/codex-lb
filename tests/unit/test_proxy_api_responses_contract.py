@@ -1367,8 +1367,14 @@ async def test_normalize_public_responses_stream_codex_route_does_not_duplicate_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("original_request_unanchored", "proxy_injected_previous_response_id"),
+    [(True, False), (False, True)],
+)
 async def test_internal_bridge_responses_disables_openai_sdk_contract(
     monkeypatch: pytest.MonkeyPatch,
+    original_request_unanchored: bool,
+    proxy_injected_previous_response_id: bool,
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -1389,7 +1395,8 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         target_instance="owner-b",
         codex_session_affinity=True,
         downstream_turn_state="http_turn_generated",
-        original_request_unanchored=True,
+        original_request_unanchored=original_request_unanchored,
+        proxy_injected_previous_response_id=proxy_injected_previous_response_id,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
         reservation=None,
@@ -1413,7 +1420,12 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     # Minimal payload + request stubs.
     from app.core.openai.requests import ResponsesRequest
 
-    payload = ResponsesRequest(model="gpt-5.5", input="hi", instructions="")
+    payload = ResponsesRequest(
+        model="gpt-5.5",
+        input="hi",
+        instructions="",
+        previous_response_id="resp_proxy_injected" if proxy_injected_previous_response_id else None,
+    )
 
     class _StubRequest:
         @property
@@ -1439,11 +1451,12 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
     )
     assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
-    assert kwargs.get("forwarded_original_request_unanchored") is True
+    assert kwargs.get("forwarded_original_request_unanchored") is original_request_unanchored
+    assert kwargs.get("forwarded_proxy_injected_previous_response_id") is proxy_injected_previous_response_id
     assert kwargs.get("forwarded_legacy_signature") is False
     forwarded_headers = kwargs.get("forwarded_headers")
     assert isinstance(forwarded_headers, dict)
-    assert "x-codex-turn-state" not in forwarded_headers
+    assert ("x-codex-turn-state" not in forwarded_headers) is original_request_unanchored
 
 
 @pytest.mark.asyncio

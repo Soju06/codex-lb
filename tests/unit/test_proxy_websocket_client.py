@@ -16,6 +16,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
+import app.core.resilience.network_recovery as network_recovery
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
@@ -336,6 +337,355 @@ async def test_direct_websocket_network_send_and_receive_are_typed_and_rotate_wi
     websocket_connect.assert_awaited_once()
     assert rotate.await_count == 2
     assert all(call.kwargs["transport"] == "websocket" for call in rotate.await_args_list)
+
+
+def test_websocket_egress_key_distinguishes_route_environment_proxy_and_direct_without_credentials() -> None:
+    url = "wss://chatgpt.com/backend-api/codex/responses"
+    proxy_url = "http://proxy-user:proxy-secret@proxy.shared.test:7890"
+
+    routed = proxy_websocket_module._websocket_egress_key(
+        url,
+        route_endpoint_id="ep-shared",
+    )
+    environment_proxy = proxy_websocket_module._websocket_egress_key(
+        url,
+        proxy_url=proxy_url,
+    )
+    direct = proxy_websocket_module._websocket_egress_key(url)
+
+    assert routed == "routed_proxy:ep-shared"
+    assert environment_proxy == "environment_proxy:http://proxy.shared.test:7890"
+    assert direct == "direct:wss://chatgpt.com:443"
+    assert "proxy-user" not in str((routed, environment_proxy, direct))
+    assert "proxy-secret" not in str((routed, environment_proxy, direct))
+
+
+@pytest.mark.asyncio
+async def test_responses_env_proxy_no_close_failures_correlate_across_accounts_without_leaking_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoCloseConnection(_FakeConnection):
+        async def recv(self) -> str:
+            raise ConnectionClosedError(None, None)
+
+    class _Settings(SimpleNamespace):
+        def upstream_websocket_proxy_env(self) -> dict[str, str]:
+            return {
+                "https_proxy": "http://proxy-user:proxy-secret@proxy.shared.test:7890",
+            }
+
+    connections = [_NoCloseConnection(), _NoCloseConnection()]
+    connector = AsyncMock(side_effect=connections)
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.2,
+        max_observations=16,
+    )
+    observations: list[tuple[str | None, str | None]] = []
+
+    async def observe(*, egress_key: str | None, account_id: str | None) -> bool:
+        observations.append((egress_key, account_id))
+        return await correlator.observe(
+            egress_key=egress_key,
+            account_id=account_id,
+        )
+
+    rotate = AsyncMock(return_value="rotated")
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", connector)
+    monkeypatch.setattr(proxy_websocket_module, "correlate_websocket_egress_failure", observe, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: _Settings(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=True,
+        ),
+    )
+
+    first = await connect_responses_websocket(
+        {},
+        "token-a",
+        "account-a",
+        allow_direct_egress=True,
+    )
+    second = await connect_responses_websocket(
+        {},
+        "token-b",
+        "account-b",
+        allow_direct_egress=True,
+    )
+    messages = await asyncio.gather(first.receive(), second.receive())
+
+    assert [message.error_code for message in messages] == [
+        "proxy_network_unavailable",
+        "proxy_network_unavailable",
+    ]
+    assert observations == [
+        ("environment_proxy:http://proxy.shared.test:7890", "account-a"),
+        ("environment_proxy:http://proxy.shared.test:7890", "account-b"),
+    ]
+    assert "proxy-user" not in str(observations)
+    assert "proxy-secret" not in str(observations)
+    rotate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_routed_responses_error_uses_actual_endpoint_for_cross_account_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool-requested",
+        endpoint=ResolvedProxyEndpoint("ep-requested", "http", "requested.proxy.test", 8080),
+    )
+    actual_route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool-actual",
+        endpoint=ResolvedProxyEndpoint("ep-actual", "http", "actual.proxy.test", 8080),
+    )
+
+    class _ActualRouteCodexClient(_FakeCodexClient):
+        async def open_ws_with_route_metadata(
+            self,
+            url: str,
+            *,
+            route: ResolvedUpstreamRoute,
+            **kwargs: object,
+        ) -> CodexWebSocketResult:
+            self.calls.append({"url": url, "route": route, **kwargs})
+            return CodexWebSocketResult(
+                websocket=self.websocket,
+                context=None,
+                route=actual_route,
+                fallback_used=True,
+            )
+
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.2,
+        max_observations=16,
+    )
+    observations: list[tuple[str | None, str | None]] = []
+
+    async def observe(*, egress_key: str | None, account_id: str | None) -> bool:
+        observations.append((egress_key, account_id))
+        return await correlator.observe(
+            egress_key=egress_key,
+            account_id=account_id,
+        )
+
+    monkeypatch.setattr(proxy_websocket_module, "correlate_websocket_egress_failure", observe)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+    first = await connect_responses_websocket(
+        {},
+        "token-a",
+        "account-a",
+        route=requested_route,
+        codex_client=cast(
+            Any,
+            _ActualRouteCodexClient(_FakeCodexErrorWebSocket(ConnectionResetError("reset-a"))),
+        ),
+    )
+    second = await connect_responses_websocket(
+        {},
+        "token-b",
+        "account-b",
+        route=requested_route,
+        codex_client=cast(
+            Any,
+            _ActualRouteCodexClient(_FakeCodexErrorWebSocket(ConnectionResetError("reset-b"))),
+        ),
+    )
+
+    messages = await asyncio.gather(first.receive(), second.receive())
+
+    assert [message.error_code for message in messages] == [
+        "proxy_network_unavailable",
+        "proxy_network_unavailable",
+    ]
+    assert observations == [
+        ("routed_proxy:ep-actual", "account-a"),
+        ("routed_proxy:ep-actual", "account-b"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_explicit_close_frame_does_not_enter_no_close_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExplicitCloseConnection(_FakeConnection):
+        async def recv(self) -> str:
+            raise ConnectionClosedError(Close(1011, "server restart"), None)
+
+    correlate = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", AsyncMock(return_value=_ExplicitCloseConnection()))
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "correlate_websocket_egress_failure",
+        correlate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {},
+        "token-a",
+        "account-a",
+        allow_direct_egress=True,
+    )
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.close_code == 1011
+    assert message.error_code is None
+    correlate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_routed_responses_explicit_close_message_and_followup_closed_do_not_enter_no_close_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExplicitCloseCodexWebSocket(_FakeCodexWebSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages = iter(
+                (
+                    aiohttp.WSMessage(
+                        aiohttp.WSMsgType.CLOSE,
+                        1011,
+                        "server restart",
+                    ),
+                    aiohttp.WSMessage(
+                        aiohttp.WSMsgType.CLOSED,
+                        None,
+                        None,
+                    ),
+                )
+            )
+
+        async def receive(self) -> aiohttp.WSMessage:
+            return next(self.messages)
+
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool-close",
+        endpoint=ResolvedProxyEndpoint("ep-close", "http", "close.proxy.test", 8080),
+    )
+    correlate = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_websocket_module, "correlate_websocket_egress_failure", correlate)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    upstream = await connect_responses_websocket(
+        {},
+        "token-a",
+        "account-a",
+        route=route,
+        codex_client=cast(Any, _FakeCodexClient(_ExplicitCloseCodexWebSocket())),
+    )
+    message = await upstream.receive()
+    closed_message = await upstream.receive()
+
+    assert message.kind == "close"
+    assert message.close_code == 1011
+    assert closed_message.kind == "close"
+    correlate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_routed_non_responses_closed_message_preserves_existing_close_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ClosedCodexWebSocket(_FakeCodexWebSocket):
+        async def receive(self) -> aiohttp.WSMessage:
+            return aiohttp.WSMessage(
+                aiohttp.WSMsgType.CLOSED,
+                None,
+                None,
+            )
+
+    correlate = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_websocket_module, "correlate_websocket_egress_failure", correlate)
+    upstream = CodexUpstreamWebSocket(
+        _ClosedCodexWebSocket(),
+        correlate_no_close_failures=False,
+        account_id="account-live",
+        egress_key="routed_proxy:live-endpoint",
+    )
+
+    message = await upstream.receive()
+
+    assert message.kind == "close"
+    correlate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_no_close_failure_does_not_enter_responses_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoCloseConnection(_FakeConnection):
+        async def recv(self) -> str:
+            raise ConnectionClosedError(None, None)
+
+    correlate = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", AsyncMock(return_value=_NoCloseConnection()))
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "correlate_websocket_egress_failure",
+        correlate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_live_websocket(
+        "rtc_no_close",
+        {},
+        "token-a",
+        "account-a",
+        protocol=RealtimeWebSocketProtocol.LIVE_V3,
+        allow_direct_egress=True,
+    )
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+    correlate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

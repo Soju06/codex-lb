@@ -4,6 +4,7 @@ import asyncio
 import errno
 import logging
 import socket
+import threading
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -64,6 +65,150 @@ def test_process_network_failure_does_not_classify_endpoint_failures(error: OSEr
 def test_process_network_error_requires_stable_code_not_message_text() -> None:
     assert network_recovery.is_process_network_error(network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE)
     assert not network_recovery.is_process_network_error("upstream_unavailable")
+
+
+@pytest.mark.asyncio
+async def test_websocket_egress_failure_correlator_marks_all_cross_account_waiters_and_trailing_failure() -> None:
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.2,
+        max_observations=16,
+    )
+
+    first = asyncio.create_task(
+        correlator.observe(
+            egress_key="environment_proxy:http://proxy.example:8080",
+            account_id="acc-a",
+        )
+    )
+    await asyncio.sleep(0)
+    second = asyncio.create_task(
+        correlator.observe(
+            egress_key="environment_proxy:http://proxy.example:8080",
+            account_id="acc-b",
+        )
+    )
+
+    assert await asyncio.gather(first, second) == [True, True]
+    assert (
+        await asyncio.wait_for(
+            correlator.observe(
+                egress_key="environment_proxy:http://proxy.example:8080",
+                account_id="acc-a",
+            ),
+            timeout=0.05,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_egress_failure_correlator_rejects_same_account_different_egress_and_anonymous() -> None:
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.02,
+        max_observations=16,
+    )
+
+    same_account = await asyncio.gather(
+        correlator.observe(egress_key="direct:wss://chatgpt.com:443", account_id="acc-a"),
+        correlator.observe(egress_key="direct:wss://chatgpt.com:443", account_id="acc-a"),
+    )
+    different_egress = await asyncio.gather(
+        correlator.observe(egress_key="routed_proxy:ep-a", account_id="acc-a"),
+        correlator.observe(egress_key="routed_proxy:ep-b", account_id="acc-b"),
+    )
+    anonymous = await asyncio.wait_for(
+        correlator.observe(egress_key="direct:wss://chatgpt.com:443", account_id=None),
+        timeout=0.01,
+    )
+
+    assert same_account == [False, False]
+    assert different_egress == [False, False]
+    assert anonymous is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_egress_failure_correlator_retains_cancelled_observation_without_waiter() -> None:
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.2,
+        max_observations=16,
+    )
+    cancelled = asyncio.create_task(
+        correlator.observe(
+            egress_key="environment_proxy:http://proxy.example:8081",
+            account_id="acc-a",
+        )
+    )
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    assert (
+        await asyncio.wait_for(
+            correlator.observe(
+                egress_key="environment_proxy:http://proxy.example:8081",
+                account_id="acc-b",
+            ),
+            timeout=0.05,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_egress_failure_correlator_evicts_oldest_observation_at_capacity() -> None:
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.03,
+        max_observations=2,
+    )
+
+    for egress_key, account_id in (
+        ("routed_proxy:ep-oldest", "acc-a"),
+        ("routed_proxy:ep-middle", "acc-c"),
+        ("routed_proxy:ep-newest", "acc-d"),
+    ):
+        candidate = asyncio.create_task(
+            correlator.observe(
+                egress_key=egress_key,
+                account_id=account_id,
+            )
+        )
+        await asyncio.sleep(0)
+        candidate.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await candidate
+
+    assert (
+        await correlator.observe(
+            egress_key="routed_proxy:ep-oldest",
+            account_id="acc-b",
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_egress_failure_correlator_notifies_waiters_across_event_loops() -> None:
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.5,
+        max_observations=16,
+    )
+    ready = threading.Barrier(2)
+
+    def observe_in_thread(account_id: str) -> bool:
+        async def observe() -> bool:
+            ready.wait()
+            return await correlator.observe(
+                egress_key="environment_proxy:http://proxy.cross-loop.test:8080",
+                account_id=account_id,
+            )
+
+        return asyncio.run(observe())
+
+    assert await asyncio.gather(
+        asyncio.to_thread(observe_in_thread, "acc-a"),
+        asyncio.to_thread(observe_in_thread, "acc-b"),
+    ) == [True, True]
 
 
 @pytest.mark.asyncio

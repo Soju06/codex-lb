@@ -241,6 +241,23 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
     return all(not call_ids for call_ids in unsettled_call_ids_by_type.values())
 
 
+def responses_input_has_self_contained_tool_continuation_suffix(
+    input_items: list[JsonValue],
+    *,
+    stored_count: int,
+) -> bool:
+    """Prove that a full resend advances through a complete direct tool round trip."""
+
+    if stored_count <= 0 or len(input_items) <= stored_count:
+        return False
+    suffix = input_items[stored_count:]
+    return (
+        responses_input_items_are_self_contained_fresh_replay(input_items)
+        and responses_payload_is_account_neutral_fresh_replay({"input": suffix})
+        and any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_TYPES for item in suffix)
+    )
+
+
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
     if value is None:
         return True

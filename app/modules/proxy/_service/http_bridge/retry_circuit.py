@@ -360,7 +360,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 )
                 if detail == "clean_close":
                     backoff = min(backoff, clean_close_max_backoff)
-                state.cooldown_until = now + backoff
+                state.cooldown_until = max(state.cooldown_until, now + backoff)
                 if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                     http_bridge_retry_circuit_total.labels(outcome="opened").inc()
                 logger.warning(

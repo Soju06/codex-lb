@@ -579,7 +579,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         (
                             detail
                             for detail in (retire_detail, error_code)
-                            if detail in {"stream_incomplete", "stream_idle_timeout"}
+                            if detail in {"stream_incomplete", "stream_idle_timeout", "upstream_keepalive_timeout"}
                         ),
                         None,
                     )
@@ -853,6 +853,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         penalize_account=(
                             message.error_code != "proxy_network_unavailable"
+                            and message.error_code != "upstream_keepalive_timeout"
                             and not (
                                 message.kind == "close"
                                 and _classify_upstream_close(
@@ -874,7 +875,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 exc_info=True,
             )
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
-            account_neutral = error_code == "proxy_network_unavailable"
+            account_neutral = error_code in {"proxy_network_unavailable", "upstream_keepalive_timeout"}
             async with session.lifecycle_lock:
                 await self._fail_http_bridge_reader_and_maybe_retire(
                     session,

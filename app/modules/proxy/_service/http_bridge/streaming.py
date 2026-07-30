@@ -1009,6 +1009,10 @@ class _HTTPBridgeStreamingMixin:
                 stored_count=durable_full_resend_anchor_count,
             )
             if replay_projection is not None:
+                durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
+                    replay_projection.input_items,
+                    stored_count=replay_projection.stored_prefix_count,
+                )
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
                 ).model_copy(update={"input": replay_projection.input_items})

@@ -254,6 +254,7 @@ class _HTTPBridgeMixin(
             and (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
+                or task.get_name().startswith("http-bridge-recovery-settlement-")
                 or task.get_name().startswith("cancelled-task-cleanup-")
             )
         ]
@@ -2380,6 +2381,7 @@ class _HTTPBridgeMixin(
             complete_failed_handoff()
 
         try:
+            account_changed = account.id != session.account.id
             if owner_rebind_affinity is not None:
                 await self._claim_http_bridge_replacement_before_swap(
                     session,
@@ -2388,6 +2390,7 @@ class _HTTPBridgeMixin(
                     release_selected_account_lease=release_selected_account_lease,
                     owner_rebind_affinity=owner_rebind_affinity,
                 )
+            if owner_rebind_affinity is not None or account_changed:
                 await self._unregister_http_bridge_turn_states(session)
                 await self._unregister_http_bridge_previous_response_ids(session)
                 session.last_completed_response_id = None

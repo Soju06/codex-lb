@@ -180,6 +180,84 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+_HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    15.0,
+    30.0,
+    60.0,
+    120.0,
+)
+
+
+async def _retry_http_bridge_recovery_settlement(
+    service: Any,
+    session: Any,
+    *,
+    session_id: str,
+    api_key_id: str | None,
+    instance_id: str,
+    owner_epoch: int,
+    request_fingerprint: str,
+    response_id: str | None,
+) -> None:
+    """Keep a completed journal row fenced until durable settlement succeeds."""
+
+    for delay_seconds in _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS:
+        await asyncio.sleep(delay_seconds)
+        try:
+            await service._durable_bridge.mark_recovery_attempt_replayed(
+                session_id=session_id,
+                api_key_id=api_key_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+                response_id=response_id,
+            )
+            return
+        except Exception:
+            # Keep the owner lease alive while the database is recovering so a
+            # second replica cannot claim the still-UNKNOWN journal row.
+            try:
+                async with service._http_bridge_lock:
+                    await service._refresh_durable_http_bridge_session(session)
+            except Exception:
+                logger.debug("Failed to refresh HTTP bridge lease during settlement retry", exc_info=True)
+    logger.error(
+        "HTTP bridge recovery settlement retry budget exhausted session_id=%s fingerprint=%s",
+        _hash_identifier(session_id),
+        _hash_identifier(request_fingerprint),
+    )
+
+
+def _schedule_http_bridge_recovery_settlement_retry(
+    service: Any,
+    session: Any,
+    **kwargs: Any,
+) -> None:
+    task = asyncio.create_task(
+        _retry_http_bridge_recovery_settlement(service, session, **kwargs),
+        name=f"http-bridge-recovery-settlement-{_hash_identifier(kwargs['request_fingerprint'])}",
+    )
+    service._background_cleanup_tasks.add(task)
+
+    def _discard(done_task: asyncio.Task[Any]) -> None:
+        service._background_cleanup_tasks.discard(done_task)
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("HTTP bridge recovery settlement retry failed", exc_info=True)
+
+    task.add_done_callback(_discard)
+
+
 T = TypeVar("T")
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _MODEL_OUTPUT_EVENT_TYPES = frozenset(
@@ -1630,6 +1708,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                 except Exception:
                     if settlement_attempt == 2:
                         logger.warning("Failed to settle HTTP bridge recovery attempt", exc_info=True)
+                        _schedule_http_bridge_recovery_settlement_retry(
+                            self,
+                            session,
+                            session_id=recovery_attempt_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=recovery_attempt_owner_epoch,
+                            request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
+                            response_id=response_id,
+                        )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))
 
@@ -1723,6 +1811,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                 except Exception:
                     if settlement_attempt == 2:
                         logger.warning("Failed to settle deterministic HTTP bridge recovery attempt", exc_info=True)
+                        _schedule_http_bridge_recovery_settlement_retry(
+                            self,
+                            session,
+                            session_id=recovery_attempt_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=recovery_attempt_owner_epoch,
+                            request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
+                            response_id=response_id,
+                        )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))
 

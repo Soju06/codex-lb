@@ -695,7 +695,7 @@ class DurableBridgeRepository:
                 )
                 .values(**values)
             )
-            if clear_continuity:
+            if clear_continuity and bool(getattr(result, "rowcount", 0)):
                 await self._clear_aliases_for_session(session_id)
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))

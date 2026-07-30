@@ -953,6 +953,7 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_retains_prior_output = False
         durable_recovery_attempt_fingerprint: str | None = None
         durable_recovery_attempt_available = False
+        durable_recovery_attempt_claimed = False
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
 
@@ -1019,15 +1020,39 @@ class _HTTPBridgeStreamingMixin:
                 durable_recovery_attempt_fingerprint = durable_bridge_hash(fresh_replay_text)
                 if durable_lookup is not None and durable_full_resend_is_account_neutral:
                     try:
-                        durable_recovery_attempt_available = (
-                            await self._durable_bridge.lookup_recovery_attempt(
+                        existing_attempt = await self._durable_bridge.lookup_recovery_attempt(
+                            session_id=durable_lookup.session_id,
+                            request_fingerprint=durable_recovery_attempt_fingerprint,
+                        )
+                        if existing_attempt is not None:
+                            claimed = await self._durable_bridge.mark_recovery_attempt_replayed(
                                 session_id=durable_lookup.session_id,
+                                api_key_id=bridge_session_key.api_key_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=durable_lookup.owner_epoch,
                                 request_fingerprint=durable_recovery_attempt_fingerprint,
                             )
-                            is not None
-                        )
+                            if not claimed:
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "bridge_continuity_persistence_failed",
+                                        "HTTP responses recovery ownership changed; retry the request.",
+                                    ),
+                                )
+                            durable_recovery_attempt_claimed = True
+                            durable_recovery_attempt_available = False
+                    except ProxyResponseError:
+                        raise
                     except Exception:
-                        logger.warning("Failed to load HTTP bridge recovery attempt", exc_info=True)
+                        logger.warning("Failed to claim HTTP bridge recovery attempt", exc_info=True)
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP responses recovery state could not be claimed; retry the request.",
+                            ),
+                        )
         durable_anchor_trimmable = durable_full_resend_anchor_count is not None
         durable_model_transition_lookup = (
             durable_lookup
@@ -1399,6 +1424,10 @@ class _HTTPBridgeStreamingMixin:
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
             file_required_preferred_account = False
+
+        if durable_recovery_attempt_claimed:
+            switch_to_account_neutral_replay()
+            request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
 
         if required_continuity_owner_missing:
             owner_unavailable = ProxyResponseError(
@@ -2321,17 +2350,18 @@ class _HTTPBridgeStreamingMixin:
             if (
                 durable_recovery_attempt_available
                 and durable_recovery_attempt_fingerprint is not None
-                and durable_lookup is not None
                 and _http_bridge_error_is_ambiguous_transport(exc)
                 and request_state.response_event_count == 0
                 and request_state.previous_response_id is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
             ):
                 try:
                     marked = await self._durable_bridge.mark_recovery_attempt_replayed(
-                        session_id=durable_lookup.session_id,
+                        session_id=session.durable_session_id,
                         api_key_id=bridge_session_key.api_key_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                        owner_epoch=durable_lookup.owner_epoch,
+                        owner_epoch=session.durable_owner_epoch,
                         request_fingerprint=durable_recovery_attempt_fingerprint,
                     )
                 except Exception:

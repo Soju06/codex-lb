@@ -20386,6 +20386,25 @@ async def test_http_bridge_retry_circuit_counts_stream_idle_timeout() -> None:
     assert cast(Any, service)._http_bridge_retry_circuits[hard_session.key].consecutive_failures == 1
 
 
+@pytest.mark.parametrize(
+    ("error_code", "expected_ambiguous"),
+    [
+        ("stream_incomplete", True),
+        ("stream_idle_timeout", True),
+        ("upstream_request_timeout", True),
+        ("invalid_request_error", False),
+        ("quota_exceeded", False),
+    ],
+)
+def test_http_bridge_durable_recovery_requires_ambiguous_transport_error(
+    error_code: str,
+    expected_ambiguous: bool,
+) -> None:
+    error = ProxyResponseError(502, openai_error(error_code, "upstream result"))
+
+    assert http_bridge_streaming_module._http_bridge_error_is_ambiguous_transport(error) is expected_ambiguous
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_retry_circuit_counts_missing_response_created_timeout() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -20406,7 +20425,7 @@ async def test_http_bridge_retry_circuit_counts_missing_response_created_timeout
 
     state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
     assert state.consecutive_failures == 2
-    assert state.last_detail == "missing_response_created_timeout"
+    assert state.last_detail == "stream_idle_timeout"
     assert state.cooldown_until > time.monotonic()
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
 
@@ -20420,7 +20439,7 @@ async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() ->
         http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
             consecutive_failures=2,
             cooldown_until=now + 60.0,
-            last_detail="missing_response_created_timeout",
+            last_detail="stream_idle_timeout",
             last_touched_monotonic=now,
         )
     )

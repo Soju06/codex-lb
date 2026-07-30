@@ -12,6 +12,8 @@ through a retry-circuit cooldown only consumes the client request budget.
   client-provided and proxy-injected anchors.
 - Fail continuity-bound requests closed when a retry-circuit cooldown is
   active and no safe fresh replay exists.
+- Record proof-gated fresh-resend attempts in a durable recovery journal so a
+  later replica can replay only an unresolved, transport-ambiguous attempt.
 - Keep ordinary requests and existing session ownership on their current
   recovery paths, and emit the continuity-fail-closed diagnostic for
   observability.
@@ -19,4 +21,5 @@ through a retry-circuit cooldown only consumes the client request budget.
 ## Impact
 
 - HTTP bridge continuation recovery and idle-timeout behavior.
-- No API, database, account-status, or session-owner changes.
+- Adds a durable recovery-attempt journal migration and startup schema check;
+  no public API or account-status changes.

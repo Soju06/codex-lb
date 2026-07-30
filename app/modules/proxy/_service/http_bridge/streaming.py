@@ -260,6 +260,22 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
     return (str(code) if code is not None else None, str(message) if message is not None else None)
 
 
+_HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES = frozenset(
+    {
+        "stream_incomplete",
+        "stream_idle_timeout",
+        "upstream_request_timeout",
+    }
+)
+
+
+def _http_bridge_error_is_ambiguous_transport(exc: ProxyResponseError) -> bool:
+    """Return whether an error leaves upstream acceptance genuinely unknown."""
+
+    code, _message = _proxy_error_code_message(exc)
+    return code in _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES
+
+
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
     code, message = _proxy_error_code_message(exc)
     if code == "capacity_exhausted_active_sessions":
@@ -2306,6 +2322,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_recovery_attempt_available
                 and durable_recovery_attempt_fingerprint is not None
                 and durable_lookup is not None
+                and _http_bridge_error_is_ambiguous_transport(exc)
                 and request_state.response_event_count == 0
                 and request_state.previous_response_id is not None
             ):

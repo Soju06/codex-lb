@@ -24,14 +24,15 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
         "stream_incomplete",
         "clean_close",
         "stream_idle_timeout",
-        "upstream_keepalive_timeout",
-        # A missing response.created is the strongest signal that the
-        # upstream socket is unusable: no response event was observed before
-        # the client-safe deadline, so retrying the same hard key can recreate
-        # the exact failing request in a tight loop.
-        "missing_response_created_timeout",
     }
 )
+_HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
+    # These diagnostics describe the same ambiguous idle/incomplete
+    # transport class. Keep the durable contract to the three documented
+    # failure classes while retaining the more specific event in logs.
+    "upstream_keepalive_timeout": "stream_idle_timeout",
+    "missing_response_created_timeout": "stream_idle_timeout",
+}
 
 
 @dataclass(slots=True)
@@ -323,6 +324,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
     ) -> None:
+        detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return
 

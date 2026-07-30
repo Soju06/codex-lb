@@ -269,13 +269,14 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
         **_replica_gauge_kwargs,
     )
-    # Sibling workers derive the same candidate pool capacity from the same
-    # partitioned caps, so livemax (not livesum) reports the real value.
+    # Sibling workers enforce independent lease counters, so each worker can
+    # admit its own pool capacity. Sum capacity across live workers (like the
+    # inflight gauge) so the exported utilization ratio stays comparable.
     stream_pool_capacity = Gauge(
         "codex_lb_stream_pool_capacity",
         "Stream capacity of the fair-share gate's last candidate pool",
         registry=REGISTRY,
-        **_replica_gauge_kwargs,
+        **_gauge_kwargs,
     )
     proxy_phase_latency_seconds = Histogram(
         "codex_lb_proxy_phase_latency_seconds",

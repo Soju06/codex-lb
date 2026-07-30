@@ -435,6 +435,7 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         request_fingerprint: str,
         response_id: str | None = None,
+        allow_owner_change: bool = False,
     ) -> bool:
         del api_key_id
         async with self._session() as session:
@@ -444,6 +445,7 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 request_fingerprint=request_fingerprint,
                 response_id=response_id,
+                allow_owner_change=allow_owner_change,
             )
 
     async def mark_instance_draining(self, *, instance_id: str) -> int:

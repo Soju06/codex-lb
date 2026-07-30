@@ -254,7 +254,6 @@ class _HTTPBridgeMixin(
             and (
                 task.get_name().startswith("proxy-http_bridge_session_close-")
                 or task.get_name().startswith("http-bridge-close-")
-                or task.get_name().startswith("http-bridge-recovery-settlement-")
                 or task.get_name().startswith("cancelled-task-cleanup-")
             )
         ]
@@ -1645,6 +1644,7 @@ class _HTTPBridgeMixin(
         session: "_HTTPBridgeSession",
         *,
         turn_state_lock_held: bool = False,
+        release_durable_session: bool = True,
     ) -> None:
         session.closed = True
         if turn_state_lock_held:
@@ -1660,7 +1660,7 @@ class _HTTPBridgeMixin(
             logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
         finally:
             session.account_lease = None
-        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
+        if release_durable_session and session.durable_session_id and session.durable_owner_epoch:
             try:
                 await self._durable_bridge.release_live_session(
                     session_id=session.durable_session_id,
@@ -2381,7 +2381,6 @@ class _HTTPBridgeMixin(
             complete_failed_handoff()
 
         try:
-            account_changed = account.id != session.account.id
             if owner_rebind_affinity is not None:
                 await self._claim_http_bridge_replacement_before_swap(
                     session,
@@ -2390,7 +2389,7 @@ class _HTTPBridgeMixin(
                     release_selected_account_lease=release_selected_account_lease,
                     owner_rebind_affinity=owner_rebind_affinity,
                 )
-            if owner_rebind_affinity is not None or account_changed:
+            if owner_rebind_affinity is not None or account.id != session.account.id:
                 await self._unregister_http_bridge_turn_states(session)
                 await self._unregister_http_bridge_previous_response_ids(session)
                 session.last_completed_response_id = None

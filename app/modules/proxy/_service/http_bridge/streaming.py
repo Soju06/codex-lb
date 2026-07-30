@@ -2432,6 +2432,7 @@ class _HTTPBridgeStreamingMixin:
                         session,
                         error_code="stream_incomplete",
                         error_message="Upstream websocket closed before response.completed",
+                        preserve_durable_lease=True,
                     )
                     switch_to_account_neutral_replay()
                     request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
@@ -2704,6 +2705,7 @@ class _HTTPBridgeStreamingMixin:
         *,
         error_code: str,
         error_message: str,
+        preserve_durable_lease: bool = False,
     ) -> None:
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
@@ -2720,7 +2722,7 @@ class _HTTPBridgeStreamingMixin:
             api_key=None,
             response_create_gate=session.response_create_gate,
         )
-        await self._close_http_bridge_session(session)
+        await self._close_http_bridge_session(session, release_durable_session=not preserve_durable_lease)
 
     async def _stream_http_bridge_session_events(
         self: Any,

@@ -228,15 +228,27 @@ async def _retry_http_bridge_recovery_settlement(
     for delay_seconds in _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS:
         await _wait_for_http_bridge_recovery_settlement_retry(service, session, delay_seconds)
         try:
-            await service._durable_bridge.mark_recovery_attempt_replayed(
+            marked = await service._durable_bridge.mark_recovery_attempt_replayed(
                 session_id=session_id,
                 api_key_id=api_key_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 request_fingerprint=request_fingerprint,
                 response_id=response_id,
+                allow_owner_change=True,
             )
-            return
+            if marked:
+                try:
+                    await service._durable_bridge.release_live_session(
+                        session_id=session_id,
+                        instance_id=instance_id,
+                        owner_epoch=owner_epoch,
+                        draining=False,
+                    )
+                except Exception:
+                    logger.debug("Failed to release HTTP bridge recovery origin lease", exc_info=True)
+                return
+            logger.warning("HTTP bridge recovery settlement owner fence rejected; retrying")
         except Exception:
             continue
     logger.error(
@@ -1714,6 +1726,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         owner_epoch=recovery_attempt_owner_epoch,
                         request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                         response_id=response_id,
+                        allow_owner_change=True,
                     )
                     break
                 except Exception:
@@ -1817,6 +1830,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         owner_epoch=recovery_attempt_owner_epoch,
                         request_fingerprint=matched_request_state.recovery_attempt_fingerprint,
                         response_id=response_id,
+                        allow_owner_change=True,
                     )
                     break
                 except Exception:

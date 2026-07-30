@@ -848,6 +848,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         request_fingerprint: str,
         response_id: str | None = None,
+        allow_owner_change: bool = False,
     ) -> bool:
         async with sqlite_writer_section():
             # Keep the owner fence and journal transition in one transaction.
@@ -855,18 +856,19 @@ class DurableBridgeRepository:
             # advancing the epoch between the check and the state update;
             # sqlite_writer_section provides the equivalent writer
             # serialization for SQLite.
-            owner_exists = await self._session.scalar(
-                select(HttpBridgeSessionRecord.id)
-                .where(
-                    HttpBridgeSessionRecord.id == session_id,
-                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+            if not allow_owner_change:
+                owner_exists = await self._session.scalar(
+                    select(HttpBridgeSessionRecord.id)
+                    .where(
+                        HttpBridgeSessionRecord.id == session_id,
+                        HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                        HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    )
+                    .with_for_update()
                 )
-                .with_for_update()
-            )
-            if owner_exists is None:
-                await self._session.rollback()
-                return False
+                if owner_exists is None:
+                    await self._session.rollback()
+                    return False
             values: dict[str, object] = {"state": HttpBridgeRecoveryAttemptState.REPLAYED}
             if response_id is not None:
                 values["response_id"] = response_id

@@ -1055,7 +1055,10 @@ class _HTTPBridgeStreamingMixin:
                                     service_tier=None,
                                     latest_turn_state=durable_lookup.latest_turn_state,
                                     latest_response_id=None,
-                                    allow_takeover=True,
+                                    # Revalidate the stale lookup under the
+                                    # row lock; an active owner that appeared
+                                    # after the lookup must not be displaced.
+                                    allow_takeover=False,
                                 )
                                 if claimed_session.owner_instance_id != claim_instance_id:
                                     raise ProxyResponseError(

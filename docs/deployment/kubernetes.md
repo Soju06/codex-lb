@@ -35,6 +35,19 @@ post-drain process cleanup. If that cleanup ignores cancellation at its bound,
 the launcher forces the captured signal (or SIGTERM for programmatic shutdown)
 instead of returning an unbounded task to asyncio runner teardown.
 
+**Upgrade warning:** this release adds a render-time timing guard. Existing
+values files, `--set` overrides, or values retained by
+`helm upgrade --reuse-values` with
+`terminationGracePeriodSeconds < config.shutdownDrainTimeoutSeconds + 32`
+make `helm template`, `helm install`, and `helm upgrade` fail before resources
+are applied. With the default `config.shutdownDrainTimeoutSeconds: 30`, the
+minimum is `62`; the chart default is `65`. Raise every retained low value
+explicitly to at least the computed minimum (`65` preserves the chart's default
+headroom for a 30-second drain). Omitting the key does not clear its stored
+value when `--reuse-values` is used. To adopt the chart default instead, use an
+intentional non-reuse or `--reset-values` upgrade with the key absent. Production
+overrides should retain additional helper-launch headroom.
+
 The defaults satisfy the chart's timing guards. When tuning them, keep
 `preStopSleepSeconds <= config.shutdownDrainTimeoutSeconds` and
 `terminationGracePeriodSeconds >= config.shutdownDrainTimeoutSeconds + 32`.

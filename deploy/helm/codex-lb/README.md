@@ -615,6 +615,19 @@ Advanced snippet-based keys via `ingress.responses.nginx.configurationSnippet` a
 helm upgrade codex-lb oci://ghcr.io/soju06/charts/codex-lb <your values...>
 ```
 
+**Upgrade warning:** this release adds a render-time timing guard. Existing
+values files, `--set` overrides, or values retained by
+`helm upgrade --reuse-values` with
+`terminationGracePeriodSeconds < config.shutdownDrainTimeoutSeconds + 32`
+make `helm template`, `helm install`, and `helm upgrade` fail before resources
+are applied. With the default `config.shutdownDrainTimeoutSeconds: 30`, the
+minimum is `62`; the chart default is `65`. Raise every retained low value
+explicitly to at least the computed minimum (`65` preserves the chart's default
+headroom for a 30-second drain). Omitting the key does not clear its stored
+value when `--reuse-values` is used. To adopt the chart default instead, use an
+intentional non-reuse or `--reset-values` upgrade with the key absent. Production
+overrides should retain additional helper-launch headroom.
+
 - External DB installs can migrate before StatefulSet creation.
 - External secrets installs keep the dedicated migration Job and fail closed behind the schema gate.
 - Bundled installs stay easy to bootstrap and keep the migration hook for upgrades.

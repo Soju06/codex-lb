@@ -24268,6 +24268,7 @@ async def test_hidden_http_bridge_model_capacity_retry_suppresses_reconnect_wait
         started_at=time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create"}',
         propagate_http_errors=True,
         bridge_request_deadline=time.monotonic() + 1.0,
@@ -24374,6 +24375,7 @@ async def test_http_bridge_model_capacity_deadline_preserves_propagated_error(mo
         started_at=0.0,
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create"}',
         propagate_http_errors=True,
     )
@@ -24446,6 +24448,7 @@ async def test_http_bridge_model_capacity_detached_waiter_cleanup_keeps_other_qu
         started_at=0.0,
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create"}',
         propagate_http_errors=True,
     )
@@ -24458,6 +24461,7 @@ async def test_http_bridge_model_capacity_detached_waiter_cleanup_keeps_other_qu
         started_at=0.0,
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create","input":"next"}',
     )
     upstream = AsyncMock()
@@ -24527,6 +24531,7 @@ async def test_http_bridge_model_capacity_wait_retries_only_original_pending_req
         started_at=0.0,
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create"}',
         propagate_http_errors=True,
     )
@@ -24539,6 +24544,7 @@ async def test_http_bridge_model_capacity_wait_retries_only_original_pending_req
         started_at=0.0,
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create","input":"later"}',
     )
     upstream = AsyncMock()
@@ -38509,6 +38515,7 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_detach_d
         response_create_gate_acquired=True,
         response_create_admission_reacquire_required=True,
         event_queue=asyncio.Queue(),
+        transport="http",
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
     )
     session = proxy_service._HTTPBridgeSession(
@@ -38589,6 +38596,7 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_admissio
         response_create_gate=response_create_gate,
         response_create_gate_acquired=True,
         response_create_admission_reacquire_required=True,
+        transport="http",
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
     )
     session = proxy_service._HTTPBridgeSession(
@@ -38662,6 +38670,7 @@ async def test_retry_http_bridge_precreated_request_bounds_admission_wait_by_dea
         response_create_gate=response_create_gate,
         response_create_gate_acquired=True,
         response_create_admission_reacquire_required=True,
+        transport="http",
         request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
     )
     session = proxy_service._HTTPBridgeSession(

@@ -44,6 +44,10 @@ The Helm lifecycle hook MUST start local drain and poll its strict status. The c
 - **THEN** documentation states that preStop and SIGTERM share one application deadline
 - **AND** distinguishes the earlier Kubernetes hard-grace start from the Python helper's application-deadline start
 - **AND** uses the nested `config.shutdownDrainTimeoutSeconds` values key
+- **AND** warns that an old or custom `terminationGracePeriodSeconds` from a values file, `--set`, or `--reuse-values` below `config.shutdownDrainTimeoutSeconds + 32` makes Helm rendering fail before resources are applied
+- **AND** states that the minimum is the configured drain timeout plus 32 seconds, is 62 seconds at the default 30-second drain timeout, and that the chart default is 65 seconds
+- **AND** directs the operator to remove the override or raise it to at least the computed minimum before installing or upgrading
+- **AND** states that omitting the key under `--reuse-values` retains the stored low value, so that path must set at least the computed minimum explicitly, while adopting the chart default requires an intentional non-reuse or `--reset-values` upgrade with the key absent
 
 ### Requirement: Shipped launch paths use the pre-connection drain server
 

@@ -67,7 +67,20 @@ Helm runs `python -m app.core.prestop`. The Python helper measures routing dwell
 
 ## Migration Plan
 
-Deploy normally after Helm rendering and lifecycle tests pass. Defaults already satisfy the new timing guards. Rollback is a code/chart rollback; no schema, data, dependency, or configuration migration is involved.
+The chart default increases from 60 to 65 seconds and needs no operator action
+when no termination-grace override or reused release value is retained. Before
+installing or upgrading, audit existing values files, `--set` arguments, and
+values retained by `helm upgrade --reuse-values`. A retained
+`terminationGracePeriodSeconds` below
+`config.shutdownDrainTimeoutSeconds + 32` fails Helm rendering before resources
+are applied; at the default 30-second drain timeout the minimum is 62 seconds
+and the chart default is 65 seconds. Raise every retained low value explicitly
+to at least the computed minimum; 65 preserves the default helper-launch
+headroom when the drain timeout remains 30 seconds. Merely omitting the key does
+not clear its stored value under `--reuse-values`. Adopting the chart default
+requires an intentional non-reuse or `--reset-values` upgrade with the key absent.
+A failed upgrade leaves the existing release in place. Rollback remains a
+code/chart rollback; no schema, data, or dependency migration is involved.
 
 ## Open Questions
 

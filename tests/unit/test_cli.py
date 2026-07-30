@@ -36,24 +36,43 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
-    assert kwargs["workers"] == 1
+    assert "workers" not in kwargs
     assert kwargs["proxy_headers"] is False
 
 
 def test_main_pins_one_worker_when_web_concurrency_requests_more(monkeypatch):
-    captured: dict[str, Any] = {}
+    captured: dict[str, object] = {}
 
-    def fake_run(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
+    class FakeConfig:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            captured["workers"] = kwargs["workers"]
+            self.workers = kwargs["workers"]
 
-    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+        def load_app(self) -> None:
+            captured["loaded"] = True
+
+    class FakeServer:
+        started = True
+
+        def __init__(self, _config: FakeConfig, *, drain_timeout_seconds: float) -> None:
+            captured["drain_timeout_seconds"] = drain_timeout_seconds
+
+        def run(self) -> None:
+            captured["ran"] = True
+
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
-    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(Config=FakeConfig))
+    monkeypatch.setattr(cli, "_load_graceful_drain_server", lambda: FakeServer)
+    monkeypatch.setattr(cli, "_load_shutdown_drain_timeout_seconds", lambda: 17)
 
-    cli.main()
+    cli.main([])
 
-    assert captured["kwargs"]["workers"] == 1
+    assert captured == {
+        "workers": 1,
+        "loaded": True,
+        "drain_timeout_seconds": 17,
+        "ran": True,
+    }
 
 
 def test_main_validates_selected_port_before_loading_uvicorn(monkeypatch):

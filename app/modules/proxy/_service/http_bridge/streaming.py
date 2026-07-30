@@ -1047,6 +1047,12 @@ class _HTTPBridgeStreamingMixin:
                                 )
                             durable_recovery_attempt_claimed = True
                             durable_recovery_attempt_available = False
+                        elif existing_attempt is None:
+                            # No prior attempt owns this fingerprint. The
+                            # request-submit path will journal it immediately
+                            # before dispatch, and an ambiguous transport
+                            # outcome may then consume the one replay fence.
+                            durable_recovery_attempt_available = True
                     except ProxyResponseError:
                         raise
                     except Exception:

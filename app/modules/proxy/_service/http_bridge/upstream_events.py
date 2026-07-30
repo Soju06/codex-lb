@@ -193,6 +193,23 @@ _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     60.0,
     120.0,
 )
+_HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS = 10.0
+
+
+async def _wait_for_http_bridge_recovery_settlement_retry(
+    service: Any,
+    session: Any,
+    delay_seconds: float,
+) -> None:
+    remaining = max(0.0, delay_seconds)
+    while remaining > 0:
+        await asyncio.sleep(min(remaining, _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS))
+        remaining -= _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS
+        try:
+            async with service._http_bridge_lock:
+                await service._refresh_durable_http_bridge_session(session)
+        except Exception:
+            logger.debug("Failed to refresh HTTP bridge lease during settlement backoff", exc_info=True)
 
 
 async def _retry_http_bridge_recovery_settlement(
@@ -209,7 +226,7 @@ async def _retry_http_bridge_recovery_settlement(
     """Keep a response-observed journal row fenced until durable settlement succeeds."""
 
     for delay_seconds in _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS:
-        await asyncio.sleep(delay_seconds)
+        await _wait_for_http_bridge_recovery_settlement_retry(service, session, delay_seconds)
         try:
             await service._durable_bridge.mark_recovery_attempt_replayed(
                 session_id=session_id,
@@ -221,13 +238,7 @@ async def _retry_http_bridge_recovery_settlement(
             )
             return
         except Exception:
-            # Keep the owner lease alive while the database is recovering so a
-            # second replica cannot claim the still-UNKNOWN journal row.
-            try:
-                async with service._http_bridge_lock:
-                    await service._refresh_durable_http_bridge_session(session)
-            except Exception:
-                logger.debug("Failed to refresh HTTP bridge lease during settlement retry", exc_info=True)
+            continue
     logger.error(
         "HTTP bridge recovery settlement retry budget exhausted session_id=%s fingerprint=%s",
         _hash_identifier(session_id),

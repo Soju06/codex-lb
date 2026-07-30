@@ -28,7 +28,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_accounts_api_probe.py::test_pending_downgrade_evidence_is_persisted_for_all_replicas \
 	tests/integration/test_accounts_api_probe.py::test_reimport_clears_pending_downgrade_evidence \
 	tests/integration/test_repositories.py::test_replace_reauthorized_discards_pending_downgrade_evidence \
-	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport
+	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
+	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade
 SHELL := /bin/bash
 
 .PHONY: help

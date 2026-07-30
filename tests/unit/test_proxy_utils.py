@@ -10054,8 +10054,11 @@ def test_bare_session_cap_spillover_is_revoked_by_account_scoped_hosted_input(it
     assert policy.spill_on_account_cap is False
 
 
-def test_bare_session_cap_spillover_is_revoked_by_stored_prompt() -> None:
-    payload = ResponsesRequest.model_validate(
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_bare_session_cap_spillover_is_revoked_by_stored_prompt(
+    request_type: type[ResponsesRequest] | type[ResponsesCompactRequest],
+) -> None:
+    payload = request_type.model_validate(
         {
             "model": "gpt-5.6-sol",
             "instructions": "hi",
@@ -10064,14 +10067,24 @@ def test_bare_session_cap_spillover_is_revoked_by_stored_prompt() -> None:
         }
     )
 
-    policy = proxy_service._sticky_key_for_responses_request(
-        payload,
-        headers={"x-session-id": "client-session"},
-        codex_session_affinity=False,
-        openai_cache_affinity=False,
-        openai_cache_affinity_max_age_seconds=300,
-        sticky_threads_enabled=False,
-    )
+    if isinstance(payload, ResponsesRequest):
+        policy = proxy_service._sticky_key_for_responses_request(
+            payload,
+            headers={"x-session-id": "client-session"},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=300,
+            sticky_threads_enabled=False,
+        )
+    else:
+        policy = proxy_service._sticky_key_for_compact_request(
+            payload,
+            headers={"x-session-id": "client-session"},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=300,
+            sticky_threads_enabled=False,
+        )
 
     assert policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
     assert policy.spill_on_account_cap is False

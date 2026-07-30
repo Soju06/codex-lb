@@ -2,7 +2,7 @@
 
 ### Requirement: Client-declared session identity headers key bare process-session affinity
 
-The service MUST recognize client-declared session identity headers as the bare process-session affinity key on every Responses API entry point, including `/v1/responses`, checked in this precedence order: `session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, `thread-id` (the Codex CLI names, unchanged and first where Codex session affinity is enabled), then `x-session-affinity`, `x-session-id`, `x-opencode-session`, `x-claude-code-agent-id`, `x-claude-remote-session-id`. The client-specific names MUST remain enabled when Codex session affinity is disabled. The first eligible header present with a nonblank value MUST supply the key, so a Codex-affinity request carrying both a Codex name and a client identity header routes exactly as before this requirement existed. Sessions keyed by these headers MUST carry the same bare process-session semantics defined elsewhere in this capability: soft locality, cap spillover for self-contained payloads, and no ownership evidence.
+The service MUST recognize client-declared session identity headers as the bare process-session affinity key on every Responses API entry point, including `/v1/responses`, checked in this precedence order: `session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, `thread-id` (the Codex CLI names, unchanged and first where Codex session affinity is enabled), then `x-session-affinity`, `x-session-id`, `x-opencode-session`, `x-claude-code-agent-id`, `x-claude-remote-session-id`. The client-specific names MUST remain enabled when Codex session affinity is disabled. The first eligible header present with a nonblank value MUST supply the key, so a Codex-affinity request carrying both a Codex name and a client identity header routes exactly as before this requirement existed. Sessions keyed by these headers MUST carry the same bare process-session semantics defined elsewhere in this capability: soft locality, cap spillover for self-contained payloads, and no ownership evidence. A standard Responses or compact request carrying a non-empty stored `prompt` MUST NOT spill to another account under an account cap.
 
 Parent identity headers — `x-parent-session-id`, `x-codex-parent-thread-id`, `x-claude-code-parent-agent-id`, and `x-openai-subagent` — MUST NOT supply the session affinity key: a parent key would collapse every subagent of one parent onto a single session. `x-client-request-id` MUST NOT supply the key because clients also populate it with per-request identifiers.
 
@@ -54,3 +54,9 @@ The account-neutral replay header filter MUST strip the recognized client identi
 - **WHEN** the internal owner-forward headers are built
 - **THEN** the client identity headers are retained for affinity and request logging on the owner
 - **AND** the owner strips them only when building the Responses upstream request
+
+#### Scenario: Compact stored prompt remains account-bound
+
+- **GIVEN** a `/v1/responses/compact` request carrying client identity and a non-empty stored `prompt`
+- **WHEN** its mapped account is at the response-create cap
+- **THEN** bare-session cap spillover to another account is disabled

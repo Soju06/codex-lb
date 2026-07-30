@@ -20,6 +20,7 @@
 - [x] 3.3 Keep account-scoped hosted input on the bridge and disable bare-session cap spillover for it.
 - [x] 3.4 Keep stored-prompt requests on the bridge and disable bare-session cap spillover for them.
 - [x] 3.5 Keep one-shot requests on the bridge when `auto` transport resolves under an effective `always_websocket` policy.
+- [x] 3.6 Keep compact stored-prompt requests account-bound under account caps.
 
 ## 4. Tests
 
@@ -32,3 +33,4 @@
 - [x] 4.7 Account-scoped hosted-input coverage: such requests neither bypass the bridge nor spill across accounts.
 - [x] 4.8 Stored-prompt coverage: such requests neither bypass the bridge nor spill across accounts.
 - [x] 4.9 Always-websocket coverage: global and per-API-key policy keep one-shot requests on the bridge.
+- [x] 4.10 Stored-prompt spillover coverage includes standard Responses and compact request models.

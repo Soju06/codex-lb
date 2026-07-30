@@ -350,6 +350,7 @@ def _request_allows_bare_session_cap_spillover(
     extra = payload.model_extra or {}
     previous_response_id = extra.get("previous_response_id")
     conversation = extra.get("conversation")
+    prompt = extra.get("prompt")
     # A lookup miss does not make an upstream-stored object portable. Selection
     # must remain fail-closed for every owner-bearing payload shape.
     return not (
@@ -357,6 +358,7 @@ def _request_allows_bare_session_cap_spillover(
         or (isinstance(previous_response_id, str) and bool(previous_response_id.strip()))
         or (conversation is not None and not isinstance(conversation, str))
         or (isinstance(conversation, str) and bool(conversation.strip()))
+        or prompt not in (None, "")
         or extract_input_file_ids(payload.input)
         or (
             isinstance(payload.input, list)

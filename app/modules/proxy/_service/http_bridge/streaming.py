@@ -2244,7 +2244,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
                 retry_previous_response_id = None
                 retry_request_stage = "context_overflow_recover"
-                retry_preferred_account_id = None
+                retry_preferred_account_id = rewritten_file_account_id
                 allow_previous_response_recovery_rebind = False
             elif should_rollover_after_context_overflow:
                 _log_http_bridge_event(
@@ -2393,6 +2393,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                 retry_request_state.request_stage = retry_request_stage
                 retry_request_state.preferred_account_id = retry_preferred_account_id
+                retry_request_state.file_required_preferred_account = file_required_preferred_account
                 retry_request_state.excluded_account_ids.update(request_state.excluded_account_ids)
 
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(

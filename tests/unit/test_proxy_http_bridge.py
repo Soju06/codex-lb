@@ -11513,6 +11513,116 @@ async def test_stream_via_http_bridge_rolls_over_session_after_context_length_ex
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_context_overflow_keeps_file_owner_on_soft_affinity_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_doc"}],
+                }
+            ],
+            "previous_response_id": "resp_file_context",
+            "prompt_cache_key": "bridge-file-context-overflow",
+        }
+    )
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-file-context-overflow", None)
+    initial_session = _make_bridge_session(key=key)
+    retry_session = _make_bridge_session(key=key)
+    initial_session.account.id = "acc-file"
+    retry_session.account.id = "acc-file"
+
+    observed_states: list[proxy_service._WebSocketRequestState] = []
+    observed_frames: list[dict[str, Any]] = []
+
+    async def fake_stream_http_bridge_session_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ):
+        del queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
+        observed_states.append(request_state)
+        observed_frames.append(json.loads(text_data))
+        if len(observed_states) == 1:
+            raise ProxyResponseError(
+                400,
+                proxy_service.openai_error(
+                    "context_length_exceeded",
+                    "Your input exceeds the context window of this model.",
+                    error_type="invalid_request_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    get_or_create = AsyncMock(side_effect=[initial_session, retry_session])
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-file"))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+    monkeypatch.setattr(service, "_close_http_bridge_session", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+            rewritten_file_account_id="acc-file",
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert get_or_create.await_count == 2
+    initial_call, retry_call = get_or_create.await_args_list
+    assert initial_call.kwargs["preferred_account_id"] == "acc-file"
+    assert initial_call.kwargs["fallback_on_preferred_account_unavailable"] is False
+    assert retry_call.kwargs["previous_response_id"] is None
+    assert retry_call.kwargs["preferred_account_id"] == "acc-file"
+    assert retry_call.kwargs["fallback_on_preferred_account_unavailable"] is False
+    assert "previous_response_id" not in observed_frames[1]
+    assert observed_frames[1]["input"] == payload.to_payload()["input"]
+    assert observed_states[1].preferred_account_id == "acc-file"
+    assert observed_states[1].file_required_preferred_account is True
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_context_overflow_keeps_hard_affinity_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

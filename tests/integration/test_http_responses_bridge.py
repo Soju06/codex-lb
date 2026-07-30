@@ -527,6 +527,27 @@ class _CreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         )
 
 
+class _CompleteThenCreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        if not self.sent_text:
+            await super().send_text(text)
+            return
+        self.sent_text.append(text)
+        response_id = f"resp_cancel_after_anchor_{len(self.sent_text)}"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
 class _SilentUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -13405,6 +13426,296 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
     assert session.closed is True
     assert session.upstream_control.retire_after_drain is True
     assert fake_upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_escape_cancel_allows_next_same_session_full_history(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_escape_recovery",
+        "http-bridge-escape-recovery@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    account = await _get_account(account_id)
+    interrupted_upstream = _CompleteThenCreatedOnlyUpstreamWebSocket("resp_escape_source")
+    recovery_upstream = _FakeBridgeUpstreamWebSocket("resp_escape_recovered")
+    upstreams = [interrupted_upstream, recovery_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    account_health_write = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(service, "_handle_stream_error", account_health_write)
+
+    session_id = "codex-escape-recovery"
+    session_headers = {"x-codex-session-id": session_id}
+    stored_input = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+        }
+    ]
+    initial_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": stored_input,
+            "stream": True,
+        },
+        headers=session_headers,
+    )
+    assert initial_events[-1]["type"] == "response.completed"
+
+    tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_escape",
+        "name": "shell",
+        "input": "pwd",
+        "status": "completed",
+    }
+    tool_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_escape",
+        "output": "/workspace",
+        "status": "completed",
+    }
+    interrupted_input = [*stored_input, tool_call, tool_output]
+    interrupted_payload = proxy_module.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": interrupted_input,
+            "stream": True,
+        }
+    )
+    interrupted_stream = cast(
+        AsyncGenerator[str, None],
+        service._stream_via_http_bridge(
+            interrupted_payload,
+            session_headers,
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=128,
+            queue_limit=8,
+        ),
+    )
+    created_block = await asyncio.wait_for(interrupted_stream.__anext__(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert "response.created" in created_block
+
+    # Codex Escape closes the downstream stream while the response is still
+    # in progress. The bridge must fence the old connection-local anchor
+    # before retiring that socket.
+    await interrupted_stream.aclose()
+    durable_after_cancel = await service._durable_bridge.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value=session_id,
+        api_key_id=None,
+        turn_state=None,
+        session_header=session_id,
+        previous_response_id=None,
+    )
+    assert durable_after_cancel is not None
+    assert durable_after_cancel.latest_response_id is None
+    assert durable_after_cancel.latest_input_item_count == len(stored_input)
+
+    followup_input = [
+        *interrupted_input,
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue after Escape"}],
+        },
+    ]
+    recovered_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": followup_input,
+            "stream": True,
+        },
+        headers=session_headers,
+    )
+
+    assert recovered_events[-1]["type"] == "response.completed"
+    assert connect_count == 2
+    assert interrupted_upstream.closed is True
+    assert len(interrupted_upstream.sent_text) == 2
+    assert len(recovery_upstream.sent_text) == 1
+    recovery_frame = json.loads(recovery_upstream.sent_text[0])
+    assert "previous_response_id" not in recovery_frame
+    assert recovery_frame["input"] == followup_input
+    account_health_write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_automatic_compaction_recovers_on_fresh_same_account_socket(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_compaction_owner",
+        "http-bridge-compaction-owner@example.com",
+    )
+    alternate_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_compaction_alternate",
+        "http-bridge-compaction-alternate@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    alternate_account = await _get_account(alternate_account_id)
+    owner_chatgpt_account_id = cast(str, owner_account.chatgpt_account_id)
+    service = get_proxy_service_for_app(app_instance)
+    session_id = "codex-automatic-compaction-recovery"
+    old_input = [{"type": "message", "role": "user", "content": "the pre-compaction history"}]
+    old_fingerprint = proxy_module._fingerprint_input_items(old_input)
+
+    claimed = await service._durable_bridge.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value=session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id=owner_account.id,
+        model="gpt-5.1",
+        service_tier=None,
+        latest_turn_state=session_id,
+        latest_response_id="resp_before_compaction",
+        allow_takeover=True,
+    )
+    renewed = await service._durable_bridge.renew_live_session(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        lease_ttl_seconds=60.0,
+        latest_turn_state=session_id,
+        latest_response_id="resp_before_compaction",
+        latest_input_item_count=len(old_input),
+        latest_input_full_fingerprint=old_fingerprint,
+    )
+    assert renewed is not None
+    released = await service._durable_bridge.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+    assert released is not None
+    assert released.latest_response_id == "resp_before_compaction"
+    assert released.latest_input_full_fingerprint == old_fingerprint
+
+    selection_calls: list[dict[str, object]] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        selection_calls.append(dict(kwargs))
+        selected_account = (
+            owner_account if kwargs.get("preferred_account_id") == owner_account.id else alternate_account
+        )
+        return AccountSelection(account=selected_account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    upstream = _FakeBridgeUpstreamWebSocket("resp_compaction_recovered")
+    connected_account_ids: list[str] = []
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        return upstream
+
+    account_health_write = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(service, "_handle_stream_error", account_health_write)
+
+    compaction_input = [
+        {
+            "id": "cmp_automatic_recovery",
+            "type": "compaction",
+            "encrypted_content": "encrypted-complete-context",
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": "continue after automatic compaction",
+        },
+    ]
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": compaction_input,
+            "stream": True,
+        },
+        headers={"x-codex-session-id": session_id},
+    )
+
+    assert events[-1]["type"] == "response.completed"
+    assert connected_account_ids == [owner_chatgpt_account_id]
+    assert len(selection_calls) == 1
+    assert selection_calls[0]["preferred_account_id"] == owner_account.id
+    assert selection_calls[0]["preferred_account_is_continuity_owner"] is True
+    assert selection_calls[0]["fallback_on_preferred_account_unavailable"] is False
+    assert len(upstream.sent_text) == 1
+    recovery_frame = json.loads(upstream.sent_text[0])
+    assert "previous_response_id" not in recovery_frame
+    assert recovery_frame["input"] == compaction_input
+    account_health_write.assert_not_awaited()
 
 
 @pytest.mark.asyncio

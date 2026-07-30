@@ -381,6 +381,8 @@ def _prepare_websocket_request_state_for_account_switch(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
     """Return an unsent request body only when moving accounts is proven safe."""
+    if request_state.account_bound_owner_id is not None:
+        return None
     if request_state.previous_response_id is None:
         return request_state.request_text
     if not (
@@ -805,7 +807,7 @@ def _websocket_fresh_request_blocks_account_switch(request_state: _WebSocketRequ
 
 
 def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
-    if request_state.file_required_preferred_account:
+    if request_state.file_required_preferred_account or request_state.account_bound_owner_id is not None:
         return False
     if request_state.previous_response_id is None:
         return True
@@ -823,7 +825,10 @@ def _prepare_websocket_request_state_for_auth_replay(
 ) -> str | None:
     if request_state.last_downstream_sequence_number is not None:
         return None
-    if not _websocket_auth_request_can_switch_account(request_state):
+    account_bound_replay = request_state.account_bound_owner_id is not None
+    if not account_bound_replay and not _websocket_auth_request_can_switch_account(request_state):
+        return None
+    if account_bound_replay and request_state.previous_response_id is not None:
         return None
     if (
         request_state.proxy_injected_previous_response_id

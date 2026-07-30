@@ -14,6 +14,7 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
+    responses_payload_is_same_account_compaction_recovery,
 )
 
 
@@ -150,6 +151,115 @@ def test_account_neutral_fresh_replay_accepts_self_contained_payloads(
     payload: dict[str, JsonValue],
 ) -> None:
     assert responses_payload_is_account_neutral_fresh_replay(payload) is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(
+            {
+                "model": "gpt-5.4",
+                "instructions": "continue",
+                "input": [{"id": "cmp_valid", "type": "compaction", "encrypted_content": "ciphertext"}],
+            },
+            True,
+            id="exact-compaction",
+        ),
+        pytest.param(
+            {
+                "input": [
+                    {"id": "cmp_valid", "type": "compaction", "encrypted_content": "ciphertext"},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ]
+            },
+            True,
+            id="account-neutral-suffix",
+        ),
+        pytest.param(
+            {"input": [{"type": "compaction", "encrypted_content": "ciphertext"}]},
+            False,
+            id="missing-id",
+        ),
+        pytest.param(
+            {"input": [{"id": " ", "type": "compaction", "encrypted_content": "ciphertext"}]},
+            False,
+            id="blank-id",
+        ),
+        pytest.param(
+            {"input": [{"id": "cmp_empty", "type": "compaction", "encrypted_content": ""}]},
+            False,
+            id="empty-ciphertext",
+        ),
+        pytest.param(
+            {
+                "input": [
+                    {
+                        "id": "cmp_extra",
+                        "type": "compaction",
+                        "encrypted_content": "ciphertext",
+                        "summary": "untrusted",
+                    }
+                ]
+            },
+            False,
+            id="unknown-compaction-field",
+        ),
+        pytest.param(
+            {"input": [{"type": "message", "role": "system", "content": "summary of the old session"}]},
+            False,
+            id="plaintext-summary",
+        ),
+        pytest.param(
+            {
+                "input": [
+                    {"id": "cmp_file", "type": "compaction", "encrypted_content": "ciphertext"},
+                    {"type": "input_file", "file_id": "file_owner_scoped"},
+                ]
+            },
+            False,
+            id="account-scoped-suffix",
+        ),
+        pytest.param(
+            {
+                "input": [
+                    {"id": "cmp_nested", "type": "compaction", "encrypted_content": "ciphertext"},
+                    {"type": "reasoning", "encrypted_content": "second-ciphertext"},
+                ]
+            },
+            False,
+            id="second-encrypted-item",
+        ),
+        pytest.param(
+            {
+                "previous_response_id": "resp_explicit",
+                "input": [{"id": "cmp_explicit", "type": "compaction", "encrypted_content": "ciphertext"}],
+            },
+            False,
+            id="explicit-anchor",
+        ),
+        pytest.param(
+            {
+                "conversation": "conv_explicit",
+                "input": [{"id": "cmp_conversation", "type": "compaction", "encrypted_content": "ciphertext"}],
+            },
+            False,
+            id="explicit-conversation",
+        ),
+        pytest.param(
+            {
+                "input": [{"id": "cmp_unknown", "type": "compaction", "encrypted_content": "ciphertext"}],
+                "future_state": {"id": "owner-scoped"},
+            },
+            False,
+            id="unknown-request-state",
+        ),
+    ],
+)
+def test_same_account_compaction_recovery_requires_exact_shape_and_neutral_suffix(
+    payload: dict[str, JsonValue],
+    expected: bool,
+) -> None:
+    assert responses_payload_is_same_account_compaction_recovery(payload) is expected
 
 
 def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() -> None:

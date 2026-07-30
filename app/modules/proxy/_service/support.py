@@ -823,6 +823,11 @@ class _WebSocketRequestState:
     fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
+    # Exact upstream owner for request bodies that are safe only on one
+    # account, such as encrypted Codex compaction context. Unlike ordinary
+    # preference this survives reconnect/retry preparation and forbids
+    # account-switch fallbacks.
+    account_bound_owner_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False

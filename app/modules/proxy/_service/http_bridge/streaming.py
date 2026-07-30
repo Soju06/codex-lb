@@ -214,6 +214,7 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
+    responses_payload_is_same_account_compaction_recovery,
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -226,8 +227,9 @@ def _preserve_proxy_anchor_recovery_state(
     source: _WebSocketRequestState,
     target: _WebSocketRequestState,
 ) -> None:
-    """Preserve already-proven fallback state only for the exact same proxy anchor."""
+    """Preserve request ownership and exact-anchor fallback across re-preparation."""
 
+    target.account_bound_owner_id = source.account_bound_owner_id
     if (
         not source.proxy_injected_previous_response_id
         or source.previous_response_id is None
@@ -934,16 +936,29 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_prior_output = False
+        durable_compaction_recovery_allowed = False
         force_local_recovery_creation = False
         live_local_session_exists = False
         forwards_to_active_owner = False
         fresh_reattach_requires_live_path = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
+        payload_is_same_account_compaction_recovery = responses_payload_is_same_account_compaction_recovery(
+            payload.to_payload()
+        )
 
         def classify_durable_full_resend(
             lookup: DurableBridgeLookup,
-        ) -> tuple[int | None, str | None, bool]:
+        ) -> tuple[int | None, str | None, bool, bool]:
             stored_count = lookup.latest_input_item_count
+            compaction_recovery_allowed = (
+                bridge_session_key.strength == "hard"
+                and lookup.account_id is not None
+                and isinstance(stored_count, int)
+                and stored_count > 0
+                and isinstance(lookup.latest_input_full_fingerprint, str)
+                and bool(lookup.latest_input_full_fingerprint)
+                and payload_is_same_account_compaction_recovery
+            )
             if (
                 not payload_looks_like_full_resend
                 or stored_count is None
@@ -954,7 +969,7 @@ class _HTTPBridgeStreamingMixin:
                 )
                 or not isinstance(payload.input, list)
             ):
-                return None, None, False
+                return None, None, False, compaction_recovery_allowed
             replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                 cast(list[JsonValue], payload.input),
                 stored_count=stored_count,
@@ -972,10 +987,15 @@ class _HTTPBridgeStreamingMixin:
                         pending_tool_calls=lookup.latest_pending_tool_calls,
                     )
                 )
-            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
+            return (
+                stored_count,
+                lookup.latest_input_full_fingerprint,
+                safe_fresh_context,
+                compaction_recovery_allowed,
+            )
 
-        def durable_full_resend_allows_unanchored_lineage() -> bool:
-            if durable_full_resend_has_safe_fresh_context:
+        def durable_recovery_allows_unanchored_lineage() -> bool:
+            if durable_compaction_recovery_allowed or durable_full_resend_has_safe_fresh_context:
                 return True
             if durable_full_resend_anchor_count is None or not isinstance(payload.input, list):
                 return False
@@ -1017,7 +1037,7 @@ class _HTTPBridgeStreamingMixin:
                 same_owner_snapshot
                 and forwarded_lookup.latest_response_id is not None
                 and refreshed_lookup.latest_response_anchor_quarantined
-                and durable_full_resend_allows_unanchored_lineage()
+                and durable_recovery_allows_unanchored_lineage()
             )
 
         def enforce_quarantined_anchor_admission(
@@ -1033,7 +1053,7 @@ class _HTTPBridgeStreamingMixin:
                 or bool(request_payload.conversation)
             ):
                 return
-            if durable_full_resend_allows_unanchored_lineage():
+            if durable_recovery_allows_unanchored_lineage():
                 _log_http_bridge_event(
                     "durable_anchor_quarantine_recovery_allowed",
                     bridge_session_key,
@@ -1089,6 +1109,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_anchor_count,
                 durable_full_resend_anchor_fingerprint,
                 durable_full_resend_has_safe_fresh_context,
+                durable_compaction_recovery_allowed,
             ) = classify_durable_full_resend(durable_lookup)
             enforce_quarantined_anchor_admission(
                 lookup=durable_lookup,
@@ -1155,7 +1176,7 @@ class _HTTPBridgeStreamingMixin:
                 and not payload.conversation
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
-                and not durable_full_resend_allows_unanchored_lineage()
+                and not durable_recovery_allows_unanchored_lineage()
             )
             fresh_reattach_has_previous_socket_anchor = (
                 not live_local_session_exists
@@ -1166,7 +1187,7 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
             )
             if fresh_reattach_has_previous_socket_anchor:
-                if not durable_full_resend_allows_unanchored_lineage():
+                if not durable_recovery_allows_unanchored_lineage():
                     # Preserve request preparation/validation evidence while
                     # keeping the retained connection-local id out of the
                     # serialized frame. No upstream transport exists yet.
@@ -1290,10 +1311,14 @@ class _HTTPBridgeStreamingMixin:
             or model_transition_owner_missing
         )
         continuity_preferred_account_id = request_state.preferred_account_id
+        request_state.account_bound_owner_id = (
+            durable_lookup.account_id if durable_compaction_recovery_allowed and durable_lookup is not None else None
+        )
         # Existing bridge/response ownership and file ownership are equally
         # hard. Merge them before transport creation; source ordering must not
         # turn a conflict into an implicit account switch.
         request_state.preferred_account_id = resolve_required_account_id(
+            ("account-bound compaction", request_state.account_bound_owner_id),
             ("previous response or bridge", request_state.preferred_account_id),
             ("input file", rewritten_file_account_id),
         )
@@ -1363,6 +1388,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal account_neutral_recovery
             nonlocal affinity
             nonlocal bridge_session_key
+            nonlocal durable_compaction_recovery_allowed
             nonlocal durable_full_resend_anchor_count
             nonlocal durable_full_resend_anchor_fingerprint
             nonlocal durable_full_resend_fresh_payload
@@ -1428,6 +1454,7 @@ class _HTTPBridgeStreamingMixin:
             durable_full_resend_anchor_fingerprint = None
             durable_full_resend_fresh_payload = None
             durable_full_resend_is_account_neutral = None
+            durable_compaction_recovery_allowed = False
             durable_lookup = None
             file_required_preferred_account = False
 
@@ -1612,6 +1639,7 @@ class _HTTPBridgeStreamingMixin:
                     else:
                         durable_lookup = refreshed_bootstrap_lookup
                         if refreshed_bootstrap_lookup is None:
+                            durable_compaction_recovery_allowed = False
                             durable_full_resend_anchor_count = None
                             durable_full_resend_anchor_fingerprint = None
                             durable_full_resend_has_safe_fresh_context = False
@@ -1620,6 +1648,7 @@ class _HTTPBridgeStreamingMixin:
                                 durable_full_resend_anchor_count,
                                 durable_full_resend_anchor_fingerprint,
                                 durable_full_resend_has_safe_fresh_context,
+                                durable_compaction_recovery_allowed,
                             ) = classify_durable_full_resend(refreshed_bootstrap_lookup)
                             enforce_quarantined_anchor_admission(
                                 lookup=refreshed_bootstrap_lookup,
@@ -1628,6 +1657,7 @@ class _HTTPBridgeStreamingMixin:
                             )
                             continuity_preferred_account_id = refreshed_bootstrap_lookup.account_id
                             request_state.preferred_account_id = resolve_required_account_id(
+                                ("account-bound compaction", request_state.account_bound_owner_id),
                                 (
                                     "refreshed bootstrap bridge",
                                     continuity_preferred_account_id,
@@ -1681,6 +1711,7 @@ class _HTTPBridgeStreamingMixin:
                             if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
                                 durable_lookup = fresh_turn_state_lookup
                                 if fresh_turn_state_lookup is None:
+                                    durable_compaction_recovery_allowed = False
                                     durable_full_resend_anchor_count = None
                                     durable_full_resend_anchor_fingerprint = None
                                     durable_full_resend_has_safe_fresh_context = False
@@ -1689,6 +1720,7 @@ class _HTTPBridgeStreamingMixin:
                                         durable_full_resend_anchor_count,
                                         durable_full_resend_anchor_fingerprint,
                                         durable_full_resend_has_safe_fresh_context,
+                                        durable_compaction_recovery_allowed,
                                     ) = classify_durable_full_resend(fresh_turn_state_lookup)
                                     enforce_quarantined_anchor_admission(
                                         lookup=fresh_turn_state_lookup,
@@ -1697,6 +1729,7 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                     continuity_preferred_account_id = fresh_turn_state_lookup.account_id
                                     request_state.preferred_account_id = resolve_required_account_id(
+                                        ("account-bound compaction", request_state.account_bound_owner_id),
                                         (
                                             "refreshed previous response or bridge",
                                             continuity_preferred_account_id,
@@ -1717,10 +1750,15 @@ class _HTTPBridgeStreamingMixin:
                                     or (
                                         fresh_turn_state_lookup is not None
                                         and fresh_turn_state_lookup.account_id is not None
-                                        and durable_full_resend_anchor_count is not None
                                         and (
-                                            durable_full_resend_allows_unanchored_lineage()
-                                            or fresh_turn_state_lookup.latest_response_id is not None
+                                            durable_compaction_recovery_allowed
+                                            or (
+                                                durable_full_resend_anchor_count is not None
+                                                and (
+                                                    durable_recovery_allows_unanchored_lineage()
+                                                    or fresh_turn_state_lookup.latest_response_id is not None
+                                                )
+                                            )
                                         )
                                     )
                                 )
@@ -1770,7 +1808,7 @@ class _HTTPBridgeStreamingMixin:
                     and bridge_session_key.strength == "hard"
                     and durable_lookup is not None
                     and durable_lookup.latest_response_id is not None
-                    and not durable_full_resend_allows_unanchored_lineage()
+                    and not durable_recovery_allows_unanchored_lineage()
                 ):
                     reject_fresh_socket_durable_anchor(
                         lookup=durable_lookup,
@@ -1815,6 +1853,7 @@ class _HTTPBridgeStreamingMixin:
                             ),
                             preferred_account_id=request_state.preferred_account_id,
                             preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
+                            fallback_on_preferred_account_unavailable=(request_state.account_bound_owner_id is None),
                             request_usage_budget=request_state.request_usage_budget,
                             session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
@@ -1955,7 +1994,7 @@ class _HTTPBridgeStreamingMixin:
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
             and not resolved_current_socket_anchor
-            and not durable_full_resend_allows_unanchored_lineage()
+            and not durable_recovery_allows_unanchored_lineage()
         ):
             reject_fresh_socket_durable_anchor(
                 lookup=durable_lookup,
@@ -2114,6 +2153,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             request_state.preferred_account_id = previous_request_state.preferred_account_id
+            request_state.account_bound_owner_id = previous_request_state.account_bound_owner_id
             request_state.excluded_account_ids.update(previous_request_state.excluded_account_ids)
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
@@ -2135,7 +2175,7 @@ class _HTTPBridgeStreamingMixin:
                 # keep the replay-safety decision made when the anchor was
                 # injected.
                 request_state.fresh_upstream_request_is_retry_safe = (
-                    (durable_full_resend_anchor_count is None or durable_full_resend_allows_unanchored_lineage())
+                    (durable_full_resend_anchor_count is None or durable_recovery_allows_unanchored_lineage())
                     if store_context_trim_applied
                     else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
@@ -2224,7 +2264,9 @@ class _HTTPBridgeStreamingMixin:
                             preferred_account_id=replacement_preferred_account_id,
                             preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
                             fallback_on_preferred_account_unavailable=not (
-                                file_required_preferred_account or request_state.previous_response_id is not None
+                                file_required_preferred_account
+                                or request_state.previous_response_id is not None
+                                or request_state.account_bound_owner_id is not None
                             ),
                             allow_previous_response_recovery_rebind=request_state.previous_response_id is not None,
                             request_usage_budget=request_state.request_usage_budget,
@@ -2519,7 +2561,8 @@ class _HTTPBridgeStreamingMixin:
                         preferred_account_id=retry_preferred_account_id,
                         preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
                         fallback_on_preferred_account_unavailable=not (
-                            file_required_preferred_account and retry_preferred_account_id is not None
+                            (file_required_preferred_account and retry_preferred_account_id is not None)
+                            or request_state.account_bound_owner_id is not None
                         ),
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                         request_deadline=request_deadline,

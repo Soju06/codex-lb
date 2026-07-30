@@ -160,6 +160,22 @@ Return HTTP 400 with `error.code = "continuity_requires_full_resend"`, `error.ty
 
 Keep the helper narrow and call it only from those guards. Owner lookup failures, active-owner unavailability, network failures, upstream close settlement, raw previous-response recovery, and general continuity loss retain their existing retryable errors because a later identical attempt may recover without changing the request.
 
+### 15. Quarantine the socket lineage before downstream-cancellation retirement
+
+Pressing Escape closes the downstream SSE generator before the upstream response reaches a terminal event. The detach path must continue to mark the request draining and retire the whole shared socket, because anonymous late frames from the abandoned response cannot safely share a socket with a later request. That local retirement cancels the upstream reader before calling the WebSocket close operation, so it cannot rely on the reader's non-text disconnect branch to quarantine connection-local state.
+
+While the pending lock still exposes pre-drain request provenance, snapshot the same exact anchor candidate used by disconnect invalidation. After detaching the downstream consumer but before whole-session close releases durable ownership, apply the existing owner/epoch/expected-response compare-and-set. On confirmed quarantine, clear only the matching in-memory latest response id, current-socket `store` provenance, and pending-tool metadata; retain the input count and fingerprint for the next full-history recovery. A missing candidate, `store=true`, client-supplied anchor, unsent request, ambiguous candidates, CAS miss, persistence failure, or newer response keeps the existing fail-closed behavior.
+
+This is lineage invalidation, not replay. The interrupted request is never resubmitted, the old socket is never reused, the account does not change, and cancellation does not write account health. The next client turn must still satisfy the existing verified full-history predicate before it can start unanchored on a new socket.
+
+### 16. Recognize upstream encrypted compaction as same-account complete context
+
+Codex automatic compaction replaces the prior client-visible item history with an upstream-issued opaque item shaped exactly as `{"id": "...", "type": "compaction", "encrypted_content": "..."}`. Its ciphertext cannot and should not match the durable fingerprint of the plaintext history it replaces. Treat that representation as an independent fresh-socket admission proof only for a hard-continuity durable lookup that retains a positive input count, a non-empty fingerprint, and a concrete owner account.
+
+The classifier requires the compaction item to be first, requires non-blank `id` and `encrypted_content`, rejects unknown fields, and runs all later input through the existing account-neutral self-contained replay validator. The request must omit explicit `previous_response_id` and `conversation`. A valid request opens or takes over a fresh socket without injecting the old connection-local response id and forwards the compaction item byte-for-byte while keeping selection fixed to the durable owner. The ciphertext is never projected, stripped, or made eligible for account-neutral failover.
+
+This exception does not authenticate arbitrary ciphertext locally; upstream remains authoritative for its encrypted format. Its safety boundary is narrower: a malformed or forged item can affect only the caller's same durable session on the same upstream account and will be rejected by upstream, while a missing id, blank ciphertext, extra field, plaintext summary, account-scoped suffix, absent durable proof, missing owner, soft-affinity request, or ordinary incremental input remains fail-closed before transport creation.
+
 ## Risks / Trade-offs
 
 - **A send fails after the timestamp is set.** Existing send-error cleanup retires or settles the request before the watchdog can act; tests cover that the timestamp alone is not sufficient eligibility.
@@ -170,6 +186,7 @@ Keep the helper narrow and call it only from those guards. Owner lookup failures
 - **A later request contains only incremental input.** Retained input proof marks the durable row as quarantined, and the request fails before transport creation instead of becoming a fresh turn.
 - **A later request stops at a normal tool boundary.** A fingerprint-matched, fully projected history with a complete direct call/output suffix may start a new lineage without waiting for a synthetic user turn.
 - **A malformed tool suffix resembles a full resend.** Whole-history and suffix self-containment plus the complete-pair requirement reject orphan outputs, unresolved calls, duplicate ids, and unsupported tool state.
+- **A plaintext summary resembles automatic compaction.** Only the exact upstream encrypted-compaction item shape is admitted, and the request remains pinned to the durable owner account; ordinary messages and cross-account replay remain ineligible.
 - **A historical anchor has no usable input proof.** The quarantine sentinel remains identifiable but can never satisfy the prefix matcher, so recovery fails closed until a real completed response replaces it.
 - **A queued request happens to name the same anchor when a socket closes.** Absence of a current send timestamp excludes it from disconnect invalidation.
 - **The socket closes while completely idle.** Current-socket completion provenance permits an exact latest-response quarantine even with an empty pending queue.
@@ -189,6 +206,7 @@ Keep the helper narrow and call it only from those guards. Owner lookup failures
 - **The disconnect CAS misses or persistence fails.** The proxy does not claim in-memory quarantine succeeded and leaves local continuity fields unchanged; normal failure/retry settlement remains authoritative.
 - **A persisted response id remains resolvable after reconnect.** Proactive disconnect invalidation requires `store=false`; `store=true` requests retain the existing reconnect behavior.
 - **The disconnect interrupted already-visible work.** The proxy still fails that request instead of replaying it; only the dead automatic anchor is quarantined for the client's next self-contained retry.
+- **The downstream client cancels before the upstream peer closes.** Detach snapshots and quarantines the same exact current-socket anchor before canceling/releasing the bridge, then preserves the ownership barrier and existing full-history admission for the next turn.
 - **A forwarding hop tampers with or strips provenance.** Versioned structured signatures bind the marker and prevent fallback to an unbound legacy signature.
 - **A mixed-version owner cannot verify the new provenance field.** That cross-replica request fails closed during rollout; non-provenance forwards remain backward compatible.
 - **Whole-session retirement interrupts a healthy sibling.** This narrow design chooses fail-closed session cleanup rather than attempting unsafe sibling isolation on current `main`. Existing terminal settlement must cover every pending sibling exactly once.

@@ -918,9 +918,11 @@ Explicit OpenAI SDK fingerprint markers, including `x-stainless-*` headers or an
 
 For a hard-continuity HTTP bridge request, a durable `latest_response_id` MAY be injected automatically into a fresh upstream session only while that durable anchor remains trusted. If a request carrying that proxy-injected anchor reaches the eventless missing-`response.created` deadline, the service MUST quarantine the exact durable latest anchor through the fenced compare-and-set behavior defined by proxy admission control. It MUST NOT replay the timed-out request as an anchorless fresh turn.
 
-Because a `store=false` Responses WebSocket anchor is connection-local, a non-text upstream disconnect MUST also make an actually sent proxy-injected anchor or an exact latest response proven to have completed on that socket ineligible for later automatic injection. The service MUST apply the protected disconnect-quarantine selection, fenced mutation, and confirmed in-memory matching-anchor clear defined by proxy admission control before durable release and before existing safe no-anchor replay may mutate request provenance. It MUST NOT infer current-socket provenance from an unsent request, a client-supplied id, a `store=true` request, a durable id loaded from another socket or process, ambiguous sent anchors, or a failed/fenced persistence mutation. An already-proven safe full-context replay MAY continue without the quarantined anchor.
+Because a `store=false` Responses WebSocket anchor is connection-local, a non-text upstream disconnect or a downstream SSE cancellation that retires the current upstream socket MUST also make an actually sent proxy-injected anchor or an exact latest response proven to have completed on that socket ineligible for later automatic injection. The service MUST apply the protected disconnect-quarantine selection, fenced mutation, and confirmed in-memory matching-anchor clear defined by proxy admission control before durable release and before existing safe no-anchor replay or cancellation retirement may mutate request provenance. It MUST NOT infer current-socket provenance from an unsent request, a client-supplied id, a `store=true` request, a durable id loaded from another socket or process, ambiguous sent anchors, or a failed/fenced persistence mutation. An already-proven safe full-context replay MAY continue without the quarantined anchor, but a canceled request MUST NOT be replayed.
 
 A hard-continuity request without explicit `previous_response_id` or `conversation` MUST NOT automatically inject a retained `store=false` durable latest-response id onto a fresh WebSocket. A live local session MUST count as a usable continuity path only when the durable latest id matches a response completed with `store=false` on that session's current socket; a live recovery socket without that completion MUST apply the same full-history admission as a fresh socket. The durable row otherwise remains available only for owner routing and full-history recovery proof. A fingerprint-verified self-contained full-context resend MAY start a new unanchored lineage; incremental, prefix-mismatched, or otherwise unverifiable input MUST fail with the full-resend-required client error before an upstream transport is created or a request is submitted. A refreshed lookup after owner-forward failure MUST reapply quarantine admission before local takeover. An explicit client anchor or `conversation` remains distinct from automatic injection.
+
+An upstream-issued encrypted `compaction` item MAY replace plaintext fingerprint matching only for the same hard-continuity durable fresh-socket or quarantined-anchor recovery. The request MUST omit explicit `previous_response_id` and `conversation`; durable state MUST retain a positive input count, non-empty fingerprint, and concrete owner account; and selection MUST stay fixed to that account. The first input item MUST contain exactly non-blank `id`, literal `type: "compaction"`, and non-blank `encrypted_content`. Remaining input and request controls MUST satisfy the existing account-neutral self-contained fresh-replay validator. The service MUST forward an admitted compaction item unchanged and without the old automatic anchor. It MUST NOT admit malformed items, arbitrary summaries, account-scoped suffix state, missing durable proof or owner, soft-affinity use, ordinary incremental requests, or any cross-account compaction replay.
 
 If a request waits for response-create admission after a proxy-injected connection-local anchor is serialized, the service MUST revalidate that anchor against current-socket `store=false` completion provenance immediately before enqueue and send. A socket replacement or mismatched durable id MUST NOT carry the serialized anchor across the WebSocket boundary. The service MAY switch to the captured unanchored request only when existing replay-safety proof already marks that full request safe; an anchor-dependent request MUST fail with the full-resend-required client error before upstream submission. When HTTP bridge external-image inlining is enabled, the anchored and captured unanchored candidates MUST both retain that preparation, surviving external-image URLs MUST fail locally, and the serialized size guard MUST apply after transformation to whichever candidate may be sent.
 
@@ -1024,6 +1026,22 @@ The full-resend-required client error MUST use HTTP 400 with `error.code` equal 
 - **THEN** the closed socket's exact automatic anchor has already been quarantined
 - **AND** the retry follows the existing unanchored quarantine-recovery guard
 - **AND** it does not first wait for another missing-`response.created` deadline on the dead connection-local id
+
+#### Scenario: Escape interruption permits the next verified same-session turn
+
+- **GIVEN** the client cancels a downstream Codex SSE stream before its upstream response completes
+- **AND** retiring the old socket conditionally quarantines its exact eligible automatic `store=false` anchor
+- **WHEN** the client sends the next turn under the same session header with fingerprint-matched self-contained full history
+- **THEN** the proxy opens a fresh upstream socket and submits that history without the quarantined anchor
+- **AND** it does not reconnect or replay the interrupted request
+
+#### Scenario: Automatic encrypted compaction survives a fresh socket
+
+- **GIVEN** Codex replaces previously fingerprinted history with an upstream-issued encrypted `compaction` item
+- **AND** durable hard-continuity state retains the original owner and prior input proof but no reusable socket
+- **WHEN** Codex continues the same session without an explicit anchor
+- **THEN** the service opens a fresh socket on that owner and forwards the compaction item unchanged without `previous_response_id`
+- **AND** it does not classify the opaque context replacement as an incremental plaintext request
 
 #### Scenario: Idle close still invalidates the latest connection-local response
 

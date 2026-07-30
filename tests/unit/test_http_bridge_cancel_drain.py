@@ -14,6 +14,7 @@ from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.db.models import AccountStatus, Base
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 
 pytestmark = pytest.mark.unit
@@ -168,6 +169,160 @@ async def test_cancelled_http_bridge_request_retires_session_before_retry_overla
     assert session.closed is True
     upstream_close.assert_awaited_once()
     release_reservation.assert_awaited_once_with(cancelled_request.api_key_reservation)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_http_bridge_request_quarantines_socket_anchor_before_durable_release() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    coordinator = DurableBridgeSessionCoordinator(cast(Callable[[], AsyncSession], session_factory))
+    instance_id = proxy_service.get_settings().http_responses_session_bridge_instance_id
+    anchor_id = "resp-cancel-anchor"
+    input_fingerprint = proxy_service._fingerprint_input_items([{"role": "user", "content": "first question"}])
+    lookup = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-cancel-drain",
+        api_key_id=None,
+        instance_id=instance_id,
+        lease_ttl_seconds=60.0,
+        account_id="acc-cancel-drain",
+        model="gpt-5.5",
+        service_tier=None,
+        latest_turn_state="turn-cancel-drain",
+        latest_response_id=anchor_id,
+        allow_takeover=True,
+    )
+    refreshed = await coordinator.renew_live_session(
+        session_id=lookup.session_id,
+        api_key_id=None,
+        instance_id=instance_id,
+        owner_epoch=lookup.owner_epoch,
+        lease_ttl_seconds=60.0,
+        latest_response_id=anchor_id,
+        latest_input_item_count=1,
+        latest_input_full_fingerprint=input_fingerprint,
+        latest_pending_tool_calls={"call-cancel": "custom_tool_call"},
+    )
+    assert refreshed is not None
+
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    service._durable_bridge = coordinator  # noqa: SLF001
+    cancelled_request = _make_request_state(
+        "req-cancelled-anchor",
+        response_id="resp-cancelled-in-progress",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    cancelled_request.skip_request_log = False
+    cancelled_request.response_create_sent_at = 2.0
+    cancelled_request.response_store = False
+    cancelled_request.proxy_injected_previous_response_id = True
+    cancelled_request.previous_response_id = anchor_id
+    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
+    session.durable_session_id = lookup.session_id
+    session.durable_owner_epoch = lookup.owner_epoch
+    session.last_completed_response_id = anchor_id
+    session.last_completed_response_store = False
+    session.last_completed_input_count = 1
+    session.last_completed_input_prefix_fingerprint = input_fingerprint
+    session.last_pending_tool_calls = {"call-cancel": "custom_tool_call"}
+
+    try:
+        detached = await service._detach_http_bridge_request(session, request_state=cancelled_request)
+        durable_after_cancel = await coordinator.lookup_request_targets(
+            session_key_kind="session_header",
+            session_key_value="sid-cancel-drain",
+            api_key_id=None,
+            turn_state=None,
+            session_header="sid-cancel-drain",
+            previous_response_id=None,
+        )
+    finally:
+        await engine.dispose()
+
+    assert detached is True
+    assert durable_after_cancel is not None
+    assert durable_after_cancel.latest_response_id is None
+    assert durable_after_cancel.latest_input_item_count == 1
+    assert durable_after_cancel.latest_input_full_fingerprint == input_fingerprint
+    assert durable_after_cancel.latest_pending_tool_calls is None
+    assert session.last_completed_response_id is None
+    assert session.last_completed_response_store is None
+    assert session.last_pending_tool_calls == {}
+    assert session.closed is True
+    cast(Any, session.upstream).close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_http_bridge_request_fences_quarantine_through_socket_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    cancelled_request = _make_request_state(
+        "req-cancelled-race",
+        response_id="resp-cancelled-race",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    cancelled_request.skip_request_log = False
+    cancelled_request.response_create_sent_at = 2.0
+    cancelled_request.response_store = False
+    cancelled_request.proxy_injected_previous_response_id = True
+    cancelled_request.previous_response_id = "resp-anchor-race"
+    session = _make_http_bridge_session(deque([cancelled_request]), queued_request_count=1)
+    session.last_completed_response_id = "resp-anchor-race"
+    session.last_completed_response_store = False
+
+    quarantine_started = asyncio.Event()
+    allow_quarantine = asyncio.Event()
+    lifecycle_order: list[str] = []
+
+    async def quarantine_anchor(
+        _service: object,
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        expected_response_id: str,
+        lifecycle_lock_held: bool = False,
+    ) -> bool:
+        assert expected_response_id == "resp-anchor-race"
+        assert lifecycle_lock_held is True
+        lifecycle_order.append("quarantine_started")
+        quarantine_started.set()
+        await allow_quarantine.wait()
+        lifecycle_order.append("quarantine_finished")
+        return True
+
+    async def close_session(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        reason: str,
+    ) -> None:
+        assert reason == "retire_after_drain"
+        lifecycle_order.append("socket_retired")
+        _session.closed = True
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_quarantine_http_bridge_disconnected_socket_anchor",
+        quarantine_anchor,
+    )
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_session)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    detach_task = asyncio.create_task(service._detach_http_bridge_request(session, request_state=cancelled_request))
+    await asyncio.wait_for(quarantine_started.wait(), timeout=1.0)
+    competing_retire = asyncio.create_task(service._retire_http_bridge_after_drain_if_ready(session))
+    await asyncio.sleep(0)
+
+    assert lifecycle_order == ["quarantine_started"]
+
+    allow_quarantine.set()
+    detached, _ = await asyncio.gather(detach_task, competing_retire)
+
+    assert detached is True
+    assert lifecycle_order == ["quarantine_started", "quarantine_finished", "socket_retired"]
 
 
 def test_retiring_http_bridge_session_is_not_reusable() -> None:

@@ -55,8 +55,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
+    _quarantine_http_bridge_disconnected_socket_anchor,
     _quarantine_http_bridge_durable_anchor,
-    _quarantine_http_bridge_durable_anchor_id,
     _record_http_bridge_stuck_retire,
     _select_http_bridge_disconnect_anchor_quarantine_response_id,
 )
@@ -724,16 +724,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 if disconnect_quarantine_response_id is not None:
-                    async with session.lifecycle_lock:
-                        quarantined = await _quarantine_http_bridge_durable_anchor_id(
-                            self,
-                            session,
-                            expected_response_id=disconnect_quarantine_response_id,
-                        )
-                        if quarantined and session.last_completed_response_id == disconnect_quarantine_response_id:
-                            session.last_completed_response_id = None
-                            session.last_completed_response_store = None
-                            session.last_pending_tool_calls = {}
+                    await _quarantine_http_bridge_disconnected_socket_anchor(
+                        self,
+                        session,
+                        expected_response_id=disconnect_quarantine_response_id,
+                    )
                     disconnect_quarantine_response_id = None
                 retried = False
                 # A process-network receive failure follows a successful send;

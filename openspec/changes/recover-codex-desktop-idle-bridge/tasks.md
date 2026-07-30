@@ -86,3 +86,17 @@
 - [x] 14.2 Add one dedicated `continuity_requires_full_resend` helper and use it only in the deterministic local guards.
 - [x] 14.3 Add unit and backend-route regressions for the stable envelope, repeated Goal-style incremental rejection, no transport creation, and no account-health side effects.
 - [ ] 14.4 Run focused and full required checks, strict OpenSpec validation, final review, and deployment-safety audit.
+
+## 15. Downstream-cancellation lineage invalidation
+
+- [x] 15.1 Specify Escape/downstream SSE cancellation as a connection-local lineage boundary while preserving the no-replay, no-account-movement ownership barrier.
+- [x] 15.2 Snapshot and conditionally quarantine the exact eligible `store=false` automatic anchor before cancellation retirement releases durable ownership, clearing only confirmed matching in-memory provenance.
+- [x] 15.3 Add detach and `/backend-api/codex/responses` regressions proving the old socket closes, the interrupted request is not replayed, and the next verified same-session full-history turn succeeds on a fresh socket.
+- [x] 15.4 Run focused tests, lint/type/architecture checks, strict OpenSpec validation, and restart/health verification.
+
+## 16. Automatic encrypted-compaction recovery
+
+- [x] 16.1 Specify upstream encrypted compaction as a strict same-account complete-context replacement without relaxing plaintext full-resend or cross-account replay policy.
+- [x] 16.2 Add a narrow replay-safety classifier and admit it only for hard-continuity durable fresh-socket or quarantine recovery with retained proof and a fixed owner.
+- [x] 16.3 Add classifier, bridge-admission, and `/backend-api/codex/responses` regressions covering exact forwarding, owner pinning, malformed items, account-scoped suffixes, ordinary incremental rejection, and no account-health writes.
+- [x] 16.4 Run focused and full required checks, strict OpenSpec validation, Codex review, restart/health verification, and PR-readiness checks.

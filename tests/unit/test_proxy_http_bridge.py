@@ -7973,6 +7973,13 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
         pytest.param("unresolved_call", False, id="unresolved-tool-call"),
         pytest.param("duplicate_call_id", False, id="duplicate-tool-call-id"),
         pytest.param("missing_proof_sentinel", False, id="missing-prefix-proof-fails-closed"),
+        pytest.param("encrypted_compaction", True, id="encrypted-compaction"),
+        pytest.param("compaction_missing_durable_proof", False, id="compaction-missing-durable-proof"),
+        pytest.param("compaction_missing_id", False, id="compaction-missing-id"),
+        pytest.param("compaction_empty_ciphertext", False, id="compaction-empty-ciphertext"),
+        pytest.param("compaction_extra_field", False, id="compaction-extra-field"),
+        pytest.param("compaction_account_scoped_suffix", False, id="compaction-account-scoped-suffix"),
+        pytest.param("plaintext_summary", False, id="plaintext-summary"),
     ],
 )
 async def test_stream_via_http_bridge_recovers_quarantined_anchor_only_from_safe_full_resend(
@@ -8049,6 +8056,59 @@ async def test_stream_via_http_bridge_recovers_quarantined_anchor_only_from_safe
                 "content": [{"type": "output_text", "text": "first answer"}],
             },
             {"role": "user", "content": "continue from the full history"},
+        ],
+        "encrypted_compaction": [
+            {
+                "id": "cmp_quarantine_recovery",
+                "type": "compaction",
+                "encrypted_content": "encrypted-session-context",
+            }
+        ],
+        "compaction_missing_durable_proof": [
+            {
+                "id": "cmp_without_durable_proof",
+                "type": "compaction",
+                "encrypted_content": "encrypted-session-context",
+            }
+        ],
+        "compaction_missing_id": [
+            {
+                "type": "compaction",
+                "encrypted_content": "encrypted-session-context",
+            }
+        ],
+        "compaction_empty_ciphertext": [
+            {
+                "id": "cmp_empty",
+                "type": "compaction",
+                "encrypted_content": "",
+            }
+        ],
+        "compaction_extra_field": [
+            {
+                "id": "cmp_extra",
+                "type": "compaction",
+                "encrypted_content": "encrypted-session-context",
+                "summary": "untrusted",
+            }
+        ],
+        "compaction_account_scoped_suffix": [
+            {
+                "id": "cmp_account_scoped",
+                "type": "compaction",
+                "encrypted_content": "encrypted-session-context",
+            },
+            {
+                "type": "reasoning",
+                "encrypted_content": "second-owner-bound-ciphertext",
+            },
+        ],
+        "plaintext_summary": [
+            {
+                "type": "message",
+                "role": "system",
+                "content": "Summary of the previous conversation.",
+            }
         ],
     }
     request_input = request_inputs[request_kind]
@@ -8136,12 +8196,22 @@ async def test_stream_via_http_bridge_recovers_quarantined_anchor_only_from_safe
                 lease_expires_at=None,
                 state=HttpBridgeSessionState.CLOSED,
                 latest_turn_state="http_turn_quarantined",
-                latest_response_id=None,
-                latest_input_item_count=-1 if request_kind == "missing_proof_sentinel" else 1,
+                latest_response_id=(
+                    "resp_without_durable_proof" if request_kind == "compaction_missing_durable_proof" else None
+                ),
+                latest_input_item_count=(
+                    None
+                    if request_kind == "compaction_missing_durable_proof"
+                    else (-1 if request_kind == "missing_proof_sentinel" else 1)
+                ),
                 latest_input_full_fingerprint=(
-                    "quarantine-sentinel"
-                    if request_kind == "missing_proof_sentinel"
-                    else proxy_service._fingerprint_input_items(stored_input)
+                    None
+                    if request_kind == "compaction_missing_durable_proof"
+                    else (
+                        "quarantine-sentinel"
+                        if request_kind == "missing_proof_sentinel"
+                        else proxy_service._fingerprint_input_items(stored_input)
+                    )
                 ),
                 latest_pending_tool_calls=None,
             )
@@ -8175,7 +8245,10 @@ async def test_stream_via_http_bridge_recovers_quarantined_anchor_only_from_safe
         with pytest.raises(ProxyResponseError) as exc_info:
             await collect_chunks()
         _assert_http_bridge_full_resend_required(exc_info.value)
-        assert prepared_payloads == []
+        if request_kind == "compaction_missing_durable_proof":
+            assert [prepared.input for prepared in prepared_payloads] == [validated_request_input]
+        else:
+            assert prepared_payloads == []
         get_or_create.assert_not_awaited()
         submit.assert_not_awaited()
         return
@@ -8186,6 +8259,7 @@ async def test_stream_via_http_bridge_recovers_quarantined_anchor_only_from_safe
     assert all(prepared.previous_response_id is None for prepared in prepared_payloads)
     assert prepared_payloads[-1].input == validated_request_input
     assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.account_bound_owner_id == ("acc-bridge" if request_kind == "encrypted_compaction" else None)
     creation = get_or_create.await_args
     assert creation is not None
     assert creation.kwargs["previous_response_id"] is None
@@ -9837,6 +9911,13 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
             None,
             id="turn-state-refreshed-quarantine-mid-tool",
         ),
+        pytest.param(
+            "quarantined",
+            "turn_state",
+            "compaction",
+            None,
+            id="turn-state-refreshed-quarantine-compaction",
+        ),
     ],
 )
 async def test_stream_via_http_bridge_refreshes_durable_state_before_owner_forward_takeover(
@@ -9871,9 +9952,23 @@ async def test_stream_via_http_bridge_refreshes_durable_state_before_owner_forwa
         "output": "clean",
         "status": "completed",
     }
-    request_input: proxy_service.JsonValue = (
-        [*stored_input, tool_call, tool_output] if request_kind == "mid_tool" else "incremental follow-up"
-    )
+    if request_kind == "mid_tool":
+        request_input: proxy_service.JsonValue = [*stored_input, tool_call, tool_output]
+    elif request_kind == "compaction":
+        request_input = [
+            {
+                "id": "cmp_owner_forward_refresh",
+                "type": "compaction",
+                "encrypted_content": "encrypted-complete-context",
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "continue after automatic compaction",
+            },
+        ]
+    else:
+        request_input = "incremental follow-up"
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",

@@ -111,6 +111,7 @@ _ACCOUNT_NEUTRAL_CLIENT_METADATA_FIELDS = frozenset(
         "x-openai-subagent",
     }
 )
+_SAME_ACCOUNT_COMPACTION_ITEM_FIELDS = frozenset({"encrypted_content", "id", "type"})
 _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
     {
         "code_interpreter_call",
@@ -555,6 +556,32 @@ def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, Json
     if tools is None:
         return True
     return _tools_are_account_neutral(tools)
+
+
+def responses_payload_is_same_account_compaction_recovery(payload: Mapping[str, JsonValue]) -> bool:
+    """Prove an encrypted compaction replacement without making it portable."""
+
+    if payload.get("conversation") not in (None, "") or payload.get("previous_response_id") not in (None, ""):
+        return False
+    input_value = payload.get("input")
+    if not isinstance(input_value, list) or not input_value:
+        return False
+    input_items = cast(list[JsonValue], input_value)
+    compaction_item_value = input_items[0]
+    if not isinstance(compaction_item_value, dict):
+        return False
+    compaction_item = cast(dict[str, JsonValue], compaction_item_value)
+    if (
+        set(compaction_item) != _SAME_ACCOUNT_COMPACTION_ITEM_FIELDS
+        or compaction_item.get("type") != "compaction"
+        or not _is_nonblank_string(compaction_item.get("id"))
+        or not _is_nonblank_string(compaction_item.get("encrypted_content"))
+    ):
+        return False
+
+    suffix_payload: dict[str, JsonValue] = dict(payload)
+    suffix_payload["input"] = input_items[1:]
+    return responses_payload_is_account_neutral_fresh_replay(suffix_payload)
 
 
 def _reasoning_config_is_account_neutral(reasoning: JsonValue | None) -> bool:

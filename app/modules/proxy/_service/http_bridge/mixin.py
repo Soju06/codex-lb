@@ -2032,7 +2032,8 @@ class _HTTPBridgeMixin(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
-        require_same_account = require_same_account or account_neutral_recovery
+        account_bound_owner_id = request_state.account_bound_owner_id
+        require_same_account = require_same_account or account_neutral_recovery or account_bound_owner_id is not None
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
@@ -2057,9 +2058,12 @@ class _HTTPBridgeMixin(
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         requested_preferred_account_id = (
-            request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
+            request_state.preferred_account_id
+            if require_preferred_account or account_neutral_recovery or account_bound_owner_id is not None
+            else None
         )
         required_preferred_account_id = resolve_required_account_id(
+            ("account-bound request", account_bound_owner_id),
             ("requested reconnect owner", requested_preferred_account_id),
             (
                 "account-neutral recovery",
@@ -2067,7 +2071,9 @@ class _HTTPBridgeMixin(
             ),
         )
         close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
+        hard_close_account_bound = account_bound_owner_id is not None or (
+            session.key.strength == "hard" and (close_skips_account or require_same_account)
+        )
         skip_same_account = (
             session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
         )

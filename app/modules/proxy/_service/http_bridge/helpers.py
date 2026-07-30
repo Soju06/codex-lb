@@ -1693,6 +1693,35 @@ async def _quarantine_http_bridge_durable_anchor_id(
     return outcome == "cleared"
 
 
+async def _quarantine_http_bridge_disconnected_socket_anchor(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    expected_response_id: str,
+    lifecycle_lock_held: bool = False,
+) -> bool:
+    """Fence one dead socket anchor and clear only matching local provenance."""
+
+    if not lifecycle_lock_held:
+        async with session.lifecycle_lock:
+            return await _quarantine_http_bridge_disconnected_socket_anchor(
+                service,
+                session,
+                expected_response_id=expected_response_id,
+                lifecycle_lock_held=True,
+            )
+    quarantined = await _quarantine_http_bridge_durable_anchor_id(
+        service,
+        session,
+        expected_response_id=expected_response_id,
+    )
+    if quarantined and session.last_completed_response_id == expected_response_id:
+        session.last_completed_response_id = None
+        session.last_completed_response_store = None
+        session.last_pending_tool_calls = {}
+    return quarantined
+
+
 def _select_http_bridge_disconnect_anchor_quarantine_response_id(
     pending_requests: Sequence[_WebSocketRequestState],
     *,

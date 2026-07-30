@@ -77,10 +77,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
+    _quarantine_http_bridge_disconnected_socket_anchor,
     _record_continuity_fail_closed,
     _record_http_bridge_prewarm_outcome,
     _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
+    _select_http_bridge_disconnect_anchor_quarantine_response_id,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
@@ -1204,9 +1206,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                 session,
                                 request_state=request_state,
                                 restart_reader=True,
-                                require_same_account=is_http_bridge_account_neutral_replay(
-                                    kind=session.key.affinity_kind,
-                                    key=session.key.affinity_key,
+                                require_same_account=(
+                                    request_state.account_bound_owner_id is not None
+                                    or is_http_bridge_account_neutral_replay(
+                                        kind=session.key.affinity_kind,
+                                        key=session.key.affinity_key,
+                                    )
                                 ),
                             )
                         except Exception:
@@ -1457,32 +1462,61 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
     ) -> bool:
         detached = False
-        async with session.pending_lock:
-            if request_state in session.pending_requests and not request_state.draining_until_terminal:
-                request_state.draining_until_terminal = True
-                request_state.downstream_visible = False
-                session.queued_request_count = max(0, session.queued_request_count - 1)
-                session.upstream_control.reconnect_requested = True
-                session.upstream_control.retire_after_drain = True
-                detached = True
-        request_state.event_queue = None
-        # event_queue is nulled unconditionally because by the time
-        # _detach is called from the finally block in
-        # _stream_http_bridge_session_events, the terminal event has
-        # already been delivered via _pop_terminal_websocket_request_state.
-        # A late-arriving event on a nulled queue is a no-op.
+        disconnect_quarantine_response_id: str | None = None
+        async with session.lifecycle_lock:
+            async with session.pending_lock:
+                if request_state in session.pending_requests and not request_state.draining_until_terminal:
+                    disconnect_quarantine_response_id = _select_http_bridge_disconnect_anchor_quarantine_response_id(
+                        session.pending_requests,
+                        latest_response_id=session.last_completed_response_id,
+                        latest_response_store=session.last_completed_response_store,
+                    )
+                    request_state.draining_until_terminal = True
+                    request_state.downstream_visible = False
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    detached = True
+            request_state.event_queue = None
+            # event_queue is nulled unconditionally because by the time
+            # _detach is called from the finally block in
+            # _stream_http_bridge_session_events, the terminal event has
+            # already been delivered via _pop_terminal_websocket_request_state.
+            # A late-arriving event on a nulled queue is a no-op.
+            if disconnect_quarantine_response_id is not None:
+                await _quarantine_http_bridge_disconnected_socket_anchor(
+                    self,
+                    session,
+                    expected_response_id=disconnect_quarantine_response_id,
+                    lifecycle_lock_held=True,
+                )
+            if detached:
+                await self._retire_http_bridge_after_drain_if_ready(
+                    session,
+                    lifecycle_lock_held=True,
+                )
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             return False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await self._release_websocket_request_state_reservation(request_state)
         request_state.api_key_reservation = None
-        await self._retire_http_bridge_after_drain_if_ready(session)
         return True
 
-    async def _retire_http_bridge_after_drain_if_ready(self: Any, session: "_HTTPBridgeSession") -> bool:
+    async def _retire_http_bridge_after_drain_if_ready(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        lifecycle_lock_held: bool = False,
+    ) -> bool:
         if not (session.upstream_control.reconnect_requested and session.upstream_control.retire_after_drain):
             return False
+        if not lifecycle_lock_held:
+            async with session.lifecycle_lock:
+                return await self._retire_http_bridge_after_drain_if_ready(
+                    session,
+                    lifecycle_lock_held=True,
+                )
         async with session.pending_lock:
             has_visible_pending = any(
                 _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
@@ -1537,9 +1571,13 @@ class _HTTPBridgeRequestSubmitMixin:
         send_request: bool = True,
         require_same_account: bool = False,
     ) -> bool:
-        require_same_account = require_same_account or is_http_bridge_account_neutral_replay(
-            kind=session.key.affinity_kind,
-            key=session.key.affinity_key,
+        require_same_account = (
+            require_same_account
+            or request_state.account_bound_owner_id is not None
+            or is_http_bridge_account_neutral_replay(
+                kind=session.key.affinity_kind,
+                key=session.key.affinity_key,
+            )
         )
         retry_text_data = text_data
         using_fresh_replay = False
@@ -1636,6 +1674,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
+            hard_owner_bound = hard_owner_bound or request_state.account_bound_owner_id is not None
+            if request_state.account_bound_owner_id is not None:
+                request_state.preferred_account_id = request_state.account_bound_owner_id
             if request_state.previous_response_id is not None and not (
                 request_state.proxy_injected_previous_response_id
                 and request_state.fresh_upstream_request_is_retry_safe
@@ -1812,6 +1853,9 @@ class _HTTPBridgeRequestSubmitMixin:
         error_message: str | None,
     ) -> Literal["not_replayable", "retried", "failed"]:
         permanent_failure_code = _websocket_auth_failure_permanent_code(error_message)
+        account_bound_owner_id = request_state.account_bound_owner_id
+        if account_bound_owner_id is not None and session.account.id != account_bound_owner_id:
+            return "not_replayable"
         request_text = _prepare_websocket_request_state_for_auth_replay(request_state)
         if request_text is None:
             await self._load_balancer.mark_permanent_failure(session.account, permanent_failure_code)
@@ -1836,7 +1880,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.force_refresh_account_id = None
             request_state.preferred_account_id = None
             request_state.excluded_account_ids.add(session.account.id)
-            if is_http_bridge_account_neutral_replay(
+            if account_bound_owner_id is not None or is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,
                 key=session.key.affinity_key,
             ):
@@ -1861,9 +1905,12 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(
                 session,
                 request_state=request_state,
-                require_same_account=is_http_bridge_account_neutral_replay(
-                    kind=session.key.affinity_kind,
-                    key=session.key.affinity_key,
+                require_same_account=(
+                    account_bound_owner_id is not None
+                    or is_http_bridge_account_neutral_replay(
+                        kind=session.key.affinity_kind,
+                        key=session.key.affinity_key,
+                    )
                 ),
             )
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
@@ -1910,6 +1957,8 @@ class _HTTPBridgeRequestSubmitMixin:
         if not retry_text:
             return False
         if request_state.file_required_preferred_account:
+            return False
+        if request_state.account_bound_owner_id is not None:
             return False
         if not _websocket_request_can_replay_before_visible_output(request_state):
             return False

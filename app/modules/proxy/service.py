@@ -122,6 +122,9 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
+from app.modules.proxy._service.api_key_usage import (
+    _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY as _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY,
+)
 from app.modules.proxy._service.api_key_usage import _ApiKeyUsageMixin
 from app.modules.proxy._service.codex_control import _CodexControlMixin
 from app.modules.proxy._service.compact import _CompactMixin
@@ -947,6 +950,7 @@ class ProxyService(
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._stream_api_key_release_retry_semaphore = asyncio.Semaphore(_STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY)
         # In-memory pin from upstream-issued file_id -> codex-lb account_id.
         # Used so ``finalize_file`` for a given ``file_id`` is routed to
         # the same account that handled ``create_file``. Cross-instance

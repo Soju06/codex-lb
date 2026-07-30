@@ -33,6 +33,9 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory
 logger = logging.getLogger("app.modules.proxy.service")
 
 _API_KEY_RESERVATION_HEARTBEAT_SECONDS = 300.0
+_STREAM_API_KEY_RELEASE_RETRY_BASE_SECONDS = 0.1
+_STREAM_API_KEY_RELEASE_RETRY_MAX_SECONDS = 5.0
+_STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY = 4
 
 
 def _service_api_keys_service() -> type[ApiKeysService]:
@@ -60,6 +63,7 @@ def _api_key_reservation_heartbeat_seconds() -> float:
 class _ApiKeyUsageServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
     _background_cleanup_tasks: set[asyncio.Task[None]]
+    _stream_api_key_release_retry_semaphore: asyncio.Semaphore
 
 
 def _normalize_service_tier_value(value: Any) -> str | None:
@@ -420,6 +424,7 @@ class _ApiKeyUsageMixin:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
+                    retry_persistence_failures=True,
                 )
                 self._schedule_cancel_safe_cleanup(
                     release_coro,
@@ -439,6 +444,7 @@ class _ApiKeyUsageMixin:
                         api_key=api_key,
                         api_key_reservation=api_key_reservation,
                         request_id=request_id,
+                        retry_persistence_failures=True,
                     )
                     self._schedule_cancel_safe_cleanup(
                         release_coro,
@@ -481,19 +487,48 @@ class _ApiKeyUsageMixin:
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
+        retry_persistence_failures: bool = False,
     ) -> None:
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
-        with anyio.CancelScope(shield=True):
+        retry_attempt = 1
+        retry_delay_seconds = _STREAM_API_KEY_RELEASE_RETRY_BASE_SECONDS
+        while True:
+            retry_slot_acquired = False
             try:
-                async with proxy._repo_factory() as repos:
-                    api_keys_service = _service_api_keys_service()(repos.api_keys)
-                    await api_keys_service.release_usage_reservation(
-                        api_key_reservation.reservation_id,
-                    )
+                if retry_persistence_failures:
+                    await proxy._stream_api_key_release_retry_semaphore.acquire()
+                    retry_slot_acquired = True
+                with anyio.CancelScope(shield=True):
+                    async with proxy._repo_factory() as repos:
+                        api_keys_service = _service_api_keys_service()(repos.api_keys)
+                        await api_keys_service.release_usage_reservation(
+                            api_key_reservation.reservation_id,
+                        )
+                return
             except Exception:
+                if not retry_persistence_failures:
+                    logger.warning(
+                        "Failed to release stream API key reservation key_id=%s request_id=%s",
+                        api_key.id,
+                        request_id,
+                        exc_info=True,
+                    )
+                    return
                 logger.warning(
-                    "Failed to release stream API key reservation key_id=%s request_id=%s",
+                    "Failed to release stream API key reservation key_id=%s request_id=%s "
+                    "retry_attempt=%d retry_delay_seconds=%.2f",
                     api_key.id,
                     request_id,
+                    retry_attempt,
+                    retry_delay_seconds,
                     exc_info=True,
                 )
+            finally:
+                if retry_slot_acquired:
+                    proxy._stream_api_key_release_retry_semaphore.release()
+            await asyncio.sleep(retry_delay_seconds)
+            retry_attempt += 1
+            retry_delay_seconds = min(
+                _STREAM_API_KEY_RELEASE_RETRY_MAX_SECONDS,
+                retry_delay_seconds * 2,
+            )

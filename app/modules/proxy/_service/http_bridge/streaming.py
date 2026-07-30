@@ -1311,12 +1311,6 @@ class _HTTPBridgeStreamingMixin:
             del _fresh_state
             request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
             request_state.fresh_upstream_request_is_retry_safe = True
-        if (
-            durable_recovery_attempt_fingerprint is not None
-            and durable_full_resend_is_account_neutral is True
-            and request_state.fresh_upstream_request_is_retry_safe
-        ):
-            request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         session_creation_headers = (
@@ -2605,6 +2599,8 @@ class _HTTPBridgeStreamingMixin:
                     reservation=retry_api_key_reservation,
                 )
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                if durable_recovery_fresh_replay and durable_recovery_attempt_fingerprint is not None:
+                    retry_request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
                 _apply_http_bridge_downstream_turn_state(
                     retry_request_state,
                     downstream_turn_state=downstream_turn_state,

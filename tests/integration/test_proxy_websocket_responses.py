@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
+from app.core.clients import proxy_websocket as proxy_websocket_module
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.affinity import _codex_session_selection_key
@@ -134,6 +135,22 @@ class _FailingSendUpstreamWebSocket(_FakeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         await super().send_text(text)
         raise RuntimeError("socket closed during send")
+
+
+class _WarmClosedBeforeSendUpstreamWebSocket(_SequencedUpstreamWebSocket):
+    def __init__(
+        self,
+        messages: list[_FakeUpstreamMessage],
+        *,
+        deferred_message_batches: list[list[_FakeUpstreamMessage]],
+    ) -> None:
+        super().__init__(messages, deferred_message_batches=deferred_message_batches)
+        self.closed_before_send = False
+
+    async def send_text(self, text: str) -> None:
+        if self.closed_before_send:
+            raise proxy_websocket_module._websocket_send_not_dispatched_error()
+        await super().send_text(text)
 
 
 class _DelayedUpstreamWebSocket(_FakeUpstreamWebSocket):
@@ -7520,6 +7537,170 @@ def test_backend_responses_websocket_emits_terminal_failure_when_upstream_send_b
     assert len(log_calls) == 1
     assert log_calls[0]["error_code"] == "stream_incomplete"
     assert log_calls[0]["status"] == "error"
+
+
+@pytest.mark.parametrize("replacement_succeeds", [True, False])
+def test_backend_responses_websocket_retries_closed_warm_socket_before_send(
+    app_instance,
+    monkeypatch,
+    replacement_succeeds,
+):
+    first_response_id = "resp_ws_closed_warm_first"
+    second_response_id = "resp_ws_closed_warm_second"
+    first_upstream = _WarmClosedBeforeSendUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": first_response_id, "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": first_response_id, "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ]
+        ],
+    )
+    replacement_upstream = _WarmClosedBeforeSendUpstreamWebSocket(
+        [],
+        deferred_message_batches=(
+            [
+                [
+                    _FakeUpstreamMessage(
+                        "text",
+                        text=json.dumps(
+                            {
+                                "type": "response.created",
+                                "response": {"id": second_response_id, "status": "in_progress"},
+                            },
+                            separators=(",", ":"),
+                        ),
+                    ),
+                    _FakeUpstreamMessage(
+                        "text",
+                        text=json.dumps(
+                            {
+                                "type": "response.completed",
+                                "response": {"id": second_response_id, "status": "completed"},
+                            },
+                            separators=(",", ":"),
+                        ),
+                    ),
+                ]
+            ]
+            if replacement_succeeds
+            else []
+        ),
+    )
+    replacement_upstream.closed_before_send = not replacement_succeeds
+    upstreams = [first_upstream, replacement_upstream]
+    account = SimpleNamespace(id="acct_ws_closed_warm")
+    connect_count = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        nonlocal connect_count
+        if connect_count == 1:
+            assert request_state.dispatch_absent_replay_account_id == account.id
+            assert request_state.preferred_account_id == account.id
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    first_request = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "Return exactly OK.",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
+        "stream": True,
+    }
+    compacted_continuation = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "Return exactly OK.",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "compacted"}]}],
+        "previous_response_id": first_response_id,
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(first_request))
+            first_events = [json.loads(websocket.receive_text()) for _ in range(2)]
+            first_upstream.closed_before_send = True
+
+            websocket.send_text(json.dumps(compacted_continuation))
+            second_events = [json.loads(websocket.receive_text()) for _ in range(2 if replacement_succeeds else 1)]
+
+    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
+    assert connect_count == 2
+    assert len(first_upstream.sent_text) == 1
+    if replacement_succeeds:
+        assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+        assert len(replacement_upstream.sent_text) == 1
+        assert json.loads(replacement_upstream.sent_text[0])["previous_response_id"] == first_response_id
+    else:
+        assert [event["type"] for event in second_events] == ["response.failed"]
+        assert second_events[0]["response"]["error"]["code"] == "upstream_websocket_closed_before_send"
+        assert replacement_upstream.sent_text == []
 
 
 def test_backend_responses_websocket_rejects_oversized_response_create_before_upstream(

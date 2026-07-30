@@ -819,6 +819,11 @@ class _WebSocketRequestState:
     fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
+    # A closed-before-send transport proof permits one exact replay, but the
+    # request's response-create lease belongs to the account selected for the
+    # undispatched attempt. Keep that account mandatory until the resend
+    # succeeds.
+    dispatch_absent_replay_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False

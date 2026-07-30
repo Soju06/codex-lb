@@ -57,6 +57,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
+    UpstreamWebSocketSendNotDispatchedError,
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
 )
@@ -544,6 +545,36 @@ async def _close_downstream_after_sequenced_replay_refusal(
             "Failed to close downstream websocket after sequenced replay refusal",
             exc_info=True,
         )
+
+
+async def _claim_websocket_send_not_dispatched_replay(
+    request_state: _WebSocketRequestState,
+    pending_requests: deque[_WebSocketRequestState],
+    *,
+    pending_lock: anyio.Lock,
+    account_id: str,
+) -> bool:
+    """Claim one exact resend after the adapter proves dispatch never began."""
+
+    async with pending_lock:
+        if (
+            len(pending_requests) != 1
+            or pending_requests[0] is not request_state
+            or not request_state.request_text
+            or request_state.replay_count >= 1
+            or request_state.response_id is not None
+            or not request_state.awaiting_response_created
+            or request_state.response_event_count != 0
+            or request_state.last_downstream_sequence_number is not None
+            or request_state.downstream_visible
+            or request_state.upstream_model_output_seen
+        ):
+            return False
+        pending_requests.popleft()
+        request_state.replay_count += 1
+        request_state.preferred_account_id = account_id
+        request_state.dispatch_absent_replay_account_id = account_id
+    return True
 
 
 @contextmanager
@@ -1471,6 +1502,8 @@ class _WebSocketMixin:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
+                        if request_state is not None:
+                            request_state.dispatch_absent_replay_account_id = None
                     elif bytes_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         with _websocket_archive_request_context(archive_request_id):
@@ -1499,6 +1532,43 @@ class _WebSocketMixin:
                         )
                     continue
                 except UpstreamWebSocketTransportError as exc:
+                    if (
+                        isinstance(exc, UpstreamWebSocketSendNotDispatchedError)
+                        and request_state is not None
+                        and account is not None
+                        and await _claim_websocket_send_not_dispatched_replay(
+                            request_state,
+                            pending_requests,
+                            pending_lock=pending_lock,
+                            account_id=account.id,
+                        )
+                    ):
+                        _facade().logger.info(
+                            "Transparent websocket replay after closed-before-send proof request_id=%s",
+                            request_state.request_log_id or request_state.request_id,
+                        )
+                        replay_request_state = request_state
+                        if upstream_control is not None:
+                            upstream_control.reconnect_requested = True
+                        if upstream_reader is not None:
+                            await _facade()._await_cancelled_task(
+                                upstream_reader,
+                                label="proxy websocket upstream reader",
+                            )
+                            upstream_reader = None
+                        upstream_control = None
+                        if upstream is not None:
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                _facade().logger.debug(
+                                    "Failed to close closed-before-send upstream websocket",
+                                    exc_info=True,
+                                )
+                        upstream = None
+                        await release_current_account_lease()
+                        account = None
+                        continue
                     # send_str/send_bytes may fail after handing bytes to the
                     # kernel. Delivery is uncertain, so replay could duplicate
                     # a response.create even when no output is visible yet.
@@ -2041,6 +2111,7 @@ class _WebSocketMixin:
             is_retry = attempt > 0
             forced_refresh_account_id = request_state.force_refresh_account_id
             preferred_account_id = forced_refresh_account_id or request_state.preferred_account_id
+            dispatch_absent_owner_required = request_state.dispatch_absent_replay_account_id is not None
             turn_state_owner_required = (
                 request_state.affinity_policy.codex_session_source == "turn_state"
                 and request_state.preferred_account_id is not None
@@ -2049,6 +2120,7 @@ class _WebSocketMixin:
                 (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
                 or request_state.file_required_preferred_account
                 or turn_state_owner_required
+                or dispatch_absent_owner_required
             )
             try:
                 account = await proxy._select_websocket_connect_account(

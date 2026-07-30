@@ -16410,6 +16410,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
         request_state=request_state,
         restart_reader=True,
         require_same_account=False,
+        require_preferred_account=False,
     )
     send_text.assert_not_awaited()
 

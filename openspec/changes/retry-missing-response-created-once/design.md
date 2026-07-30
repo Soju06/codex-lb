@@ -74,9 +74,9 @@ the acknowledgement was missing.
 
 - **A warm socket is already closed before the next send begins.** The transport
   adapter returns a sealed not-dispatched proof without calling its send
-  primitive. The bridge reconnects once on the same leased account and sends
-  the exact request, including a continuation anchor, because upstream could
-  not have accepted the first attempt.
+  primitive. The HTTP bridge or direct WebSocket proxy reconnects once on the
+  same leased account and sends the exact request, including a continuation
+  anchor, because upstream could not have accepted the first attempt.
 - **The socket closes during send.** Dispatch is ambiguous, so the existing
   fail-closed 502 remains authoritative and no internal resend occurs.
 - **The original send was accepted but its acknowledgement was lost.** Closing

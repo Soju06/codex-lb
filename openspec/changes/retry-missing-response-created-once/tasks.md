@@ -15,6 +15,8 @@
       closure.
 - [x] 2.6 Seal the transport proof for a socket closed before dispatch and
       transparently retry that exact request once on the leased account.
+- [x] 2.7 Apply the same bounded exact resend to the direct WebSocket proxy
+      while preserving sole-owner, admission, and account-lease constraints.
 
 ## 3. Verification
 
@@ -27,3 +29,5 @@
       affinity movement, account penalties, and unrelated edits.
 - [x] 3.4 Add adapter construction/dispatch proofs and an externally visible
       compacted-continuation regression for a closed warm socket.
+- [x] 3.5 Add direct WebSocket regression coverage for transparent
+      closed-before-send continuation recovery.

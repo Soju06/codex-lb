@@ -162,7 +162,13 @@ _SEND_NOT_DISPATCHED_CONSTRUCTOR_TOKEN = object()
 
 
 class UpstreamWebSocketSendNotDispatchedError(UpstreamWebSocketTransportError):
-    """Proof that a websocket frame was rejected before dispatch began."""
+    """Proof that a websocket frame was rejected before dispatch began.
+
+    The constructor token is module-private, subclassing is disabled, and the
+    adapters are the only production construction path. Python reflection can
+    still bypass these boundaries, so this is a runtime application contract,
+    not a security boundary against hostile in-process code.
+    """
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         del cls, kwargs

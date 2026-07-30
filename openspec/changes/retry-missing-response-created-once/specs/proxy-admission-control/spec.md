@@ -31,6 +31,15 @@ client continuation anchor because the not-dispatched result proves that the
 upstream did not receive the failed attempt. The replacement attempt MUST
 remain within the original request budget and existing replay limit.
 
+The direct WebSocket proxy MUST apply the same closed-before-send recovery only
+when the undispatched request is the socket's sole pending request. It MUST
+remove that request from the retired reader before cancellation, retain its
+response-create admission and account lease, require the same account for the
+replacement connection, preserve the exact request including any continuation
+anchor, and re-register it on the replacement reader. A sibling request,
+response lifecycle evidence, downstream-visible output, or an exhausted replay
+count MUST suppress this recovery and retain existing terminal settlement.
+
 Any failure raised after the adapter invokes its send primitive remains
 dispatch-ambiguous and MUST retain the existing fail-closed behavior without an
 internal resend.
@@ -81,6 +90,23 @@ observed while awaiting the stale receive task's cancellation.
 - **WHEN** its send primitive raises after dispatch may have begun
 - **THEN** the adapter returns the existing ambiguous transport failure
 - **AND** the bridge does not reconnect and resend internally
+
+#### Scenario: Direct WebSocket continuation recovers before dispatch
+
+- **GIVEN** a direct WebSocket continuation is the sole pending request
+- **AND** its warm upstream socket is already closed before send dispatch
+- **WHEN** the adapter returns the sealed not-dispatched result
+- **THEN** the proxy removes the request from the retired reader
+- **AND** it reconnects once to the same leased account
+- **AND** it resends the exact continuation through the existing downstream
+  WebSocket
+
+#### Scenario: Direct WebSocket closed-before-send recovery is bounded
+
+- **GIVEN** a direct WebSocket request already consumed its exact resend
+- **WHEN** the replacement socket is also closed before dispatch
+- **THEN** the proxy does not attempt another reconnect and resend
+- **AND** it applies existing terminal settlement
 
 #### Scenario: Completed receive wins cancellation
 

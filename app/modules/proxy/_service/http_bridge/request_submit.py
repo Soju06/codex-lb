@@ -682,6 +682,14 @@ class _HTTPBridgeRequestSubmitMixin:
                             "The recovery checkpoint was already consumed; retry the request.",
                         ),
                     )
+                if getattr(attempt, "request_id", request_state.request_id) != request_state.request_id:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "Another recovery request is already in flight; retry the request.",
+                        ),
+                    )
                 request_state.recovery_attempt_fingerprint = attempt_fingerprint
                 request_state.recovery_attempt_session_id = session.durable_session_id
                 request_state.recovery_attempt_owner_epoch = session.durable_owner_epoch
@@ -1064,6 +1072,69 @@ class _HTTPBridgeRequestSubmitMixin:
                                 openai_error(
                                     "bridge_continuity_persistence_failed",
                                     "HTTP responses session ownership changed before dispatch; retry the request.",
+                                ),
+                            )
+                    # The journal entry is created before queue admission so
+                    # concurrent requests cannot both enter the gate without
+                    # a recovery generation. Revalidate it after the gate and
+                    # lifecycle locks, immediately before dispatch: a waiter
+                    # may have observed UNKNOWN while the first request
+                    # settled the row REPLAYED.
+                    if (
+                        request_state.recovery_attempt_fingerprint is not None
+                        and not request_state.recovery_attempt_claimed
+                    ):
+                        if (
+                            request_state.recovery_attempt_session_id != session.durable_session_id
+                            or request_state.recovery_attempt_owner_epoch != session.durable_owner_epoch
+                        ):
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "HTTP responses session ownership changed before dispatch; retry the request.",
+                                ),
+                            )
+                        try:
+                            dispatch_attempt = await self._durable_bridge.record_recovery_attempt(
+                                session_id=session.durable_session_id,
+                                api_key_id=session.key.api_key_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=session.durable_owner_epoch,
+                                request_fingerprint=request_state.recovery_attempt_fingerprint,
+                                request_id=request_state.request_id,
+                                account_id=session.account.id,
+                                model=request_state.model,
+                                replay_safe=True,
+                            )
+                        except Exception as exc:
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "Recovered response continuity could not be revalidated; retry the request.",
+                                ),
+                            ) from exc
+                        if (
+                            dispatch_attempt is None
+                            or getattr(dispatch_attempt.state, "value", dispatch_attempt.state) != "unknown"
+                            or getattr(dispatch_attempt, "request_id", request_state.request_id)
+                            != request_state.request_id
+                        ):
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "The recovery checkpoint was consumed before dispatch; retry the request.",
                                 ),
                             )
                     async with session.pending_lock:

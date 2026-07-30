@@ -777,6 +777,14 @@ class DurableBridgeRepository:
                 snapshot = _to_recovery_attempt_snapshot(attempt)
                 await self._session.rollback()
                 return snapshot
+            elif attempt.request_id != request_id:
+                # A different request already owns the UNKNOWN checkpoint.
+                # Do not overwrite it while that request may still be between
+                # admission and dispatch; the caller must fail closed rather
+                # than sharing a journal generation.
+                snapshot = _to_recovery_attempt_snapshot(attempt)
+                await self._session.rollback()
+                return snapshot
             else:
                 attempt.request_id = request_id
                 attempt.account_id = account_id
@@ -812,6 +820,10 @@ class DurableBridgeRepository:
                 if attempt is None:
                     raise
                 if attempt.state == HttpBridgeRecoveryAttemptState.REPLAYED:
+                    snapshot = _to_recovery_attempt_snapshot(attempt)
+                    await self._session.rollback()
+                    return snapshot
+                if attempt.request_id != request_id:
                     snapshot = _to_recovery_attempt_snapshot(attempt)
                     await self._session.rollback()
                     return snapshot

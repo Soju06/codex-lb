@@ -1476,6 +1476,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
             request_state.recovery_attempt_session_id = durable_recovery_attempt_session_id
             request_state.recovery_attempt_owner_epoch = durable_recovery_attempt_owner_epoch
+            request_state.recovery_attempt_claimed = True
 
         if required_continuity_owner_missing:
             owner_unavailable = ProxyResponseError(

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -59,6 +59,9 @@ export function DashboardPage() {
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
   const setAccountListSort = useDashboardPreferencesStore((s) => s.setAccountListSort);
   const canWrite = useAuthStore((state) => state.canWrite);
+  const initialized = useAuthStore((state) => state.initialized);
+  const role = useAuthStore((state) => state.role);
+  const isAdmin = initialized && role === "admin";
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
     [searchParams],
@@ -67,17 +70,28 @@ export function DashboardPage() {
     () => parseConversationTimeframe(searchParams.get("conversationTimeframe")),
     [searchParams],
   );
-  const dashboardView = useMemo(
+  const requestedDashboardView = useMemo(
     () => parseDashboardView(searchParams.get("view")),
     [searchParams],
   );
+  const dashboardView = isAdmin ? requestedDashboardView : "request-logs";
+  useEffect(() => {
+    if (!initialized || isAdmin || searchParams.get("view") !== "conversations") {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("view");
+    setSearchParams(next, { replace: true });
+  }, [initialized, isAdmin, searchParams, setSearchParams]);
   // Conversation stats must follow the timeframe restored for the active
   // view, including when that state came from a bookmarked URL.
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
-  const conversationsState = useConversations({ enabled: dashboardView === "conversations" });
+  const conversationsState = useConversations({
+    enabled: isAdmin && dashboardView === "conversations",
+  });
   const { conversationsQuery } = conversationsState;
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
@@ -117,6 +131,9 @@ export function DashboardPage() {
 
   const handleDashboardViewChange = useCallback(
     (nextView: "request-logs" | "conversations") => {
+      if (nextView === "conversations" && !isAdmin) {
+        return;
+      }
       const next = new URLSearchParams(searchParams);
       if (nextView === "request-logs") {
         next.delete("view");
@@ -125,7 +142,7 @@ export function DashboardPage() {
       }
       setSearchParams(next);
     },
-    [searchParams, setSearchParams],
+    [isAdmin, searchParams, setSearchParams],
   );
 
   const handleAccountAction = useCallback(
@@ -417,10 +434,14 @@ export function DashboardPage() {
 
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
-              <DashboardViewSelector value={dashboardView} onChange={handleDashboardViewChange} />
+              <DashboardViewSelector
+                value={dashboardView}
+                onChange={handleDashboardViewChange}
+                showConversations={isAdmin}
+              />
               <div className="h-px flex-1 bg-border" />
             </div>
-            {dashboardView === "conversations" ? <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} /> : logsQuery.isPending && !logPage ? (
+            {isAdmin && dashboardView === "conversations" ? <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} /> : logsQuery.isPending && !logPage ? (
               <div className="rounded-xl border bg-card py-8">
                 <SpinnerBlock />
               </div>

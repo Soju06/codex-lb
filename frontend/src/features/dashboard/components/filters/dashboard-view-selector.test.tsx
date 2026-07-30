@@ -56,6 +56,25 @@ describe("DashboardViewSelector", () => {
     expect(items[1]).toHaveTextContent(/Conversations/);
   });
 
+  it("hides Conversations when conversation access is disabled", async () => {
+    const user = userEvent.setup();
+    render(
+      <DashboardViewSelector
+        value="request-logs"
+        onChange={vi.fn()}
+        showConversations={false}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /request logs/i }));
+
+    const menu = await screen.findByRole("menu");
+    const items = withinMenu(menu).getAllByRole("menuitemradio");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toHaveTextContent(/Request Logs/);
+    expect(screen.queryByRole("menuitemradio", { name: /conversations/i })).not.toBeInTheDocument();
+  });
+
   it("marks the active option as checked", async () => {
     const user = userEvent.setup();
     render(<DashboardViewSelector value="conversations" onChange={vi.fn()} />);

@@ -3,11 +3,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock
 from urllib.parse import quote
 
 import pytest
 from sqlalchemy import event, select, update
 
+import app.core.auth.dependencies as auth_dependencies
+from app.core.auth.dashboard_access import guest_principal
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, RequestKind, RequestLog
@@ -1582,6 +1585,31 @@ async def test_conversation_since_older_than_30_days_is_clamped(
 
     assert response.status_code == 200
     assert [row["conversationId"] for row in response.json()["conversations"]] == ["conv-day-20"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_routes_reject_guest_principal(app_instance, async_client, monkeypatch):
+    original_validate_dashboard_session = auth_dependencies.validate_dashboard_session
+    app_instance.dependency_overrides[original_validate_dashboard_session] = guest_principal
+    monkeypatch.setattr(
+        auth_dependencies,
+        "validate_dashboard_session",
+        AsyncMock(return_value=guest_principal()),
+    )
+    try:
+        for path in (
+            "/api/conversations",
+            "/api/conversations/",
+            "/api/conversations/guest-hidden",
+        ):
+            response = await async_client.get(path)
+            assert response.status_code == 403
+            payload = response.json()
+            assert payload["error"]["code"] == "admin_access_required"
+            assert "conversations" not in payload
+            assert "conversationId" not in payload
+    finally:
+        app_instance.dependency_overrides.pop(original_validate_dashboard_session, None)
 
 
 @pytest.mark.asyncio

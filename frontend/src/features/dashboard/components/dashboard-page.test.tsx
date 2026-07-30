@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders } from "@/test/utils";
 import { createDashboardOverview, createDashboardProjections } from "@/test/mocks/factories";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
@@ -150,6 +151,12 @@ type ConversationsQueryOverrides = {
 
 describe("DashboardPage", () => {
   beforeEach(() => {
+    useAuthStore.setState({
+      role: "admin",
+      permissions: ["read", "write"],
+      canWrite: true,
+      initialized: true,
+    });
     accountCardsSpy.mockReset();
     accountListSpy.mockReset();
     accountSummaryLineSpy.mockReset();
@@ -411,6 +418,66 @@ describe("DashboardPage", () => {
     await user.click(await screen.findByRole("menuitemradio", { name: "Conversations" }));
 
     expect(screen.getByTestId("conversation-timeframe-select")).toHaveTextContent("30d");
+  });
+
+  it("hides Conversations and normalizes guest deep links", async () => {
+    const user = userEvent.setup();
+    useAuthStore.setState({
+      role: "guest",
+      permissions: ["read"],
+      canWrite: false,
+    });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    const historyLength = window.history.length;
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-timeframe-select")).not.toBeInTheDocument();
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    expect(screen.queryByRole("menuitemradio", { name: "Conversations" })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.location.search).not.toContain("view=conversations");
+      expect(window.history.length).toBe(historyLength);
+    });
+  });
+
+  it("fails closed during auth hydration and preserves an admin bookmark until the guest is known", async () => {
+    useAuthStore.setState({
+      initialized: false,
+      role: "admin",
+      permissions: ["read", "write"],
+      canWrite: true,
+    });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(window.location.search).toContain("view=conversations");
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+
+    act(() => {
+      useAuthStore.setState({
+        initialized: true,
+        role: "guest",
+        permissions: ["read"],
+        canWrite: false,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+      expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+      expect(window.location.search).not.toContain("view=conversations");
+    });
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
   });
 
   it("renders the account summary line in the Accounts header using overview accounts", () => {

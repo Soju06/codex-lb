@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
 from app.core.auth.dependencies import (
     ensure_dashboard_admin_access,
+    require_dashboard_admin_access,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
@@ -32,7 +33,7 @@ router = APIRouter(
 conversations_router = APIRouter(
     prefix="/api/conversations",
     tags=["dashboard"],
-    dependencies=[Depends(validate_dashboard_session), Depends(set_dashboard_error_format)],
+    dependencies=[Depends(require_dashboard_admin_access), Depends(set_dashboard_error_format)],
 )
 
 _MODEL_OPTION_DELIMITER = ":::"

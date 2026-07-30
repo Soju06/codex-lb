@@ -858,14 +858,20 @@ class DurableBridgeRepository:
             values: dict[str, object] = {"state": HttpBridgeRecoveryAttemptState.REPLAYED}
             if response_id is not None:
                 values["response_id"] = response_id
+            # A claim authorizes one replay and must only transition UNKNOWN
+            # rows. Settlement (which supplies response_id) remains idempotent
+            # for a REPLAYED row after the replay completes.
+            claimable_states = (
+                (HttpBridgeRecoveryAttemptState.UNKNOWN,)
+                if response_id is None
+                else (HttpBridgeRecoveryAttemptState.UNKNOWN, HttpBridgeRecoveryAttemptState.REPLAYED)
+            )
             result = await self._session.execute(
                 update(HttpBridgeRecoveryAttemptRecord)
                 .where(
                     HttpBridgeRecoveryAttemptRecord.session_id == session_id,
                     HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
-                    HttpBridgeRecoveryAttemptRecord.state.in_(
-                        (HttpBridgeRecoveryAttemptState.UNKNOWN, HttpBridgeRecoveryAttemptState.REPLAYED)
-                    ),
+                    HttpBridgeRecoveryAttemptRecord.state.in_(claimable_states),
                 )
                 .values(**values)
             )

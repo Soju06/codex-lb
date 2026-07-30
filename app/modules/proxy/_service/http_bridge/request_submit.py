@@ -2027,6 +2027,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     request_state.clean_close_retry_result = False
                     return False
+            # A fresh hard-session replay may select a replacement account.
+            # The admission lease is account-scoped, so release the old
+            # account's lease before reconnecting; the post-reconnect path
+            # below acquires a lease for the account actually selected.
+            if fresh_hard_request_account_switch_allowed:
+                await self._release_request_state_account_response_create_lease(request_state)
             if hard_owner_bound and not model_fallback_replay and not fresh_hard_request_account_switch_allowed:
                 await self._reconnect_http_bridge_session(
                     session,

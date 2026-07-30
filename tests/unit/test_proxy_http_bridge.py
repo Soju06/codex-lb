@@ -19681,9 +19681,12 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
     session.account = cast(Any, SimpleNamespace(id="acc-rejected", status=AccountStatus.ACTIVE))
     session.last_upstream_close_code = 1011
     session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    old_lease = request_state.account_response_create_lease
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     reconnect = AsyncMock()
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
 
     assert await service._retry_http_bridge_precreated_request(session) is True
     assert request_state.preferred_account_id is None
@@ -19692,6 +19695,7 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
     reconnect_call = reconnect.await_args
     assert reconnect_call is not None
     assert reconnect_call.kwargs["request_state"] is request_state
+    release_lease.assert_awaited_once_with(old_lease)
 
 
 @pytest.mark.asyncio
@@ -19720,9 +19724,12 @@ async def test_retry_http_bridge_fresh_hard_request_excludes_silent_account(
     session.account = cast(Any, SimpleNamespace(id="acc-silent", status=AccountStatus.ACTIVE))
     session.last_upstream_close_code = 1011
     session.upstream = cast(Any, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    old_lease = request_state.account_response_create_lease
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     reconnect = AsyncMock()
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
 
     assert await service._retry_http_bridge_precreated_request(session) is True
     assert request_state.preferred_account_id is None
@@ -19731,6 +19738,7 @@ async def test_retry_http_bridge_fresh_hard_request_excludes_silent_account(
     reconnect_call = reconnect.await_args
     assert reconnect_call is not None
     assert reconnect_call.kwargs["request_state"] is request_state
+    release_lease.assert_awaited_once_with(old_lease)
 
 
 @pytest.mark.asyncio

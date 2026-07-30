@@ -382,11 +382,17 @@ async def test_responses_env_proxy_no_close_failures_correlate_across_accounts_w
     )
     observations: list[tuple[str | None, str | None]] = []
 
-    async def observe(*, egress_key: str | None, account_id: str | None) -> bool:
+    async def observe(
+        *,
+        egress_key: str | None,
+        account_id: str | None,
+        wait_for_correlation: bool = True,
+    ) -> bool:
         observations.append((egress_key, account_id))
         return await correlator.observe(
             egress_key=egress_key,
             account_id=account_id,
+            wait_for_correlation=wait_for_correlation,
         )
 
     rotate = AsyncMock(return_value="rotated")
@@ -432,6 +438,88 @@ async def test_responses_env_proxy_no_close_failures_correlate_across_accounts_w
 
 
 @pytest.mark.asyncio
+async def test_responses_known_network_failure_correlates_prior_ambiguous_account_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ReceiveFailureConnection(_FakeConnection):
+        def __init__(self, error: BaseException) -> None:
+            super().__init__()
+            self._error = error
+
+        async def recv(self) -> str:
+            raise self._error
+
+    connector = AsyncMock(
+        side_effect=[
+            _ReceiveFailureConnection(ConnectionClosedError(None, None)),
+            _ReceiveFailureConnection(OSError(errno.ENETUNREACH, "Network is unreachable")),
+        ]
+    )
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.5,
+        max_observations=16,
+    )
+    first_observed = asyncio.Event()
+    observations: list[tuple[str | None, str | None, bool]] = []
+
+    async def observe(
+        *,
+        egress_key: str | None,
+        account_id: str | None,
+        wait_for_correlation: bool = True,
+    ) -> bool:
+        observations.append((egress_key, account_id, wait_for_correlation))
+        if account_id == "account-a":
+            first_observed.set()
+        return await correlator.observe(
+            egress_key=egress_key,
+            account_id=account_id,
+            wait_for_correlation=wait_for_correlation,
+        )
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", connector)
+    monkeypatch.setattr(proxy_websocket_module, "correlate_websocket_egress_failure", observe, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "rotate_shared_http_transport", AsyncMock(return_value="rotated"))
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    first = await connect_responses_websocket(
+        {},
+        "token-a",
+        "account-a",
+        allow_direct_egress=True,
+    )
+    second = await connect_responses_websocket(
+        {},
+        "token-b",
+        "account-b",
+        allow_direct_egress=True,
+    )
+    first_receive = asyncio.create_task(first.receive())
+    await first_observed.wait()
+
+    second_message = await asyncio.wait_for(second.receive(), timeout=0.1)
+    first_message = await asyncio.wait_for(first_receive, timeout=0.1)
+
+    assert [first_message.error_code, second_message.error_code] == [
+        "proxy_network_unavailable",
+        "proxy_network_unavailable",
+    ]
+    assert observations == [
+        ("direct:wss://chatgpt.com:443", "account-a", True),
+        ("direct:wss://chatgpt.com:443", "account-b", False),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_routed_responses_error_uses_actual_endpoint_for_cross_account_correlation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -468,11 +556,17 @@ async def test_routed_responses_error_uses_actual_endpoint_for_cross_account_cor
     )
     observations: list[tuple[str | None, str | None]] = []
 
-    async def observe(*, egress_key: str | None, account_id: str | None) -> bool:
+    async def observe(
+        *,
+        egress_key: str | None,
+        account_id: str | None,
+        wait_for_correlation: bool = True,
+    ) -> bool:
         observations.append((egress_key, account_id))
         return await correlator.observe(
             egress_key=egress_key,
             account_id=account_id,
+            wait_for_correlation=wait_for_correlation,
         )
 
     monkeypatch.setattr(proxy_websocket_module, "correlate_websocket_egress_failure", observe)

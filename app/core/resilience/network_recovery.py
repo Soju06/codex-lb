@@ -86,14 +86,15 @@ class WebSocketEgressFailureCorrelator:
         *,
         egress_key: str | None,
         account_id: str | None,
+        wait_for_correlation: bool = True,
     ) -> bool:
-        """Return whether this failure shares an egress incident with another account."""
+        """Record an egress failure and optionally await cross-account evidence."""
 
         if not egress_key or not account_id:
             return False
 
         loop = asyncio.get_running_loop()
-        waiter = loop.create_future()
+        waiter: asyncio.Future[bool] | None = loop.create_future() if wait_for_correlation else None
         with self._lock:
             observed_at = time.monotonic()
             self._expire_observations_locked(observed_at)
@@ -123,7 +124,10 @@ class WebSocketEgressFailureCorrelator:
 
         if correlated:
             return True
+        if not wait_for_correlation:
+            return False
 
+        assert waiter is not None
         try:
             return await asyncio.wait_for(
                 asyncio.shield(waiter),
@@ -176,10 +180,12 @@ async def correlate_websocket_egress_failure(
     *,
     egress_key: str | None,
     account_id: str | None,
+    wait_for_correlation: bool = True,
 ) -> bool:
     return await _websocket_egress_failure_correlator.observe(
         egress_key=egress_key,
         account_id=account_id,
+        wait_for_correlation=wait_for_correlation,
     )
 
 

@@ -20699,12 +20699,18 @@ async def test_http_bridge_deadline_waits_for_inflight_no_close_correlation(
     )
     first_observed = asyncio.Event()
 
-    async def observe(*, egress_key: str | None, account_id: str | None) -> bool:
+    async def observe(
+        *,
+        egress_key: str | None,
+        account_id: str | None,
+        wait_for_correlation: bool = True,
+    ) -> bool:
         if account_id == "acc-bridge-deadline-a":
             first_observed.set()
         return await correlator.observe(
             egress_key=egress_key,
             account_id=account_id,
+            wait_for_correlation=wait_for_correlation,
         )
 
     monkeypatch.setattr(

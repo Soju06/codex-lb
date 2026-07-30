@@ -195,17 +195,20 @@ async def _correlate_no_close_receive_error(
     account_id: str | None,
     egress_key: str | None,
 ) -> str:
-    if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE or not enabled:
+    if not enabled:
         return error_code
-    classification_owner = asyncio.current_task()
-    if classification_owner is not None:
-        with _websocket_receive_classification_lock:
-            _websocket_receive_classification_tasks.add(classification_owner)
-        classification_owner.add_done_callback(_discard_websocket_receive_classification_task)
+    wait_for_correlation = error_code != PROCESS_NETWORK_UNAVAILABLE_CODE
+    if wait_for_correlation:
+        classification_owner = asyncio.current_task()
+        if classification_owner is not None:
+            with _websocket_receive_classification_lock:
+                _websocket_receive_classification_tasks.add(classification_owner)
+            classification_owner.add_done_callback(_discard_websocket_receive_classification_task)
     try:
         correlated = await correlate_websocket_egress_failure(
             egress_key=egress_key,
             account_id=account_id,
+            wait_for_correlation=wait_for_correlation,
         )
     except asyncio.CancelledError:
         raise

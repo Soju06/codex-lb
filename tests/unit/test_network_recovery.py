@@ -102,6 +102,33 @@ async def test_websocket_egress_failure_correlator_marks_all_cross_account_waite
 
 
 @pytest.mark.asyncio
+async def test_websocket_egress_failure_correlator_records_nonwaiting_cross_account_evidence() -> None:
+    correlator = network_recovery.WebSocketEgressFailureCorrelator(
+        window_seconds=0.2,
+        max_observations=16,
+    )
+    ambiguous = asyncio.create_task(
+        correlator.observe(
+            egress_key="direct:wss://chatgpt.com:443",
+            account_id="acc-a",
+        )
+    )
+    await asyncio.sleep(0)
+
+    known_neutral = await asyncio.wait_for(
+        correlator.observe(
+            egress_key="direct:wss://chatgpt.com:443",
+            account_id="acc-b",
+            wait_for_correlation=False,
+        ),
+        timeout=0.05,
+    )
+
+    assert known_neutral is True
+    assert await asyncio.wait_for(ambiguous, timeout=0.05) is True
+
+
+@pytest.mark.asyncio
 async def test_websocket_egress_failure_correlator_rejects_same_account_different_egress_and_anonymous() -> None:
     correlator = network_recovery.WebSocketEgressFailureCorrelator(
         window_seconds=0.02,

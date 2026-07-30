@@ -1521,6 +1521,11 @@ class _HTTPBridgeRequestSubmitMixin:
             # owner retire the whole session with the typed, non-replayable
             # failure instead of falling back to the earlier close reason.
             raise
+        except ProxyResponseError as exc:
+            if exc is request_state.account_capacity_wait_error:
+                raise
+            logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
+            return False
         except Exception:
             logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
             return False

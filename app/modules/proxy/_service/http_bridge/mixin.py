@@ -141,7 +141,11 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_safe_headers_with_turn_state,
 )
 from app.modules.proxy._service.http_bridge.session_registry import _HTTPBridgeSessionRegistryMixin
-from app.modules.proxy._service.http_bridge.streaming import _HTTPBridgeStreamingMixin
+from app.modules.proxy._service.http_bridge.streaming import (
+    _http_bridge_account_capacity_wait_deadline,
+    _http_bridge_terminal_capacity_error,
+    _HTTPBridgeStreamingMixin,
+)
 from app.modules.proxy._service.http_bridge.upstream_events import _HTTPBridgeUpstreamEventsMixin
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -2097,9 +2101,12 @@ class _HTTPBridgeMixin(
             await release_selected_account_lease()
 
         while True:
+            reconnect_deadline = deadline
+            if request_state.account_capacity_wait_deadline is not None:
+                reconnect_deadline = min(reconnect_deadline, request_state.account_capacity_wait_deadline)
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
             selection = await self._select_account_with_budget_for_stream(
-                deadline,
+                reconnect_deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="http_bridge",
                 request_stage="reattach",
@@ -2127,13 +2134,28 @@ class _HTTPBridgeMixin(
             account = selection.account
             if account is None:
                 await release_selected_account_lease()
+                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
+                selection_error = ProxyResponseError(
+                    status_code,
+                    openai_error(
+                        selection.error_code or "no_accounts",
+                        selection.error_message or "No active accounts available",
+                        error_type="rate_limit_error" if status_code == 429 else "server_error",
+                    ),
+                )
+                capacity_wait_deadline = _http_bridge_account_capacity_wait_deadline(
+                    request_state,
+                    selection_error,
+                )
+                if capacity_wait_deadline is not None:
+                    reconnect_deadline = min(deadline, capacity_wait_deadline)
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
                     reuse_current_account_lease
                     and not hard_close_account_bound
                     and required_preferred_account_id is None
-                    and _remaining_budget_seconds(deadline) > 0
+                    and _remaining_budget_seconds(reconnect_deadline) > 0
                 ):
                     preferred_candidate_id = None
                     continue
@@ -2143,9 +2165,12 @@ class _HTTPBridgeMixin(
                     kind="http_bridge",
                     request_stage="reattach",
                     model=session.request_model,
-                    max_sleep_seconds=_remaining_budget_seconds(deadline),
+                    max_sleep_seconds=_remaining_budget_seconds(reconnect_deadline),
                     request_state=request_state,
                 ):
+                    if _remaining_budget_seconds(reconnect_deadline) <= 0:
+                        record_selected_account_takeover(None)
+                        raise _http_bridge_terminal_capacity_error(request_state, selection_error)
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if required_preferred_account_id in excluded_account_ids:
                         raise _http_bridge_previous_response_owner_unavailable_error()
@@ -2171,15 +2196,7 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = None
                     continue
                 record_selected_account_takeover(None)
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type="rate_limit_error" if status_code == 429 else "server_error",
-                    ),
-                )
+                raise _http_bridge_terminal_capacity_error(request_state, selection_error)
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
                     await self._load_balancer.release_account_lease(selection.lease)
@@ -2206,7 +2223,7 @@ class _HTTPBridgeMixin(
                 account = await self._ensure_fresh_with_budget(
                     account,
                     force=force_refresh,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=_remaining_budget_seconds(reconnect_deadline),
                 )
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
@@ -2217,21 +2234,21 @@ class _HTTPBridgeMixin(
                 upstream = await self._open_upstream_websocket_with_budget(
                     account,
                     connect_headers,
-                    timeout_seconds=_remaining_budget_seconds(deadline),
+                    timeout_seconds=_remaining_budget_seconds(reconnect_deadline),
                     request_state=request_state,
                 )
                 _copy_websocket_route_metadata_to_session(session, request_state)
                 record_selected_account_takeover(account.id)
                 break
             except ProxyResponseError as exc:
-                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                if exc.status_code != 401 or _remaining_budget_seconds(reconnect_deadline) <= 0:
                     await release_selected_account_lease()
                     raise
                 try:
                     account = await self._ensure_fresh_with_budget(
                         account,
                         force=True,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=_remaining_budget_seconds(reconnect_deadline),
                     )
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         session.headers,
@@ -2244,7 +2261,7 @@ class _HTTPBridgeMixin(
                     upstream = await self._open_upstream_websocket_with_budget(
                         account,
                         connect_headers,
-                        timeout_seconds=_remaining_budget_seconds(deadline),
+                        timeout_seconds=_remaining_budget_seconds(reconnect_deadline),
                         request_state=request_state,
                     )
                     _copy_websocket_route_metadata_to_session(session, request_state)
@@ -2265,7 +2282,7 @@ class _HTTPBridgeMixin(
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and _remaining_budget_seconds(reconnect_deadline) > 0:
                     if retry_same_account_once and not exc.is_permanent:
                         retry_same_account_once = False
                         await release_selected_account_lease()
@@ -2275,7 +2292,7 @@ class _HTTPBridgeMixin(
                 await release_selected_account_lease()
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError):
-                if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
+                if selected_is_preferred and _remaining_budget_seconds(reconnect_deadline) > 0:
                     if retry_same_account_once:
                         retry_same_account_once = False
                         await release_selected_account_lease()

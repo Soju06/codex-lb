@@ -218,6 +218,11 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
+# Ceiling on the recoverable account-capacity wait; surfaces the 429 cap
+# envelope while the client is still connected instead of holding the
+# request for the full bridge request budget. Gate-contention waits are
+# exempt (the in-flight turn legitimately holds the gate).
+_ACCOUNT_CAPACITY_WAIT_MAX_SECONDS = 120.0
 
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
@@ -269,18 +274,67 @@ def _http_bridge_unanchored_fork_can_spill_on_cap(
     )
 
 
+def _http_bridge_capacity_wait_deadline(request_state: _WebSocketRequestState) -> float:
+    """Per-request ceiling for account-capacity waits, anchored at first use.
+
+    Without a ceiling the bridge request budget (default 7200s) lets a capped
+    account hold a request far past any client timeout, so the client dies
+    without ever seeing the 429 cap envelope.
+    """
+    if request_state.account_capacity_wait_deadline is None:
+        request_state.account_capacity_wait_deadline = _service_time().monotonic() + _ACCOUNT_CAPACITY_WAIT_MAX_SECONDS
+    return request_state.account_capacity_wait_deadline
+
+
+def _http_bridge_account_capacity_wait_deadline(
+    request_state: _WebSocketRequestState,
+    exc: ProxyResponseError,
+) -> float | None:
+    code, _message = _proxy_error_code_message(exc)
+    if code == "response_create_gate_timeout":
+        return None
+    if _is_local_account_cap_code(code) and request_state.account_capacity_wait_error is None:
+        request_state.account_capacity_wait_error = exc
+    if request_state.account_capacity_wait_error is None:
+        return None
+    return _http_bridge_capacity_wait_deadline(request_state)
+
+
+def _http_bridge_terminal_capacity_error(
+    request_state: _WebSocketRequestState,
+    exc: ProxyResponseError,
+) -> ProxyResponseError:
+    original_cap_error = request_state.account_capacity_wait_error
+    if original_cap_error is None:
+        return exc
+    code, _message = _proxy_error_code_message(exc)
+    if code == "response_create_gate_timeout":
+        return exc
+    if _is_local_account_cap_code(code) or _http_bridge_account_capacity_wait_seconds(exc) is not None:
+        return original_cap_error
+    return exc
+
+
 def _http_bridge_capacity_wait_plan(
     exc: ProxyResponseError,
     *,
     request_deadline: float,
+    capacity_wait_deadline: float | None = None,
 ) -> tuple[float, float, str | None] | None:
     account_capacity_wait_seconds = _http_bridge_account_capacity_wait_seconds(exc)
     if account_capacity_wait_seconds is None:
         return None
-    remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
+    code, message = _proxy_error_code_message(exc)
+    effective_deadline = request_deadline
+    if capacity_wait_deadline is not None and code != "response_create_gate_timeout":
+        # Account-capacity waits are additionally bounded by the configured
+        # ceiling so a capped account surfaces its 429 envelope while the
+        # client is still connected; gate contention keeps budget-bounded
+        # semantics because the in-flight turn legitimately holds the gate.
+        effective_deadline = min(request_deadline, capacity_wait_deadline)
+    remaining_budget_seconds = max(0.0, effective_deadline - _service_time().monotonic())
     if remaining_budget_seconds <= 0:
         return None
-    code, message = _proxy_error_code_message(exc)
     bounded_wait_seconds = min(account_capacity_wait_seconds, remaining_budget_seconds)
     if code == "response_create_gate_timeout":
         # Reserve the tail of the request budget for one final gate
@@ -292,6 +346,20 @@ def _http_bridge_capacity_wait_plan(
             max(0.0, remaining_budget_seconds - attempt_reserve_seconds),
         )
     return bounded_wait_seconds, account_capacity_wait_seconds, message
+
+
+def _http_bridge_capacity_wait_expired(
+    request_state: _WebSocketRequestState,
+    exc: ProxyResponseError,
+    *,
+    request_deadline: float,
+) -> bool:
+    """Whether either the bridge budget or local-cap wait ceiling has elapsed."""
+    capacity_wait_deadline = _http_bridge_account_capacity_wait_deadline(request_state, exc)
+    effective_deadline = (
+        request_deadline if capacity_wait_deadline is None else min(request_deadline, capacity_wait_deadline)
+    )
+    return _service_time().monotonic() >= effective_deadline
 
 
 def _http_bridge_can_replace_retired_gate_session(
@@ -573,6 +641,46 @@ class _HTTPBridgeStreamingMixin:
             capacity_startup_ready_event=capacity_startup_ready_event,
         )
 
+    async def _write_account_cap_overload_request_log(
+        self: Any,
+        *,
+        request_state: _WebSocketRequestState,
+        exc: ProxyResponseError,
+        account_id: str | None,
+    ) -> None:
+        """Record a terminal account-capacity overload before session creation.
+
+        These failures raise before any submission or settlement runs, so the
+        normal settlement-time request logging never sees them; without this
+        row the dashboard is blind to capacity-wait 429s.
+        """
+        error_code, error_message = _proxy_error_code_message(exc)
+        if not _is_local_account_cap_code(error_code):
+            return
+        try:
+            await self._write_request_log(
+                account_id=account_id,
+                api_key=request_state.api_key,
+                request_id=request_state.request_log_id or request_state.request_id,
+                model=request_state.model or "",
+                latency_ms=int(max(0.0, _service_time().monotonic() - request_state.started_at) * 1000),
+                status="error",
+                error_code=error_code,
+                error_message=error_message,
+                failure_phase="account_capacity_wait",
+                reasoning_effort=request_state.reasoning_effort,
+                transport=request_state.transport,
+                requested_service_tier=request_state.requested_service_tier,
+                actual_service_tier=request_state.actual_service_tier,
+                session_id=request_state.session_id,
+                useragent=request_state.useragent,
+                useragent_group=request_state.useragent_group,
+                conversation_id=request_state.conversation_id,
+                client_ip=request_state.client_ip,
+            )
+        except Exception:
+            logger.warning("Failed to record account-capacity overload request log", exc_info=True)
+
     async def _stream_http_bridge_or_retry(
         self: Any,
         payload: ResponsesRequest,
@@ -743,9 +851,10 @@ class _HTTPBridgeStreamingMixin:
             request_payload: ResponsesRequest,
             *,
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
+            previous_request_state: _WebSocketRequestState | None = None,
         ) -> tuple[_WebSocketRequestState, str]:
             if bridge_uses_responses_lite:
-                request_state, text_data = self._prepare_http_bridge_request(
+                prepared_request = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -755,7 +864,7 @@ class _HTTPBridgeStreamingMixin:
                     preserve_responses_lite_client_metadata=True,
                 )
             else:
-                request_state, text_data = self._prepare_http_bridge_request(
+                prepared_request = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -763,6 +872,10 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                 )
+            request_state, text_data = prepared_request
+            if previous_request_state is not None:
+                request_state.account_capacity_wait_deadline = previous_request_state.account_capacity_wait_deadline
+                request_state.account_capacity_wait_error = previous_request_state.account_capacity_wait_error
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event
             return request_state, text_data
@@ -1178,6 +1291,14 @@ class _HTTPBridgeStreamingMixin:
             request_state.fresh_upstream_request_is_retry_safe = False
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
+
+        async def write_terminal_account_cap_overload(exc: ProxyResponseError) -> None:
+            await self._write_account_cap_overload_request_log(
+                request_state=request_state,
+                exc=exc,
+                account_id=None,
+            )
+
         session_creation_headers = (
             without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
         )
@@ -1267,7 +1388,10 @@ class _HTTPBridgeStreamingMixin:
             fresh_payload = durable_full_resend_fresh_payload
             if fresh_payload is None:
                 raise RuntimeError("account-neutral replay projection missing after eligibility check")
-            request_state, text_data = prepare_bridge_request(fresh_payload)
+            request_state, text_data = prepare_bridge_request(
+                fresh_payload,
+                previous_request_state=request_state,
+            )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
@@ -1370,7 +1494,11 @@ class _HTTPBridgeStreamingMixin:
                         request_state.preferred_account_id = None
                         preferred_account_has_continuity_provenance = False
                         continue
-                    wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
+                    wait_plan = _http_bridge_capacity_wait_plan(
+                        exc,
+                        request_deadline=request_deadline,
+                        capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, exc),
+                    )
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
@@ -1390,10 +1518,26 @@ class _HTTPBridgeStreamingMixin:
                             request_state=request_state,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
-                            raise
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            exc,
+                            request_deadline=request_deadline,
+                        ):
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
+                            await self._write_account_cap_overload_request_log(
+                                request_state=request_state,
+                                exc=terminal_exc,
+                                account_id=None,
+                            )
+                            raise terminal_exc
                         continue
-                    raise
+                    terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
+                    await self._write_account_cap_overload_request_log(
+                        request_state=request_state,
+                        exc=terminal_exc,
+                        account_id=None,
+                    )
+                    raise terminal_exc
                 switch_to_account_neutral_replay()
                 continue
             break
@@ -1615,9 +1759,17 @@ class _HTTPBridgeStreamingMixin:
                             switch_to_account_neutral_replay()
                             owner_forward_fresh_replay = True
                             continue
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                            capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(
+                                request_state, capacity_exc
+                            ),
+                        )
                         if wait_plan is None:
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before retrying HTTP bridge recovery session creation "
@@ -1639,8 +1791,14 @@ class _HTTPBridgeStreamingMixin:
                             request_state=request_state,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
-                            raise
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                        ):
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         continue
                     break
                 _record_bridge_reattach(
@@ -1733,6 +1891,7 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
                         reservation=retry_api_key_reservation,
+                        previous_request_state=request_state,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
@@ -1833,7 +1992,10 @@ class _HTTPBridgeStreamingMixin:
                 update={"previous_response_id": session.last_completed_response_id}
             )
             proxy_injected_previous_response_id = True
-            request_state, text_data = prepare_bridge_request(effective_payload)
+            request_state, text_data = prepare_bridge_request(
+                effective_payload,
+                previous_request_state=request_state,
+            )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1913,7 +2075,10 @@ class _HTTPBridgeStreamingMixin:
             # guard, the stored input context, and the usage budget all
             # observe the input actually sent upstream.
             previous_request_state = request_state
-            request_state, text_data = prepare_bridge_request(submit_payload)
+            request_state, text_data = prepare_bridge_request(
+                submit_payload,
+                previous_request_state=previous_request_state,
+            )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             if downstream_turn_state is not None:
@@ -2044,9 +2209,17 @@ class _HTTPBridgeStreamingMixin:
                             exclude_account_ids=request_state.excluded_account_ids or None,
                         )
                     except ProxyResponseError as capacity_exc:
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                            capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(
+                                request_state, capacity_exc
+                            ),
+                        )
                         if wait_plan is None:
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before replacing retired HTTP bridge gate "
@@ -2065,8 +2238,14 @@ class _HTTPBridgeStreamingMixin:
                             request_state=request_state,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
-                            raise
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                        ):
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         continue
                     break
                 if initial_handoff_scope_id is not None:
@@ -2148,9 +2327,17 @@ class _HTTPBridgeStreamingMixin:
                             exclude_account_ids=request_state.excluded_account_ids or None,
                         )
                     except ProxyResponseError as capacity_exc:
-                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        wait_plan = _http_bridge_capacity_wait_plan(
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                            capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(
+                                request_state, capacity_exc
+                            ),
+                        )
                         if wait_plan is None:
-                            raise
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                         logger.info(
                             "Waiting for an account to recover before retrying HTTP bridge soft reroute session "
@@ -2169,8 +2356,14 @@ class _HTTPBridgeStreamingMixin:
                             request_state=request_state,
                         ):
                             yield line
-                        if _service_time().monotonic() >= request_deadline:
-                            raise
+                        if _http_bridge_capacity_wait_expired(
+                            request_state,
+                            capacity_exc,
+                            request_deadline=request_deadline,
+                        ):
+                            terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                            await write_terminal_account_cap_overload(terminal_exc)
+                            raise terminal_exc
                         continue
                     break
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
@@ -2337,9 +2530,15 @@ class _HTTPBridgeStreamingMixin:
                         exclude_account_ids=request_state.excluded_account_ids or None,
                     )
                 except ProxyResponseError as capacity_exc:
-                    wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                    wait_plan = _http_bridge_capacity_wait_plan(
+                        capacity_exc,
+                        request_deadline=request_deadline,
+                        capacity_wait_deadline=_http_bridge_account_capacity_wait_deadline(request_state, capacity_exc),
+                    )
                     if wait_plan is None:
-                        raise
+                        terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                        await write_terminal_account_cap_overload(terminal_exc)
+                        raise terminal_exc
                     bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                     logger.info(
                         "Waiting for an account to recover before retrying HTTP bridge local recovery session "
@@ -2359,8 +2558,14 @@ class _HTTPBridgeStreamingMixin:
                         request_state=request_state,
                     ):
                         yield line
-                    if _service_time().monotonic() >= request_deadline:
-                        raise
+                    if _http_bridge_capacity_wait_expired(
+                        request_state,
+                        capacity_exc,
+                        request_deadline=request_deadline,
+                    ):
+                        terminal_exc = _http_bridge_terminal_capacity_error(request_state, capacity_exc)
+                        await write_terminal_account_cap_overload(terminal_exc)
+                        raise terminal_exc
                     continue
                 break
             _record_bridge_reattach(path=recovery_path, outcome="success")
@@ -2388,6 +2593,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state, retry_text_data = prepare_bridge_request(
                     retry_payload,
                     reservation=retry_api_key_reservation,
+                    previous_request_state=request_state,
                 )
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:
@@ -2473,6 +2679,14 @@ class _HTTPBridgeStreamingMixin:
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
         request_state.bridge_request_deadline = request_deadline
+
+        async def write_terminal_account_cap_overload(exc: ProxyResponseError) -> None:
+            await self._write_account_cap_overload_request_log(
+                request_state=request_state,
+                exc=exc,
+                account_id=session.account.id,
+            )
+
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -2496,11 +2710,18 @@ class _HTTPBridgeStreamingMixin:
                         queue_limit=queue_limit,
                     )
             except ProxyResponseError as exc:
+                capacity_wait_deadline = _http_bridge_account_capacity_wait_deadline(request_state, exc)
                 if request_state.bridge_soft_capacity_reroute_allowed:
                     raise
-                wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
+                wait_plan = _http_bridge_capacity_wait_plan(
+                    exc,
+                    request_deadline=request_deadline,
+                    capacity_wait_deadline=capacity_wait_deadline,
+                )
                 if wait_plan is None:
-                    raise
+                    terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
+                    await write_terminal_account_cap_overload(terminal_exc)
+                    raise terminal_exc
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
                 exc_code, _exc_message = _proxy_error_code_message(exc)
                 gate_contention = exc_code == "response_create_gate_timeout"
@@ -2548,8 +2769,14 @@ class _HTTPBridgeStreamingMixin:
                     if gate_contention:
                         async with session.pending_lock:
                             session.queued_request_count = max(0, session.queued_request_count - 1)
-                if _service_time().monotonic() >= request_deadline:
-                    raise
+                if _http_bridge_capacity_wait_expired(
+                    request_state,
+                    exc,
+                    request_deadline=request_deadline,
+                ):
+                    terminal_exc = _http_bridge_terminal_capacity_error(request_state, exc)
+                    await write_terminal_account_cap_overload(terminal_exc)
+                    raise terminal_exc
                 if gate_contention and session.closed:
                     raise
                 continue

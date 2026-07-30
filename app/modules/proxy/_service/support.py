@@ -877,6 +877,8 @@ class _WebSocketRequestState:
     account_capacity_wait_reason: str | None = None
     account_capacity_wait_started_at: float | None = None
     account_capacity_wait_retry_after_seconds: float | None = None
+    account_capacity_wait_deadline: float | None = None
+    account_capacity_wait_error: ProxyResponseError | None = None
     capacity_startup_wait_event: asyncio.Event | None = None
     capacity_startup_ready_event: asyncio.Event | None = None
 

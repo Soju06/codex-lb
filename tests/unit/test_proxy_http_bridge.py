@@ -3294,6 +3294,7 @@ async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolve
     ]
     assert request_state.response_id == "resp_precreated_completed"
     assert session.last_completed_response_id == "resp_precreated_completed"
+    assert session.last_completed_response_account_id == session.account.id
     assert session.queued_request_count == 0
     assert not session.pending_requests
     register_previous.assert_awaited_once()
@@ -3418,6 +3419,7 @@ async def test_ordinary_completed_alias_rejection_preserves_successful_response(
     assert completed["type"] == "response.completed"
     assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
     assert session.last_completed_response_id == "resp_ordinary_completed"
+    assert session.last_completed_response_account_id == session.account.id
     assert session.upstream_control.reconnect_requested is False
     assert session.upstream_control.retire_after_drain is False
     finalize.assert_awaited_once()
@@ -7143,12 +7145,12 @@ async def _run_session_anchor_owner_stream(
     *,
     account_id: str,
     anchor_owner_account_id: str | None,
-) -> list[str | None]:
+) -> list[proxy_service.ResponsesRequest]:
     """Drive _stream_via_http_bridge for a trimmable session-anchor turn.
 
     The stored prefix matches the incoming input (so the trim branch WOULD
     apply); the only variable is whether the serving account owns the anchor.
-    Returns the previous_response_id values passed to each prepare call.
+    Returns the payloads passed to each prepare call.
     """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     prefix_items: list[proxy_service.JsonValue] = [
@@ -7176,7 +7178,7 @@ async def _run_session_anchor_owner_stream(
     event_queue = request_state.event_queue
     assert event_queue is not None
     await event_queue.put(None)
-    prepared_previous_response_ids: list[str | None] = []
+    prepared_payloads: list[proxy_service.ResponsesRequest] = []
 
     def fake_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
@@ -7188,7 +7190,7 @@ async def _run_session_anchor_owner_stream(
         client_ip: str | None = None,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
         del api_key, api_key_reservation, request_id, client_ip
-        prepared_previous_response_ids.append(prepared_payload.previous_response_id)
+        prepared_payloads.append(prepared_payload)
         return request_state, '{"type":"response.create"}'
 
     session = proxy_service._HTTPBridgeSession(
@@ -7200,7 +7202,7 @@ async def _run_session_anchor_owner_stream(
         ),
         request_model="gpt-5.4",
         account=cast(Any, SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE)),
-        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
         pending_lock=anyio.Lock(),
@@ -7255,7 +7257,7 @@ async def _run_session_anchor_owner_stream(
         queue_limit=4,
     ):
         pass
-    return prepared_previous_response_ids
+    return prepared_payloads
 
 
 @pytest.mark.asyncio
@@ -7265,7 +7267,7 @@ async def test_stream_via_http_bridge_injects_session_anchor_when_account_owns_i
     # Serving account owns the anchor -> the compact anchor is injected as normal.
     prepared = await _run_session_anchor_owner_stream(monkeypatch, account_id="acc-1", anchor_owner_account_id="acc-1")
     # Injection re-prepares the payload, so the final (sent) request carries the anchor.
-    assert prepared[-1] == "resp_session_latest"
+    assert prepared[-1].previous_response_id == "resp_session_latest"
 
 
 @pytest.mark.asyncio
@@ -7278,7 +7280,13 @@ async def test_stream_via_http_bridge_skips_session_anchor_after_cross_account_f
     # emits response.created -> the response-create gate wedges. It must be skipped
     # and the full history resent instead.
     prepared = await _run_session_anchor_owner_stream(monkeypatch, account_id="acc-2", anchor_owner_account_id="acc-1")
-    assert "resp_session_latest" not in prepared
+    assert all(payload.previous_response_id != "resp_session_latest" for payload in prepared)
+    assert prepared[-1].input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "c"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "d"}]},
+    ]
 
 
 @pytest.mark.asyncio
@@ -7691,6 +7699,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
     )
     assert creation.kwargs["preferred_account_id"] == "acc-1"
     assert session.last_completed_response_id == (None if preserves_full_resend else "resp_latest")
+    assert session.last_completed_response_account_id == (None if preserves_full_resend else "acc-1")
     if not preserves_full_resend:
         assert request_state.proxy_injected_previous_response_id is True
         assert request_state.fresh_upstream_request_is_retry_safe is False

@@ -25661,21 +25661,42 @@ async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(
         return account, retired_upstream if connect_count == 1 else replacement_upstream
 
     async def stage_first_replay(
-        *args: object,
+        websocket: WebSocket,
+        upstream: UpstreamWebSocket,
+        *,
+        account: Account,
+        account_id_value: str,
         pending_requests: deque[proxy_service._WebSocketRequestState],
         pending_lock: anyio.Lock,
+        client_send_lock: anyio.Lock,
+        api_key: ApiKeyData | None,
         upstream_control: proxy_service._WebSocketUpstreamControl,
-        **kwargs: object,
+        response_create_gate: asyncio.Semaphore,
+        proxy_request_budget_seconds: float,
+        stream_idle_timeout_seconds: float,
+        downstream_activity: proxy_service._DownstreamWebSocketActivity,
+        codex_session_affinity: bool = True,
+        continuity_state: proxy_service._WebSocketContinuityState | None = None,
     ) -> None:
         nonlocal relay_count
         relay_count += 1
         if relay_count > 1:
             await relay_upstream_messages(
-                *args,
+                websocket,
+                upstream,
+                account=account,
+                account_id_value=account_id_value,
                 pending_requests=pending_requests,
                 pending_lock=pending_lock,
+                client_send_lock=client_send_lock,
+                api_key=api_key,
                 upstream_control=upstream_control,
-                **kwargs,
+                response_create_gate=response_create_gate,
+                proxy_request_budget_seconds=proxy_request_budget_seconds,
+                stream_idle_timeout_seconds=stream_idle_timeout_seconds,
+                downstream_activity=downstream_activity,
+                codex_session_affinity=codex_session_affinity,
+                continuity_state=continuity_state,
             )
             return
 
@@ -25685,8 +25706,8 @@ async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(
                     upstream_control.replay_request_state = pending_requests.popleft()
                     break
             await asyncio.sleep(0)
-        terminal_task = asyncio.create_task(asyncio.sleep(0))
-        await terminal_task
+        terminal_task = asyncio.create_task(asyncio.sleep(0, result=True))
+        assert await terminal_task is True
         upstream_control.terminal_message_task = terminal_task
         upstream_control.reconnect_requested = True
         staged_replay.set()

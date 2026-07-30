@@ -72,6 +72,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
+    _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
@@ -981,22 +982,60 @@ class _HTTPBridgeRequestSubmitMixin:
                                 exc_info=True,
                             )
                             recovery_alias_registered = False
-                        if not recovery_alias_registered:
+                    if not recovery_alias_registered:
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        _record_continuity_fail_closed(
+                            surface="http_bridge",
+                            reason="recovery_alias_registration_failed",
+                            previous_response_id=request_state.previous_response_id,
+                            session_id=request_state.session_id,
+                            upstream_error_code="bridge_continuity_persistence_failed",
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "Recovered response continuity could not be persisted; retry the request.",
+                            ),
+                        )
+                    if request_state.recovery_attempt_fingerprint is not None:
+                        try:
+                            owner_lookup = await self._durable_bridge.renew_live_session(
+                                session_id=session.durable_session_id,
+                                api_key_id=session.key.api_key_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=session.durable_owner_epoch,
+                                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                                latest_turn_state=session.downstream_turn_state,
+                                latest_response_id=None,
+                            )
+                        except Exception as exc:
                             session.closed = True
                             session.upstream_control.reconnect_requested = True
                             session.upstream_control.retire_after_drain = True
-                            _record_continuity_fail_closed(
-                                surface="http_bridge",
-                                reason="recovery_alias_registration_failed",
-                                previous_response_id=request_state.previous_response_id,
-                                session_id=request_state.session_id,
-                                upstream_error_code="bridge_continuity_persistence_failed",
-                            )
                             raise ProxyResponseError(
                                 502,
                                 openai_error(
                                     "bridge_continuity_persistence_failed",
-                                    "Recovered response continuity could not be persisted; retry the request.",
+                                    "HTTP responses session ownership could not be renewed; retry the request.",
+                                ),
+                            ) from exc
+                        if (
+                            owner_lookup is None
+                            or owner_lookup.owner_instance_id
+                            != _service_get_settings().http_responses_session_bridge_instance_id
+                            or owner_lookup.owner_epoch != session.durable_owner_epoch
+                        ):
+                            session.closed = True
+                            session.upstream_control.reconnect_requested = True
+                            session.upstream_control.retire_after_drain = True
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "HTTP responses session ownership changed before dispatch; retry the request.",
                                 ),
                             )
                     async with session.pending_lock:

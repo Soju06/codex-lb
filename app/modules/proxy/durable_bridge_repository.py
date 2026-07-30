@@ -665,6 +665,29 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def rebind_session_account(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        account_id: str,
+    ) -> bool:
+        """Persist a replacement account only while this worker owns the lease."""
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .values(account_id=account_id)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def release_session(
         self,
         *,

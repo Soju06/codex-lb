@@ -728,7 +728,6 @@ _CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
 # failure. The caller must not immediately replay that turn, but it should
 # also not have to guess when a new attempt is safe. Advertise a short,
 # bounded retry interval on the one-shot 503 response.
-_HTTP_BRIDGE_RETRY_AFTER_SECONDS = "60"
 
 
 def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -6211,8 +6210,6 @@ def _logged_error_json_response(
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
-    elif status_code == 503 and code == "upstream_request_timeout":
-        effective_headers.setdefault("Retry-After", _HTTP_BRIDGE_RETRY_AFTER_SECONDS)
     log_error_response(
         logger,
         request,

@@ -1606,6 +1606,39 @@ def _http_bridge_durable_lease_ttl_seconds() -> float:
     return float(RING_STALE_THRESHOLD_SECONDS)
 
 
+async def _persist_http_bridge_replacement_account(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    account_id: str,
+) -> None:
+    if account_id == session.account.id or session.durable_session_id is None or session.durable_owner_epoch is None:
+        return
+    try:
+        rebound = await service._durable_bridge.rebind_session_account(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            account_id=account_id,
+        )
+    except Exception as exc:
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "bridge_continuity_persistence_failed",
+                "HTTP responses session account could not be persisted; retry the request.",
+            ),
+        ) from exc
+    if not rebound:
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "bridge_continuity_persistence_failed",
+                "HTTP responses session ownership changed during account recovery; retry the request.",
+            ),
+        )
+
+
 async def _release_http_bridge_unanchored_handoffs_for_request(
     service: _HTTPBridgeServiceProtocol,
     *,
@@ -2495,6 +2528,7 @@ for _helper_name in (
     "_record_bridge_drain_recovery_allowed",
     "_is_missing_durable_bridge_table_error",
     "_http_bridge_durable_lease_ttl_seconds",
+    "_persist_http_bridge_replacement_account",
     "_forwarded_http_bridge_session_key",
     "_http_bridge_requires_cluster_registration",
     "_effective_http_bridge_idle_ttl_seconds",

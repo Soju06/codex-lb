@@ -728,11 +728,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     # Do not reconnect while the old receive
                                     # task still owns the superseded socket.
                                     # The ordinary timeout path takes the same
-                                    # fail-closed branch; its finally block
-                                    # will make one bounded cleanup attempt.
-                                    raise RuntimeError(
-                                        "HTTP bridge upstream receive did not cancel after missing response.created"
+                                    # fail-closed branch; retain the explicit
+                                    # account-neutral timeout classification
+                                    # rather than routing through the generic
+                                    # reader-crash account penalty path.
+                                    session.closed = True
+                                    await self._fail_http_bridge_reader_and_maybe_retire(
+                                        session,
+                                        error_code="upstream_request_timeout",
+                                        error_message=receive_timeout.error_message,
+                                        penalize_account=False,
+                                        retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                        force_retire=True,
                                     )
+                                    break
                                 receive_task = None
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,

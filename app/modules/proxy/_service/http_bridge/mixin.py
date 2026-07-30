@@ -111,6 +111,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _mark_http_bridge_reader_handoff_reconnect_failed,
+    _persist_http_bridge_replacement_account,
     _preferred_http_bridge_reconnect_turn_state,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
@@ -2008,7 +2009,6 @@ class _HTTPBridgeMixin(
             key=session.key.affinity_key,
         )
         require_same_account = require_same_account or account_neutral_recovery
-        old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         session.handoff_in_progress = True
@@ -2401,6 +2401,7 @@ class _HTTPBridgeMixin(
                 session.headers = {
                     key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
                 }
+            await _persist_http_bridge_replacement_account(self, session, account.id)
             try:
                 await old_upstream.close()
             except Exception:
@@ -2429,11 +2430,7 @@ class _HTTPBridgeMixin(
             session.key,
             account_id=account.id,
             model=session.request_model,
-            detail=(
-                f"request_stage=reattach, previous_account={old_account_id}, "
-                f"preferred_account_id={old_account_id}, selected_account_id={account.id}, "
-                f"durable_session_id={session.durable_session_id}"
-            ),
+            detail=(f"selected_account_id={account.id}, durable_session_id={session.durable_session_id}"),
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )

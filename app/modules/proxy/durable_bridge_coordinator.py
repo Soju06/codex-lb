@@ -349,6 +349,24 @@ class DurableBridgeSessionCoordinator:
             return None
         return _to_lookup(snapshot)
 
+    async def rebind_session_account(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        account_id: str,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rebind_session_account(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                account_id=account_id,
+            )
+
     async def release_live_session(
         self,
         *,

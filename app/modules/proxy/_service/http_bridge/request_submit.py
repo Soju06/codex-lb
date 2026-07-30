@@ -674,6 +674,14 @@ class _HTTPBridgeRequestSubmitMixin:
                             "HTTP responses session ownership changed; retry the request.",
                         ),
                     )
+                if getattr(attempt.state, "value", attempt.state) != "unknown":
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "The recovery checkpoint was already consumed; retry the request.",
+                        ),
+                    )
                 request_state.recovery_attempt_fingerprint = attempt_fingerprint
                 request_state.recovery_attempt_session_id = session.durable_session_id
                 request_state.recovery_attempt_owner_epoch = session.durable_owner_epoch

@@ -20,6 +20,7 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 - [Client Setup](client-setup.md) — Codex CLI, OpenCode, OpenClaw, Python SDK
 - [Configuration](configuration.md) — the few settings that matter
 - [Authentication](authentication.md) — dashboard auth modes
+- [Conversations](conversations.md) — dashboard view and conversation APIs
 - [API Keys](api-keys.md) — protecting proxy routes
 - [Routing](routing.md) — routing strategy guide
 - [Database](database.md) — SQLite / PostgreSQL, data paths, Postgres upgrades

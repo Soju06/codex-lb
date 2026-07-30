@@ -2,7 +2,7 @@
 
 ### Requirement: Tool-less one-shot requests bypass the HTTP bridge
 
-When the HTTP responses bridge is enabled, a request whose session identity comes from a client-declared identity header (`x-session-affinity`, `x-session-id`, `x-opencode-session`, `x-claude-code-agent-id`, `x-claude-remote-session-id`, with no Codex-name session header present) and that is self-contained and tool-less — no `tools`, no `previous_response_id`, no incoming turn-state header, no nonblank `conversation`, no stored `prompt`, no input file references, and no account-scoped hosted input items — MUST bypass the bridge for that request only and be sent over raw HTTP upstream, provided the request is not a forwarded bridge request, does not originate from a native Codex client (native Codex clients keep websocket-mode behavior), and `upstream_stream_transport` is not explicitly `websocket`. Requests without a session identity header, and requests carrying a Codex-name session header (`session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, `thread-id` — bridge-centric Codex-protocol flows), MUST keep their existing bridge behavior. Agent clients send such side calls (title generation, summaries, compaction) on the same session identity as their agent turns; routing them through the bridge would fork an independent bridge lane per overlap with the agent's in-flight turn while gaining nothing from a persistent WebSocket.
+When the HTTP responses bridge is enabled, a request whose session identity comes from a client-declared identity header (`x-session-affinity`, `x-session-id`, `x-opencode-session`, `x-claude-code-agent-id`, `x-claude-remote-session-id`, with no Codex-name session header present) and that is self-contained and tool-less — no `tools`, no `previous_response_id`, no incoming turn-state header, no nonblank `conversation`, no stored `prompt`, no input file references, and no account-scoped hosted input items — MUST bypass the bridge for that request only and be sent over raw HTTP upstream, provided the request is not a forwarded bridge request, does not originate from a native Codex client (native Codex clients keep websocket-mode behavior), `upstream_stream_transport` is not explicitly `websocket`, and an `auto` upstream transport does not have an effective `always_websocket` downstream policy. The effective downstream policy MUST apply the existing per-API-key override precedence. Requests without a session identity header, and requests carrying a Codex-name session header (`session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, `thread-id` — bridge-centric Codex-protocol flows), MUST keep their existing bridge behavior. Agent clients send such side calls (title generation, summaries, compaction) on the same session identity as their agent turns; routing them through the bridge would fork an independent bridge lane per overlap with the agent's in-flight turn while gaining nothing from a persistent WebSocket.
 
 #### Scenario: Title-generation side call skips the bridge
 
@@ -27,6 +27,13 @@ When the HTTP responses bridge is enabled, a request whose session identity come
 #### Scenario: Explicit websocket transport keeps the bridge
 
 - **GIVEN** `upstream_stream_transport` is explicitly `websocket`
+- **WHEN** a tool-less self-contained request arrives
+- **THEN** the bridge is not bypassed for that request
+
+#### Scenario: Always-websocket policy keeps the bridge
+
+- **GIVEN** `upstream_stream_transport` is `auto`
+- **AND** the effective global or per-API-key `http_downstream_transport_policy` is `always_websocket`
 - **WHEN** a tool-less self-contained request arrives
 - **THEN** the bridge is not bypassed for that request
 

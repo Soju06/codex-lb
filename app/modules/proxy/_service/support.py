@@ -450,6 +450,20 @@ def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings
     return configured, configured in ("http", "websocket")
 
 
+def _effective_http_downstream_transport_policy(
+    api_key: ApiKeyData | None,
+    dashboard_settings: Any,
+    base_settings: Any,
+) -> tuple[str, bool]:
+    override = getattr(api_key, "transport_policy_override", None) if api_key is not None else None
+    if override is not None:
+        return override, True
+    dashboard_policy = getattr(dashboard_settings, "http_downstream_transport_policy", None)
+    if isinstance(dashboard_policy, str) and dashboard_policy:
+        return dashboard_policy, False
+    return getattr(base_settings, "http_downstream_transport_policy", "smart"), False
+
+
 _CONVERSATION_HEADERS_BY_USERAGENT_PREFIX = (
     ("opencode", ("x-parent-session-id", "x-opencode-session", "x-session-id", "x-session-affinity")),
     ("codex", ("thread-id",)),

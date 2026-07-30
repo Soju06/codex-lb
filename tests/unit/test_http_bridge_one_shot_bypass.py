@@ -128,12 +128,29 @@ def test_codex_name_session_headers_keep_bridge_behavior() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dashboard_websocket_override_keeps_one_shot_on_bridge(
+@pytest.mark.parametrize(
+    ("configured_transport", "dashboard_policy", "api_key_policy"),
+    [
+        pytest.param("websocket", "smart", None, id="explicit-websocket"),
+        pytest.param("auto", "always_websocket", None, id="global-always-websocket"),
+        pytest.param("auto", "smart", "always_websocket", id="per-key-always-websocket"),
+    ],
+)
+async def test_websocket_transport_policy_keeps_one_shot_on_bridge(
     monkeypatch: pytest.MonkeyPatch,
+    configured_transport: str,
+    dashboard_policy: str,
+    api_key_policy: str | None,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     base_settings = proxy_service.get_settings().model_copy(update={"upstream_stream_transport": "auto"})
-    dashboard_settings = base_settings.model_copy(update={"upstream_stream_transport": "websocket"})
+    dashboard_settings = base_settings.model_copy(
+        update={
+            "upstream_stream_transport": configured_transport,
+            "http_downstream_transport_policy": dashboard_policy,
+        }
+    )
+    api_key = cast(Any, SimpleNamespace(transport_policy_override=api_key_policy))
     monkeypatch.setattr(
         proxy_service,
         "get_settings_cache",
@@ -159,7 +176,7 @@ async def test_dashboard_websocket_override_keeps_one_shot_on_bridge(
         yield "data: bridge\n\n"
 
     async def forbidden_retry(*_args: object, **_kwargs: object):
-        raise AssertionError("explicit websocket transport must keep the bridge")
+        raise AssertionError("websocket transport policy must keep the bridge")
         yield "data: retry\n\n"
 
     monkeypatch.setattr(service, "_stream_via_http_bridge", stream_via_bridge)
@@ -173,7 +190,7 @@ async def test_dashboard_websocket_override_keeps_one_shot_on_bridge(
             codex_session_affinity=True,
             propagate_http_errors=False,
             openai_cache_affinity=False,
-            api_key=None,
+            api_key=api_key,
             api_key_reservation=None,
             suppress_text_done_events=False,
         )

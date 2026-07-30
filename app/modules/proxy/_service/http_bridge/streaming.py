@@ -145,6 +145,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds_from_message,
+    _effective_http_downstream_transport_policy,
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
@@ -606,6 +607,9 @@ class _HTTPBridgeStreamingMixin:
             dashboard_settings,
             base_settings,
         )
+        effective_downstream_transport_policy, _policy_override_applied = _effective_http_downstream_transport_policy(
+            api_key, dashboard_settings, base_settings
+        )
         request_id = ensure_request_id()
         self._raise_for_unsupported_input_image_references(payload)
         payload_size_estimate_bytes = len(
@@ -648,6 +652,10 @@ class _HTTPBridgeStreamingMixin:
             runtime_config.enabled
             and force_upstream_stream_transport is None
             and configured_stream_transport != "websocket"
+            and not (
+                configured_stream_transport == "auto"
+                and effective_downstream_transport_policy.strip().lower() == "always_websocket"
+            )
             and _http_bridge_request_is_unanchored_one_shot(
                 payload,
                 headers,
@@ -657,8 +665,8 @@ class _HTTPBridgeStreamingMixin:
             # Tool-less, self-contained side calls (title, summary, compaction)
             # gain nothing from a persistent bridge WebSocket and would fork an
             # independent bridge lane per overlap with the agent's main turn.
-            # An explicit websocket upstream transport override keeps the
-            # bridge: bypassing there would open a fresh WebSocket per request.
+            # Explicit websocket transport and the always-websocket policy keep
+            # the bridge: bypassing there would open a fresh socket per request.
             logger.info(
                 "stream_responses bypassing http bridge for unanchored one-shot request request_id=%s",
                 request_id,

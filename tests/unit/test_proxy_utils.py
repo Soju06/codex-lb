@@ -5566,7 +5566,25 @@ async def test_codex_control_request_persists_conversation_id_and_passes_dashboa
     assert response.body == b'{"ok":true}'
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+    affinity = cast(proxy_service._AffinityPolicy, selection_kwargs[0]["affinity_policy"])
+    assert affinity.key == "conv-control"
     assert upstream_headers["x-session-id"] == "control-session-metadata"
+
+    response = await service.codex_control_request(
+        "control",
+        method="POST",
+        payload=None,
+        query_params={},
+        headers={
+            "User-Agent": "codex/1.2",
+            "x-session-id": "control-session-metadata-only",
+        },
+    )
+
+    assert response.status_code == 200
+    affinity = cast(proxy_service._AffinityPolicy, selection_kwargs[1]["affinity_policy"])
+    assert affinity.key is None
+    assert upstream_headers["x-session-id"] == "control-session-metadata-only"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["conversation_id"] == "conv-control"
 

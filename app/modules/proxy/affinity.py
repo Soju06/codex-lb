@@ -288,9 +288,17 @@ def _sticky_key_from_session_header(
     headers: Mapping[str, str],
     *,
     include_codex_names: bool = True,
+    include_client_names: bool = True,
 ) -> str | None:
     normalized = {key.lower(): value for key, value in headers.items()}
-    names = _SESSION_IDENTITY_HEADERS if include_codex_names else _CLIENT_SESSION_IDENTITY_HEADERS
+    if include_codex_names and include_client_names:
+        names = _SESSION_IDENTITY_HEADERS
+    elif include_codex_names:
+        names = _CODEX_SESSION_IDENTITY_HEADERS
+    elif include_client_names:
+        names = _CLIENT_SESSION_IDENTITY_HEADERS
+    else:
+        names = ()
     for key in names:
         value = normalized.get(key)
         if not isinstance(value, str):
@@ -329,9 +337,14 @@ def _bare_codex_session_affinity(
     headers: Mapping[str, str],
     *,
     include_codex_names: bool,
+    include_client_names: bool = True,
     allow_cap_spillover: bool,
 ) -> _AffinityPolicy | None:
-    session_key = _sticky_key_from_session_header(headers, include_codex_names=include_codex_names)
+    session_key = _sticky_key_from_session_header(
+        headers,
+        include_codex_names=include_codex_names,
+        include_client_names=include_client_names,
+    )
     if session_key is None:
         return None
     return _AffinityPolicy(
@@ -395,6 +408,7 @@ def _sticky_key_for_codex_control_request(
     session_affinity = _bare_codex_session_affinity(
         headers,
         include_codex_names=codex_session_affinity,
+        include_client_names=False,
         allow_cap_spillover=False,
     )
     if session_affinity is not None:

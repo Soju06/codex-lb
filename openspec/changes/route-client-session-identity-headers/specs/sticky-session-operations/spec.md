@@ -6,7 +6,7 @@ The service MUST recognize client-declared session identity headers as the bare 
 
 Parent identity headers — `x-parent-session-id`, `x-codex-parent-thread-id`, `x-claude-code-parent-agent-id`, and `x-openai-subagent` — MUST NOT supply the session affinity key: a parent key would collapse every subagent of one parent onto a single session. `x-client-request-id` MUST NOT supply the key because clients also populate it with per-request identifiers.
 
-The account-neutral replay header filter MUST strip the recognized client identity headers alongside the Codex names so a replay dispatched to a fresh account cannot re-register the downstream alias. The recognized client identity headers MUST NOT be forwarded on Responses upstream egress. Stripping MUST apply at Responses upstream egress (and in the account-neutral replay filter) only: internal request handling MUST retain these headers so request-log conversation metadata (see `proxy-runtime-observability`) and session affinity derivation still observe them. Non-Responses protocols that already use the same header names as upstream protocol metadata MUST retain their existing contracts.
+The account-neutral replay header filter MUST strip the recognized client identity headers alongside the Codex names so a replay dispatched to a fresh account cannot re-register the downstream alias. The recognized client identity headers MUST NOT be forwarded on Responses upstream egress. Stripping MUST apply at Responses upstream egress (and in the account-neutral replay filter) only: internal request handling MUST retain these headers so request-log conversation metadata (see `proxy-runtime-observability`) and Responses session affinity derivation still observe them. Client-specific identity headers MUST NOT supply affinity for non-Responses control requests. Non-Responses protocols that already use the same header names as upstream protocol metadata MUST retain their existing contracts.
 
 #### Scenario: Subagent sessions route independently
 
@@ -60,3 +60,10 @@ The account-neutral replay header filter MUST strip the recognized client identi
 - **GIVEN** a `/v1/responses/compact` request carrying client identity and a non-empty stored `prompt`
 - **WHEN** its mapped account is at the response-create cap
 - **THEN** bare-session cap spillover to another account is disabled
+
+#### Scenario: Control metadata does not key Responses affinity
+
+- **GIVEN** a non-Responses control request carrying only `x-session-id`
+- **WHEN** its account is selected
+- **THEN** the client-specific identity value does not supply session affinity
+- **AND** the header remains available as upstream protocol metadata

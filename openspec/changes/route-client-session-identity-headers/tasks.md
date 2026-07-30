@@ -5,6 +5,7 @@
 - [x] 1.1 Add `x-session-affinity`, `x-session-id`, `x-opencode-session`, `x-claude-code-agent-id`, and `x-claude-remote-session-id` to the session-affinity header list, after the Codex names.
 - [x] 1.2 Document the parent-header and request-id exclusions at the definition site.
 - [x] 1.3 Recognize client-specific session identity on every Responses API entry point independently of the Codex-only affinity switch.
+- [x] 1.4 Exclude client-specific identity aliases from non-Responses control-request affinity while preserving Codex-name routing.
 
 ## 2. Replay hygiene
 
@@ -34,3 +35,4 @@
 - [x] 4.8 Stored-prompt coverage: such requests neither bypass the bridge nor spill across accounts.
 - [x] 4.9 Always-websocket coverage: global and per-API-key policy keep one-shot requests on the bridge.
 - [x] 4.10 Stored-prompt spillover coverage includes standard Responses and compact request models.
+- [x] 4.11 Control-request coverage proves client-specific identity remains upstream metadata without supplying affinity.

@@ -518,11 +518,6 @@ async def lifespan(app: FastAPI):
             logger.warning("Drain timeout reached, proceeding with shutdown")
 
         proxy_service = getattr(app.state, "proxy_service", None)
-        if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
-            try:
-                await proxy_service.mark_http_bridge_draining()
-            except Exception:
-                logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
         # Settle detached recovery journals while their origin leases are
         # still held; bridge teardown below may release those owner fences.
         if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
@@ -530,6 +525,11 @@ async def lifespan(app: FastAPI):
                 await proxy_service.drain_persistence_tasks(timeout_seconds=settings.shutdown_drain_timeout_seconds)
             except Exception:
                 logger.warning("Failed to pre-drain proxy settlement tasks during shutdown", exc_info=True)
+        if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
+            try:
+                await proxy_service.mark_http_bridge_draining()
+            except Exception:
+                logger.warning("Failed to mark HTTP bridge durable sessions draining during shutdown", exc_info=True)
         if proxy_service is not None and hasattr(proxy_service, "close_all_http_bridge_sessions"):
             try:
                 await proxy_service.close_all_http_bridge_sessions()

@@ -14,4 +14,4 @@
 ## 3. Verification
 
 - [x] 3.1 Run focused tests plus Ruff and type checks for every changed module.
-- [ ] 3.2 Run strict OpenSpec validation, review the final diff/status, and complete legacy-strict ultrareview.
+- [x] 3.2 Run strict OpenSpec validation, review the final diff/status, and complete legacy-strict ultrareview.

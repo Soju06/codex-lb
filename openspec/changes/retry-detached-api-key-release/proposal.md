@@ -8,7 +8,8 @@ still consumes quota until stale recovery runs hours later.
 ## What Changes
 
 - Keep a failed detached reservation release tracked and retry it after
-  transient persistence failures.
+  transient persistence failures, with a shared concurrency bound on repository
+  attempts.
 - Make the persistence drain report completion only after the tracked
   settlement/release chain has actually terminated.
 - Add deterministic regression coverage for a finalize failure followed by one

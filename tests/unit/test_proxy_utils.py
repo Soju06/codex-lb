@@ -24995,6 +24995,87 @@ async def test_stream_api_key_background_settlement_failure_falls_back_to_releas
 
 
 @pytest.mark.asyncio
+async def test_stream_api_key_release_retries_bound_concurrent_repository_attempts(monkeypatch):
+    retry_concurrency = proxy_service._STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY
+    task_count = retry_concurrency + 1
+    active_repository_attempts = 0
+    max_active_repository_attempts = 0
+    repository_entries = 0
+    retry_limit_reached = asyncio.Event()
+    allow_repository_attempts = asyncio.Event()
+    released: list[str] = []
+    repo = SimpleNamespace(api_keys=object())
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        nonlocal active_repository_attempts, max_active_repository_attempts, repository_entries
+        active_repository_attempts += 1
+        repository_entries += 1
+        max_active_repository_attempts = max(
+            max_active_repository_attempts,
+            active_repository_attempts,
+        )
+        if active_repository_attempts == retry_concurrency:
+            retry_limit_reached.set()
+        try:
+            await allow_repository_attempts.wait()
+            yield repo
+        finally:
+            active_repository_attempts -= 1
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            assert api_keys_repository is repo.api_keys
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            released.append(reservation_id)
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    api_key = _make_api_key_data("key_stream_release_retry_bound")
+    reservations = [
+        proxy_service.ApiKeyUsageReservationData(
+            reservation_id=f"resv_stream_release_retry_bound_{index}",
+            key_id=api_key.id,
+            model="gpt-5.5",
+        )
+        for index in range(task_count)
+    ]
+    for index, reservation in enumerate(reservations):
+        service._schedule_cancel_safe_cleanup(
+            service._release_unsettled_stream_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=reservation,
+                request_id=f"req_stream_release_retry_bound_{index}",
+                retry_persistence_failures=True,
+            ),
+            action="release_stream_api_key_reservation_after_failed_settlement",
+            request_id=f"req_stream_release_retry_bound_{index}",
+        )
+
+    drain_task: asyncio.Task[bool] | None = None
+    try:
+        await asyncio.wait_for(retry_limit_reached.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert repository_entries == retry_concurrency
+        assert active_repository_attempts == retry_concurrency
+        assert len(service._background_cleanup_tasks) == task_count
+        drain_task = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=2))
+        await asyncio.sleep(0)
+        assert not drain_task.done()
+    finally:
+        allow_repository_attempts.set()
+        if drain_task is None:
+            drain_task = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=2))
+        assert await drain_task
+
+    assert max_active_repository_attempts == retry_concurrency
+    assert sorted(released) == sorted(reservation.reservation_id for reservation in reservations)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_skips_release_after_settlement_transfers_on_cancel(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -27387,6 +27468,9 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
             return False
 
     service = proxy_service.ProxyService(lambda: _RepoContextWithApiKeys())
+    # The synchronous stream-finally backstop must not queue behind detached
+    # retries, even when every retry slot is occupied.
+    service._stream_api_key_release_retry_semaphore = asyncio.Semaphore(0)
     settings = _make_proxy_settings()
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -27433,18 +27517,19 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     monkeypatch.setattr(service, "_select_account_with_budget", select_account)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        async for _ in service._stream_with_retry(
-            payload,
-            {},
-            codex_session_affinity=False,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=api_key,
-            api_key_reservation=reservation,
-            suppress_text_done_events=False,
-            request_transport="http",
-        ):
-            pass
+        async with asyncio.timeout(1):
+            async for _ in service._stream_with_retry(
+                payload,
+                {},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=api_key,
+                api_key_reservation=reservation,
+                suppress_text_done_events=False,
+                request_transport="http",
+            ):
+                pass
 
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     owner_lookup.assert_awaited_once()

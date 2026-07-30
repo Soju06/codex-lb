@@ -34,11 +34,13 @@ age threshold is too slow for a known live cleanup chain.
    drain remain the single source of cleanup ownership. Creating a second
    registry or a durable retry row would duplicate state for a narrow failure.
 
-2. **Use capped exponential delay for every persistence exception.** The outer
-   retry covers transient PostgreSQL/session failures that the API-key
-   service's SQLite-lock-specific retry does not classify. A fixed cap prevents
-   sustained database pressure during a longer outage while still allowing
-   recovery without waiting for stale sweep.
+2. **Use capped exponential delay plus a shared retry gate for every persistence
+   exception.** The outer retry covers transient PostgreSQL/session failures
+   that the API-key service's SQLite-lock-specific retry does not classify. A
+   fixed delay cap prevents each task from retrying rapidly, while a per-service
+   concurrency gate prevents many failed streams from opening repository
+   sessions simultaneously. Waiting tasks stay tracked without holding a
+   database connection.
 
 3. **Rely on reservation transition idempotency.** A retry cannot double
    decrement quota: release only claims a reservation still in `reserved`
@@ -56,8 +58,9 @@ age threshold is too slow for a known live cleanup chain.
   → Retries use capped backoff; the task accurately represents unfinished
   cleanup, and stale recovery remains the final repair path.
 - **Many simultaneous failures could retry together after an outage.**
-  → Exponential delay bounds retry load; the change adds no inline request-path
-  work.
+  → A shared four-attempt gate bounds aggregate repository pressure in each
+  service instance; exponential delay also bounds each task's retry frequency,
+  and the change adds no inline request-path work.
 - **Cancellation can stop a retry after shutdown has already timed out.**
   → The drain first reports incomplete, so process termination cannot be
   mistaken for successful settlement.

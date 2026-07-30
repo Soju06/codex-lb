@@ -706,17 +706,21 @@ class DurableBridgeRepository:
         replay_safe: bool,
     ) -> DurableBridgeRecoveryAttemptSnapshot | None:
         """Record a safe request before dispatch so an ambiguous outcome is recoverable."""
-
-        owner_exists = await self._session.scalar(
-            select(HttpBridgeSessionRecord.id).where(
-                HttpBridgeSessionRecord.id == session_id,
-                HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                HttpBridgeSessionRecord.owner_epoch == owner_epoch,
-            )
-        )
-        if owner_exists is None:
-            return None
         async with sqlite_writer_section():
+            # Lock the owner row through the journal write so a takeover
+            # cannot advance the epoch after this check but before dispatch.
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return None
             attempt = await self._session.scalar(
                 select(HttpBridgeRecoveryAttemptRecord)
                 .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)

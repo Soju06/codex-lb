@@ -637,6 +637,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 try:
                                     await receive_task
                                 except asyncio.CancelledError:
+                                    relay_task = asyncio.current_task()
+                                    if relay_task is not None and relay_task.cancelling():
+                                        raise
                                     receive_task = None
                                 except Exception:
                                     # Preserve the completed task so the next
@@ -649,7 +652,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     # next loop iteration processes its result.
                                     continue
                             retried = False
-                            if can_retry_eventless_owner and receive_cancelled:
+                            if not session.closed and can_retry_eventless_owner and receive_cancelled:
                                 try:
                                     retried = await self._retry_http_bridge_precreated_request(
                                         session,

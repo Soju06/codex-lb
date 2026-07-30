@@ -21,6 +21,20 @@ this watchdog. Any matched `response.*` lifecycle event, response-created
 milestone, or downstream-visible evidence MUST suppress the owner-side
 watchdog and leave existing timeout behavior unchanged.
 
+Before invoking an upstream websocket send primitive, each supported websocket
+adapter MUST check whether its connection is already closed. A closed adapter
+MUST return an unforgeable not-dispatched result and MUST NOT invoke the send
+primitive. When the HTTP bridge receives that result before any response
+lifecycle or downstream-visible evidence, it MUST reconnect and send the exact
+request at most once on the same leased account. This recovery MAY preserve a
+client continuation anchor because the not-dispatched result proves that the
+upstream did not receive the failed attempt. The replacement attempt MUST
+remain within the original request budget and existing replay limit.
+
+Any failure raised after the adapter invokes its send primitive remains
+dispatch-ambiguous and MUST retain the existing fail-closed behavior without an
+internal resend.
+
 When the first owner-side deadline expires, the proxy MUST recheck eligibility,
 cancel the stale receive wait, and attempt one transparent replay only through
 the existing pre-created replay safety and ownership rules and only when the
@@ -37,7 +51,9 @@ If replay is unsafe, reconnect/resend fails, or the replacement send reaches
 the deadline, the proxy MUST emit a structured low-cardinality timeout log and
 the existing stuck-retirement Prometheus counter, terminally settle every
 pending request exactly once, and retire the whole bridge session. It MUST NOT
-attempt a second replay.
+attempt a second replay. Cancellation of the relay owner or closure of the
+session MUST suppress reconnect and resend even when that cancellation is
+observed while awaiting the stale receive task's cancellation.
 
 #### Scenario: Lone eventless gate owner recovers on a fresh socket
 
@@ -49,12 +65,37 @@ attempt a second replay.
   most once on a fresh upstream socket
 - **AND** a successful replay continues the original downstream stream
 
+#### Scenario: Closed warm socket recovers before dispatch
+
+- **GIVEN** a warm bridge socket closed normally before a compacted
+  continuation starts sending
+- **WHEN** the adapter checks the connection before invoking its send primitive
+- **THEN** it returns the sealed not-dispatched result without sending
+- **AND** the bridge reconnects once on the same leased account
+- **AND** it sends the exact continuation through the original downstream
+  stream without requiring a client reconnect
+
+#### Scenario: Mid-send failure remains ambiguous
+
+- **GIVEN** an upstream socket appears open before send
+- **WHEN** its send primitive raises after dispatch may have begun
+- **THEN** the adapter returns the existing ambiguous transport failure
+- **AND** the bridge does not reconnect and resend internally
+
 #### Scenario: Completed receive wins cancellation
 
 - **GIVEN** an eventless gate owner reaches its deadline
 - **WHEN** its pending upstream receive completes as cancellation is attempted
 - **THEN** the proxy processes the completed receive through the normal path
 - **AND** it does not replay the request
+
+#### Scenario: Relay shutdown wins receive cancellation
+
+- **GIVEN** an eventless gate owner reaches its deadline
+- **AND** bridge shutdown cancels the relay while it awaits stale receive
+  cancellation
+- **THEN** the relay propagates its own cancellation
+- **AND** it does not reconnect or resend after session ownership is released
 
 #### Scenario: A pending sibling prevents socket replacement
 

@@ -36,7 +36,10 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import (
+    UpstreamWebSocketSendNotDispatchedError,
+    UpstreamWebSocketTransportError,
+)
 from app.core.errors import (
     openai_error,
 )
@@ -876,6 +879,25 @@ class _HTTPBridgeRequestSubmitMixin:
                     upstream_send_started = True
                     try:
                         await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
+                    except UpstreamWebSocketSendNotDispatchedError:
+                        # The adapter observed the warm socket closed before
+                        # dispatch began, so the exact request remains safe to
+                        # send once on a fresh socket with the same leased
+                        # account. Mid-send failures retain the fail-closed path
+                        # below because their dispatch state is ambiguous.
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        recovered = await self._retry_http_bridge_request_on_fresh_upstream(
+                            session,
+                            request_state=request_state,
+                            text_data=text_data,
+                            require_same_account=True,
+                            require_preferred_account=True,
+                            dispatch_proven_absent=True,
+                        )
+                        if not recovered:
+                            raise
                     except BaseException:
                         # Publish retirement while lifecycle ownership is still
                         # held; a gate waiter must never reuse an ambiguously sent
@@ -1456,6 +1478,8 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         send_request: bool = True,
         require_same_account: bool = False,
+        require_preferred_account: bool = False,
+        dispatch_proven_absent: bool = False,
     ) -> bool:
         require_same_account = require_same_account or is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -1463,7 +1487,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         retry_text_data = text_data
         using_fresh_replay = False
-        if request_state.previous_response_id is not None and send_request:
+        if request_state.previous_response_id is not None and send_request and not dispatch_proven_absent:
             # After an ambiguous websocket send failure we cannot prove whether
             # upstream already accepted the continuation. Re-sending the same
             # previous_response_id request can fork continuity with duplicate
@@ -1486,6 +1510,8 @@ class _HTTPBridgeRequestSubmitMixin:
         if request_state.response_event_count > 0:
             return False
         request_state.replay_count += 1
+        if require_preferred_account:
+            request_state.preferred_account_id = session.account.id
         _log_http_bridge_event(
             "retry_fresh_upstream",
             session.key,
@@ -1501,6 +1527,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 restart_reader=True,
                 require_same_account=require_same_account,
+                require_preferred_account=require_preferred_account,
             )
             if send_request:
                 retry_text_data = self._http_bridge_text_with_account_installation_id(

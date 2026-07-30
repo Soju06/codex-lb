@@ -14,6 +14,7 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.frames import Close
 from websockets.http11 import Response
+from websockets.protocol import State
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
@@ -21,6 +22,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
     CodexUpstreamWebSocket,
     RealtimeWebSocketProtocol,
+    UpstreamWebSocketSendNotDispatchedError,
     UpstreamWebSocketTransportError,
     WebsocketsUpstreamWebSocket,
     connect_live_websocket,
@@ -55,6 +57,7 @@ class _FakeConnection:
     def __init__(self, *, subprotocol: str | None = None) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False
+        self.state = State.OPEN
         self.subprotocol = subprotocol
 
     async def send(self, data: str | bytes) -> None:
@@ -65,6 +68,51 @@ class _FakeConnection:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_websockets_adapter_proves_closed_socket_was_not_dispatched() -> None:
+    connection = _FakeConnection()
+    connection.state = State.CLOSED
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, connection))
+
+    with pytest.raises(UpstreamWebSocketSendNotDispatchedError) as exc_info:
+        await websocket.send_text('{"type":"response.create"}')
+
+    assert exc_info.value.error_code == "upstream_websocket_closed_before_send"
+    assert connection.sent == []
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_proves_closed_socket_was_not_dispatched() -> None:
+    def unexpected_send(_text: str) -> None:
+        raise AssertionError("closed websocket must not enter send_str")
+
+    websocket = CodexUpstreamWebSocket(
+        SimpleNamespace(
+            closed=True,
+            send_str=unexpected_send,
+        )
+    )
+
+    with pytest.raises(UpstreamWebSocketSendNotDispatchedError) as exc_info:
+        await websocket.send_text('{"type":"response.create"}')
+
+    assert exc_info.value.error_code == "upstream_websocket_closed_before_send"
+
+
+def test_send_not_dispatched_proof_cannot_be_constructed_or_subclassed() -> None:
+    with pytest.raises(TypeError, match="closed-before-send check"):
+        UpstreamWebSocketSendNotDispatchedError(
+            "forged",
+            error_code="upstream_websocket_closed_before_send",
+            _constructor_token=object(),
+        )
+
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+
+        class _ForgedNotDispatched(UpstreamWebSocketSendNotDispatchedError):
+            pass
 
 
 async def _local_proxy_tunnel_handler(

@@ -10,6 +10,8 @@ instead of using its existing pre-visible replay path.
 
 - Reduce the eventless pre-`response.created` watchdog cap from 240 seconds to
   30 seconds.
+- Detect a warm upstream socket that is already closed before a new send starts
+  and transparently reconnect/resend once without exposing a client reconnect.
 - On the first eventless timeout, cancel the old receive wait and attempt one
   replay through the existing pre-created replay guards and fresh-socket
   reconnect path.
@@ -23,6 +25,8 @@ instead of using its existing pre-visible replay path.
 - Keep hard-affinity and file-backed work on its required account and retain the
   existing no-replay boundary after response lifecycle or downstream-visible
   progress.
+- Keep send errors after dispatch may have begun fail closed; only the
+  adapter's sealed pre-dispatch proof permits an immediate exact resend.
 
 ## Capabilities
 
@@ -35,8 +39,8 @@ instead of using its existing pre-visible replay path.
 
 ## Impact
 
-- Affected code: HTTP bridge eventless deadline and upstream-reader timeout
-  handling.
+- Affected code: websocket send classification, HTTP bridge request submission,
+  eventless deadline, and upstream-reader timeout handling.
 - Affected surface: streaming Responses requests served through the HTTP to
   upstream-WebSocket bridge.
 - No new setting, dependency, endpoint, schema, migration, account-health

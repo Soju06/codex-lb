@@ -72,6 +72,13 @@ the acknowledgement was missing.
 
 ## Failure Modes
 
+- **A warm socket is already closed before the next send begins.** The transport
+  adapter returns a sealed not-dispatched proof without calling its send
+  primitive. The bridge reconnects once on the same leased account and sends
+  the exact request, including a continuation anchor, because upstream could
+  not have accepted the first attempt.
+- **The socket closes during send.** Dispatch is ambiguous, so the existing
+  fail-closed 502 remains authoritative and no internal resend occurs.
 - **The original send was accepted but its acknowledgement was lost.** Closing
   the old socket discards any later output. Because no response lifecycle or
   downstream-visible output was observed, client-side tools or other
@@ -79,6 +86,9 @@ the acknowledgement was missing.
   compute but does not duplicate downstream effects.
 - **The acknowledgement completes while cancellation begins.** The completed
   receive remains authoritative and is processed normally; no replay occurs.
+- **The relay is cancelled while awaiting child cancellation.** The relay's
+  own cancellation remains authoritative and propagates; a closed session
+  cannot reconnect or resend after ownership and leases are released.
 - **The request is continuity- or file-bound without safe replay evidence.**
   The existing helper declines replay and the request fails closed at 30
   seconds.
@@ -99,3 +109,9 @@ that result is processed and no replay occurs. If `response.created` arrives
 from the replacement at 1,032, the original downstream stream continues
 normally. If the fresh socket is still eventless at 1,060, the proxy returns
 the existing explicit timeout and retires the bridge.
+
+A later compacted continuation finds its warm socket already closed. The
+adapter rejects the frame before invoking the socket send operation, the bridge
+reconnects once to the same account, and the original downstream stream
+continues without a client-visible reconnect. If the socket instead fails while
+the send operation is in progress, the bridge does not replay.

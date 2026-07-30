@@ -27,6 +27,30 @@ replacement send also times out, the service MUST terminally settle the request
 and retire the session exactly once without an account-health penalty for the
 missing acknowledgement.
 
+Separately, when a warm websocket is proven closed before the adapter invokes
+its send primitive, the service MAY reconnect and send the exact request once
+on the same leased account, including a request carrying
+`previous_response_id`. A successful replacement send MUST continue the
+original downstream stream without requiring a client retry. Send failures
+without that pre-dispatch proof MUST retain the existing fail-closed behavior.
+
+#### Scenario: Compacted continuation recovers from a closed warm socket
+
+- **GIVEN** a compacted continuation carries `previous_response_id`
+- **AND** its warm upstream websocket is already closed before send dispatch
+- **WHEN** the transport adapter returns the sealed not-dispatched proof
+- **THEN** the service reconnects once on the same leased account
+- **AND** it sends the exact continuation through the original downstream
+  stream
+- **AND** the client does not need to reconnect
+
+#### Scenario: Ambiguous send failure does not replay
+
+- **GIVEN** an HTTP bridge request enters the upstream send primitive
+- **WHEN** that operation fails without proof that dispatch was absent
+- **THEN** the service returns the existing terminal transport failure
+- **AND** it does not resend the request internally
+
 #### Scenario: First eventless timeout recovers transparently
 
 - **GIVEN** an HTTP bridge request has no response lifecycle or visible progress

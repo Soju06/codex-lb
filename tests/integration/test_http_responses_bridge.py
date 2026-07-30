@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
+from app.core.clients import proxy_websocket as proxy_websocket_module
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
@@ -530,6 +531,34 @@ class _CreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 class _SilentUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
+
+
+class _WarmThenClosedBeforeSendUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__("resp_warm_socket")
+        self.closed_before_send = False
+
+    async def send_text(self, text: str) -> None:
+        if self.closed_before_send:
+            raise proxy_websocket_module._websocket_send_not_dispatched_error()
+        await super().send_text(text)
+
+
+class _CancellationBlockingUpstreamWebSocket(_SilentUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.receive_started = asyncio.Event()
+        self.receive_cancellation_started = asyncio.Event()
+
+    async def receive(self) -> _FakeUpstreamMessage:
+        self.receive_started.set()
+        try:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable receive wait completed")
+        except asyncio.CancelledError:
+            self.receive_cancellation_started.set()
+            await asyncio.Event().wait()
+            raise
 
 
 class _RecordingUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -8185,6 +8214,178 @@ async def test_v1_responses_http_bridge_retries_once_before_response_created(
     assert len(upstreams[1].sent_text) == 1
     if first_failure == "silent":
         assert preferred_account_ids == [None, account.id]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_shutdown_during_eventless_receive_cancellation_does_not_replay(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    service = get_proxy_service_for_app(app_instance)
+    upstream = _CancellationBlockingUpstreamWebSocket()
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    request_state = proxy_module._WebSocketRequestState(
+        request_id="req-shutdown-cancel-race",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic() - 1.0,
+        transport="http",
+        response_create_gate=gate,
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        response_create_sent_at=time.monotonic() - 1.0,
+        event_queue=asyncio.Queue(),
+        request_text=json.dumps({"type": "response.create", "model": "gpt-5.6-sol"}),
+    )
+    session = proxy_module._HTTPBridgeSession(
+        key=proxy_module._HTTPBridgeSessionKey("prompt_cache", "shutdown-cancel-race", None),
+        headers={},
+        affinity=proxy_module._AffinityPolicy(key="shutdown-cancel-race"),
+        request_model="gpt-5.6-sol",
+        account=cast(Account, SimpleNamespace(id="acct-shutdown-cancel-race", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamWebSocket, upstream),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=gate,
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    retry = AsyncMock(return_value=True)
+    fail_pending = AsyncMock()
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+
+    relay = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    session.upstream_reader = relay
+    await _wait_for_event(upstream.receive_started)
+    await _wait_for_event(upstream.receive_cancellation_started)
+
+    await asyncio.wait_for(service._close_http_bridge_session(session), timeout=1.0)
+
+    retry.assert_not_awaited()
+    assert relay.cancelled()
+    assert session.closed is True
+    assert upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_codex_http_bridge_retries_closed_warm_socket_before_send_without_client_reconnect(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_closed_warm_send",
+        "http-bridge-closed-warm-send@example.com",
+    )
+    account = await _get_account(account_id)
+    warm_upstream = _WarmThenClosedBeforeSendUpstreamWebSocket()
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_replacement_socket")
+    upstreams = [warm_upstream, replacement_upstream]
+    connect_count = 0
+    preferred_account_ids: list[str | None] = []
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        preferred_account_ids.append(preferred_account_id)
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {
+        "session_id": "closed-warm-send-session",
+        "user-agent": "codex_cli_rs/0.145.0",
+    }
+    first = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "Return exactly OK.",
+            "input": "first turn",
+        },
+        headers=headers,
+    )
+    assert first.status_code == 200
+    warm_upstream.closed_before_send = True
+
+    second = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "Return exactly OK.",
+            "input": "compacted continuation",
+            "previous_response_id": "resp_warm_socket_1",
+        },
+        headers=headers,
+    )
+
+    assert second.status_code == 200
+    assert connect_count == 2
+    assert len(warm_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    assert preferred_account_ids == [None, account.id]
 
 
 @pytest.mark.asyncio

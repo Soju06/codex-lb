@@ -21,6 +21,7 @@ from websockets.exceptions import (
     InvalidProxy,
     InvalidStatus,
 )
+from websockets.protocol import State
 from websockets.typing import Origin, Subprotocol
 
 from app.core.clients.codex import (
@@ -157,6 +158,40 @@ class UpstreamWebSocketTransportError(RuntimeError):
         self.error_code = error_code
 
 
+_SEND_NOT_DISPATCHED_CONSTRUCTOR_TOKEN = object()
+
+
+class UpstreamWebSocketSendNotDispatchedError(UpstreamWebSocketTransportError):
+    """Proof that a websocket frame was rejected before dispatch began."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        del cls, kwargs
+        raise TypeError("UpstreamWebSocketSendNotDispatchedError cannot be subclassed")
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        _constructor_token: object,
+    ) -> None:
+        if _constructor_token is not _SEND_NOT_DISPATCHED_CONSTRUCTOR_TOKEN:
+            raise TypeError("Use the websocket adapter's closed-before-send check")
+        super().__init__(message, error_code=error_code)
+
+
+def _websocket_send_not_dispatched_error(
+    *,
+    endpoint_id: str | None = None,
+) -> UpstreamWebSocketSendNotDispatchedError:
+    endpoint_suffix = f" via endpoint {endpoint_id}" if endpoint_id else ""
+    return UpstreamWebSocketSendNotDispatchedError(
+        f"Upstream websocket was already closed before send{endpoint_suffix}",
+        error_code="upstream_websocket_closed_before_send",
+        _constructor_token=_SEND_NOT_DISPATCHED_CONSTRUCTOR_TOKEN,
+    )
+
+
 def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> str:
     return process_network_error_code(
         exc,
@@ -225,12 +260,16 @@ class WebsocketsUpstreamWebSocket:
         self._preserve_close_semantics = preserve_close_semantics
 
     async def send_text(self, text: str) -> None:
+        if getattr(self._connection, "state", State.OPEN) is not State.OPEN:
+            raise _websocket_send_not_dispatched_error()
         try:
             await self._connection.send(text)
         except Exception as exc:
             await _raise_websocket_send_error(exc, uses_proxy=self._uses_proxy)
 
     async def send_bytes(self, data: bytes) -> None:
+        if getattr(self._connection, "state", State.OPEN) is not State.OPEN:
+            raise _websocket_send_not_dispatched_error()
         try:
             await self._connection.send(data)
         except Exception as exc:
@@ -319,6 +358,8 @@ class CodexUpstreamWebSocket:
         self._response_headers = _normalize_response_headers(response_headers)
 
     async def send_text(self, text: str) -> None:
+        if bool(getattr(self._websocket, "closed", False)):
+            raise _websocket_send_not_dispatched_error(endpoint_id=self._endpoint_id)
         try:
             result = self._websocket.send_str(text)
             if asyncio.iscoroutine(result):
@@ -327,6 +368,8 @@ class CodexUpstreamWebSocket:
             await _raise_websocket_send_error(exc, endpoint_id=self._endpoint_id, uses_proxy=True)
 
     async def send_bytes(self, data: bytes) -> None:
+        if bool(getattr(self._websocket, "closed", False)):
+            raise _websocket_send_not_dispatched_error(endpoint_id=self._endpoint_id)
         try:
             result = self._websocket.send_bytes(data)
             if asyncio.iscoroutine(result):

@@ -11,13 +11,19 @@
 - [x] 2.3 Preserve the leased account, hard affinity, file ownership, request
       budget, account neutrality, and whole-session retirement on exhaustion.
 - [x] 2.4 Preserve and process a receive result that wins the cancellation race.
+- [x] 2.5 Propagate relay-owner cancellation and suppress replay after session
+      closure.
+- [x] 2.6 Seal the transport proof for a socket closed before dispatch and
+      transparently retry that exact request once on the leased account.
 
 ## 3. Verification
 
 - [x] 3.1 Add regressions for first-timeout recovery, telemetry-only silence,
       cancellation-race acknowledgement, leased-account routing, unsafe replay,
-      and second-timeout settlement.
+      second-timeout settlement, and relay shutdown during child cancellation.
 - [x] 3.2 Run focused bridge tests, lint, format, type, architecture, and strict
       OpenSpec validation.
 - [x] 3.3 Review the final diff for replay widening, duplicate settlement,
       affinity movement, account penalties, and unrelated edits.
+- [x] 3.4 Add adapter construction/dispatch proofs and an externally visible
+      compacted-continuation regression for a closed warm socket.

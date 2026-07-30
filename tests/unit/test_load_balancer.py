@@ -692,6 +692,21 @@ def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
     assert result.resets_at == int(now + 60)
 
 
+def test_select_account_fails_over_when_one_account_remains_usable():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("exhausted", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now + 3600)),
+        AccountState("usable", AccountStatus.ACTIVE, used_percent=40.0),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is not None
+    assert result.account.account_id == "usable"
+    assert result.error_code is None
+    assert result.error_message is None
+
+
 def test_select_account_reports_secondary_usage_exhaustion_reset():
     now = 1_700_000_000.0
     states = [

@@ -61,6 +61,7 @@ from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_rese
 from app.core.utils.time import utcnow
 from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup_scheduler import build_account_usage_rollup_scheduler
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
@@ -381,6 +382,14 @@ async def lifespan(app: FastAPI):
         await reconcile_model_registry_from_store()
 
     await cache_poller.start()
+
+    async with SessionLocal() as session:
+        seeded_count = await AccountsRepository(session).seed_hard_sticky_outage_grace_on_startup()
+    if seeded_count > 0:
+        logger.info(
+            "Seeded hard codex_session purge grace for already-unavailable accounts seeded_count=%s",
+            seeded_count,
+        )
 
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()

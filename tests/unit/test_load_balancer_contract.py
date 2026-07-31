@@ -17,7 +17,7 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountSelection, LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -138,6 +138,11 @@ class _StickySessionsRepository:
         del args, kwargs
         self.get_calls += 1
         return self.account_id
+
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
+        del args, kwargs
+        self.get_calls += 1
+        return StickyOwnerLookup(account_id=self.account_id, continuity_abandoned=False)
 
     async def upsert(
         self,

@@ -21357,6 +21357,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         (False, False, None),
         (True, False, None),
         (False, True, None),
+        (False, False, "pre_start"),
         (False, False, "primary"),
         (False, False, "fallback"),
     ],
@@ -21390,6 +21391,12 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
             nonlocal release_calls
             assert reservation_id == reservation.reservation_id
             release_calls += 1
+            if cancel_during == "pre_start":
+                order.append("fallback_started")
+                fallback_started.set()
+                await release_fallback.wait()
+                order.append("fallback_committed")
+                return
             if release_calls == 1:
                 if cancel_during == "primary":
                     order.append("primary_started")
@@ -21413,6 +21420,27 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
     handle_stream_error = AsyncMock(side_effect=record_health)
     monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    if cancel_during == "pre_start":
+        original_track = service._track_stream_usage_settlement_task
+
+        def cancel_settlement_before_start(
+            task: asyncio.Task[bool],
+            *,
+            api_key: ApiKeyData,
+            api_key_reservation: proxy_service.ApiKeyUsageReservationData,
+            request_id: str,
+            release_on_failure: bool = True,
+        ) -> None:
+            original_track(
+                task,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+                release_on_failure=release_on_failure,
+            )
+            task.cancel()
+
+        monkeypatch.setattr(service, "_track_stream_usage_settlement_task", cancel_settlement_before_start)
 
     failed_payload: dict[str, JsonValue] = {
         "type": "response.failed",
@@ -21480,15 +21508,18 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
         await asyncio.wait_for(finalizer, timeout=1)
     assert await asyncio.wait_for(drain, timeout=1) is True
 
-    assert blocked_while_fallback_pending is True
+    assert blocked_while_fallback_pending is (cancel_during != "pre_start")
     assert drain_blocked_while_fallback_pending is True
     assert health_writes_while_fallback_pending == 0
     assert reconnect_while_fallback_pending is True
     assert retire_while_fallback_pending is True
-    assert release_calls == 2
+    assert release_calls == (1 if cancel_during == "pre_start" else 2)
     assert upstream_control.reconnect_requested is True
     assert upstream_control.retire_after_drain is True
-    if cancel_during == "primary":
+    if cancel_during == "pre_start":
+        assert order == ["fallback_started", "fallback_committed"]
+        handle_stream_error.assert_not_awaited()
+    elif cancel_during == "primary":
         assert order == ["primary_started", "fallback_started", "fallback_committed"]
         handle_stream_error.assert_not_awaited()
     elif cancel_during == "fallback":

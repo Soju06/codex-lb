@@ -41,14 +41,21 @@ The settlement task remains tracked in every mode. Detached callers keep the
 existing callback-owned fallback. For an ordering-sensitive caller, the tracked
 task runs the existing fallback release helper after primary failure and only
 then completes with the confirmed boolean outcome. Its fallback operation is
-shielded under that task, so cancellation before or during fallback propagates
-only after the release attempt completes. The caller disables callback fallback
-and awaits that same tracked task.
+shielded under that task, so cancellation during primary work or fallback is
+reported as unconfirmed only after the release attempt completes. If the task
+is cancelled before its coroutine starts, the tracking callback schedules the
+established tracked cleanup fallback instead. Any cancellation that still
+reaches the done callback likewise transfers release to that tracker. The caller
+disables callback fallback for ordinary failure results and awaits the
+settlement outcome.
 
-This avoids racing two releases, keeps graceful-shutdown ownership across both
-settlement phases, and reuses the established release path. Always leaving
-fallback with the callback was rejected because awaiting only the primary task
-cannot establish when the second-generation cleanup commits.
+This avoids racing two releases after coroutine startup, keeps
+graceful-shutdown ownership across both settlement phases, and reuses the
+established release path. The callback retains cancellation fallback for cases
+where no coroutine handler completes release, including pre-start cancellation.
+Always leaving ordinary failure fallback with the callback was rejected because
+awaiting only the primary task cannot establish when the second-generation
+cleanup commits.
 
 ### Return confirmed settlement state
 
@@ -92,9 +99,9 @@ attempt.
   reconnect and retirement still protect the active connection.
 - **Cancellation can expose the primary task and fallback to concurrent
   mutation.** The existing shielded wait and task tracker retain ownership;
-  the ordering-sensitive task completes its shielded fallback before
-  propagating cancellation, and only one path is allowed to start fallback
-  release.
+  a started ordering-sensitive task completes its shielded fallback before
+  reporting an unconfirmed result, while pre-start cancellation transfers
+  release to the tracker. Only one path starts fallback release.
 
 ## Migration Plan
 

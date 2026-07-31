@@ -3,7 +3,7 @@
 - [x] 1.1 Add a deterministic real-WebSocket-finalizer regression proving a failed primary settlement blocks health until fallback release commits.
 - [x] 1.2 Prove an unconfirmed fallback leaves health unapplied while reconnect and retirement remain enabled.
 - [x] 1.3 Cover the existing retry consumer so an unconfirmed ordering-sensitive settlement drops deferred health penalties.
-- [x] 1.4 Prove shutdown drain remains blocked while an ordering-sensitive fallback release is pending, including cancellation before or during fallback.
+- [x] 1.4 Prove shutdown drain remains blocked while an ordering-sensitive fallback release is pending, including cancellation before primary startup or during fallback.
 
 ## 2. Settlement Ordering
 

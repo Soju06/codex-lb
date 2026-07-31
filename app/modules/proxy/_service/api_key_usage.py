@@ -331,7 +331,7 @@ class _ApiKeyUsageMixin:
                     cancellation_pending = True
             settled = fallback_task.result()
             if cancellation_pending:
-                raise asyncio.CancelledError
+                return False
             return settled
 
         async def _settle_once() -> bool:
@@ -357,6 +357,7 @@ class _ApiKeyUsageMixin:
             except asyncio.CancelledError:
                 if wait_for_settlement:
                     await _release_ordering_sensitive_fallback()
+                    return False
                 raise
             except Exception:
                 logger.warning(
@@ -372,8 +373,9 @@ class _ApiKeyUsageMixin:
         # Detach unconditionally instead of shield-awaiting: for ordinary
         # callers the tracking callback schedules a release when settlement
         # fails or is cancelled; an ordering-sensitive settlement task runs
-        # that fallback before the tracked task completes. The caller's
-        # finally-net skips via
+        # that fallback before the tracked task completes once started, while
+        # the tracker still owns cancellation before coroutine startup. The
+        # caller's finally-net skips via
         # usage_settlement_transferred, and reservations keep counting toward
         # limits until finalized/released, so a briefly-lagging settlement can
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
@@ -437,12 +439,11 @@ class _ApiKeyUsageMixin:
                     api_key.id,
                     request_id,
                 )
-                if release_on_failure:
-                    self._schedule_cancel_safe_cleanup(
-                        _release_after_failed_settlement(),
-                        action="release_stream_api_key_reservation_after_cancelled_settlement",
-                        request_id=request_id,
-                    )
+                self._schedule_cancel_safe_cleanup(
+                    _release_after_failed_settlement(),
+                    action="release_stream_api_key_reservation_after_cancelled_settlement",
+                    request_id=request_id,
+                )
             except Exception as exc:
                 logger.warning(
                     "Stream API key settlement task failed key_id=%s request_id=%s",

@@ -1540,7 +1540,11 @@ class _HTTPBridgeMixin(
                                 inflight_future.set_exception(exc)
                                 inflight_future.exception()
                 if created_session is not None and not session_registered:
-                    await self._close_http_bridge_session(created_session)
+                    if _claim_http_bridge_session_close(created_session):
+                        await self._close_http_bridge_session_bounded(
+                            created_session,
+                            reason="registration_failed",
+                        )
                 raise
             assert created_session is not None
             _log_http_bridge_event(
@@ -1587,15 +1591,30 @@ class _HTTPBridgeMixin(
                 error_type="server_error",
             ),
         )
-        for inflight_future in inflight_futures:
-            if inflight_future.done():
-                continue
-            inflight_future.set_exception(shutdown_error)
-            inflight_future.exception()
-        for session in sessions_to_close:
-            if _claim_http_bridge_session_close(session):
-                await self._close_http_bridge_session(session)
-        await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+        owned_sessions = [session for session in sessions_to_close if _claim_http_bridge_session_close(session)]
+
+        async def close_owned_sessions() -> None:
+            try:
+                for session in owned_sessions:
+                    await self._close_http_bridge_session_bounded(session, reason="shutdown")
+            finally:
+                await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+
+        cleanup_task = asyncio.create_task(
+            close_owned_sessions(),
+            name="http-bridge-cleanup-shutdown",
+        )
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            for inflight_future in inflight_futures:
+                if inflight_future.done():
+                    continue
+                inflight_future.set_exception(shutdown_error)
+                inflight_future.exception()
+        finally:
+            _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+        if cancellation is not None:
+            raise cancellation
 
     async def mark_http_bridge_draining(self) -> None:
         try:

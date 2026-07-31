@@ -8232,6 +8232,149 @@ async def test_close_all_http_bridge_sessions_does_not_duplicate_reader_owned_cl
 
 
 @pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_tracks_every_close_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    first = _make_bridge_session(key_value="shutdown-cancel-first")
+    second = _make_bridge_session(key_value="shutdown-cancel-second")
+    service._http_bridge_sessions[first.key] = first
+    service._http_bridge_sessions[second.key] = second
+    first_close_started = asyncio.Event()
+    release_closes = asyncio.Event()
+    close_calls: list[proxy_service._HTTPBridgeSession] = []
+
+    async def blocked_close(session: proxy_service._HTTPBridgeSession) -> None:
+        close_calls.append(session)
+        if session is first:
+            first_close_started.set()
+        await release_closes.wait()
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", blocked_close)
+
+    shutdown_task = asyncio.create_task(service.close_all_http_bridge_sessions())
+    try:
+        await asyncio.wait_for(first_close_started.wait(), timeout=1.0)
+        shutdown_task.cancel()
+        await asyncio.sleep(0)
+
+        assert first.upstream_close_attempted is True
+        assert second.upstream_close_attempted is True
+        assert not shutdown_task.done()
+    finally:
+        release_closes.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(shutdown_task, timeout=1.0)
+
+    assert close_calls.count(first) == 1
+    assert close_calls.count(second) == 1
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_continues_after_individual_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    first = _make_bridge_session(key_value="shutdown-error-first")
+    second = _make_bridge_session(key_value="shutdown-error-second")
+    service._http_bridge_sessions[first.key] = first
+    service._http_bridge_sessions[second.key] = second
+    close_calls: list[proxy_service._HTTPBridgeSession] = []
+
+    async def fail_first_close(session: proxy_service._HTTPBridgeSession) -> None:
+        close_calls.append(session)
+        if session is first:
+            raise RuntimeError("first close failed")
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", fail_first_close)
+
+    await service.close_all_http_bridge_sessions()
+
+    assert first.upstream_close_attempted is True
+    assert second.upstream_close_attempted is True
+    assert close_calls.count(first) == 1
+    assert close_calls.count(second) == 1
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_local_terminal_reset_and_reader_retirement_share_close_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="local-reset-reader-close-race")
+    service._http_bridge_sessions[session.key] = session
+    close = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+
+    session.upstream_reader = asyncio.current_task()
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="reader_before_local_terminal_reset",
+    )
+    await service._reset_http_bridge_session_after_local_terminal_error(
+        session,
+        error_code="stream_incomplete",
+        error_message="terminal bridge failure",
+    )
+
+    assert session.upstream_close_attempted is True
+    close.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["cancellation", "failure"])
+async def test_local_terminal_reset_closes_after_pending_cleanup_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value=f"local-reset-{interruption}")
+    service._http_bridge_sessions[session.key] = session
+    pending_cleanup_started = asyncio.Event()
+    release_pending_cleanup = asyncio.Event()
+    close = AsyncMock()
+
+    async def interrupt_pending_cleanup(*_: object, **__: object) -> None:
+        pending_cleanup_started.set()
+        if interruption == "failure":
+            raise RuntimeError("pending cleanup failed")
+        await release_pending_cleanup.wait()
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", interrupt_pending_cleanup)
+
+    reset_task = asyncio.create_task(
+        service._reset_http_bridge_session_after_local_terminal_error(
+            session,
+            error_code="stream_incomplete",
+            error_message="terminal bridge failure",
+        )
+    )
+    try:
+        await asyncio.wait_for(pending_cleanup_started.wait(), timeout=1.0)
+        if interruption == "cancellation":
+            reset_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await reset_task
+        else:
+            with pytest.raises(RuntimeError, match="pending cleanup failed"):
+                await reset_task
+    finally:
+        release_pending_cleanup.set()
+        if not reset_task.done():
+            await asyncio.gather(reset_task, return_exceptions=True)
+
+    assert session.key not in service._http_bridge_sessions
+    assert session.upstream_close_attempted is True
+    close.assert_awaited_once_with(session)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_reader_retirement_closes_previously_detached_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -13479,6 +13622,21 @@ async def test_get_or_create_http_bridge_session_does_not_publish_before_durable
         idle_ttl_seconds=120.0,
     )
     close_session = AsyncMock()
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+
+    async def fail_durable_claim(
+        session: proxy_service._HTTPBridgeSession,
+        **_: object,
+    ) -> None:
+        claim_started.set()
+        await release_claim.wait()
+        session.upstream_reader = asyncio.current_task()
+        await service._retire_stale_pending_http_bridge_session(
+            session,
+            detail="reader_before_failed_registration_cleanup",
+        )
+        raise RuntimeError("db unavailable")
 
     monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
@@ -13486,7 +13644,7 @@ async def test_get_or_create_http_bridge_session_does_not_publish_before_durable
     monkeypatch.setattr(
         service,
         "_claim_durable_http_bridge_session",
-        AsyncMock(side_effect=RuntimeError("db unavailable")),
+        AsyncMock(side_effect=fail_durable_claim),
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
@@ -13511,8 +13669,10 @@ async def test_get_or_create_http_bridge_session_does_not_publish_before_durable
         )
 
     first = asyncio.create_task(_call())
-    await asyncio.sleep(0)
+    await asyncio.wait_for(claim_started.wait(), timeout=1.0)
     second = asyncio.create_task(_call())
+    await asyncio.sleep(0)
+    release_claim.set()
 
     with pytest.raises(RuntimeError, match="db unavailable"):
         await first
@@ -13520,8 +13680,8 @@ async def test_get_or_create_http_bridge_session_does_not_publish_before_durable
         await second
 
     assert key not in service._http_bridge_sessions
-    assert close_session.await_count >= 1
-    assert all(call.args == (created_session,) for call in close_session.await_args_list)
+    assert created_session.upstream_close_attempted is True
+    close_session.assert_awaited_once_with(created_session)
 
 
 @pytest.mark.asyncio

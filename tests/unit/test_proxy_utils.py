@@ -21337,6 +21337,105 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fallback_fails", [False, True])
+async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback(
+    monkeypatch,
+    fallback_fails: bool,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_settlement_fallback")
+    api_key = _make_api_key_data("key_ws_settlement_fallback")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_settlement_fallback",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    fallback_started = asyncio.Event()
+    release_fallback = asyncio.Event()
+    release_calls = 0
+    order: list[str] = []
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            del api_keys_repository
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            nonlocal release_calls
+            assert reservation_id == reservation.reservation_id
+            release_calls += 1
+            if release_calls == 1:
+                order.append("primary_failed")
+                raise RuntimeError("primary settlement unavailable")
+            order.append("fallback_started")
+            fallback_started.set()
+            await release_fallback.wait()
+            if fallback_fails:
+                order.append("fallback_failed")
+                raise RuntimeError("fallback settlement unavailable")
+            order.append("fallback_committed")
+
+    async def record_health(*_args: object, **_kwargs: object) -> None:
+        order.append("health")
+
+    handle_stream_error = AsyncMock(side_effect=record_health)
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    failed_payload: dict[str, JsonValue] = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_ws_settlement_fallback",
+            "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+        },
+    }
+    failed_event = parse_sse_event(f"data: {json.dumps(failed_payload)}\n\n")
+    assert failed_event is not None
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_settlement_fallback",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic(),
+        skip_request_log=True,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    finalizer = asyncio.create_task(
+        service._finalize_websocket_request_state(
+            request_state,
+            account=account,
+            account_id_value=account.id,
+            event=failed_event,
+            event_type="response.failed",
+            payload=failed_payload,
+            api_key=api_key,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(1),
+        )
+    )
+    await asyncio.wait_for(fallback_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    blocked_while_fallback_pending = not finalizer.done()
+    health_writes_while_fallback_pending = handle_stream_error.await_count
+    release_fallback.set()
+    await asyncio.wait_for(finalizer, timeout=1)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    assert blocked_while_fallback_pending is True
+    assert health_writes_while_fallback_pending == 0
+    assert release_calls == 2
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.retire_after_drain is True
+    if fallback_fails:
+        assert order == ["primary_failed", "fallback_started", "fallback_failed"]
+        handle_stream_error.assert_not_awaited()
+    else:
+        assert order == ["primary_failed", "fallback_started", "fallback_committed", "health"]
+        handle_stream_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_finalize_websocket_empty_prewarm_does_not_store_continuity_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -24790,7 +24889,8 @@ async def test_stream_api_key_settlement_detaches_and_closes_repo(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stream_api_key_settlement_wait_option_blocks_until_finalized(monkeypatch):
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_stream_api_key_settlement_wait_option_blocks_until_finalized(monkeypatch, cancel_caller: bool):
     """Ordering-sensitive callers (websocket error path) opt into waiting so
     the settlement commits before load-balancer health writes."""
     started = asyncio.Event()
@@ -24854,6 +24954,9 @@ async def test_stream_api_key_settlement_wait_option_blocks_until_finalized(monk
     )
     await asyncio.wait_for(started.wait(), timeout=1)
     await asyncio.sleep(0)
+    if cancel_caller:
+        caller.cancel()
+        await asyncio.sleep(0)
     # Still blocked on the in-flight settlement.
     assert not caller.done()
     release.set()

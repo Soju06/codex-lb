@@ -9,12 +9,17 @@ before the load-balancer health write (the settlement-ordering invariant), so
 that error path intentionally blocks on settlement. If the primary settlement
 fails, the finalizer MUST wait for fallback release to commit before recording
 account health. If neither operation confirms settlement, the account-health
-write MUST remain unapplied. In all other cases the settlement MUST run as a
-tracked background task; when it fails or is cancelled, the reservation MUST
-still be released by the tracking fallback, and the request's finalization path
-MUST NOT double-release a transferred settlement. Reservations MUST continue to
-count toward key limits until finalized or released, so deferred settlement can
-never admit usage a synchronous settlement would have rejected.
+write MUST remain unapplied. When the existing stream-retry path deliberately
+defers an account-health penalty until the same ordering-sensitive settlement,
+it MUST likewise apply neither that penalty nor an immediately following
+terminal health write unless settlement is confirmed, and it MUST NOT start a
+second settlement for the transferred reservation. In all other cases the
+settlement MUST run as a tracked background task; when it fails or is cancelled,
+the reservation MUST still be released by the tracking fallback, and the
+request's finalization path MUST NOT double-release a transferred settlement.
+Reservations MUST continue to count toward key limits until finalized or
+released, so deferred settlement can never admit usage a synchronous settlement
+would have rejected.
 
 #### Scenario: Response close precedes settlement completion
 
@@ -49,6 +54,13 @@ never admit usage a synchronous settlement would have rejected.
 - **WHEN** both primary settlement and fallback release fail
 - **THEN** the finalizer does not record the account-health error
 - **AND** the upstream connection is still scheduled for reconnect and retirement
+
+#### Scenario: Unconfirmed retry settlement drops deferred health
+
+- **GIVEN** a keyed stream retry has deferred an account-health penalty until replacement selection
+- **WHEN** neither primary settlement nor fallback release confirms settlement
+- **THEN** the deferred penalty and any immediately following terminal health write remain unapplied
+- **AND** the retry path does not start a second settlement for the transferred reservation
 
 #### Scenario: Shutdown drains pending settlements
 

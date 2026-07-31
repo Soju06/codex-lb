@@ -12499,12 +12499,20 @@ async def test_stream_with_retry_post_refresh_transport_failure_retries_same_acc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "replacement_outcome",
-    ["success", "model_rejection", "surface", "visible_surface", "second_transient_exhaustion"],
+    ("replacement_outcome", "settlement_confirmed"),
+    [
+        ("success", True),
+        ("model_rejection", True),
+        ("surface", True),
+        ("visible_surface", True),
+        ("second_transient_exhaustion", True),
+        ("success", False),
+    ],
 )
 async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     monkeypatch,
     replacement_outcome: str,
+    settlement_confirmed: bool,
 ):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -12526,10 +12534,12 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
         model="gpt-5.1",
     )
     release_unsettled = AsyncMock()
+    record_success = AsyncMock()
 
     async def settle_usage(
         settled_api_key: ApiKeyData | None,
         settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
         *_args: object,
         **_kwargs: object,
     ) -> bool:
@@ -12537,9 +12547,10 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
         assert settled_reservation is reservation
         expected_settlement_account = account_c if replacement_outcome == "second_transient_exhaustion" else account_b
         assert stream_account_ids[-1] == expected_settlement_account.id
+        stream_settlement.usage_settlement_transferred = True
         settlement_wait_flags.append(bool(_kwargs.get("wait_for_settlement")))
         settlement_order.append("settle")
-        return True
+        return settlement_confirmed
 
     async def record_health(
         account: Account,
@@ -12566,6 +12577,7 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
     monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
@@ -12694,20 +12706,22 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
     transient_penalties = [
         call for call in handle_stream_error.await_args_list if call.args[2] == "invalid_request_error"
     ]
-    expected_penalty_accounts = [account_a]
-    if replacement_outcome == "second_transient_exhaustion":
+    expected_penalty_accounts = [account_a] if settlement_confirmed else []
+    if settlement_confirmed and replacement_outcome == "second_transient_exhaustion":
         expected_penalty_accounts.append(account_b)
     assert [call.args[0] for call in transient_penalties] == expected_penalty_accounts
     expected_health_codes = ["invalid_request_error"] * len(expected_penalty_accounts)
-    if replacement_outcome in ("surface", "visible_surface"):
+    if settlement_confirmed and replacement_outcome in ("surface", "visible_surface"):
         expected_health_codes.append("replacement_failed")
     ordered_terminal_effects = [entry for entry in settlement_order if entry != "health:invalid_api_key"]
     assert ordered_terminal_effects == ["settle"] + [f"health:{code}" for code in expected_health_codes]
     assert settlement_wait_flags == [True]
     assert stream_reservations == [reservation] * len(expected_account_ids)
     release_unsettled.assert_not_awaited()
-    expected_record_error_calls = [mock_call(account_a, 2)]
-    if replacement_outcome == "second_transient_exhaustion":
+    if not settlement_confirmed:
+        record_success.assert_not_awaited()
+    expected_record_error_calls = [mock_call(account_a, 2)] if settlement_confirmed else []
+    if settlement_confirmed and replacement_outcome == "second_transient_exhaustion":
         expected_record_error_calls.append(mock_call(account_b, 2))
     extra_retry_calls = [call for call in record_errors.await_args_list if call.args[1] == 2]
     assert extra_retry_calls == expected_record_error_calls

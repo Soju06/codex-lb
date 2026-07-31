@@ -8,9 +8,10 @@ discards the task's `False` result, leaving the tracking callback to schedule
 fallback release later.
 
 This is a settlement-sensitive concurrency change across the shared stream
-settlement helper and the WebSocket finalizer. The design must preserve the
-ordinary detached path while giving the ordering-sensitive caller a confirmed
-outcome.
+settlement helper, the WebSocket finalizer, and the existing retry path that
+defers transient account-health penalties until settlement. The design must
+preserve the ordinary detached path while giving ordering-sensitive callers a
+confirmed outcome.
 
 ## Goals / Non-Goals
 
@@ -18,6 +19,8 @@ outcome.
 
 - Confirm primary settlement or fallback release before a WebSocket
   account-health write.
+- Apply retry-deferred account-health penalties only after the same confirmed
+  settlement outcome.
 - Prevent duplicate fallback release between the synchronous waiter and the
   detached task tracker.
 - Preserve cancellation shielding and tracked shutdown ownership.
@@ -57,6 +60,11 @@ confirmed. When neither primary settlement nor fallback release succeeds, the
 health write remains unapplied, while reconnect and retire-after-drain flags are
 still set so the failed upstream connection is not reused.
 
+The retry consumer uses the same wait mode before applying deferred transient
+penalties. A `False` result drops those pending penalties and gates any terminal
+health write that immediately follows the wait. Because the settlement helper
+has already transferred ownership, that path does not start another settlement.
+
 ### Test the real WebSocket finalizer seam
 
 The regression drives `_finalize_websocket_request_state` with a keyed,
@@ -65,11 +73,15 @@ blocks on an event, and assertions prove health remains blocked until fallback
 commit. A second outcome proves health remains unapplied when fallback also
 fails.
 
+The existing post-refresh retry regression also exercises an unconfirmed wait
+result and proves deferred penalties stay unapplied without another settlement
+attempt.
+
 ## Risks / Trade-offs
 
 - **An ordering-sensitive error path can wait on repository persistence.**
   This is the contract's deliberate exception and is limited to keyed
-  WebSocket account-health errors.
+  WebSocket account-health errors and the existing retry-deferred health path.
 - **A persistence outage can omit a legitimate account-health observation.**
   Skipping the write is safer than reversing the settlement/health order;
   reconnect and retirement still protect the active connection.

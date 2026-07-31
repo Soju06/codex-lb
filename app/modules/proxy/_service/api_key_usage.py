@@ -343,9 +343,10 @@ class _ApiKeyUsageMixin:
                 )
                 return False
 
-        # Detach unconditionally instead of shield-awaiting: the tracking
-        # callback already schedules a release when settlement fails or is
-        # cancelled, the caller's finally-net skips via
+        # Detach unconditionally instead of shield-awaiting: for ordinary
+        # callers the tracking callback schedules a release when settlement
+        # fails or is cancelled; ordering-sensitive waiters own that fallback
+        # inline. The caller's finally-net skips via
         # usage_settlement_transferred, and reservations keep counting toward
         # limits until finalized/released, so a briefly-lagging settlement can
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement

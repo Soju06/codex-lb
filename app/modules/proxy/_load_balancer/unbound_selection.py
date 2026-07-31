@@ -14,7 +14,7 @@ from app.core.balancer import (
     SelectionResult,
     TrafficClass,
 )
-from app.db.models import Account
+from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionOwner,
@@ -70,6 +70,7 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    allow_usage_exhaustion_error: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,7 @@ class UnboundSelectionOutcome(Generic[SelectionInputsT]):
     selected_lease: AccountLease | None
     error_message: str | None
     error_code: str | None
+    resets_at: int | None = None
     disposition: str = "shared_result"
 
 
@@ -105,11 +107,13 @@ async def run_unbound_selection_path(
     redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
     error_message: str | None = None
     selection_error_code: str | None = None
+    selection_resets_at: int | None = None
 
     def _direct_error(
         *,
@@ -161,6 +165,7 @@ async def run_unbound_selection_path(
                 )
             if not selection_states and states:
                 selection_error_code = _account_cap_error_code(lease_kind)
+                selection_resets_at = None
                 error_message = _account_cap_error_message(lease_kind, caps)
                 result = SelectionResult(None, error_message)
                 logger.warning(
@@ -172,6 +177,7 @@ async def run_unbound_selection_path(
                 _record_account_cap_rejection(lease_kind)
             else:
                 selection_error_code = None
+                selection_resets_at = None
                 result = _select_account_preferring_budget_safe(
                     selection_states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -184,7 +190,22 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     ignore_standard_quota=False,
                     routing_costs_by_account_id=effective_routing_costs,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                    usage_exhaustion_states=states,
                 )
+                if (
+                    result.account is None
+                    and result.error_code is None
+                    and lease_kind is not None
+                    and len(selection_states) < len(states)
+                    and any(state.status == AccountStatus.ACTIVE for state in states if state not in selection_states)
+                ):
+                    selection_error_code = _account_cap_error_code(lease_kind)
+                    result = SelectionResult(
+                        None,
+                        _account_cap_error_message(lease_kind, caps),
+                        error_code=selection_error_code,
+                    )
                 probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
                     selection_states,
                     result.account,
@@ -266,6 +287,8 @@ async def run_unbound_selection_path(
                     selected_snapshot.reset_at = selected_reset_at
             elif result.account is None:
                 error_message = result.error_message
+                selection_error_code = result.error_code or selection_error_code
+                selection_resets_at = result.resets_at or selection_resets_at
 
         if probe_reservation_invalidated:
             selected_snapshot = None
@@ -442,4 +465,5 @@ async def run_unbound_selection_path(
         selected_lease=selected_lease,
         error_message=error_message,
         error_code=selection_error_code,
+        resets_at=selection_resets_at,
     )

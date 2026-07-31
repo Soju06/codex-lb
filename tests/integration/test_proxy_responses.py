@@ -175,6 +175,104 @@ async def test_proxy_responses_no_accounts(async_client):
     assert event["response"]["error"]["code"] == "no_accounts"
 
 
+def _install_usage_limited_selection(monkeypatch, *, resets_at: int | None = 1_700_003_600) -> None:
+    async def fake_select_account(*_args, **_kwargs):
+        return proxy_module.AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 300s",
+            error_code="usage_limit_reached",
+            resets_at=resets_at,
+        )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.LoadBalancer.select_account",
+        fake_select_account,
+    )
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_pool_usage_exhaustion_returns_429(async_client, monkeypatch):
+    _install_usage_limited_selection(monkeypatch)
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+
+    response = await async_client.post("/v1/responses", json=payload)
+
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["type"] == "usage_limit_reached"
+    assert error["code"] == "usage_limit_reached"
+    assert error["resets_at"] == 1_700_003_600
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_pool_usage_exhaustion_omits_unknown_reset(async_client, monkeypatch):
+    _install_usage_limited_selection(monkeypatch, resets_at=None)
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+
+    response = await async_client.post("/v1/responses", json=payload)
+
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["type"] == "usage_limit_reached"
+    assert error["code"] == "usage_limit_reached"
+    assert "resets_at" not in error
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_pool_usage_exhaustion_returns_429(async_client, monkeypatch):
+    _install_usage_limited_selection(monkeypatch)
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+    request_id = "req_stream_usage_limited"
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-request-id": request_id},
+    )
+
+    # Codex only classifies a terminal response as usage-limited when it sees
+    # both HTTP 429 and error.type == "usage_limit_reached" (#1246).
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["type"] == "usage_limit_reached"
+    assert error["code"] == "usage_limit_reached"
+    assert error["resets_at"] == 1_700_003_600
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_mixed_unusable_pool_keeps_no_accounts_semantics(async_client, monkeypatch):
+    # Paused/deactivated/reauth-only pools must keep the pre-existing
+    # no_accounts semantics; only usage/quota exhaustion of the whole
+    # eligible pool may surface the new usage_limit_reached contract.
+    async def fake_select_account(*_args, **_kwargs):
+        return proxy_module.AccountSelection(
+            account=None,
+            error_message="All accounts are paused, deactivated, or require re-authentication",
+            error_code=None,
+        )
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.LoadBalancer.select_account",
+        fake_select_account,
+    )
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    # The synthetic failure keeps the #1479 SDK stream contract: a sequenced
+    # synthetic response.created precedes the sequenced response.failed.
+    created = _extract_first_raw_event(lines)
+    assert created["type"] == "response.created"
+    assert created["sequence_number"] == 0
+    failed = _extract_first_event(lines)
+    assert failed["type"] == "response.failed"
+    assert failed["sequence_number"] == 1
+    assert failed["response"]["error"]["code"] == "no_accounts"
+    assert failed["response"]["error"]["type"] == "server_error"
+
+
 @pytest.mark.asyncio
 async def test_backend_responses_prohibits_fast_model_alias_priority_tier(async_client, monkeypatch):
     raw_account_id = "acc_prohibit_fast_mode"

@@ -170,6 +170,8 @@ class StickySelectionOwner(Protocol):
         preserve_existing_mapping_on_fallback: bool,
         traffic_class: TrafficClass,
         ignore_standard_quota: bool,
+        allow_usage_exhaustion_error: bool = True,
+        usage_exhaustion_states: Iterable[AccountState] | None = None,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -204,6 +206,7 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    allow_usage_exhaustion_error: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +229,7 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     selected_lease: AccountLease | None
     error_message: str | None
     error_code: str | None
+    resets_at: int | None = None
     disposition: StickySelectionDisposition = "shared_result"
 
 
@@ -261,11 +265,13 @@ async def run_sticky_selection_path(
     redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
     error_message: str | None = None
     selection_error_code: str | None = None
+    selection_resets_at: int | None = None
 
     def _direct_error(
         *,
@@ -405,9 +411,11 @@ async def run_sticky_selection_path(
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
         if hard_sticky and not selection_states:
             selection_error_code = "hard_affinity_saturated"
+            selection_resets_at = None
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
         elif not selection_states and states:
             selection_error_code = _account_cap_error_code(lease_kind)
+            selection_resets_at = None
             result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
             logger.warning(
                 "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
@@ -432,17 +440,22 @@ async def run_sticky_selection_path(
                 traffic_class=traffic_class,
                 ignore_standard_quota=False,
                 routing_costs_by_account_id=effective_routing_costs,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=states,
             )
             if result.account is None:
                 selection_error_code = "hard_affinity_saturated"
+                selection_resets_at = None
                 result = SelectionResult(
                     None,
                     result.error_message or "Hard affinity owner account is unavailable",
                 )
             else:
                 selection_error_code = None
+                selection_resets_at = None
         else:
             selection_error_code = None
+            selection_resets_at = None
             try:
                 async with owner._repo_factory() as repos:
                     sticky_outcome = await owner._select_with_stickiness(
@@ -465,8 +478,25 @@ async def run_sticky_selection_path(
                         traffic_class=traffic_class,
                         ignore_standard_quota=False,
                         routing_costs_by_account_id=effective_routing_costs,
+                        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                        usage_exhaustion_states=states,
                     )
                     result = sticky_outcome.selection
+                    if (
+                        result.account is None
+                        and result.error_code is None
+                        and lease_kind is not None
+                        and len(selection_states) < len(states)
+                        and any(
+                            state.status == AccountStatus.ACTIVE for state in states if state not in selection_states
+                        )
+                    ):
+                        selection_error_code = _account_cap_error_code(lease_kind)
+                        result = SelectionResult(
+                            None,
+                            _account_cap_error_message(lease_kind, caps),
+                            error_code=selection_error_code,
+                        )
             except BaseException:
                 async with owner._runtime_lock:
                     owner._release_due_probe_reservation_locked(probe_reservation)
@@ -525,6 +555,8 @@ async def run_sticky_selection_path(
                     probe_reservation_invalidated = True
             if result.account is None:
                 error_message = result.error_message
+                selection_error_code = result.error_code or selection_error_code
+                selection_resets_at = result.resets_at or selection_resets_at
             elif probe_reservation_invalidated:
                 selected = None
             else:
@@ -856,6 +888,7 @@ async def run_sticky_selection_path(
         selected_lease=selected_lease,
         error_message=error_message,
         error_code=selection_error_code,
+        resets_at=selection_resets_at,
     )
 
 
@@ -880,6 +913,8 @@ async def _select_with_stickiness(
     preserve_existing_mapping_on_fallback: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -894,6 +929,8 @@ async def _select_with_stickiness(
                 traffic_class=traffic_class,
                 ignore_standard_quota=ignore_standard_quota,
                 routing_costs_by_account_id=routing_costs_by_account_id,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=usage_exhaustion_states,
             )
         )
     if sticky_kind is None:
@@ -1019,6 +1056,8 @@ async def _select_with_stickiness(
                         traffic_class=traffic_class,
                         ignore_standard_quota=ignore_standard_quota,
                         routing_costs_by_account_id=routing_costs_by_account_id,
+                        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                        usage_exhaustion_states=usage_exhaustion_states,
                     )
                     pool_also_exhausted = pool_best.account is not None and (
                         pool_best.account.account_id == pinned.account_id
@@ -1105,6 +1144,8 @@ async def _select_with_stickiness(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs_by_account_id=routing_costs_by_account_id,
+        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+        usage_exhaustion_states=usage_exhaustion_states,
     )
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
         return finish_selection(chosen, persist_account_id=chosen.account.account_id)
@@ -1308,6 +1349,8 @@ def _select_account_preferring_budget_safe(
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
@@ -1326,6 +1369,7 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=False,
         )
         if recovery_probe.account is not None:
             return recovery_probe
@@ -1358,6 +1402,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
 
     best_health_states = _best_health_tier_states(state_list)
@@ -1375,6 +1421,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if burn_first.account is not None:
             return burn_first
@@ -1398,6 +1446,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if preferred.account is not None:
             return preferred
@@ -1415,6 +1465,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
     return select_account(
         state_list,
@@ -1428,6 +1480,8 @@ def _select_account_preferring_budget_safe(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
+        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+        usage_exhaustion_states=usage_exhaustion_states,
     )
 
 

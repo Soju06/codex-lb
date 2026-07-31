@@ -22,6 +22,7 @@ from app.core.balancer import (
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
+    USAGE_LIMIT_REACHED,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -183,6 +184,7 @@ class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
+    resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
 
@@ -440,6 +442,7 @@ class LoadBalancer:
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         concurrency_caps: AccountConcurrencyCaps | None = None,
         redact_sensitive_details: bool = False,
+        allow_usage_exhaustion_error: bool = True,
     ) -> AccountSelection:
         if (required_account_is_ownership_constraint or required_continuity_owner) and required_account_id is None:
             raise ValueError("required account ownership flags require required_account_id")
@@ -574,6 +577,7 @@ class LoadBalancer:
         error_message: str | None = None
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
         if sticky_source == "session_header" and legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
@@ -638,6 +642,7 @@ class LoadBalancer:
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 ),
             )
             selection_inputs = unbound_outcome.selection_inputs
@@ -645,6 +650,7 @@ class LoadBalancer:
             selected_lease = unbound_outcome.selected_lease
             error_message = unbound_outcome.error_message
             selection_error_code = unbound_outcome.error_code
+            selection_resets_at = unbound_outcome.resets_at
             if unbound_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -682,6 +688,7 @@ class LoadBalancer:
                     selection_inputs=selection_inputs,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 ),
             )
             selection_inputs = sticky_outcome.selection_inputs
@@ -689,6 +696,7 @@ class LoadBalancer:
             selected_lease = sticky_outcome.selected_lease
             error_message = sticky_outcome.error_message
             selection_error_code = sticky_outcome.error_code
+            selection_resets_at = sticky_outcome.resets_at
             if sticky_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -735,7 +743,12 @@ class LoadBalancer:
                 and (selection_inputs.accounts or selection_inputs.error_code is not None)
             ):
                 set_normal()
-            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+            return AccountSelection(
+                account=None,
+                error_message=error_message,
+                error_code=selection_error_code,
+                resets_at=selection_resets_at,
+            )
         if not circuit_breaker_open:
             set_normal()
         logger.info(
@@ -1188,8 +1201,16 @@ class LoadBalancer:
             deterministic_probe=True,
             traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             ignore_standard_quota=False,
+            usage_exhaustion_states=states,
         )
         if result.account is None:
+            if result.error_code == USAGE_LIMIT_REACHED:
+                return AccountSelection(
+                    account=None,
+                    error_message=result.error_message,
+                    error_code=result.error_code,
+                    resets_at=result.resets_at,
+                )
             return AccountSelection(
                 account=None,
                 error_message=result.error_message,
@@ -1410,6 +1431,8 @@ class LoadBalancer:
         preserve_existing_mapping_on_fallback: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
+        allow_usage_exhaustion_error: bool = True,
+        usage_exhaustion_states: Iterable[AccountState] | None = None,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
             states=states,
@@ -1431,6 +1454,8 @@ class LoadBalancer:
             preserve_existing_mapping_on_fallback=preserve_existing_mapping_on_fallback,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -2267,6 +2292,7 @@ def _state_from_account(
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
     effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
     effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
+    usage_exhaustion_evidence_status = status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED)
 
     return AccountState(
         account_id=account.id,
@@ -2286,6 +2312,8 @@ def _state_from_account(
         plan_type=account.plan_type,
         capacity_credits=capacity_credits,
         health_tier=new_tier,
+        priority_used_percent=used_percent if usage_exhaustion_evidence_status else None,
+        priority_secondary_used_percent=secondary_used if usage_exhaustion_evidence_status else None,
         inflight_response_creates=runtime.inflight_response_creates,
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,

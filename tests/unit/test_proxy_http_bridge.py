@@ -8091,7 +8091,7 @@ async def test_close_http_bridge_session_bounded_timeout_keeps_close_task_runnin
         finally:
             close_finished.set()
 
-    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(http_bridge_helpers_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
 
     await service._close_http_bridge_session_bounded(session, reason="test")
@@ -8161,7 +8161,13 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
     session = _make_bridge_session(key_value="reader-owned-close")
     service._http_bridge_sessions[session.key] = session
     drain_started = asyncio.Event()
-    close = AsyncMock()
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def blocked_close(target: proxy_service._HTTPBridgeSession) -> None:
+        assert target is session
+        close_started.set()
+        await release_close.wait()
 
     original_drain = service._drain_http_bridge_background_cleanup_tasks
 
@@ -8169,7 +8175,7 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
         drain_started.set()
         await original_drain(reason=reason)
 
-    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+    monkeypatch.setattr(service, "_close_http_bridge_session", blocked_close)
     monkeypatch.setattr(service, "_drain_http_bridge_background_cleanup_tasks", observed_drain)
 
     async def reader_path() -> None:
@@ -8179,16 +8185,10 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
             detail="forced_reader_failure",
         )
 
-    await session.pending_lock.acquire()
     reader_task = asyncio.create_task(reader_path())
     shutdown_task: asyncio.Task[None] | None = None
     try:
-
-        async def wait_until_detached() -> None:
-            while session.key in service._http_bridge_sessions:
-                await asyncio.sleep(0)
-
-        await asyncio.wait_for(wait_until_detached(), timeout=1.0)
+        await asyncio.wait_for(close_started.wait(), timeout=1.0)
         assert session.key not in service._http_bridge_sessions
         assert session.upstream_reader is None
         assert any(
@@ -8200,12 +8200,10 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
 
         assert not shutdown_task.done()
     finally:
-        session.pending_lock.release()
+        release_close.set()
         await asyncio.wait_for(reader_task, timeout=1.0)
         if shutdown_task is not None:
             await asyncio.wait_for(shutdown_task, timeout=1.0)
-
-    close.assert_awaited_once_with(session)
 
 
 @pytest.mark.asyncio
@@ -8249,6 +8247,63 @@ async def test_reader_retirement_closes_previously_detached_session(
 
     assert session.upstream_close_attempted is True
     close.assert_awaited_once_with(session)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_close_and_reader_retirement_share_close_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="scheduled-reader-close-race")
+    service._http_bridge_sessions[session.key] = session
+    close = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+
+    async with service._http_bridge_lock:
+        detached = service._detach_http_bridge_session_locked(session.key, expected_session=session)
+    assert detached is session
+
+    service._schedule_http_bridge_session_closes([session], reason="scheduled_owner")
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="reader_after_scheduled_close",
+    )
+
+    for _ in range(20):
+        if not service._background_cleanup_tasks:
+            break
+        await asyncio.sleep(0)
+    close.assert_awaited_once_with(session)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_reader_retirement_bounds_stuck_pending_lock_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="reader-owned-stuck-pending")
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(http_bridge_helpers_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    await session.pending_lock.acquire()
+    try:
+        await asyncio.wait_for(
+            service._retire_stale_pending_http_bridge_session(
+                session,
+                detail="stuck_pending_lock",
+            ),
+            timeout=0.1,
+        )
+        assert service._background_cleanup_tasks
+    finally:
+        session.pending_lock.release()
+
+    for _ in range(20):
+        if not service._background_cleanup_tasks:
+            break
+        await asyncio.sleep(0)
     assert service._background_cleanup_tasks == set()
 
 

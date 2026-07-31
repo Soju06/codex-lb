@@ -70,6 +70,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
+    _claim_http_bridge_session_close,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
@@ -1412,7 +1413,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if should_reconnect:
                 session.pending_requests.clear()
-                session.upstream_close_attempted = True
+                should_reconnect = _claim_http_bridge_session_close(session)
         if not should_reconnect:
             return False
 
@@ -1428,9 +1429,7 @@ class _HTTPBridgeRequestSubmitMixin:
         session.closed = True
         if session.upstream_reader is asyncio.current_task():
             session.upstream_reader = None
-        owns_close = not session.upstream_close_attempted
-        if owns_close:
-            session.upstream_close_attempted = True
+        owns_close = _claim_http_bridge_session_close(session)
 
         async def retire_session() -> None:
             async with self._http_bridge_lock:
@@ -1438,9 +1437,6 @@ class _HTTPBridgeRequestSubmitMixin:
                     self._http_bridge_sessions.pop(session.key, None)
                     self._unregister_http_bridge_turn_states_locked(session)
                     self._unregister_http_bridge_previous_response_ids_locked(session)
-            async with session.pending_lock:
-                # Let any in-flight pending-state mutation finish before close.
-                pass
             if owns_close:
                 await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
             _log_http_bridge_event(
@@ -1448,7 +1444,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.key,
                 account_id=session.account.id,
                 model=session.request_model,
-                pending_count=await self._http_bridge_pending_count(session),
+                pending_count=self._http_bridge_pending_count_nowait(session, context="retire_stale_pending_log"),
                 detail=detail,
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,

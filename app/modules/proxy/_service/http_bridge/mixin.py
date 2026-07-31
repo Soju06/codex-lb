@@ -70,6 +70,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _await_task_deferring_cancellation,
+    _claim_http_bridge_session_close,
     _close_http_bridge_session_bounded,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
@@ -252,6 +253,8 @@ class _HTTPBridgeMixin(
         reason: str,
     ) -> None:
         for session in sessions:
+            if not _claim_http_bridge_session_close(session):
+                continue
             if len(self._background_cleanup_tasks) >= _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD:
                 logger.warning(
                     "http_bridge_background_cleanup_backlog action=session_close count=%d threshold=%d reason=%s",
@@ -1320,7 +1323,8 @@ class _HTTPBridgeMixin(
                             owns_creation = True
             try:
                 for session_to_close in sessions_to_close_before_create:
-                    await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
+                    if _claim_http_bridge_session_close(session_to_close):
+                        await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
             except BaseException as exc:
                 if owns_creation:
                     await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
@@ -1589,10 +1593,8 @@ class _HTTPBridgeMixin(
             inflight_future.set_exception(shutdown_error)
             inflight_future.exception()
         for session in sessions_to_close:
-            if session.upstream_close_attempted:
-                continue
-            session.upstream_close_attempted = True
-            await self._close_http_bridge_session(session)
+            if _claim_http_bridge_session_close(session):
+                await self._close_http_bridge_session(session)
         await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
 
     async def mark_http_bridge_draining(self) -> None:

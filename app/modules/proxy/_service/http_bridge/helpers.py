@@ -675,6 +675,13 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     )
 
 
+def _claim_http_bridge_session_close(session: "_HTTPBridgeSession") -> bool:
+    if session.upstream_close_attempted:
+        return False
+    session.upstream_close_attempted = True
+    return True
+
+
 async def _close_http_bridge_session_bounded(
     service: Any,
     session: "_HTTPBridgeSession",

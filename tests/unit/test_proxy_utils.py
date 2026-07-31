@@ -30659,6 +30659,64 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
 
 
 @pytest.mark.asyncio
+async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_double_settlement_failure")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_double_settlement_failure",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    response = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "model": "gpt-5.1",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        }
+    )
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=RuntimeError("compact finalize failed")),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(side_effect=RuntimeError("compact fail-safe release failed")),
+    )
+    service_factory = MagicMock(side_effect=[primary_service, fail_safe_service])
+    monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._settle_compact_api_key_usage(
+            api_key=api_key,
+            api_key_reservation=reservation,
+            response=response,
+            request_service_tier=None,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.failure_phase == "usage_settlement"
+    assert exc.failure_detail == "compact_api_key_usage_persistence_failed"
+    assert exc.failure_exception_type == "RuntimeError"
+    assert isinstance(exc.__cause__, RuntimeError)
+    assert str(exc.__cause__) == "compact finalize failed"
+    assert service_factory.call_count == 2
+    primary_service.finalize_usage_reservation.assert_awaited_once_with(
+        reservation.reservation_id,
+        model="gpt-5.1",
+        input_tokens=7,
+        output_tokens=3,
+        cached_input_tokens=0,
+        service_tier=None,
+    )
+    primary_service.release_usage_reservation.assert_not_awaited()
+    fail_safe_service.finalize_usage_reservation.assert_not_awaited()
+    fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_path",
     ["body_read", "request_client_error", "request_os_error"],

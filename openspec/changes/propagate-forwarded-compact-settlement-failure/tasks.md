@@ -6,6 +6,7 @@
 ## 2. Forwarded Regression
 
 - [x] 2.1 Add a signed owner-forwarded compact integration regression that injects finalization failure and verifies one upstream call, no health-error handling, the 502 error, and a `released` reservation.
+- [x] 2.2 Add a unit regression that makes finalization and fail-safe release both fail and verifies the trusted `usage_settlement_failed` error provenance.
 
 ## 3. Verification
 

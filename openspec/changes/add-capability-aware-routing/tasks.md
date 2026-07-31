@@ -25,5 +25,5 @@
   direct-WebSocket integration tests, migration checks, architecture checks,
   affected lint/format/type gates, `git diff --check`, and the repository local
   CI gate.
-- [ ] 3.2 Inspect the final committed diff, run one independent Sensitive review,
+- [x] 3.2 Inspect the final committed diff, run one independent Sensitive review,
   and resolve every actionable in-scope finding before publication.

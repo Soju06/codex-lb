@@ -61,7 +61,7 @@ def _repo_factory(repository: object) -> ProxyRepoFactory:
 
 def test_parse_routing_intent_accepts_one_authenticated_carrier() -> None:
     assert parse_routing_intent(
-        {"X-CoDeX-LB-ReQuIrEd-CaPaBiLiTy": " trusted_cyber "},
+        {"X-CoDeX-LB-ReQuIrEd-CaPaBiLiTy": "trusted_cyber"},
         api_key=_api_key(),
     ) == RoutingIntent.requiring(RoutingCapability.TRUSTED_CYBER)
     assert parse_routing_intent(
@@ -95,7 +95,10 @@ def test_parse_routing_intent_rejects_duplicate_raw_header_values() -> None:
     assert _error_code(exc_info.value) == UNSUPPORTED_REQUIRED_CAPABILITY_CODE
 
 
-@pytest.mark.parametrize("value", ["other", "TRUSTED_CYBER", True, ["trusted_cyber"]])
+@pytest.mark.parametrize(
+    "value",
+    ["other", "TRUSTED_CYBER", " trusted_cyber ", True, ["trusted_cyber"]],
+)
 def test_parse_routing_intent_rejects_unknown_or_malformed_values(value: JsonValue) -> None:
     with pytest.raises(ProxyResponseError) as exc_info:
         parse_routing_intent(

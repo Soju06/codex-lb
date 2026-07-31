@@ -10695,8 +10695,8 @@ def test_backend_responses_websocket_trusted_capability_empty_pool_fails_closed_
         selection_requirements.append(bool(kwargs["require_security_work_authorized"]))
         return proxy_module.AccountSelection(
             account=None,
-            error_message="No accounts marked as authorized for security work",
-            error_code="no_security_work_authorized_accounts",
+            error_message="No available accounts. Service is operating in degraded mode",
+            error_code=None,
         )
 
     async def reject_upstream_open(*_args, **_kwargs):
@@ -10892,13 +10892,13 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
 
 @pytest.mark.parametrize("websocket_path", ["/backend-api/codex/responses", "/v1/responses"])
 @pytest.mark.parametrize(
-    "duplicate_kind",
-    ["header_and_metadata", "raw_headers", "raw_metadata_containers", "raw_metadata_keys"],
+    "invalid_carrier_kind",
+    ["header_and_metadata", "raw_headers", "raw_metadata_containers", "raw_metadata_keys", "top_level"],
 )
-def test_direct_responses_websocket_duplicate_capability_carriers_fail_before_selection(
+def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_fail_before_selection(
     app_instance,
     monkeypatch,
-    duplicate_kind,
+    invalid_carrier_kind,
     websocket_path,
 ):
     api_key = _capability_test_api_key("key_ws_capability_duplicate")
@@ -10922,6 +10922,11 @@ def test_direct_responses_websocket_duplicate_capability_carriers_fail_before_se
         assert current_api_key == api_key
         return current_api_key
 
+    async def bypass_api_key_usage_reservation(self, current_api_key, **_kwargs):
+        del self, _kwargs
+        assert current_api_key == api_key
+        return None
+
     async def reject_selection(*_args, **_kwargs):
         nonlocal selection_attempted
         selection_attempted = True
@@ -10942,6 +10947,11 @@ def test_direct_responses_websocket_duplicate_capability_carriers_fail_before_se
     )
     monkeypatch.setattr(
         proxy_module.ProxyService,
+        "_reserve_websocket_api_key_usage",
+        bypass_api_key_usage_reservation,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
         "_select_websocket_connect_account",
         reject_selection,
     )
@@ -10954,14 +10964,14 @@ def test_direct_responses_websocket_duplicate_capability_carriers_fail_before_se
     response_create = _websocket_response_create("security task")
     websocket_headers: dict[str, str] | Headers
     request_text = json.dumps(response_create, separators=(",", ":"))
-    if duplicate_kind == "header_and_metadata":
+    if invalid_carrier_kind == "header_and_metadata":
         response_create["client_metadata"] = {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
         request_text = json.dumps(response_create, separators=(",", ":"))
         websocket_headers = {
             "Authorization": "Bearer capability-duplicate",
             REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
         }
-    elif duplicate_kind == "raw_headers":
+    elif invalid_carrier_kind == "raw_headers":
         websocket_headers = Headers(
             [
                 ("Authorization", "Bearer capability-duplicate"),
@@ -10975,13 +10985,16 @@ def test_direct_responses_websocket_duplicate_capability_carriers_fail_before_se
             {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
             separators=(",", ":"),
         )
-        if duplicate_kind == "raw_metadata_containers":
+        if invalid_carrier_kind == "raw_metadata_containers":
             request_text = request_text[:-1] + ',"client_metadata":' + marker_json + ',"client_metadata":{}}'
-        else:
+        elif invalid_carrier_kind == "raw_metadata_keys":
             capability_key = json.dumps(REQUIRED_CAPABILITY_HEADER)
             lowercase_key = json.dumps(REQUIRED_CAPABILITY_HEADER.lower())
             metadata_json = "{" + capability_key + ':"trusted_cyber",' + lowercase_key + ':"trusted_cyber"}'
             request_text = request_text[:-1] + ',"client_metadata":' + metadata_json + "}"
+        else:
+            response_create[REQUIRED_CAPABILITY_HEADER] = "trusted_cyber"
+            request_text = json.dumps(response_create, separators=(",", ":"))
 
     with TestClient(app_instance) as client:
         with client.websocket_connect(

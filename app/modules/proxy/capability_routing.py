@@ -169,7 +169,7 @@ def parse_routing_intent(
     if not isinstance(raw_capability, str):
         raise _unsupported_capability_error()
     try:
-        capability = RoutingCapability(raw_capability.strip())
+        capability = RoutingCapability(raw_capability)
     except ValueError as exc:
         raise _unsupported_capability_error() from exc
     return RoutingIntent.requiring(capability)

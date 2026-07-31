@@ -1714,11 +1714,18 @@ def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
 
 
 def _websocket_capability_metadata_values(payload: dict[str, JsonValue]) -> tuple[JsonValue, ...] | None:
+    normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
+    payload_pairs = payload.raw_pairs if isinstance(payload, _WebSocketJsonObject) else tuple(payload.items())
+    misplaced_values = [value for key, value in payload_pairs if key.lower() == normalized_name]
+    if misplaced_values:
+        # The reserved per-frame carrier is valid only inside
+        # ``client_metadata``. Surface a deliberately ambiguous carrier set so
+        # the shared parser rejects any top-level placement before selection.
+        return (misplaced_values[0], misplaced_values[0])
     if not isinstance(payload, _WebSocketJsonObject):
         return None
     metadata_objects = [value for key, value in payload.raw_pairs if key == "client_metadata"]
     values: list[JsonValue] = []
-    normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
     for metadata in metadata_objects:
         if not isinstance(metadata, _WebSocketJsonObject):
             continue

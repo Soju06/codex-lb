@@ -2603,7 +2603,17 @@ class _WebSocketMixin:
         if account:
             request_state.websocket_stream_lease = selection.lease
             return account
-        if defer_no_account_error and not _facade()._is_local_account_cap_code(selection.error_code):
+        durable_capability_pool_missing = bool(
+            require_security_work_authorized
+            and request_state.durable_capability_lineage_required
+            and not require_preferred_account
+            and not _facade()._is_local_account_cap_code(selection.error_code)
+        )
+        if (
+            defer_no_account_error
+            and not durable_capability_pool_missing
+            and not _facade()._is_local_account_cap_code(selection.error_code)
+        ):
             _facade().logger.warning(
                 "Websocket account selection deferred no-account error request_id=%s model=%s "
                 "preferred_account_id=%s require_preferred=%s error_code=%s error=%s excluded_count=%s",
@@ -2618,7 +2628,9 @@ class _WebSocketMixin:
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE:
+        if durable_capability_pool_missing or (
+            require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+        ):
             await proxy._emit_websocket_security_work_missing_pool(
                 websocket,
                 client_send_lock=client_send_lock,

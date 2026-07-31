@@ -79,6 +79,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.websocket import helpers as websocket_helpers_module
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
+from app.modules.proxy.capability_lineage_repository import CapabilityLineageRepository
 from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
 from app.modules.proxy.load_balancer import (
     AccountLease,
@@ -189,6 +190,38 @@ async def test_stream_selector_compatibility_drops_unsupported_continuity_owner_
 
     assert result.error_message == "unavailable"
     assert calls == [(42.0, "acc-owner")]
+
+
+@pytest.mark.asyncio
+async def test_budget_compatibility_requires_security_flag_support() -> None:
+    calls: list[float] = []
+
+    async def narrow_selector(deadline: float) -> AccountSelection:
+        calls.append(deadline)
+        return AccountSelection(account=None, error_message="unavailable")
+
+    service = cast(
+        proxy_service.ProxyService,
+        SimpleNamespace(_select_account_with_budget=narrow_selector),
+    )
+
+    ordinary_result = await proxy_service.ProxyService._select_account_with_budget_compatible(
+        service,
+        41.0,
+        require_security_work_authorized=False,
+    )
+
+    assert ordinary_result.error_message == "unavailable"
+    assert calls == [41.0]
+
+    with pytest.raises(TypeError, match="require_security_work_authorized"):
+        await proxy_service.ProxyService._select_account_with_budget_compatible(
+            service,
+            42.0,
+            require_security_work_authorized=True,
+        )
+
+    assert calls == [41.0]
 
 
 @pytest.mark.asyncio
@@ -1289,6 +1322,18 @@ def test_filter_inbound_headers_strips_internal_responses_lite_header():
     assert "x-openai-internal-codex-responses-lite" not in lowered
     assert filtered["x-openai-client-version"] == "2.24.0"
     assert filtered["User-Agent"] == "codex-test"
+
+
+def test_filter_inbound_headers_strips_internal_capability_header():
+    filtered = filter_inbound_headers(
+        {
+            "X-Codex-LB-Required-Capability": "trusted_cyber",
+            "X-Custom": "preserved",
+        }
+    )
+
+    assert "X-Codex-LB-Required-Capability" not in filtered
+    assert filtered["X-Custom"] == "preserved"
 
 
 def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
@@ -4462,6 +4507,9 @@ class _RequestLogsRecorder:
 
 class _RepoContext:
     def __init__(self, request_logs: _RequestLogsRecorder) -> None:
+        capability_lineage = AsyncMock(spec=CapabilityLineageRepository)
+        capability_lineage.is_required.return_value = False
+        capability_lineage.require.return_value = ("test-marker",)
         self._repos = ProxyRepositories(
             accounts=cast(AccountsRepository, AsyncMock()),
             usage=cast(UsageRepository, AsyncMock()),
@@ -4469,6 +4517,7 @@ class _RepoContext:
             sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
             api_keys=cast(ApiKeysRepository, AsyncMock()),
             additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            capability_lineage=capability_lineage,
         )
 
     async def __aenter__(self) -> ProxyRepositories:

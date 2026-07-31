@@ -703,6 +703,7 @@ from app.modules.proxy.affinity import (
 from app.modules.proxy.affinity import (
     _sticky_key_for_responses_request as _sticky_key_for_responses_request,
 )
+from app.modules.proxy.capability_routing import CapabilityRouter
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -934,6 +935,7 @@ class ProxyService(
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        self._capability_router = CapabilityRouter(repo_factory)
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
@@ -1407,10 +1409,16 @@ class ProxyService(
                 require_unambiguous_account=affinity_policy.require_unambiguous_account,
                 sticky_max_age_seconds=affinity_policy.max_age_seconds,
             )
+        required_capability_kwargs = {}
+        if kwargs.get("require_security_work_authorized") is True:
+            required_capability_kwargs["require_security_work_authorized"] = kwargs.pop(
+                "require_security_work_authorized"
+            )
         return await _call_with_supported_optional_kwargs(
             self._select_account_with_budget,
             deadline,
             optional_kwargs=kwargs,
+            **required_capability_kwargs,
         )
 
     @asynccontextmanager

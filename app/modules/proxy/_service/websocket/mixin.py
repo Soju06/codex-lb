@@ -401,6 +401,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
     _websocket_auth_failure_requires_reauth,
+    _websocket_capability_metadata_values,
     _websocket_client_previous_response_full_resend_is_retry_safe,
     _websocket_connect_deadline,
     _websocket_continuity_anchor_for_payload,
@@ -433,6 +434,17 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.capability_routing import (
+    CAPABILITY_ROUTING_UNAVAILABLE_CODE,
+    CAPABILITY_ROUTING_UNAVAILABLE_MESSAGE,
+    RoutingCapability,
+    RoutingIntent,
+    _capability_lineage_unavailable_error,
+    capability_lineage_aliases,
+    parse_routing_intent,
+    reject_capability_signal_outside_response_create,
+    strip_capability_metadata,
+)
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
@@ -475,10 +487,21 @@ def _facade() -> Any:
 logger = logging.getLogger(__name__)
 
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
+_CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
+    "This request requires Trusted Access for Cyber, but no eligible account is marked as "
+    "security-work-authorized. codex-lb did not fall back to an ordinary account."
+)
+_CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_routing"
 
 
 class _WebSocketReplaySequenceRegression(Exception):
     pass
+
+
+class _CapabilityLineagePropagationError(Exception):
+    def __init__(self, error: ProxyResponseError) -> None:
+        super().__init__("Capability lineage propagation failed")
+        self.error = error
 
 
 def _log_websocket_persist_conflict(context: str, exc: RefreshError, account_id: str) -> None:
@@ -523,6 +546,40 @@ async def _reject_websocket_owner_switch_blocked(
         client_send_lock=client_send_lock,
         request_state=request_state,
         error_code="previous_response_owner_unavailable",
+        error_message=error_message,
+        downstream_activity=downstream_activity,
+    )
+    await _release_websocket_response_create_gate(request_state, response_create_gate)
+
+
+async def _reject_websocket_capability_switch_blocked(
+    proxy: Any,
+    websocket: WebSocket,
+    *,
+    client_send_lock: anyio.Lock,
+    request_state: _WebSocketRequestState,
+    account: Account,
+    api_key: ApiKeyData | None,
+    response_create_gate: asyncio.Semaphore,
+    downstream_activity: _DownstreamWebSocketActivity,
+) -> None:
+    error_message = (
+        "Required capability cannot switch accounts while another response is still streaming; "
+        "retry after the terminal frame."
+    )
+    await proxy._release_websocket_request_state_reservation(request_state)
+    await proxy._write_websocket_connect_failure(
+        account_id=account.id,
+        api_key=api_key,
+        request_state=request_state,
+        error_code="continuity_owner_conflict",
+        error_message=error_message,
+    )
+    await proxy._emit_websocket_terminal_error(
+        websocket,
+        client_send_lock=client_send_lock,
+        request_state=request_state,
+        error_code="continuity_owner_conflict",
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
@@ -748,6 +805,7 @@ class _WebSocketMixin:
         api_key: ApiKeyData | None,
         client_ip: str | None = None,
         synthesized_turn_state: str | None = None,
+        capability_header_values: tuple[str, ...] | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -775,6 +833,7 @@ class _WebSocketMixin:
         )
         account: Account | None = None
         account_lease: AccountLease | None = None
+        upstream_requires_security_work_authorized: bool | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
         client_turn_state_header: str | None = _sticky_key_from_turn_state_header(filtered_headers)
         upstream_account_id: str | None = None
@@ -788,6 +847,7 @@ class _WebSocketMixin:
 
         async def retire_current_upstream() -> None:
             nonlocal account, upstream, upstream_control, upstream_reader
+            nonlocal upstream_requires_security_work_authorized
             if upstream_control is not None:
                 upstream_control.reconnect_requested = True
             if upstream_reader is not None:
@@ -805,6 +865,7 @@ class _WebSocketMixin:
             upstream = None
             await release_current_account_lease()
             account = None
+            upstream_requires_security_work_authorized = None
 
         try:
             while True:
@@ -934,9 +995,26 @@ class _WebSocketMixin:
                     text_data = message.get("text")
                     bytes_data = message.get("bytes")
 
+                    if bytes_data is not None:
+                        async with client_send_lock:
+                            await websocket.send_text(
+                                _serialize_websocket_error_event(
+                                    _wrapped_websocket_error_event(400, openai_invalid_payload_error())
+                                )
+                            )
+                        continue
+
                     if text_data is not None:
                         payload = _parse_websocket_payload(text_data)
-                        if payload is not None and _is_websocket_response_create(payload):
+                        if payload is None:
+                            async with client_send_lock:
+                                await websocket.send_text(
+                                    _serialize_websocket_error_event(
+                                        _wrapped_websocket_error_event(400, openai_invalid_payload_error())
+                                    )
+                                )
+                            continue
+                        if _is_websocket_response_create(payload):
                             try:
                                 prepared_request = await proxy._prepare_websocket_response_create_request(
                                     payload,
@@ -953,6 +1031,7 @@ class _WebSocketMixin:
                                     conversation_id=conversation_id,
                                     client_ip=client_ip,
                                     synthesized_turn_state=synthesized_turn_state,
+                                    capability_header_values=capability_header_values,
                                 )
                                 if await _websocket_full_replay_should_wait_for_continuity(
                                     prepared_request.request_state,
@@ -991,6 +1070,7 @@ class _WebSocketMixin:
                                         conversation_id=conversation_id,
                                         client_ip=client_ip,
                                         synthesized_turn_state=synthesized_turn_state,
+                                        capability_header_values=capability_header_values,
                                     )
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
@@ -1040,6 +1120,21 @@ class _WebSocketMixin:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
                                             _wrapped_websocket_error_event(400, openai_validation_error(exc))
+                                        )
+                                    )
+                                continue
+                        elif payload is not None:
+                            try:
+                                reject_capability_signal_outside_response_create(
+                                    api_key=api_key,
+                                    client_metadata=payload.get("client_metadata"),
+                                    client_metadata_values=_websocket_capability_metadata_values(payload),
+                                )
+                            except ProxyResponseError as exc:
+                                async with client_send_lock:
+                                    await websocket.send_text(
+                                        _serialize_websocket_error_event(
+                                            _wrapped_websocket_error_event(exc.status_code, exc.payload)
                                         )
                                     )
                                 continue
@@ -1179,6 +1274,117 @@ class _WebSocketMixin:
                     request_state is not None
                     and upstream is not None
                     and account is not None
+                    and request_state.require_security_work_authorized
+                ):
+                    capability_account_reusable = False
+                    if upstream_requires_security_work_authorized:
+                        try:
+                            (
+                                revalidated_account,
+                                _error_code,
+                                _error_message,
+                            ) = await proxy._revalidate_open_websocket_account(
+                                account,
+                                request_state=request_state,
+                                api_key=request_state.api_key or api_key,
+                            )
+                        except ProxyResponseError as exc:
+                            error = _parse_openai_error(exc.payload)
+                            error_code = _normalize_error_code(
+                                error.code if error else None,
+                                error.type if error else None,
+                            )
+                            error_message = error.message if error and error.message else "Upstream error"
+                            await proxy._release_websocket_request_state_reservation(request_state)
+                            await proxy._write_websocket_connect_failure(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_state=request_state,
+                                error_code=error_code or "upstream_error",
+                                error_message=error_message,
+                            )
+                            await proxy._emit_websocket_terminal_error(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                request_state=request_state,
+                                error_code=error_code or "upstream_error",
+                                error_message=error_message,
+                                error_type=error.type if error and error.type else "server_error",
+                                error_param=error.param if error else None,
+                                downstream_activity=downstream_activity,
+                            )
+                            request_state = None
+                            text_data = None
+                            payload = None
+                            continue
+                        except BaseException as exc:
+                            await proxy._release_websocket_request_state_reservation(request_state)
+                            if not isinstance(exc, Exception):
+                                raise
+                            _facade().logger.exception(
+                                "Capability account revalidation failed request_id=%s account_id=%s",
+                                request_state.request_log_id or request_state.request_id,
+                                account.id,
+                            )
+                            await proxy._write_websocket_connect_failure(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_state=request_state,
+                                error_code=CAPABILITY_ROUTING_UNAVAILABLE_CODE,
+                                error_message=CAPABILITY_ROUTING_UNAVAILABLE_MESSAGE,
+                            )
+                            await proxy._emit_websocket_terminal_error(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                request_state=request_state,
+                                error_code=CAPABILITY_ROUTING_UNAVAILABLE_CODE,
+                                error_message=CAPABILITY_ROUTING_UNAVAILABLE_MESSAGE,
+                                error_type="server_error",
+                                downstream_activity=downstream_activity,
+                            )
+                            request_state = None
+                            text_data = None
+                            payload = None
+                            continue
+                        if revalidated_account is not None:
+                            account = revalidated_account
+                            capability_account_reusable = True
+
+                    if not capability_account_reusable:
+                        async with pending_lock:
+                            capability_switch_blocked = any(
+                                pending_request is not request_state for pending_request in pending_requests
+                            )
+                            if capability_switch_blocked and request_state in pending_requests:
+                                pending_requests.remove(request_state)
+                        if capability_switch_blocked:
+                            await _reject_websocket_capability_switch_blocked(
+                                proxy,
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                request_state=request_state,
+                                account=account,
+                                api_key=api_key,
+                                response_create_gate=response_create_gate,
+                                downstream_activity=downstream_activity,
+                            )
+                            request_state = None
+                            text_data = None
+                            payload = None
+                            continue
+                        await retire_current_upstream()
+                        upstream_turn_state = None
+                        if synthesized_turn_state is not None:
+                            filtered_headers = {
+                                key: value
+                                for key, value in filtered_headers.items()
+                                if key.lower() != "x-codex-turn-state"
+                            }
+
+                if (
+                    request_state is not None
+                    and upstream is not None
+                    and account is not None
                     and request_state.affinity_policy.require_unambiguous_account
                 ):
                     # Socket reuse bypasses connect-time selection. Re-run the
@@ -1193,6 +1399,7 @@ class _WebSocketMixin:
                         affinity_policy=request_state.affinity_policy,
                         model=request_state.model,
                         preferred_account_id=account.id,
+                        require_security_work_authorized=request_state.require_security_work_authorized,
                         fallback_on_preferred_account_unavailable=False,
                     )
                     if ownership_selection.account is None:
@@ -1321,14 +1528,6 @@ class _WebSocketMixin:
                             }
 
                 if upstream is None:
-                    if text_data is not None and payload is None:
-                        async with client_send_lock:
-                            await websocket.send_text(
-                                _serialize_websocket_error_event(
-                                    _wrapped_websocket_error_event(400, openai_invalid_payload_error())
-                                )
-                            )
-                        continue
                     if request_state is None:
                         async with client_send_lock:
                             await websocket.send_text(
@@ -1402,6 +1601,7 @@ class _WebSocketMixin:
                         # owner when a transparent replay reconnects.
                         upstream_turn_state = None
                     upstream_account_id = account.id
+                    upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
                     upstream_reader = asyncio.create_task(
@@ -1471,10 +1671,6 @@ class _WebSocketMixin:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
-                    elif bytes_data is not None:
-                        archive_request_id = None if request_state is None else request_state.archive_request_id
-                        with _websocket_archive_request_context(archive_request_id):
-                            await upstream.send_bytes(bytes_data)
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -1659,10 +1855,19 @@ class _WebSocketMixin:
         conversation_id: str | None = None,
         client_ip: str | None = None,
         synthesized_turn_state: str | None = None,
+        capability_header_values: tuple[str, ...] | None = None,
     ) -> _PreparedWebSocketRequest:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         refreshed_api_key = await proxy._refresh_websocket_api_key_policy(api_key)
+        raw_client_metadata = payload.get("client_metadata")
+        capability_intent = parse_routing_intent(
+            headers,
+            api_key=refreshed_api_key,
+            client_metadata=raw_client_metadata,
+            header_values=capability_header_values,
+            client_metadata_values=_websocket_capability_metadata_values(payload),
+        )
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_cache_affinity,
@@ -1677,6 +1882,10 @@ class _WebSocketMixin:
             service_tier_was_enforced=service_tier_was_enforced,
         )
         normalized_payload = responses_payload.to_payload()
+        stripped_client_metadata = strip_capability_metadata(normalized_payload.get("client_metadata"))
+        if stripped_client_metadata is not normalized_payload.get("client_metadata"):
+            responses_payload = responses_payload.model_copy(update={"client_metadata": stripped_client_metadata})
+            normalized_payload = responses_payload.to_payload()
         body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)
         trusted_incremental_responses_lite = bool(
             not body_uses_responses_lite
@@ -1785,6 +1994,21 @@ class _WebSocketMixin:
                     responses_payload.previous_response_id,
                     len(missing_call_ids),
                 )
+        session_id = _owner_lookup_session_id_from_headers(
+            headers,
+            synthesized_turn_state=synthesized_turn_state,
+        )
+        capability_route = await proxy._capability_router.route(
+            capability_intent,
+            api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,
+            aliases=capability_lineage_aliases(
+                headers,
+                session_id=_sticky_key_from_session_header(headers),
+                turn_state=_sticky_key_from_turn_state_header(headers) or synthesized_turn_state,
+                previous_response_ids=(responses_payload.previous_response_id,),
+                client_metadata=client_metadata,
+            ),
+        )
         reservation = await proxy._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -1794,7 +2018,6 @@ class _WebSocketMixin:
             request_usage_budget=estimate_api_key_request_usage(responses_payload),
         )
         try:
-            session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
             request_state, text_data = proxy._prepare_response_bridge_request_state(
                 responses_payload,
                 api_key=refreshed_api_key,
@@ -1815,6 +2038,8 @@ class _WebSocketMixin:
         request_state.client_ip = client_ip
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
+        request_state.require_security_work_authorized = capability_route.require_security_work_authorized
+        request_state.durable_capability_lineage_required = capability_route.require_security_work_authorized
         original_full_resend_input: JsonValue | None = None
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
@@ -2485,14 +2710,35 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        if request_state.durable_capability_lineage_required:
+            _clear_websocket_precreated_replay_fallback(request_state)
+            error_code = _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+            error_message = _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE
+            error_type = "server_error"
+            status_code = 503
+            advisory_message = _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE
+            advisory_action = _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION
+        else:
+            error_code = request_state.error_code_override or _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+            error_message = (
+                request_state.error_message_override or _facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE
+            )
+            error_type = request_state.error_type_override or (
+                "invalid_request_error" if request_state.error_code_override is not None else "server_error"
+            )
+            status_code = request_state.error_http_status_override or (
+                400 if request_state.error_code_override is not None else 503
+            )
+            advisory_message = _facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE
+            advisory_action = "forward_original_security_work_error"
         async with client_send_lock:
             await websocket.send_text(
                 json.dumps(
                     _facade()._security_work_advisory_event(
                         code=_facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
-                        message=_facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                        message=advisory_message,
                         request_id=request_state.request_log_id or request_state.request_id,
-                        action="forward_original_security_work_error",
+                        action=advisory_action,
                     ),
                     ensure_ascii=True,
                     separators=(",", ":"),
@@ -2504,14 +2750,14 @@ class _WebSocketMixin:
             account_id=account_id,
             api_key=api_key,
             request_state=request_state,
-            status_code=400,
+            status_code=status_code,
             payload=openai_error(
-                request_state.error_code_override or _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
-                request_state.error_message_override or "Security work authorization is required",
-                error_type=request_state.error_type_override or "invalid_request_error",
+                error_code,
+                error_message,
+                error_type=error_type,
             ),
-            error_code=request_state.error_code_override or _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
-            error_message=request_state.error_message_override or "Security work authorization is required",
+            error_code=error_code,
+            error_message=error_message,
         )
 
     async def _try_open_websocket_connect_attempt(
@@ -3532,6 +3778,35 @@ class _WebSocketMixin:
                 break
         except asyncio.CancelledError:
             raise
+        except _CapabilityLineagePropagationError as exc:
+            error = _parse_openai_error(exc.error.payload)
+            error_code = _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            error_message = error.message if error and error.message else "Required capability lineage is unavailable"
+            await proxy._fail_pending_websocket_requests(
+                account=account,
+                account_id_value=account_id_value,
+                pending_requests=pending_requests,
+                pending_lock=pending_lock,
+                error_code=error_code or "capability_lineage_unavailable",
+                error_message=error_message,
+                api_key=api_key,
+                websocket=websocket,
+                client_send_lock=client_send_lock,
+                response_create_gate=response_create_gate,
+                downstream_activity=downstream_activity,
+                penalize_account=False,
+            )
+            upstream_control.reconnect_requested = True
+            try:
+                await upstream.close()
+            except Exception:
+                _facade().logger.debug(
+                    "Failed to retire upstream websocket after capability lineage propagation failure",
+                    exc_info=True,
+                )
         except _WebSocketReplaySequenceRegression as exc:
             _facade().logger.warning(
                 "Refusing websocket replay after non-advancing sequence account_id=%s detail=%s",
@@ -3655,11 +3930,6 @@ class _WebSocketMixin:
                 request_state = _assign_websocket_response_id(pending_requests, response_id)
                 created_request_state = request_state
                 release_create_gate = request_state is not None
-                if request_state is not None and continuity_state is not None:
-                    _record_websocket_responses_lite_acceptance(
-                        continuity_state,
-                        request_state=request_state,
-                    )
             elif response_id is not None:
                 request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
                 release_create_gate = False
@@ -3812,6 +4082,38 @@ class _WebSocketMixin:
                 has_other_pending_requests = bool(pending_requests)
             else:
                 request_state = None
+
+        if (
+            event_type == "response.created"
+            and response_id is not None
+            and created_request_state is not None
+            and created_request_state.durable_capability_lineage_required
+        ):
+            capability_api_key = created_request_state.api_key
+            try:
+                if capability_api_key is None:
+                    raise _capability_lineage_unavailable_error()
+                await proxy._capability_router.route(
+                    RoutingIntent.requiring(RoutingCapability.TRUSTED_CYBER),
+                    api_key_id=capability_api_key.id,
+                    aliases=capability_lineage_aliases(
+                        {},
+                        previous_response_ids=_websocket_continuity_response_ids(
+                            created_request_state,
+                            response_id,
+                        ),
+                    ),
+                )
+            except ProxyResponseError as exc:
+                async with pending_lock:
+                    created_request_state.response_id = None
+                raise _CapabilityLineagePropagationError(exc) from exc
+
+        if event_type == "response.created" and created_request_state is not None and continuity_state is not None:
+            _record_websocket_responses_lite_acceptance(
+                continuity_state,
+                request_state=created_request_state,
+            )
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, response_create_gate)

@@ -719,6 +719,23 @@ class StickySession(Base):
     )
 
 
+class CapabilityLineageMarker(Base):
+    __tablename__ = "capability_lineage_markers"
+
+    marker_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class DashboardSettings(Base):
     __tablename__ = "dashboard_settings"
 

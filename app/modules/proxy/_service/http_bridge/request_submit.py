@@ -1426,27 +1426,45 @@ class _HTTPBridgeRequestSubmitMixin:
         detail: str,
     ) -> None:
         session.closed = True
-        async with self._http_bridge_lock:
-            if self._http_bridge_sessions.get(session.key) is session:
-                self._http_bridge_sessions.pop(session.key, None)
-                self._unregister_http_bridge_turn_states_locked(session)
-                self._unregister_http_bridge_previous_response_ids_locked(session)
-        async with session.pending_lock:
-            should_close = not session.upstream_close_attempted
+        if session.upstream_reader is asyncio.current_task():
+            session.upstream_reader = None
+
+        async def retire_session() -> None:
+            async with self._http_bridge_lock:
+                if self._http_bridge_sessions.get(session.key) is session:
+                    self._http_bridge_sessions.pop(session.key, None)
+                    self._unregister_http_bridge_turn_states_locked(session)
+                    self._unregister_http_bridge_previous_response_ids_locked(session)
+            async with session.pending_lock:
+                should_close = not session.upstream_close_attempted
+                if should_close:
+                    session.upstream_close_attempted = True
             if should_close:
-                session.upstream_close_attempted = True
-        if should_close:
-            await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
-        _log_http_bridge_event(
-            "retire_stale_pending",
-            session.key,
-            account_id=session.account.id,
-            model=session.request_model,
-            pending_count=await self._http_bridge_pending_count(session),
-            detail=detail,
-            cache_key_family=session.key.affinity_kind,
-            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
+            _log_http_bridge_event(
+                "retire_stale_pending",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                pending_count=await self._http_bridge_pending_count(session),
+                detail=detail,
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+
+        retire_task = asyncio.create_task(
+            retire_session(),
+            name=f"http-bridge-close-retire-{_hash_identifier(session.key.affinity_key)}",
         )
+        self._background_cleanup_tasks.add(retire_task)
+
+        def untrack_retirement(done_task: asyncio.Task[None]) -> None:
+            self._background_cleanup_tasks.discard(done_task)
+
+        retire_task.add_done_callback(untrack_retirement)
+        _, cancellation = await _await_task_deferring_cancellation(retire_task)
+        if cancellation is not None:
+            raise cancellation
 
     async def _retry_http_bridge_request_on_fresh_upstream(
         self: Any,

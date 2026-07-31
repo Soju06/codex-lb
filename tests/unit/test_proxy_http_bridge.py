@@ -8160,14 +8160,8 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="reader-owned-close")
     service._http_bridge_sessions[session.key] = session
-    close_started = asyncio.Event()
-    release_close = asyncio.Event()
     drain_started = asyncio.Event()
-
-    async def blocked_close(target: proxy_service._HTTPBridgeSession) -> None:
-        assert target is session
-        close_started.set()
-        await release_close.wait()
+    close = AsyncMock()
 
     original_drain = service._drain_http_bridge_background_cleanup_tasks
 
@@ -8175,7 +8169,7 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
         drain_started.set()
         await original_drain(reason=reason)
 
-    monkeypatch.setattr(service, "_close_http_bridge_session", blocked_close)
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
     monkeypatch.setattr(service, "_drain_http_bridge_background_cleanup_tasks", observed_drain)
 
     async def reader_path() -> None:
@@ -8185,22 +8179,33 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
             detail="forced_reader_failure",
         )
 
+    await session.pending_lock.acquire()
     reader_task = asyncio.create_task(reader_path())
     shutdown_task: asyncio.Task[None] | None = None
     try:
-        await asyncio.wait_for(close_started.wait(), timeout=1.0)
+
+        async def wait_until_detached() -> None:
+            while session.key in service._http_bridge_sessions:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_until_detached(), timeout=1.0)
         assert session.key not in service._http_bridge_sessions
         assert session.upstream_reader is None
+        assert any(
+            task.get_name().startswith("http-bridge-close-retire-") for task in service._background_cleanup_tasks
+        )
 
         shutdown_task = asyncio.create_task(service.close_all_http_bridge_sessions())
         await asyncio.wait_for(drain_started.wait(), timeout=1.0)
 
         assert not shutdown_task.done()
     finally:
-        release_close.set()
+        session.pending_lock.release()
         await asyncio.wait_for(reader_task, timeout=1.0)
         if shutdown_task is not None:
             await asyncio.wait_for(shutdown_task, timeout=1.0)
+
+    close.assert_awaited_once_with(session)
 
 
 @pytest.mark.asyncio

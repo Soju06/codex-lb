@@ -1200,18 +1200,11 @@ def decide_pr(
     if trigger_codex_review:
         reason_parts.append("current-head CI is green and no Codex news exists after head")
 
-    approve_workflow_run_ids: tuple[int, ...] = ()
-    if (
-        review_state == "clean"
-        and not unresolved_finding_urls
-        and merge_state not in UNMERGEABLE_STATES | {"CONFLICTING"}
-        and merge_state != "UNKNOWN"
-    ):
-        approve_workflow_run_ids = workflow_runs_requiring_approval(repo, head_sha)
-        if approve_workflow_run_ids:
-            reason_parts.append(
-                "workflow runs need approval: " + ",".join(str(run_id) for run_id in approve_workflow_run_ids)
-            )
+    approve_workflow_run_ids = workflow_runs_requiring_approval(repo, head_sha)
+    if approve_workflow_run_ids:
+        reason_parts.append(
+            "workflow runs need approval: " + ",".join(str(run_id) for run_id in approve_workflow_run_ids)
+        )
 
     if wants_ok_label and not has_ok_label:
         ok_action = "add"
@@ -1396,10 +1389,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-approve-workflow-runs",
         action="store_true",
-        help=(
-            "Do not approve action_required fork workflow runs after a current-head "
-            "clean Codex review on a mergeable PR."
-        ),
+        help=("Do not approve action_required fork workflow runs."),
     )
     parser.add_argument(
         "--codex-review-command",

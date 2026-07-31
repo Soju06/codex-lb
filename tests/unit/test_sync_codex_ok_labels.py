@@ -541,6 +541,63 @@ def test_apply_decision_does_not_swallow_unrelated_delete_404(monkeypatch: pytes
         module.apply_decision(decision(module), tolerate_permission_errors=False)
 
 
+def test_decide_pr_approves_action_required_workflows_before_clean_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_sync_module()
+    head_sha = "a" * 40
+
+    monkeypatch.setattr(module, "pr_timeline_evidence", lambda *_args: (head_sha, []))
+    monkeypatch.setattr(module, "issue_label_names", lambda *_args: set())
+    monkeypatch.setattr(module, "commit_checks_state", lambda *_args: "failure")
+    monkeypatch.setattr(module, "pr_merge_state", lambda *_args: "CLEAN")
+    monkeypatch.setattr(module, "find_current_head_codex_review_state", lambda *_args, **_kwargs: ("none", None))
+    monkeypatch.setattr(module, "unresolved_codex_finding_thread_urls", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "has_codex_news_after_current_head", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(module, "workflow_runs_requiring_approval", lambda *_args: (123456,))
+
+    approval = module.decide_pr(
+        "Soju06/codex-lb",
+        714,
+        allowed_authors={"openai-codex"},
+        ignore_checks=False,
+    )
+
+    assert approval.approve_workflow_run_ids == (123456,)
+    assert approval.ok_action == "keep"
+    assert not approval.wants_ok_label
+    assert not approval.trigger_codex_review
+    assert "workflow runs need approval: 123456" in approval.reason
+
+
+def test_decide_pr_approves_action_required_workflows_on_blocked_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_sync_module()
+    head_sha = "a" * 40
+
+    monkeypatch.setattr(module, "pr_timeline_evidence", lambda *_args: (head_sha, []))
+    monkeypatch.setattr(module, "issue_label_names", lambda *_args: set())
+    monkeypatch.setattr(module, "commit_checks_state", lambda *_args: "failure")
+    monkeypatch.setattr(module, "pr_merge_state", lambda *_args: "BLOCKED")
+    monkeypatch.setattr(module, "find_current_head_codex_review_state", lambda *_args, **_kwargs: ("none", None))
+    monkeypatch.setattr(module, "unresolved_codex_finding_thread_urls", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(module, "has_codex_news_after_current_head", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(module, "workflow_runs_requiring_approval", lambda *_args: (654321,))
+
+    approval = module.decide_pr(
+        "Soju06/codex-lb",
+        714,
+        allowed_authors={"openai-codex"},
+        ignore_checks=False,
+    )
+
+    assert approval.approve_workflow_run_ids == (654321,)
+    assert approval.ok_action == "keep"
+    assert not approval.wants_ok_label
+    assert "merge state is blocked" in approval.reason
+
+
 def test_trigger_codex_review_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
 

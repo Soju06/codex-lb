@@ -440,6 +440,8 @@ async def run_sticky_selection_path(
                 traffic_class=traffic_class,
                 ignore_standard_quota=False,
                 routing_costs_by_account_id=effective_routing_costs,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=states,
             )
             if result.account is None:
                 selection_error_code = "hard_affinity_saturated"
@@ -1478,6 +1480,8 @@ def _select_account_preferring_budget_safe(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
+        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+        usage_exhaustion_states=usage_exhaustion_states,
     )
 
 

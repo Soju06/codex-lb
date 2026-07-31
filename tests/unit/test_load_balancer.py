@@ -679,8 +679,20 @@ def test_select_account_skips_rate_limited_until_reset():
 def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
     now = 1_700_000_000.0
     states = [
-        AccountState("a", AccountStatus.RATE_LIMITED, used_percent=100.0, reset_at=int(now + 60)),
-        AccountState("b", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now + 3600)),
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 600),
+            primary_reset_at=int(now + 60),
+        ),
+        AccountState(
+            "b",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 7200),
+            primary_reset_at=int(now + 3600),
+        ),
         AccountState("paused", AccountStatus.PAUSED),
     ]
 
@@ -728,6 +740,26 @@ def test_select_account_reports_secondary_usage_exhaustion_reset():
     assert result.resets_at == int(now + 3600)
 
 
+def test_select_account_omits_synthesized_primary_usage_reset():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 60),
+            primary_reset_at=None,
+        )
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.error_message == "Usage limit reached"
+    assert result.resets_at is None
+
+
 def test_select_account_waits_for_latest_exhausted_window_per_account():
     now = 1_700_000_000.0
     states = [
@@ -736,7 +768,8 @@ def test_select_account_waits_for_latest_exhausted_window_per_account():
             AccountStatus.RATE_LIMITED,
             used_percent=100.0,
             secondary_used_percent=100.0,
-            reset_at=int(now + 60),
+            reset_at=int(now + 600),
+            primary_reset_at=int(now + 60),
             secondary_reset_at=int(now + 3600),
         ),
         AccountState(
@@ -744,6 +777,7 @@ def test_select_account_waits_for_latest_exhausted_window_per_account():
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=int(now + 7200),
+            primary_reset_at=int(now + 7200),
         ),
     ]
 
@@ -812,6 +846,40 @@ def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion() -> None:
         routing_strategy="usage_weighted",
         budget_threshold_pct=95.0,
         usage_exhaustion_states=full_scope_states,
+    )
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+
+
+def test_budget_safe_capacity_selection_forwards_usage_exhaustion_controls() -> None:
+    now = time.time()
+    owner_scope = [
+        AccountState(
+            "owner",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 600),
+            primary_reset_at=int(now + 3600),
+        )
+    ]
+    full_scope = [
+        *owner_scope,
+        AccountState(
+            "pool-usable",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        owner_scope,
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_exhaustion_error=False,
+        usage_exhaustion_states=full_scope,
     )
 
     assert result.account is None
@@ -1560,12 +1628,14 @@ def test_select_account_caps_quota_exceeded_retry_hint():
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=far_future_reset,
+            primary_reset_at=far_future_reset,
         ),
         AccountState(
             "b",
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=int(now + 271_819),
+            primary_reset_at=int(now + 271_819),
         ),
     ]
     result = select_account(states, now=now)
@@ -1584,6 +1654,7 @@ def test_select_account_preserves_short_quota_exceeded_retry_hint():
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=int(now + 60),
+            primary_reset_at=int(now + 60),
         ),
     ]
     result = select_account(states, now=now)

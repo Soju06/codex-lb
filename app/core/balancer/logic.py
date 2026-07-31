@@ -188,8 +188,8 @@ def pool_usage_exhaustion(
         candidates: list[float] = []
         primary_evidence = _primary_usage_evidence(state)
         secondary_evidence = _secondary_usage_evidence(state)
-        if primary_evidence is not None and float(primary_evidence) >= 100.0 and state.reset_at is not None:
-            candidates.append(float(state.reset_at))
+        if primary_evidence is not None and float(primary_evidence) >= 100.0 and state.primary_reset_at is not None:
+            candidates.append(float(state.primary_reset_at))
         if (
             secondary_evidence is not None
             and float(secondary_evidence) >= 100.0

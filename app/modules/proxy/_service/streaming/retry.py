@@ -1109,6 +1109,7 @@ class _StreamingRetryMixin:
                         )
                         return
                     if selection.error_code == USAGE_LIMIT_REACHED:
+                        await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         no_accounts_msg = selection.error_message or "Usage limit reached"
                         status_code, error_payload = selection_failure_response(selection)
                         await proxy._write_request_log(

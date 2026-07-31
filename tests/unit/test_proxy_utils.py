@@ -21337,10 +21337,14 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fallback_fails", [False, True])
+@pytest.mark.parametrize(
+    ("fallback_fails", "health_fails"),
+    [(False, False), (True, False), (False, True)],
+)
 async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback(
     monkeypatch,
     fallback_fails: bool,
+    health_fails: bool,
 ):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_settlement_fallback")
@@ -21376,6 +21380,8 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
 
     async def record_health(*_args: object, **_kwargs: object) -> None:
         order.append("health")
+        if health_fails:
+            raise RuntimeError("health persistence unavailable")
 
     handle_stream_error = AsyncMock(side_effect=record_health)
     monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
@@ -21418,12 +21424,20 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
     await asyncio.sleep(0)
     blocked_while_fallback_pending = not finalizer.done()
     health_writes_while_fallback_pending = handle_stream_error.await_count
+    reconnect_while_fallback_pending = upstream_control.reconnect_requested
+    retire_while_fallback_pending = upstream_control.retire_after_drain
     release_fallback.set()
-    await asyncio.wait_for(finalizer, timeout=1)
+    if health_fails:
+        with pytest.raises(RuntimeError, match="health persistence unavailable"):
+            await asyncio.wait_for(finalizer, timeout=1)
+    else:
+        await asyncio.wait_for(finalizer, timeout=1)
     assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     assert blocked_while_fallback_pending is True
     assert health_writes_while_fallback_pending == 0
+    assert reconnect_while_fallback_pending is True
+    assert retire_while_fallback_pending is True
     assert release_calls == 2
     assert upstream_control.reconnect_requested is True
     assert upstream_control.retire_after_drain is True

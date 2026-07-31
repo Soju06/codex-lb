@@ -314,6 +314,26 @@ class _ApiKeyUsageMixin:
         model_name = api_key_reservation.model or settlement.model or ""
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
 
+        async def _release_ordering_sensitive_fallback() -> bool:
+            fallback_task = asyncio.create_task(
+                self._release_unsettled_stream_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                ),
+                name=f"proxy-stream-api-key-fallback-{request_id}",
+            )
+            cancellation_pending = False
+            while not fallback_task.done():
+                try:
+                    await asyncio.shield(fallback_task)
+                except asyncio.CancelledError:
+                    cancellation_pending = True
+            settled = fallback_task.result()
+            if cancellation_pending:
+                raise asyncio.CancelledError
+            return settled
+
         async def _settle_once() -> bool:
             try:
                 async with proxy._repo_factory() as repos:
@@ -334,6 +354,10 @@ class _ApiKeyUsageMixin:
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
                 return True
+            except asyncio.CancelledError:
+                if wait_for_settlement:
+                    await _release_ordering_sensitive_fallback()
+                raise
             except Exception:
                 logger.warning(
                     "Failed to settle stream API key reservation key_id=%s request_id=%s",
@@ -341,12 +365,15 @@ class _ApiKeyUsageMixin:
                     request_id,
                     exc_info=True,
                 )
+                if wait_for_settlement:
+                    return await _release_ordering_sensitive_fallback()
                 return False
 
         # Detach unconditionally instead of shield-awaiting: for ordinary
         # callers the tracking callback schedules a release when settlement
-        # fails or is cancelled; ordering-sensitive waiters own that fallback
-        # inline. The caller's finally-net skips via
+        # fails or is cancelled; an ordering-sensitive settlement task runs
+        # that fallback before the tracked task completes. The caller's
+        # finally-net skips via
         # usage_settlement_transferred, and reservations keep counting toward
         # limits until finalized/released, so a briefly-lagging settlement can
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
@@ -378,12 +405,7 @@ class _ApiKeyUsageMixin:
                             break
                     except Exception:
                         break
-                if not settlement_committed:
-                    return await self._release_unsettled_stream_api_key_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        request_id=request_id,
-                    )
+            return settlement_committed
         return True
 
     def _track_stream_usage_settlement_task(

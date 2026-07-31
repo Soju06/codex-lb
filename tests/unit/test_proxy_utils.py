@@ -21352,13 +21352,20 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("fallback_fails", "health_fails"),
-    [(False, False), (True, False), (False, True)],
+    ("fallback_fails", "health_fails", "cancel_during"),
+    [
+        (False, False, None),
+        (True, False, None),
+        (False, True, None),
+        (False, False, "primary"),
+        (False, False, "fallback"),
+    ],
 )
 async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback(
     monkeypatch,
     fallback_fails: bool,
     health_fails: bool,
+    cancel_during: str | None,
 ):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_settlement_fallback")
@@ -21369,6 +21376,8 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
         model="gpt-5.1",
     )
     fallback_started = asyncio.Event()
+    primary_started = asyncio.Event()
+    hold_primary = asyncio.Event()
     release_fallback = asyncio.Event()
     release_calls = 0
     order: list[str] = []
@@ -21382,6 +21391,10 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
             assert reservation_id == reservation.reservation_id
             release_calls += 1
             if release_calls == 1:
+                if cancel_during == "primary":
+                    order.append("primary_started")
+                    primary_started.set()
+                    await hold_primary.wait()
                 order.append("primary_failed")
                 raise RuntimeError("primary settlement unavailable")
             order.append("fallback_started")
@@ -21434,9 +21447,28 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
             response_create_gate=asyncio.Semaphore(1),
         )
     )
+    if cancel_during == "primary":
+        await asyncio.wait_for(primary_started.wait(), timeout=1)
+        settlement_task = next(
+            task
+            for task in service._background_cleanup_tasks
+            if task.get_name() == "proxy-stream-api-key-settle-resp_ws_settlement_fallback"
+        )
+        settlement_task.cancel()
     await asyncio.wait_for(fallback_started.wait(), timeout=1)
+    if cancel_during == "fallback":
+        settlement_task = next(
+            task
+            for task in service._background_cleanup_tasks
+            if task.get_name() == "proxy-stream-api-key-settle-resp_ws_settlement_fallback"
+        )
+        settlement_task.cancel()
     await asyncio.sleep(0)
+    drain = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=1))
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(drain), timeout=0.05)
     blocked_while_fallback_pending = not finalizer.done()
+    drain_blocked_while_fallback_pending = not drain.done()
     health_writes_while_fallback_pending = handle_stream_error.await_count
     reconnect_while_fallback_pending = upstream_control.reconnect_requested
     retire_while_fallback_pending = upstream_control.retire_after_drain
@@ -21446,16 +21478,23 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
             await asyncio.wait_for(finalizer, timeout=1)
     else:
         await asyncio.wait_for(finalizer, timeout=1)
-    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert await asyncio.wait_for(drain, timeout=1) is True
 
     assert blocked_while_fallback_pending is True
+    assert drain_blocked_while_fallback_pending is True
     assert health_writes_while_fallback_pending == 0
     assert reconnect_while_fallback_pending is True
     assert retire_while_fallback_pending is True
     assert release_calls == 2
     assert upstream_control.reconnect_requested is True
     assert upstream_control.retire_after_drain is True
-    if fallback_fails:
+    if cancel_during == "primary":
+        assert order == ["primary_started", "fallback_started", "fallback_committed"]
+        handle_stream_error.assert_not_awaited()
+    elif cancel_during == "fallback":
+        assert order == ["primary_failed", "fallback_started", "fallback_committed"]
+        handle_stream_error.assert_not_awaited()
+    elif fallback_fails:
         assert order == ["primary_failed", "fallback_started", "fallback_failed"]
         handle_stream_error.assert_not_awaited()
     else:

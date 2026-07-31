@@ -35,23 +35,28 @@ confirmed outcome.
 
 ## Decisions
 
-### Let the ordering-sensitive waiter own failed-settlement fallback
+### Let the tracked ordering-sensitive task own failed-settlement fallback
 
 The settlement task remains tracked in every mode. Detached callers keep the
-existing callback-owned fallback. An ordering-sensitive caller disables that
-callback fallback, observes the task's boolean result, and synchronously runs
-the existing fallback release helper after `False`.
+existing callback-owned fallback. For an ordering-sensitive caller, the tracked
+task runs the existing fallback release helper after primary failure and only
+then completes with the confirmed boolean outcome. Its fallback operation is
+shielded under that task, so cancellation before or during fallback propagates
+only after the release attempt completes. The caller disables callback fallback
+and awaits that same tracked task.
 
-This avoids racing two releases while reusing the established release path.
-Always leaving fallback with the callback was rejected because awaiting only
-the primary task cannot establish when the second-generation cleanup commits.
+This avoids racing two releases, keeps graceful-shutdown ownership across both
+settlement phases, and reuses the established release path. Always leaving
+fallback with the callback was rejected because awaiting only the primary task
+cannot establish when the second-generation cleanup commits.
 
 ### Return confirmed settlement state
 
 The fallback release helper reports `True` only after its repository operation
 returns successfully and `False` after its existing logged failure handling.
-The wait branch returns the primary or fallback result; the ordinary detached
-branch continues to return immediately after ownership transfer.
+The tracked ordering-sensitive task returns the primary or fallback result; the
+ordinary detached branch continues to return immediately after ownership
+transfer.
 
 ### Gate health persistence, not connection safety
 
@@ -86,8 +91,10 @@ attempt.
   Skipping the write is safer than reversing the settlement/health order;
   reconnect and retirement still protect the active connection.
 - **Cancellation can expose the primary task and fallback to concurrent
-  mutation.** The existing shielded wait and task tracker retain ownership,
-  and only one path is allowed to start fallback release.
+  mutation.** The existing shielded wait and task tracker retain ownership;
+  the ordering-sensitive task completes its shielded fallback before
+  propagating cancellation, and only one path is allowed to start fallback
+  release.
 
 ## Migration Plan
 

@@ -9,17 +9,19 @@ before the load-balancer health write (the settlement-ordering invariant), so
 that error path intentionally blocks on settlement. If the primary settlement
 fails, the finalizer MUST wait for fallback release to commit before recording
 account health. If neither operation confirms settlement, the account-health
-write MUST remain unapplied. When the existing stream-retry path deliberately
-defers an account-health penalty until the same ordering-sensitive settlement,
-it MUST likewise apply neither that penalty nor an immediately following
-terminal health write unless settlement is confirmed, and it MUST NOT start a
-second settlement for the transferred reservation. In all other cases the
-settlement MUST run as a tracked background task; when it fails or is cancelled,
-the reservation MUST still be released by the tracking fallback, and the
-request's finalization path MUST NOT double-release a transferred settlement.
-Reservations MUST continue to count toward key limits until finalized or
-released, so deferred settlement can never admit usage a synchronous settlement
-would have rejected.
+write MUST remain unapplied. The tracked settlement task MUST remain registered
+through an ordering-sensitive fallback release, including cancellation before
+or during that release, so graceful shutdown drains both phases. When the
+existing stream-retry path deliberately defers an
+account-health penalty until the same ordering-sensitive settlement, it MUST
+likewise apply neither that penalty nor an immediately following terminal health
+write unless settlement is confirmed, and it MUST NOT start a second settlement
+for the transferred reservation. In all other cases the settlement MUST run as
+a tracked background task; when it fails or is cancelled, the reservation MUST
+still be released by the tracking fallback, and the request's finalization path
+MUST NOT double-release a transferred settlement. Reservations MUST continue to
+count toward key limits until finalized or released, so deferred settlement can
+never admit usage a synchronous settlement would have rejected.
 
 #### Scenario: Response close precedes settlement completion
 
@@ -66,3 +68,4 @@ would have rejected.
 
 - **WHEN** the service shuts down gracefully with settlements in flight
 - **THEN** shutdown waits for them up to the configured drain timeout
+- **AND** a pending ordering-sensitive fallback release remains part of that drain despite cancellation before or during fallback

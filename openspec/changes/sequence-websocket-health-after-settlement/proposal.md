@@ -10,6 +10,8 @@ account health first, violating the existing settlement-ordering invariant.
 - Make ordering-sensitive stream settlement wait for a failed primary
   settlement's fallback release and report whether the reservation is actually
   settled.
+- Keep the tracked settlement task registered through ordering-sensitive
+  fallback release so graceful shutdown drains both phases.
 - Record WebSocket account health and existing retry-deferred health penalties
   only after settlement or fallback release is confirmed; keep reconnect and
   retirement safety independent of persistence.

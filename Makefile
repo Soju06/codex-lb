@@ -12,6 +12,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_email \
 	tests/integration/test_sticky_sessions_api.py::test_durable_bridge_owned_alias_registration_is_epoch_fenced \
 	tests/integration/test_proxy_api_extended.py::test_proxy_stream_usage_limit_returns_http_error \
+	tests/integration/test_api_keys_api.py::test_rate_limit_header_failure_releases_reservation_once \
 	tests/integration/test_codex_usage_api.py::test_codex_usage_aggregates_windows \
 	tests/integration/test_proxy_compact.py::test_proxy_compact_headers_include_monthly_only_credits \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql \

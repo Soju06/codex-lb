@@ -3662,6 +3662,114 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["stream", "collect", "compact", "transcribe"])
+async def test_rate_limit_header_failure_releases_reservation_once(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    await _populate_test_registry()
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": f"header-failure-{surface}",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 50_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    release_calls: list[str] = []
+    upstream_calls: list[str] = []
+    original_release_reservation = proxy_api._release_reservation
+
+    async def fail_rate_limit_headers(_service) -> dict[str, str]:
+        raise RuntimeError("injected rate-limit header failure")
+
+    async def release_reservation(reservation) -> None:
+        assert reservation is not None
+        release_calls.append(reservation.reservation_id)
+        await original_release_reservation(reservation)
+
+    def unexpected_stream(*_args, **_kwargs):
+        upstream_calls.append("stream")
+        raise AssertionError("stream transport must not start")
+
+    async def unexpected_compact(*_args, **_kwargs):
+        upstream_calls.append("compact")
+        raise AssertionError("compact transport must not start")
+
+    async def unexpected_transcribe(*_args, **_kwargs):
+        upstream_calls.append("transcribe")
+        raise AssertionError("transcribe transport must not start")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "rate_limit_headers", fail_rate_limit_headers)
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_responses", unexpected_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", unexpected_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "compact_responses", unexpected_compact)
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", unexpected_transcribe)
+
+    headers = {"Authorization": f"Bearer {key}"}
+    with pytest.raises(RuntimeError, match="injected rate-limit header failure"):
+        if surface == "stream":
+            await async_client.post(
+                "/backend-api/codex/responses",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": True},
+            )
+        elif surface == "collect":
+            await async_client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": False},
+            )
+        elif surface == "compact":
+            await async_client.post(
+                "/v1/responses/compact",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+            )
+        else:
+            await async_client.post(
+                "/backend-api/transcribe",
+                headers=headers,
+                files={"file": ("sample.wav", b"\x00\x01\x02", "audio/wav")},
+            )
+
+    assert upstream_calls == []
+    assert len(release_calls) == 1
+
+    async with SessionLocal() as session:
+        reservations = (
+            (await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)))
+            .scalars()
+            .all()
+        )
+        assert len(reservations) == 1
+        assert release_calls == [reservations[0].id]
+        assert reservations[0].status == "released"
+
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
 async def test_stream_no_accounts_releases_reservation(async_client, monkeypatch):
     """no_accounts 즉시 종료 시 reservation이 release되어 quota가 원복된다."""
     enable = await async_client.put(

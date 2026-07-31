@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -15,6 +16,39 @@ pytestmark = pytest.mark.unit
 async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
     for block in blocks:
         yield block
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError], ids=["error", "cancelled"])
+@pytest.mark.parametrize(("owns_reservation", "expected_releases"), [(True, 1), (False, 0)])
+async def test_rate_limit_header_failure_releases_only_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+    owns_reservation: bool,
+    expected_releases: int,
+) -> None:
+    reservation = object()
+    failure = failure_type("rate-limit header failure")
+    releases: list[object] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    with pytest.raises(failure_type) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation if owns_reservation else None),
+        )
+
+    assert caught.value is failure
+    assert releases == ([reservation] if expected_releases else [])
 
 
 def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:

@@ -1958,6 +1958,19 @@ async def _rate_limit_headers_for_request(
     return await context.service.rate_limit_headers()
 
 
+async def _rate_limit_headers_with_reservation_cleanup(
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    owned_reservation: ApiKeyUsageReservationData | None,
+) -> dict[str, str]:
+    try:
+        return await _rate_limit_headers_for_request(context, api_key)
+    except BaseException:
+        if owned_reservation is not None:
+            await _release_reservation(owned_reservation)
+        raise
+
+
 def _select_codex_usage_limit(
     limits: list[V1UsageLimitResponse],
     window: str,
@@ -4875,7 +4888,15 @@ async def _stream_responses(
         )
     )
 
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key) if include_rate_limit_headers else {}
+    rate_limit_headers = (
+        await _rate_limit_headers_with_reservation_cleanup(
+            context,
+            api_key,
+            reservation if owns_reservation else None,
+        )
+        if include_rate_limit_headers
+        else {}
+    )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
@@ -5080,7 +5101,7 @@ async def _collect_responses(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
@@ -5240,7 +5261,7 @@ async def _compact_responses(
         request_usage_budget=request_usage_budget,
     )
 
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     try:
         result = await context.service.compact_responses(
             payload,
@@ -5399,7 +5420,7 @@ async def _transcribe_request(
         request_model=_TRANSCRIPTION_MODEL,
         request_service_tier=None,
     )
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     try:
         result = await context.service.transcribe(
             audio_bytes=multipart.audio_bytes,

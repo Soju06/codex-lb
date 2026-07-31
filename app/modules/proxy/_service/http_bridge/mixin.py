@@ -1589,6 +1589,9 @@ class _HTTPBridgeMixin(
             inflight_future.set_exception(shutdown_error)
             inflight_future.exception()
         for session in sessions_to_close:
+            if session.upstream_close_attempted:
+                continue
+            session.upstream_close_attempted = True
             await self._close_http_bridge_session(session)
         await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
 

@@ -1428,20 +1428,20 @@ class _HTTPBridgeRequestSubmitMixin:
         session.closed = True
         if session.upstream_reader is asyncio.current_task():
             session.upstream_reader = None
+        owns_close = not session.upstream_close_attempted
+        if owns_close:
+            session.upstream_close_attempted = True
 
         async def retire_session() -> None:
-            owns_detached_session = False
             async with self._http_bridge_lock:
                 if self._http_bridge_sessions.get(session.key) is session:
                     self._http_bridge_sessions.pop(session.key, None)
                     self._unregister_http_bridge_turn_states_locked(session)
                     self._unregister_http_bridge_previous_response_ids_locked(session)
-                    owns_detached_session = True
             async with session.pending_lock:
-                should_close = owns_detached_session and not session.upstream_close_attempted
-                if should_close:
-                    session.upstream_close_attempted = True
-            if should_close:
+                # Let any in-flight pending-state mutation finish before close.
+                pass
+            if owns_close:
                 await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
             _log_http_bridge_event(
                 "retire_stale_pending",

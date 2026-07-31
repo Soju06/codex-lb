@@ -8234,6 +8234,25 @@ async def test_close_all_http_bridge_sessions_does_not_duplicate_reader_owned_cl
 
 
 @pytest.mark.asyncio
+async def test_reader_retirement_closes_previously_detached_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="reader-owned-detached-close")
+    close = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="detached_visible_requests_drained",
+    )
+
+    assert session.upstream_close_attempted is True
+    close.assert_awaited_once_with(session)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_unregister_aliases_preserves_new_owner_mapping() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     old_session = _make_bridge_session(key_value="old-alias-owner")

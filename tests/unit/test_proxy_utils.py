@@ -30681,7 +30681,7 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     )
     fail_safe_service = SimpleNamespace(
         finalize_usage_reservation=AsyncMock(),
-        release_usage_reservation=AsyncMock(side_effect=RuntimeError("compact fail-safe release failed")),
+        release_usage_reservation=AsyncMock(side_effect=OSError("compact fail-safe release failed")),
     )
     service_factory = MagicMock(side_effect=[primary_service, fail_safe_service])
     monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)

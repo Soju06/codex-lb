@@ -8154,6 +8154,56 @@ async def test_close_http_bridge_session_bounded_cancellation_keeps_close_task_t
 
 
 @pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="reader-owned-close")
+    service._http_bridge_sessions[session.key] = session
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    drain_started = asyncio.Event()
+
+    async def blocked_close(target: proxy_service._HTTPBridgeSession) -> None:
+        assert target is session
+        close_started.set()
+        await release_close.wait()
+
+    original_drain = service._drain_http_bridge_background_cleanup_tasks
+
+    async def observed_drain(*, reason: str) -> None:
+        drain_started.set()
+        await original_drain(reason=reason)
+
+    monkeypatch.setattr(service, "_close_http_bridge_session", blocked_close)
+    monkeypatch.setattr(service, "_drain_http_bridge_background_cleanup_tasks", observed_drain)
+
+    async def reader_path() -> None:
+        session.upstream_reader = asyncio.current_task()
+        await service._retire_stale_pending_http_bridge_session(
+            session,
+            detail="forced_reader_failure",
+        )
+
+    reader_task = asyncio.create_task(reader_path())
+    shutdown_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(close_started.wait(), timeout=1.0)
+        assert session.key not in service._http_bridge_sessions
+        assert session.upstream_reader is None
+
+        shutdown_task = asyncio.create_task(service.close_all_http_bridge_sessions())
+        await asyncio.wait_for(drain_started.wait(), timeout=1.0)
+
+        assert not shutdown_task.done()
+    finally:
+        release_close.set()
+        await asyncio.wait_for(reader_task, timeout=1.0)
+        if shutdown_task is not None:
+            await asyncio.wait_for(shutdown_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_unregister_aliases_preserves_new_owner_mapping() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     old_session = _make_bridge_session(key_value="old-alias-owner")

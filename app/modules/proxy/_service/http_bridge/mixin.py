@@ -632,7 +632,7 @@ class _HTTPBridgeMixin(
                                     bind_account_neutral_recovery_owner(previous_session)
                                     key = recovery_fork_key
                                     continue
-                            elif (
+                            elif previous_session is not None and (
                                 not _http_bridge_alias_target_is_stale(previous_session)
                                 and not previous_session.handoff_in_progress
                             ):

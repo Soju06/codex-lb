@@ -1728,7 +1728,8 @@ class _HTTPBridgeUpstreamEventsMixin:
         )
 
         if (
-            event_type.startswith("response.")
+            isinstance(event_type, str)
+            and event_type.startswith("response.")
             and matched_request_state is not None
             and matched_request_state.recovery_attempt_fingerprint is not None
             and recovery_attempt_session_id is not None

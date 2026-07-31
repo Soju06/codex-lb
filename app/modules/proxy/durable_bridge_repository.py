@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
+from typing import Any
 
 from sqlalchemy import Row, and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -226,12 +227,14 @@ class DurableBridgeRepository:
             if conflict_cooldown_until_epoch is not None
             else max(0.0, cooldown_until_epoch)
         )
-        reset_failure_cooldown = cooldown_floor if threshold <= 1 else 0.0
+        # A reset starts a new failure lineage. Never carry the incoming
+        # cooldown into that fresh lineage, even when the threshold is one.
+        reset_failure_cooldown = 0.0
         base_backoff = max(0.001, base_backoff_seconds)
         max_backoff = max(base_backoff, max_backoff_seconds)
         clean_close_max_backoff = max(0.001, clean_close_max_backoff_seconds)
 
-        def cooldown_for_failure_count(failure_count: object, last_detail: object) -> object:
+        def cooldown_for_failure_count(failure_count: Any, last_detail: Any) -> Any:
             regular_cooldown = case(
                 (failure_count < threshold, 0.0),
                 (failure_count == threshold, base_backoff),
@@ -271,6 +274,7 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
+                (reset_lineage, reset_failure_cooldown),
                 (
                     conflict_failures >= threshold,
                     func.greatest(
@@ -288,27 +292,28 @@ class DurableBridgeRepository:
                 ],
                 set_={
                     "consecutive_failures": conflict_failures,
-                    "cooldown_until_epoch": func.greatest(
-                        case(
-                            (reset_lineage, reset_failure_cooldown),
-                            else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
+                    "cooldown_until_epoch": case(
+                        (reset_lineage, reset_failure_cooldown),
+                        else_=func.greatest(
+                            HttpBridgeRetryCircuit.cooldown_until_epoch,
+                            excluded.cooldown_until_epoch,
+                            merged_cooldown,
                         ),
-                        case(
-                            (reset_lineage, reset_failure_cooldown),
-                            else_=excluded.cooldown_until_epoch,
-                        ),
-                        merged_cooldown,
                     ),
                     "last_detail": case(
+                        (reset_lineage, excluded.last_detail),
                         (
                             excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
                             excluded.last_detail,
                         ),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
-                    "updated_at_epoch": func.greatest(
-                        HttpBridgeRetryCircuit.updated_at_epoch,
-                        excluded.updated_at_epoch,
+                    "updated_at_epoch": case(
+                        (reset_lineage, excluded.updated_at_epoch),
+                        else_=func.greatest(
+                            HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.updated_at_epoch,
+                        ),
                     ),
                 },
             )
@@ -337,6 +342,7 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
+                (reset_lineage, reset_failure_cooldown),
                 (
                     conflict_failures >= threshold,
                     func.max(
@@ -354,27 +360,28 @@ class DurableBridgeRepository:
                 ],
                 set_={
                     "consecutive_failures": conflict_failures,
-                    "cooldown_until_epoch": func.max(
-                        case(
-                            (reset_lineage, reset_failure_cooldown),
-                            else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
+                    "cooldown_until_epoch": case(
+                        (reset_lineage, reset_failure_cooldown),
+                        else_=func.max(
+                            HttpBridgeRetryCircuit.cooldown_until_epoch,
+                            excluded.cooldown_until_epoch,
+                            merged_cooldown,
                         ),
-                        case(
-                            (reset_lineage, reset_failure_cooldown),
-                            else_=excluded.cooldown_until_epoch,
-                        ),
-                        merged_cooldown,
                     ),
                     "last_detail": case(
+                        (reset_lineage, excluded.last_detail),
                         (
                             excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
                             excluded.last_detail,
                         ),
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
-                    "updated_at_epoch": func.max(
-                        HttpBridgeRetryCircuit.updated_at_epoch,
-                        excluded.updated_at_epoch,
+                    "updated_at_epoch": case(
+                        (reset_lineage, excluded.updated_at_epoch),
+                        else_=func.max(
+                            HttpBridgeRetryCircuit.updated_at_epoch,
+                            excluded.updated_at_epoch,
+                        ),
                     ),
                 },
             )

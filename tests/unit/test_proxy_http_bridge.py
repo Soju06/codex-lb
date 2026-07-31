@@ -47,6 +47,7 @@ from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
@@ -64,6 +65,17 @@ def _share_proxy_dashboard_settings(monkeypatch: pytest.MonkeyPatch) -> None:
             return proxy_service.get_settings()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
+
+
+@pytest.fixture(autouse=True)
+def _stub_recovery_attempt_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unit bridge tests independent of the durable recovery schema."""
+
+    monkeypatch.setattr(
+        DurableBridgeSessionCoordinator,
+        "lookup_recovery_attempt",
+        AsyncMock(return_value=None),
+    )
 
 
 def _without_installation_metadata(text: str) -> dict[str, Any]:
@@ -8129,6 +8141,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
     prepared_previous_response_ids: list[str | None] = []
     prepared_input_lengths: list[int] = []
     prepared_frames: list[dict[str, Any]] = []
+    prepare_call_count = 0
     real_prepare = service._prepare_http_bridge_request
 
     def fake_prepare(
@@ -8141,9 +8154,17 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
         client_ip: str | None = None,
         **kwargs: Any,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
-        prepared_previous_response_ids.append(prepared_payload.previous_response_id)
+        # The recovery journal fingerprint is prepared from the same payload
+        # before the request is sent. It is internal bookkeeping, not a
+        # second upstream dispatch, so keep it out of dispatch assertions.
+        nonlocal prepare_call_count
+        prepare_call_count += 1
+        record_dispatch = not (preserves_full_resend and prepare_call_count == 1)
+        if record_dispatch:
+            prepared_previous_response_ids.append(prepared_payload.previous_response_id)
         inp = prepared_payload.input
-        prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
+        if record_dispatch:
+            prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
         _, text_data = real_prepare(
             prepared_payload,
             _headers,
@@ -8153,7 +8174,8 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
             client_ip=client_ip,
             **kwargs,
         )
-        prepared_frames.append(json.loads(text_data))
+        if record_dispatch:
+            prepared_frames.append(json.loads(text_data))
         request_state.previous_response_id = prepared_payload.previous_response_id
         return request_state, text_data
 
@@ -8292,7 +8314,10 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
     if not preserves_full_resend:
         assert request_state.proxy_injected_previous_response_id is True
         assert request_state.fresh_upstream_request_is_retry_safe is False
-    account_neutral_classifier.assert_not_called()
+    if preserves_full_resend:
+        account_neutral_classifier.assert_called_once()
+    else:
+        account_neutral_classifier.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -9593,6 +9618,7 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
     request_states: list[proxy_service._WebSocketRequestState] = []
     prepared_previous_response_ids: list[str | None] = []
     prepared_inputs: list[proxy_service.JsonValue] = []
+    prepare_call_count = 0
 
     def fake_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
@@ -9604,10 +9630,14 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
         client_ip: str | None = None,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
         del api_key, api_key_reservation, request_id, client_ip
-        prepared_previous_response_ids.append(prepared_payload.previous_response_id)
-        prepared_inputs.append(prepared_payload.input)
+        nonlocal prepare_call_count
+        prepare_call_count += 1
+        record_dispatch = not (retains_prior_output and prepare_call_count == 1)
+        if record_dispatch:
+            prepared_previous_response_ids.append(prepared_payload.previous_response_id)
+            prepared_inputs.append(prepared_payload.input)
         state = proxy_service._WebSocketRequestState(
-            request_id=f"req-{len(request_states)}",
+            request_id=f"req-{prepare_call_count}",
             model="gpt-5.4",
             service_tier=None,
             reasoning_effort=None,
@@ -9617,7 +9647,8 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
             previous_response_id=prepared_payload.previous_response_id,
             transport="http",
         )
-        request_states.append(state)
+        if record_dispatch:
+            request_states.append(state)
         return state, proxy_service._response_create_text(
             prepared_payload,
             include_type_field=True,
@@ -11499,7 +11530,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     keepalive = proxy_service.parse_sse_data_json(chunks[0])
     assert keepalive is not None
     assert keepalive["status"] == "waiting_for_account_capacity"
-    assert http_bridge_streaming_module._codex_keepalive_frame() in chunks
+    assert any('"type":"codex.keepalive"' in chunk for chunk in chunks)
     assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
     assert get_or_create.await_count == 3
     assert prepare_reservations == [initial_reservation, retried_reservation]
@@ -12193,7 +12224,7 @@ async def test_stream_via_http_bridge_rolls_over_session_after_context_length_ex
     assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "context_length_exceeded"
     assert key not in service._http_bridge_sessions
-    close_session.assert_awaited_once_with(session)
+    close_session.assert_awaited_once_with(session, release_durable_session=True)
     assert isinstance(failed_block, str)
     assert '"type":"response.failed"' in failed_block
     assert '"code":"stream_incomplete"' in failed_block
@@ -15286,10 +15317,10 @@ async def test_prewarm_send_cancellation_retires_before_admitted_request_can_reu
                 queue_limit=2,
             )
         )
-        for _ in range(20):
+        for _ in range(100):
             if session.admission_waiter_count == 1:
                 break
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)
         assert session.admission_waiter_count == 1
 
         prewarm_task.cancel()
@@ -18679,8 +18710,10 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             last_call = get_or_create.await_args
             assert last_call is not None
             assert last_call.kwargs["previous_response_id"] is None
-        if unsafe_replay_input in {"missing_owner", "missing_prior_output", "orphan_output"}:
+        if unsafe_replay_input in {"missing_prior_output", "orphan_output"}:
             account_neutral_classifier.assert_not_called()
+        elif unsafe_replay_input == "missing_owner":
+            account_neutral_classifier.assert_called_once()
         else:
             account_neutral_classifier.assert_called_once()
         return
@@ -19657,6 +19690,7 @@ async def test_retry_http_bridge_precreated_request_consumes_each_clean_close_on
     session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
 
     assert await service._retry_http_bridge_precreated_request(session) is True
     assert await service._retry_http_bridge_precreated_request(session) is False
@@ -20398,8 +20432,8 @@ async def test_http_bridge_retry_circuit_clear_retries_after_lookup_failure() ->
         last_detail="stream_incomplete",
         last_touched_monotonic=time.monotonic(),
     )
-    service._http_bridge_retry_circuits[hard_session.key] = state
-    service._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = state
+    cast(Any, service)._http_bridge_retry_circuit_persisted_keys.add(hard_session.key)
 
     await service._clear_http_bridge_retry_circuit(hard_session)
 
@@ -20409,8 +20443,8 @@ async def test_http_bridge_retry_circuit_clear_retries_after_lookup_failure() ->
         api_key_id=hard_session.key.api_key_id,
         expected_updated_at_epoch=None,
     )
-    assert hard_session.key not in service._http_bridge_retry_circuits
-    assert hard_session.key not in service._http_bridge_retry_circuit_persisted_keys
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuits
+    assert hard_session.key not in cast(Any, service)._http_bridge_retry_circuit_persisted_keys
 
 
 @pytest.mark.asyncio
@@ -20579,6 +20613,7 @@ async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() ->
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+    assert exc_info.value.retry_after_seconds is not None
     assert exc_info.value.retry_after_seconds >= 60
     assert hard_session.queued_request_count == 0
 

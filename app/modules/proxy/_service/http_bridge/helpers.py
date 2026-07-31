@@ -681,7 +681,11 @@ def _http_bridge_pending_state_is_stale(
     # every follow-up on the session, so cap the anchored wait at 2x the
     # stuck-gate threshold before allowing retirement.
     if not session_closed and (request_state.previous_response_id is not None or request_state.hard_continuity_anchor):
-        anchored_wait_started_at = request_state.response_create_gate_wait_started_at or request_state.started_at
+        anchored_wait_started_at = (
+            request_state.response_create_gate_wait_started_at
+            if request_state.response_create_gate_wait_started_at is not None
+            else request_state.started_at
+        )
         if max(0.0, now - anchored_wait_started_at) < threshold_seconds * 2.0:
             return False
     # Do not require the gate/awaiting flags: retry and reader re-enqueue
@@ -695,7 +699,11 @@ def _http_bridge_pending_state_is_stale(
         return False
     if request_state.latency_response_created_ms is not None:
         return False
-    wait_started_at = request_state.response_create_gate_wait_started_at or request_state.started_at
+    wait_started_at = (
+        request_state.response_create_gate_wait_started_at
+        if request_state.response_create_gate_wait_started_at is not None
+        else request_state.started_at
+    )
     if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
         wait_started_at = request_state.last_upstream_activity_at
     return max(0.0, now - wait_started_at) >= threshold_seconds

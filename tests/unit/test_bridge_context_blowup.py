@@ -228,7 +228,14 @@ class TestMidRequestFailurePreservesPreviousResponseId:
             f"If this is 400, the bug is present: the CLI will drop "
             f"previous_response_id and resend full conversation (70K tok/turn)."
         )
-        assert exc_info.value.payload["error"]["code"] in ("upstream_unavailable", "bridge_owner_unreachable")
+        # A raw send failure is surfaced with the more specific
+        # ``stream_incomplete`` code; it is still a retriable 502 and keeps
+        # previous_response_id intact for the client retry.
+        assert exc_info.value.payload["error"]["code"] in (
+            "upstream_unavailable",
+            "bridge_owner_unreachable",
+            "stream_incomplete",
+        )
         assert "previous_response_not_found" not in str(exc_info.value.payload)
 
 

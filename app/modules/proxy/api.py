@@ -12,6 +12,7 @@ from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, cast
 from uuid import uuid4
 
+import anyio
 from fastapi import (
     APIRouter,
     Body,
@@ -1958,6 +1959,20 @@ async def _rate_limit_headers_for_request(
     return await context.service.rate_limit_headers()
 
 
+async def _release_reservation_deferring_cancellation(
+    reservation: ApiKeyUsageReservationData,
+) -> None:
+    with anyio.CancelScope(shield=True):
+        task = asyncio.create_task(_release_reservation(reservation))
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+
+
 async def _rate_limit_headers_with_reservation_cleanup(
     context: ProxyContext,
     api_key: ApiKeyData | None,
@@ -1967,7 +1982,13 @@ async def _rate_limit_headers_with_reservation_cleanup(
         return await _rate_limit_headers_for_request(context, api_key)
     except BaseException:
         if owned_reservation is not None:
-            await _release_reservation(owned_reservation)
+            try:
+                await _release_reservation_deferring_cancellation(owned_reservation)
+            except (Exception, asyncio.CancelledError):
+                logger.warning(
+                    "Failed to release API key reservation after rate-limit header failure",
+                    exc_info=True,
+                )
         raise
 
 

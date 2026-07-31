@@ -4,10 +4,10 @@
 
 Reservation 생성 후 upstream API 호출에 진입하지 않고 종료되는 모든 경로에서 reservation이 release되어야 한다. `reserved` 상태로 남는 reservation이 존재하면 안 된다. 시스템은 이 동작을 SHALL 보장해야 한다.
 
-After admission commits an owned reservation, response metadata preparation
-before upstream work, including rate-limit header calculation, remains part of
-the early-exit cleanup window. If that preparation fails, the system MUST
-release the owned reservation exactly once before propagating the failure.
+After admission commits an owned reservation, rate-limit response-header
+calculation before upstream work remains part of the early-exit cleanup window.
+If that calculation fails, the system MUST attempt to release the owned
+reservation exactly once before propagating the original header failure.
 
 #### Scenario: no_accounts 즉시 종료 시 release
 

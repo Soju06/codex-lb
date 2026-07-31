@@ -1,8 +1,9 @@
 ## 1. Regression Coverage
 
 - [x] 1.1 Add focused unit coverage that proves header failure or cancellation
-  releases an owned reservation once, preserves the original failure, and does
-  not release a borrowed reservation.
+  releases an owned reservation once across a cancellation checkpoint,
+  preserves the original failure if release persistence fails, and does not
+  release a borrowed reservation.
 - [x] 1.2 Add one parameterized ASGI regression for stream, collect, compact,
   and transcribe that injects header failure after real quota admission and
   requires exactly one release, a `released` row, restored quota, and no

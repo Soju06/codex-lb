@@ -74,9 +74,9 @@ upstream work.
   parameterized route-level regression.
 - **Cleanup is accidentally duplicated by a downstream owner** → Inject the
   failure before downstream construction and require exactly one release call.
-- **Release persistence fails independently** → Preserve the existing
-  persistence/stale-recovery behavior and do not broaden this fix into a second
-  settlement-retry mechanism.
+- **Release persistence fails independently** → Log that cleanup failure,
+  preserve the original header failure, and rely on existing stale recovery
+  rather than broadening this fix into a second settlement-retry mechanism.
 
 ## Migration Plan
 

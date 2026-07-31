@@ -18,8 +18,9 @@ Borrowed reservations remain owned by their origin.
 A database, cache, or calculation error while building rate-limit headers can
 occur after quota has been reserved but before upstream work begins. The owned
 reservation must be released once before that error propagates. A separate
-failure of the release persistence itself remains outside this change and
-continues to use the repository's existing stale-recovery contract.
+failure of the release persistence itself is logged without replacing the
+header error and continues to use the repository's existing stale-recovery
+contract.
 
 ## Concrete example
 

@@ -1430,13 +1430,15 @@ class _HTTPBridgeRequestSubmitMixin:
             session.upstream_reader = None
 
         async def retire_session() -> None:
+            owns_detached_session = False
             async with self._http_bridge_lock:
                 if self._http_bridge_sessions.get(session.key) is session:
                     self._http_bridge_sessions.pop(session.key, None)
                     self._unregister_http_bridge_turn_states_locked(session)
                     self._unregister_http_bridge_previous_response_ids_locked(session)
+                    owns_detached_session = True
             async with session.pending_lock:
-                should_close = not session.upstream_close_attempted
+                should_close = owns_detached_session and not session.upstream_close_attempted
                 if should_close:
                     session.upstream_close_attempted = True
             if should_close:

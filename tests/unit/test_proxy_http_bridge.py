@@ -8209,6 +8209,31 @@ async def test_close_all_http_bridge_sessions_waits_for_reader_owned_bounded_clo
 
 
 @pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_does_not_duplicate_reader_owned_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="reader-owned-close-race")
+    service._http_bridge_sessions[session.key] = session
+    close = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close)
+
+    async def reader_path() -> None:
+        session.upstream_reader = asyncio.current_task()
+        await service._retire_stale_pending_http_bridge_session(
+            session,
+            detail="forced_reader_failure",
+        )
+
+    reader_task = asyncio.create_task(reader_path())
+    shutdown_task = asyncio.create_task(service.close_all_http_bridge_sessions())
+
+    await asyncio.gather(reader_task, shutdown_task)
+
+    close.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_unregister_aliases_preserves_new_owner_mapping() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     old_session = _make_bridge_session(key_value="old-alias-owner")

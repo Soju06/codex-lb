@@ -26,8 +26,8 @@ None.
 ### Modified Capabilities
 
 - `api-keys`: Extend the early-exit reservation cleanup contract to failures
-  while response metadata is prepared after admission and before upstream
-  ownership begins.
+  while rate-limit response headers are calculated after admission and before
+  upstream ownership begins.
 
 ## Impact
 

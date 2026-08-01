@@ -1118,13 +1118,8 @@ async def test_proxy_compact_preflight_permanent_refresh_settles_reservation(asy
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles_reservation(async_client, monkeypatch):
-    """Regression (route-level, forwarded bridge path): a compact request that
-    reaches the OWNER instance via the internal bridge forward — where
-    ``owns_reservation`` is false so ``compact_responses`` is the SOLE settler —
-    and whose preflight budget is exhausted MUST settle (release) the API-key
-    usage reservation before raising the ``502 upstream_request_timeout``, so
-    held API-key quota is not leaked.
+async def test_proxy_compact_forwarded_bridge_rejection_leaves_reservation_for_origin(async_client, monkeypatch):
+    """A forwarded compact rejection must leave cleanup at the origin.
 
     This drives the REAL external surface, not a handcrafted service call: it
     POSTs a signed forwarded request to the internal bridge endpoint
@@ -1133,16 +1128,9 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     reproduced here through the api-keys service). ``internal_bridge_responses``
     parses the forward, sets ``skip_limit_enforcement`` + the
     ``api_key_reservation_override``, and ``_stream_responses`` extracts the
-    terminal ``compaction_trigger`` and calls ``compact_responses`` with
-    ``owns_reservation`` false — so ``_compact_or_stream_responses``'s ``finally``
-    does NOT release the reservation and ``compact_responses`` alone must settle
-    it. Pre-fix the budget-exhausted terminal raised via
-    ``_raise_proxy_budget_exhausted`` without settling (through the outer
-    ``except ProxyResponseError`` handler and the log-only ``finally``), leaving
-    the reservation row ``reserved`` (leaked held quota); post-fix the row is
-    ``released``. PR #1254 fixed the sibling transport-failure / permanent-refresh
-    preflight raises but left the budget-exhausted terminal out of scope; this
-    completes that invariant.
+    terminal ``compaction_trigger`` and returns a definitive non-200 before an
+    HTTP-200 cleanup handoff. The receiver must not settle the origin's
+    reservation; the origin remains responsible for its one release attempt.
     """
     import app.modules.proxy._service.compact as compact_module
     from app.core.config.settings import get_settings
@@ -1248,14 +1236,13 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     assert response.status_code == 502, response.text
     assert response.json()["error"]["code"] == "upstream_request_timeout"
 
-    # The forwarded reservation row was RELEASED by compact_responses (sole
-    # settler) before the terminal raised (the fix). Pre-fix it stayed "reserved"
-    # — leaked held API-key quota — because owns_reservation is false on the
-    # forwarded path so the route's finally does not release it.
+    # The receiver returned a definitive non-200 and therefore did not acquire
+    # cleanup ownership. A real origin observes that rejection and releases the
+    # still-reserved row exactly once.
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
-        assert row.status == "released", f"forwarded reservation leaked held quota; status={row.status!r}"
+        assert row.status == "reserved"
 
 
 @pytest.mark.asyncio

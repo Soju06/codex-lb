@@ -23,6 +23,7 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.support import (
     _ApiKeyReservationTouchState,
     _consume_api_key_reservation_heartbeat_result,
+    _signal_propagated_responses_service_cleanup_ready,
     _StreamSettlement,
     _WebSocketRequestState,
 )
@@ -274,28 +275,34 @@ class _ApiKeyUsageMixin:
         )
 
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
-        with anyio.CancelScope(shield=True):
-            try:
-                async with proxy._repo_factory() as repos:
-                    api_keys_service = _service_api_keys_service()(repos.api_keys)
-                    if response is not None and input_tokens is not None and output_tokens is not None:
-                        await api_keys_service.finalize_usage_reservation(
-                            reservation_id,
-                            model=model_name,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            cached_input_tokens=cached_input_tokens or 0,
-                            service_tier=service_tier,
-                        )
-                    else:
-                        await api_keys_service.release_usage_reservation(reservation_id)
-            except Exception:
-                logger.warning(
-                    "Failed to settle compact API key reservation key_id=%s request_id=%s",
-                    api_key.id,
-                    get_request_id(),
-                    exc_info=True,
-                )
+        try:
+            with anyio.CancelScope(shield=True):
+                try:
+                    async with proxy._repo_factory() as repos:
+                        api_keys_service = _service_api_keys_service()(repos.api_keys)
+                        if response is not None and input_tokens is not None and output_tokens is not None:
+                            await api_keys_service.finalize_usage_reservation(
+                                reservation_id,
+                                model=model_name,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                cached_input_tokens=cached_input_tokens or 0,
+                                service_tier=service_tier,
+                            )
+                        else:
+                            await api_keys_service.release_usage_reservation(reservation_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to settle compact API key reservation key_id=%s request_id=%s",
+                        api_key.id,
+                        get_request_id(),
+                        exc_info=True,
+                    )
+        finally:
+            # The compact service has made its one cancellation-safe settlement
+            # attempt. A caller that created the reservation must not issue a
+            # second release as a fallback after this boundary.
+            _signal_propagated_responses_service_cleanup_ready()
 
     async def _settle_stream_api_key_usage(
         self,
@@ -429,7 +436,7 @@ class _ApiKeyUsageMixin:
         *,
         action: str,
         request_id: str,
-    ) -> None:
+    ) -> asyncio.Task[None]:
         task = asyncio.create_task(coro, name=f"proxy-{action}-{request_id}")
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         proxy._background_cleanup_tasks.add(task)
@@ -449,6 +456,7 @@ class _ApiKeyUsageMixin:
                 )
 
         task.add_done_callback(_cleanup_done)
+        return task
 
     async def _release_unsettled_stream_api_key_usage(
         self,

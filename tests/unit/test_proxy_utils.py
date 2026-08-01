@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import errno
 import gc
 import hashlib
@@ -10,7 +11,7 @@ import socket
 import ssl
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import timedelta
@@ -61,9 +62,11 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy import http_bridge_forwarding as proxy_http_bridge_forwarding
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
+from app.modules.proxy._service import file_ops as proxy_file_ops
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service import warmup as proxy_warmup_service
 from app.modules.proxy._service.http_bridge import request_submit as proxy_http_bridge_request_submit
@@ -2352,6 +2355,1897 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_forwarded_terminal_compaction_passes_signed_file_owner_to_compact_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = False
+    reservation = SimpleNamespace(reservation_id="reservation_forwarded_compaction")
+    release_reservation = AsyncMock()
+    compact_calls: list[dict[str, object]] = []
+
+    async def compact_responses(*_args: object, **kwargs: object) -> CompactResponsePayload:
+        compact_calls.append(kwargs)
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        return CompactResponsePayload.model_validate(
+            {
+                "id": "resp_forwarded_compaction",
+                "object": "response.compaction",
+                "compaction_summary": {"encrypted_content": "enc_forwarded"},
+            }
+        )
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            compact_responses=compact_responses,
+            rate_limit_headers=AsyncMock(return_value={}),
+        )
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/internal/bridge/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [
+                {"type": "input_file", "file_id": "file_forwarded_compaction"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+        codex_session_affinity=True,
+        prefer_http_bridge=True,
+        forwarded_request=True,
+        forwarded_headers={},
+        forwarded_file_owner_account_id="acc_forwarded_compaction",
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert compact_calls[0]["forwarded_file_owner_account_id"] == "acc_forwarded_compaction"
+    _ = [chunk async for chunk in response.body_iterator]
+    release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_terminal_compaction_malformed_output_keeps_receiver_settlement_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = False
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_forwarded_malformed_compaction",
+        key_id="key_forwarded_malformed_compaction",
+        model="gpt-5.1",
+    )
+    origin_release = AsyncMock()
+    receiver_settle = AsyncMock()
+
+    async def compact_responses(*_args: object, **kwargs: object) -> CompactResponsePayload:
+        await receiver_settle(kwargs["api_key_reservation"])
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        return CompactResponsePayload.model_validate(
+            {
+                "id": "resp_forwarded_malformed_compaction",
+                "object": "response.compaction",
+                "output": [],
+            }
+        )
+
+    receiver_context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                compact_responses=compact_responses,
+                rate_limit_headers=AsyncMock(return_value={}),
+            )
+        ),
+    )
+    receiver_request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+        }
+    )
+    forwarded_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+
+    async def forward_to_receiver(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        proxy_support._signal_propagated_responses_owner_forward_dispatched()
+        receiver_response = await proxy_api._stream_responses(
+            receiver_request,
+            forwarded_payload,
+            context=receiver_context,
+            api_key=None,
+            codex_session_affinity=True,
+            prefer_http_bridge=True,
+            skip_limit_enforcement=True,
+            api_key_reservation_override=reservation,
+            include_rate_limit_headers=False,
+            forwarded_request=True,
+            forwarded_headers={},
+            enforce_openai_sdk_contract=False,
+        )
+        assert isinstance(receiver_response, StreamingResponse)
+        assert receiver_response.status_code == 200
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        async for chunk in receiver_response.body_iterator:
+            yield chunk.decode() if isinstance(chunk, bytes) else str(chunk)
+
+    origin_context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_http_responses=forward_to_receiver)),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", origin_release)
+    origin_request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    origin_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_malformed_compaction"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        origin_request,
+        origin_payload,
+        context=origin_context,
+        api_key=None,
+        prefer_http_bridge=True,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == 200
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert '"type":"response.failed"' in body
+    assert '"code":"upstream_error"' in body
+    receiver_settle.assert_awaited_once_with(reservation)
+    origin_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminal_compaction_pre_handoff_failure_releases_at_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = False
+    reservation = SimpleNamespace(reservation_id="reservation_terminal_compaction_pre_handoff")
+    release_reservation = AsyncMock()
+
+    async def compact_responses(*_args: object, **_kwargs: object) -> CompactResponsePayload:
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("file_owner_unavailable", "Durable file owner unavailable"),
+        )
+
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            compact_responses=compact_responses,
+            rate_limit_headers=AsyncMock(return_value={}),
+        )
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+        codex_session_affinity=True,
+    )
+
+    assert response.status_code == 502
+    release_reservation.assert_awaited_once_with(reservation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["stream", "collect", "compact"])
+@pytest.mark.parametrize(
+    "failure_type",
+    [RuntimeError, asyncio.CancelledError],
+    ids=["error", "cancellation"],
+)
+async def test_responses_rate_limit_header_failure_releases_pre_service_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    failure_type: type[BaseException],
+) -> None:
+    reservation = SimpleNamespace(reservation_id=f"reservation_{surface}_rate_limit_headers")
+    release_reservation = AsyncMock()
+    service_call = AsyncMock()
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                stream_responses=service_call,
+                stream_http_responses=service_call,
+                compact_responses=service_call,
+            )
+        ),
+    )
+
+    monkeypatch.setattr(proxy_api, "_opportunistic_admission_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(
+        proxy_api,
+        "_rate_limit_headers_for_request",
+        AsyncMock(side_effect=failure_type("rate-limit headers unavailable")),
+    )
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": f"/test/{surface}", "headers": []})
+
+    with pytest.raises(failure_type):
+        if surface == "compact":
+            await proxy_api._compact_responses(
+                request,
+                ResponsesCompactRequest.model_validate(
+                    {
+                        "model": "gpt-5.1",
+                        "instructions": "compact",
+                        "input": "hello",
+                    }
+                ),
+                context,
+                api_key=None,
+            )
+        else:
+            payload = ResponsesRequest.model_validate(
+                {
+                    "model": "gpt-5.1",
+                    "instructions": "respond",
+                    "input": "hello",
+                    "stream": surface == "stream",
+                }
+            )
+            if surface == "stream":
+                await proxy_api._stream_responses(
+                    request,
+                    payload,
+                    context,
+                    api_key=None,
+                )
+            else:
+                await proxy_api._collect_responses(
+                    request,
+                    payload,
+                    context,
+                    api_key=None,
+                )
+
+    service_call.assert_not_awaited()
+    release_reservation.assert_awaited_once_with(reservation)
+
+
+@pytest.mark.asyncio
+async def test_terminal_compaction_cancellation_after_service_handoff_does_not_release_at_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = False
+    reservation = SimpleNamespace(reservation_id="reservation_terminal_compaction_cancelled")
+    release_reservation = AsyncMock()
+
+    async def compact_responses(*_args: object, **_kwargs: object) -> CompactResponsePayload:
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        raise asyncio.CancelledError
+
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(
+            service=SimpleNamespace(
+                compact_responses=compact_responses,
+                rate_limit_headers=AsyncMock(return_value={}),
+            )
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await proxy_api._stream_responses(
+            request,
+            payload,
+            context=context,
+            api_key=None,
+            codex_session_affinity=True,
+        )
+
+    release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_api_does_not_release_after_service_settlement_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = SimpleNamespace(reservation_id="reservation_compact_api_handoff")
+    release_reservation = AsyncMock()
+
+    async def compact_responses(*_args: object, **_kwargs: object) -> CompactResponsePayload:
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        return CompactResponsePayload.model_validate(
+            {
+                "id": "resp_compact_api_handoff",
+                "object": "response.compaction",
+                "output": [{"type": "compaction", "encrypted_content": "enc_compact_api"}],
+            }
+        )
+
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(compact_responses=compact_responses)),
+    )
+    monkeypatch.setattr(proxy_api, "_opportunistic_admission_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/responses/compact", "headers": []})
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": "hello",
+        }
+    )
+
+    response = await proxy_api._compact_responses(request, payload, context, api_key=None)
+
+    assert response.status_code == 200
+    release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["session_open", "owner_query"])
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_responses_file_owner_database_failure_releases_reservation_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    release_fails: bool,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_file_owner_failure")
+    release_reservation = AsyncMock(
+        side_effect=RuntimeError("reservation database unavailable") if release_fails else None
+    )
+    selection = AsyncMock()
+
+    async def fail_lookup(_repository, _file_ids) -> dict[str, str]:
+        raise RuntimeError("file pin database unavailable")
+
+    class _FailingSessionContext:
+        async def __aenter__(self) -> None:
+            raise RuntimeError("file pin database session unavailable")
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    if failure_stage == "session_open":
+        monkeypatch.setattr(service, "_file_pin_session_factory", _FailingSessionContext)
+    else:
+        monkeypatch.setattr(
+            proxy_file_ops.FileAccountPinRepository,
+            "get_live_account_ids",
+            fail_lookup,
+        )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_db_failure"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+    )
+
+    assert not isinstance(response, StreamingResponse)
+    assert response.status_code == 502
+    assert json.loads(bytes(response.body))["error"]["code"] == "file_owner_unavailable"
+    release_reservation.assert_awaited_once_with(reservation)
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_responses_success_does_not_release_service_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = _make_api_key_data("key_stream_service_owned_reservation")
+    reservation = SimpleNamespace(reservation_id="reservation_stream_service_owned")
+    release_reservation = AsyncMock()
+
+    async def stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_service_owned","status":"completed"}}\n\n'
+
+    context = SimpleNamespace(service=SimpleNamespace(stream_responses=stream_responses))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="read", input="hello", stream=True)
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    _ = [chunk async for chunk in response.body_iterator]
+    release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_success_does_not_release_service_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = _make_api_key_data("key_collect_service_owned_reservation")
+    reservation = SimpleNamespace(reservation_id="reservation_collect_service_owned")
+    release_reservation = AsyncMock()
+
+    async def stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_collect_owned","status":"completed"}}\n\n'
+
+    context = SimpleNamespace(service=SimpleNamespace(stream_responses=stream_responses))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="read", input="hello", stream=False)
+
+    response = await proxy_api._collect_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=api_key,
+    )
+
+    assert response.status_code == 200
+    release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_cancellation_after_cleanup_handoff_releases_only_in_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_collect_cleanup_handoff")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_collect_cleanup_handoff",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    api_release = AsyncMock()
+    service_release = AsyncMock()
+    cleanup_ready = asyncio.Event()
+    stream_cancelled = asyncio.Event()
+    stream_blocker = asyncio.Event()
+
+    async def stream_http_responses(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        cleanup_ready.set()
+        try:
+            await stream_blocker.wait()
+            raise AssertionError("cancelled collector unexpectedly resumed")
+        except asyncio.CancelledError:
+            stream_cancelled.set()
+            raise
+        finally:
+            await service_release(reservation)
+        yield ""
+
+    monkeypatch.setattr(service, "stream_http_responses", stream_http_responses)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", api_release)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="read", input="hello", stream=False)
+
+    collect_task = asyncio.create_task(
+        proxy_api._collect_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=api_key,
+            prefer_http_bridge=True,
+        )
+    )
+    try:
+        await asyncio.wait_for(cleanup_ready.wait(), timeout=1)
+        collect_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await collect_task
+
+        await asyncio.wait_for(stream_cancelled.wait(), timeout=1)
+        api_release.assert_not_awaited()
+        service_release.assert_awaited_once_with(reservation)
+    finally:
+        stream_blocker.set()
+        if not collect_task.done():
+            collect_task.cancel()
+        await asyncio.gather(collect_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_responses_file_owner_lookup_cancellation_releases_reservation_once_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    release_fails: bool,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_file_owner_cancel")
+    release_reservation = AsyncMock(
+        side_effect=RuntimeError("reservation database unavailable") if release_fails else None
+    )
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_cancelled_lookup"}],
+            "stream": True,
+        }
+    )
+
+    request_task = asyncio.create_task(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=None,
+        )
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    assert await service.drain_persistence_tasks(1.0) is True
+    release_reservation.assert_awaited_once_with(reservation)
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_responses_reservation_release_is_tracked_without_swallowing_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    release_fails: bool,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_cancel_scope_cleanup",
+        key_id="key_cancel_scope_cleanup",
+        model="gpt-5.1",
+    )
+    release_count = 0
+    reached_after_helper = False
+
+    async def release_reservation(candidate: object) -> None:
+        nonlocal release_count
+        assert candidate is reservation
+        await anyio.sleep(0)
+        release_count += 1
+        if release_fails:
+            raise RuntimeError("reservation database unavailable")
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    with anyio.CancelScope() as cancel_scope:
+        cancel_scope.cancel()
+        await proxy_api._release_reservation_best_effort(
+            reservation,
+            action="cancel-scope regression",
+            scheduler=service,
+            request_id="request-cancel-scope-cleanup",
+        )
+        reached_after_helper = True
+
+    assert cancel_scope.cancelled_caught
+    assert reached_after_helper is False
+    assert await service.drain_persistence_tasks(1.0) is True
+    assert release_count == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_file_owner_lookup_cancellation_releases_only_api_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_direct_file_owner_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_direct_file_owner_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    api_release_reservation = AsyncMock()
+    service_release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        service_release_reservation,
+    )
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", api_release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_direct_cancelled_lookup"}],
+            "stream": True,
+        }
+    )
+
+    request_task = asyncio.create_task(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=api_key,
+            prefer_http_bridge=False,
+        )
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    assert await service.drain_persistence_tasks(1.0) is True
+    api_release_reservation.assert_awaited_once_with(reservation)
+    service_release_reservation.assert_not_awaited()
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_origin_http_bridge_file_owner_lookup_cancellation_releases_only_api_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_origin_bridge_file_owner_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_origin_bridge_file_owner_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    api_release_reservation = AsyncMock()
+    service_release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        service_release_reservation,
+    )
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", api_release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_origin_bridge_cancelled_lookup"}],
+            "stream": True,
+        }
+    )
+
+    request_task = asyncio.create_task(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=api_key,
+            prefer_http_bridge=True,
+        )
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    assert await service.drain_persistence_tasks(1.0) is True
+    api_release_reservation.assert_awaited_once_with(reservation)
+    service_release_reservation.assert_not_awaited()
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_origin_releases_forwarded_file_owner_preflight_failure_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_forwarded_owner_preflight")
+    release_reservation = AsyncMock()
+
+    async def receiver_preflight_failure(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error(
+                "file_owner_unavailable",
+                "Durable file ownership is temporarily unavailable",
+                error_type="server_error",
+            ),
+        )
+        yield ""
+
+    monkeypatch.setattr(service, "stream_http_responses", receiver_preflight_failure)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_owner_preflight"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+        prefer_http_bridge=True,
+    )
+
+    assert not isinstance(response, StreamingResponse)
+    assert response.status_code == 502
+    assert json.loads(bytes(response.body))["error"]["code"] == "file_owner_unavailable"
+    release_reservation.assert_awaited_once_with(reservation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_response", [False, True], ids=["stream", "collect"])
+@pytest.mark.parametrize(
+    ("receiver_rejected", "expected_release_count"),
+    [(False, 0), (True, 1)],
+    ids=["ambiguous-dispatch", "definitive-non-200"],
+)
+async def test_origin_release_follows_owner_forward_dispatch_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    collect_response: bool,
+    receiver_rejected: bool,
+    expected_release_count: int,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    reservation = SimpleNamespace(reservation_id="reservation_owner_dispatch_outcome")
+    release_reservation = AsyncMock()
+
+    async def forwarded_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        proxy_support._signal_propagated_responses_owner_forward_dispatched()
+        if receiver_rejected:
+            proxy_support._signal_propagated_responses_owner_forward_rejected()
+        raise proxy_module.ProxyResponseError(
+            503,
+            openai_error("upstream_unavailable", "Owner forward failed before acknowledgement"),
+        )
+        yield ""
+
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_http_responses=forwarded_stream)),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_owner_dispatch_outcome"}],
+            "stream": not collect_response,
+        }
+    )
+
+    if collect_response:
+        response = await proxy_api._collect_responses(
+            request,
+            payload,
+            context,
+            api_key=None,
+            prefer_http_bridge=True,
+        )
+    else:
+        response = await proxy_api._stream_responses(
+            request,
+            payload,
+            context,
+            api_key=None,
+            prefer_http_bridge=True,
+        )
+
+    assert response.status_code == 503
+    assert release_reservation.await_count == expected_release_count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_response", [False, True], ids=["stream", "collect"])
+@pytest.mark.parametrize(
+    "forward_outcome",
+    ["dispatch_ambiguous", "receiver_acknowledged"],
+    ids=["ambiguous-dispatch", "acknowledged-then-lost"],
+)
+async def test_responses_api_owner_forward_unsafe_outcome_neither_replays_nor_releases(
+    monkeypatch: pytest.MonkeyPatch,
+    collect_response: bool,
+    forward_outcome: str,
+) -> None:
+    dashboard_settings = _make_proxy_settings()
+    dashboard_settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = 3600
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=True,
+        http_responses_session_bridge_instance_id="instance-origin",
+    )
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_public_owner_forward_outcome")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id=f"reservation_public_{forward_outcome}",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    origin_release = AsyncMock()
+    local_submit = AsyncMock(side_effect=AssertionError("local bridge submit attempted"))
+    seen_forward_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-owner",
+        owner_endpoint="http://owner.invalid",
+        key=proxy_service._HTTPBridgeSessionKey(
+            "session_header",
+            "session-public-owner-forward",
+            api_key.id,
+        ),
+    )
+    get_or_create = AsyncMock(
+        side_effect=[
+            owner_forward,
+            AssertionError("owner-forward failure triggered local session creation"),
+        ]
+    )
+
+    class _OutcomeOwnerClient:
+        async def stream_responses(self, **kwargs: object) -> AsyncIterator[str]:
+            seen_forward_reservations.append(
+                cast(proxy_http_bridge_forwarding.HTTPBridgeForwardContext, kwargs["context"]).reservation
+            )
+            cast(Callable[[], None], kwargs["on_request_dispatched"])()
+            if forward_outcome == "receiver_acknowledged":
+                cast(Callable[[], None], kwargs["on_response_ready"])()
+            raise aiohttp.ClientConnectionError("owner response status lost")
+            yield ""
+
+    async def forbidden_direct_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        raise AssertionError("direct local upstream attempted")
+        yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service,
+        "_resolve_forwarded_file_account_for_responses",
+        AsyncMock(return_value="acc-file-owner"),
+    )
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", local_submit)
+    monkeypatch.setattr(service, "_stream_with_retry", forbidden_direct_stream)
+    service._http_bridge_owner_client = cast(Any, _OutcomeOwnerClient())
+    monkeypatch.setattr(proxy_api, "_opportunistic_admission_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", origin_release)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [(b"x-codex-session-id", b"session-public-owner-forward")],
+        }
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_public_owner_forward"}],
+            "stream": not collect_response,
+        }
+    )
+
+    context = cast(proxy_api.ProxyContext, SimpleNamespace(service=service))
+    if collect_response:
+        response = await proxy_api._collect_responses(
+            request,
+            payload,
+            context,
+            api_key=api_key,
+            codex_session_affinity=True,
+            prefer_http_bridge=True,
+        )
+    else:
+        response = await proxy_api._stream_responses(
+            request,
+            payload,
+            context=context,
+            api_key=api_key,
+            codex_session_affinity=True,
+            prefer_http_bridge=True,
+        )
+
+    assert response.status_code == 503
+    assert json.loads(bytes(response.body))["error"]["code"] == "bridge_owner_unreachable"
+    get_or_create.assert_awaited_once()
+    get_or_create_call = get_or_create.await_args
+    assert get_or_create_call is not None
+    assert get_or_create_call.kwargs["preferred_account_id"] == "acc-file-owner"
+    local_submit.assert_not_awaited()
+    assert seen_forward_reservations == [reservation]
+    origin_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_unexpected_pre_handoff_failure_releases_origin_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    reservation = SimpleNamespace(reservation_id="reservation_collect_unexpected_pre_handoff")
+    release_reservation = AsyncMock()
+
+    async def failing_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        raise RuntimeError("settings database unavailable")
+        yield ""
+
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_http_responses=failing_stream)),
+    )
+    monkeypatch.setattr(proxy_api, "_opportunistic_admission_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": "hello",
+            "stream": False,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="settings database unavailable"):
+        await proxy_api._collect_responses(
+            request,
+            payload,
+            context,
+            api_key=None,
+            prefer_http_bridge=True,
+        )
+
+    release_reservation.assert_awaited_once_with(reservation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_response", [False, True], ids=["stream", "collect"])
+async def test_lost_owner_ack_keeps_origin_release_disabled_after_receiver_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    collect_response: bool,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_lost_owner_ack",
+        key_id="key_lost_owner_ack",
+        model="gpt-5.1",
+    )
+    origin_release = AsyncMock()
+    receiver_settle = AsyncMock()
+
+    class _LostAckOwnerClient:
+        async def stream_responses(
+            self,
+            *,
+            on_request_dispatched: Callable[[], None],
+            **_kwargs: object,
+        ) -> AsyncIterator[str]:
+            on_request_dispatched()
+            await receiver_settle(reservation)
+            raise aiohttp.ClientConnectionError("receiver 200 acknowledgement lost")
+            yield ""
+
+    origin_service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    origin_service._http_bridge_owner_client = _LostAckOwnerClient()
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="owner-instance",
+        owner_endpoint="http://owner.invalid",
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-lost-owner-ack", None),
+    )
+
+    def origin_stream(
+        stream_payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        **kwargs: object,
+    ) -> AsyncIterator[str]:
+        return origin_service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=stream_payload,
+            headers=headers,
+            api_key_reservation=cast(
+                proxy_service.ApiKeyUsageReservationData | None,
+                kwargs["api_key_reservation"],
+            ),
+            codex_session_affinity=False,
+            downstream_turn_state=None,
+            request_started_at=time.monotonic(),
+            proxy_api_authorization=None,
+            file_owner_account_id="acc_lost_owner_ack",
+        )
+
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_http_responses=origin_stream)),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", origin_release)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_lost_owner_ack"}],
+            "stream": not collect_response,
+        }
+    )
+
+    if collect_response:
+        response = await proxy_api._collect_responses(
+            request,
+            payload,
+            context,
+            api_key=None,
+            prefer_http_bridge=True,
+        )
+    else:
+        response = await proxy_api._stream_responses(
+            request,
+            payload,
+            context,
+            api_key=None,
+            prefer_http_bridge=True,
+        )
+
+    assert response.status_code == 503
+    receiver_settle.assert_awaited_once_with(reservation)
+    origin_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_frame_before_cleanup_handoff_does_not_transfer_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = SimpleNamespace(reservation_id="reservation_collect_pre_handoff_frame")
+    release_reservation = AsyncMock()
+
+    async def stream_responses(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield ": keepalive\n\n"
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("file_owner_unavailable", "Durable file owner unavailable"),
+        )
+
+    context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_responses=stream_responses)),
+    )
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": "hello",
+            "stream": False,
+        }
+    )
+
+    response = await proxy_api._collect_responses(
+        request,
+        payload,
+        context,
+        api_key=None,
+    )
+
+    assert response.status_code == 502
+    release_reservation.assert_awaited_once_with(reservation)
+
+
+@pytest.mark.asyncio
+async def test_responses_delayed_file_owner_database_failure_releases_reservation_after_stream_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_file_owner_delayed_failure")
+    release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_release = asyncio.Event()
+
+    async def fail_lookup_after_handoff(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_release.wait()
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        fail_lookup_after_handoff,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_delayed_db_failure"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == 200
+    assert lookup_started.is_set()
+    lookup_release.set()
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+
+    assert "response.failed" in body
+    assert "file_owner_unavailable" in body
+    release_reservation.assert_awaited_once_with(reservation)
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_responses_file_owner_lookup_cancellation_after_stream_handoff_releases_reservation_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_file_owner_handoff_cancel")
+    release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_cancelled = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        try:
+            await lookup_blocker.wait()
+        except asyncio.CancelledError:
+            lookup_cancelled.set()
+            raise
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_handoff_cancelled_lookup"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == 200
+    assert lookup_started.is_set()
+    body_iterator = cast(AsyncGenerator[Any, None], response.body_iterator)
+    body_task = asyncio.ensure_future(anext(body_iterator))
+    await asyncio.sleep(0)
+    body_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await body_task
+
+    await asyncio.wait_for(lookup_cancelled.wait(), timeout=1)
+    assert await service.drain_persistence_tasks(1.0) is True
+    release_reservation.assert_awaited_once_with(reservation)
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_heartbeat_disconnect_before_file_owner_resolution_cancels_lookup_and_releases_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_native_heartbeat_file_owner")
+    release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_cancelled = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        try:
+            await lookup_blocker.wait()
+        except asyncio.CancelledError:
+            lookup_cancelled.set()
+            raise
+        return {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_native_heartbeat_cancel"}],
+            "stream": True,
+        }
+    )
+    baseline_tasks = set(asyncio.all_tasks())
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+        native_codex_heartbeat=True,
+    )
+
+    try:
+        assert isinstance(response, StreamingResponse)
+        assert response.status_code == 200
+        assert lookup_started.is_set()
+        body_iterator = cast(AsyncGenerator[Any, None], response.body_iterator)
+        first = await anext(body_iterator)
+        assert first == proxy_service.CODEX_KEEPALIVE_FRAME
+
+        await body_iterator.aclose()
+
+        await asyncio.wait_for(lookup_cancelled.wait(), timeout=1)
+        assert await service.drain_persistence_tasks(1.0) is True
+        release_reservation.assert_awaited_once_with(reservation)
+        selection.assert_not_awaited()
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if task not in baseline_tasks and task is not asyncio.current_task() and not task.done()
+        ]
+    finally:
+        lookup_blocker.set()
+        leaked_tasks = [
+            task
+            for task in asyncio.all_tasks()
+            if task not in baseline_tasks and task is not asyncio.current_task() and not task.done()
+        ]
+        for task in leaked_tasks:
+            task.cancel()
+        await asyncio.gather(*leaked_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_heartbeat_close_after_file_lookup_before_service_cleanup_guard_releases_at_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_pre_cleanup_guard")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_pre_cleanup_guard",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    api_release_reservation = AsyncMock()
+    service_release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_complete = asyncio.Event()
+    preflight_started = asyncio.Event()
+    preflight_cancelled = asyncio.Event()
+    preflight_blocker = asyncio.Event()
+
+    async def resolve_owner(_repository, file_ids) -> dict[str, str]:
+        lookup_complete.set()
+        return {file_id: "acc_file_owner" for file_id in file_ids}
+
+    async def block_turn_state_preflight(*_args: object, **_kwargs: object) -> str | None:
+        preflight_started.set()
+        try:
+            await preflight_blocker.wait()
+        except asyncio.CancelledError:
+            preflight_cancelled.set()
+            raise
+        raise AssertionError("cancelled turn-state preflight unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        resolve_owner,
+    )
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", block_turn_state_preflight)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        service_release_reservation,
+    )
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", api_release_reservation)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [(b"x-codex-turn-state", b"turn_pre_cleanup_guard")],
+        }
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_pre_cleanup_guard"}],
+            "stream": True,
+        }
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+        native_codex_heartbeat=True,
+    )
+
+    try:
+        assert isinstance(response, StreamingResponse)
+        await asyncio.wait_for(lookup_complete.wait(), timeout=1)
+        await asyncio.wait_for(preflight_started.wait(), timeout=1)
+        body_iterator = cast(AsyncGenerator[Any, None], response.body_iterator)
+        first = await anext(body_iterator)
+        assert first == proxy_service.CODEX_KEEPALIVE_FRAME
+
+        await body_iterator.aclose()
+
+        await asyncio.wait_for(preflight_cancelled.wait(), timeout=1)
+        assert await service.drain_persistence_tasks(1.0) is True
+        api_release_reservation.assert_awaited_once_with(reservation)
+        service_release_reservation.assert_not_awaited()
+        selection.assert_not_awaited()
+    finally:
+        preflight_blocker.set()
+
+
+@pytest.mark.asyncio
+async def test_native_heartbeat_close_after_file_owner_lookup_leaves_release_to_service_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_native_heartbeat_service_cleanup")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_native_heartbeat_service_cleanup",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    api_release_reservation = AsyncMock()
+    service_release_reservation = AsyncMock()
+    lookup_complete = asyncio.Event()
+    selection_started = asyncio.Event()
+    selection_cancelled = asyncio.Event()
+    selection_blocker = asyncio.Event()
+
+    async def resolve_owner(_repository, file_ids) -> dict[str, str]:
+        lookup_complete.set()
+        return {file_id: "acc_file_owner" for file_id in file_ids}
+
+    async def block_selection(*_args: object, **_kwargs: object) -> AccountSelection:
+        selection_started.set()
+        try:
+            await selection_blocker.wait()
+        except asyncio.CancelledError:
+            selection_cancelled.set()
+            raise
+        raise AssertionError("cancelled selection unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        resolve_owner,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", block_selection)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        service_release_reservation,
+    )
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", api_release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_service_cleanup"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+        native_codex_heartbeat=True,
+    )
+    try:
+        assert isinstance(response, StreamingResponse)
+        await asyncio.wait_for(lookup_complete.wait(), timeout=1)
+        await asyncio.wait_for(selection_started.wait(), timeout=1)
+        body_iterator = cast(AsyncGenerator[Any, None], response.body_iterator)
+        first = await anext(body_iterator)
+        assert first == proxy_service.CODEX_KEEPALIVE_FRAME
+
+        await body_iterator.aclose()
+
+        await asyncio.wait_for(selection_cancelled.wait(), timeout=1)
+        assert await service.drain_persistence_tasks(1.0) is True
+        api_release_reservation.assert_not_awaited()
+        service_release_reservation.assert_awaited_once_with(
+            api_key=api_key,
+            api_key_reservation=reservation,
+            request_id=ANY,
+        )
+    finally:
+        selection_blocker.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_fails", [False, True])
+async def test_native_heartbeat_anyio_cancellation_tracks_one_release_and_closes_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    release_fails: bool,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_native_heartbeat_anyio_cancel")
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_cancelled = asyncio.Event()
+    lookup_finalized = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+    release_attempts = 0
+    cancellation_observed = False
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        try:
+            await lookup_blocker.wait()
+        except asyncio.CancelledError:
+            lookup_cancelled.set()
+            raise
+        finally:
+            lookup_finalized.set()
+        return {}
+
+    async def release_reservation(candidate: object) -> None:
+        nonlocal release_attempts
+        assert candidate is reservation
+        await anyio.sleep(0)
+        release_attempts += 1
+        if release_fails:
+            raise RuntimeError("reservation database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_native_heartbeat_anyio_cancel"}],
+            "stream": True,
+        }
+    )
+    baseline_tasks = set(asyncio.all_tasks())
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+        native_codex_heartbeat=True,
+    )
+    assert isinstance(response, StreamingResponse)
+    body_iterator = cast(AsyncGenerator[Any, None], response.body_iterator)
+    heartbeat_seen = asyncio.Event()
+
+    async def consume_body() -> None:
+        nonlocal cancellation_observed
+        try:
+            first = await anext(body_iterator)
+            assert first == proxy_service.CODEX_KEEPALIVE_FRAME
+            heartbeat_seen.set()
+            await anext(body_iterator)
+        except anyio.get_cancelled_exc_class():
+            cancellation_observed = True
+            raise
+
+    try:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume_body)
+            await heartbeat_seen.wait()
+            task_group.cancel_scope.cancel()
+
+        await asyncio.wait_for(lookup_cancelled.wait(), timeout=1)
+        await asyncio.wait_for(lookup_finalized.wait(), timeout=1)
+        assert await service.drain_persistence_tasks(1.0) is True
+        assert cancellation_observed is True
+        assert release_attempts == 1
+        selection.assert_not_awaited()
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if task not in baseline_tasks and task is not asyncio.current_task() and not task.done()
+        ]
+    finally:
+        lookup_blocker.set()
+        leaked_tasks = [
+            task
+            for task in asyncio.all_tasks()
+            if task not in baseline_tasks and task is not asyncio.current_task() and not task.done()
+        ]
+        for task in leaked_tasks:
+            task.cancel()
+        await asyncio.gather(*leaked_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_heartbeat_close_after_buffered_service_event_closes_service_without_api_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_buffered_service_event")
+    release_reservation = AsyncMock()
+    service_started = asyncio.Event()
+    release_first_event = asyncio.Event()
+    first_event_yielded = asyncio.Event()
+    service_finalized = asyncio.Event()
+    hold_service_open = asyncio.Event()
+
+    async def delayed_service_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        try:
+            service_started.set()
+            await release_first_event.wait()
+            first_event_yielded.set()
+            yield 'data: {"type":"response.created","response":{"id":"resp_buffered"}}\n\n'
+            await hold_service_open.wait()
+        finally:
+            service_finalized.set()
+
+    monkeypatch.setattr(service, "stream_responses", delayed_service_stream)
+    monkeypatch.setattr(proxy_api, "_STREAM_STARTUP_ERROR_PROBE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
+    payload = ResponsesRequest(model="gpt-5.1", instructions="read", input="hello", stream=True)
+    baseline_tasks = set(asyncio.all_tasks())
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+        native_codex_heartbeat=True,
+    )
+    try:
+        assert isinstance(response, StreamingResponse)
+        await asyncio.wait_for(service_started.wait(), timeout=1)
+        release_first_event.set()
+        await asyncio.wait_for(first_event_yielded.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+        body_iterator = cast(AsyncGenerator[Any, None], response.body_iterator)
+        first = await anext(body_iterator)
+        assert first == proxy_service.CODEX_KEEPALIVE_FRAME
+        await body_iterator.aclose()
+
+        await asyncio.wait_for(service_finalized.wait(), timeout=1)
+        assert await service.drain_persistence_tasks(1.0) is True
+        release_reservation.assert_not_awaited()
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if task not in baseline_tasks and task is not asyncio.current_task() and not task.done()
+        ]
+    finally:
+        hold_service_open.set()
+        leaked_tasks = [
+            task
+            for task in asyncio.all_tasks()
+            if task not in baseline_tasks and task is not asyncio.current_task() and not task.done()
+        ]
+        for task in leaked_tasks:
+            task.cancel()
+        await asyncio.gather(*leaked_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_file_owner_lookup_cancellation_releases_reservation_once_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reservation = SimpleNamespace(reservation_id="reservation_collect_file_owner_cancel")
+    release_reservation = AsyncMock()
+    selection = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_collect_cancelled_lookup"}],
+            "stream": False,
+        }
+    )
+
+    request_task = asyncio.create_task(
+        proxy_api._collect_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=None,
+        )
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    assert await service.drain_persistence_tasks(1.0) is True
+    release_reservation.assert_awaited_once_with(reservation)
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("startup_surface", ["responses_route", "prime_helper"])
 @pytest.mark.parametrize("capacity_recovers", [True, False])
 async def test_external_stream_startup_waits_for_single_account_response_create_capacity(
@@ -3885,6 +5779,7 @@ async def test_compact_file_pin_overrides_session_and_prompt_cache_locality(
         {"session_id": "soft-process-session"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
+        forwarded_file_owner_account_id=account.id,
     )
 
     assert result.model_extra == {"output": []}
@@ -3893,6 +5788,405 @@ async def test_compact_file_pin_overrides_session_and_prompt_cache_locality(
     affinity = cast(proxy_service._AffinityPolicy, seen_selection["affinity_policy"])
     assert affinity.codex_session_source == "session_header"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_owner", "expected_error_code"),
+    [
+        (None, "file_owner_unavailable"),
+        ("acc_reclaimed_owner", "continuity_owner_conflict"),
+    ],
+)
+async def test_compact_revalidates_forwarded_file_owner_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_owner: str | None,
+    expected_error_code: str,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    selection = AsyncMock()
+    upstream_compact = AsyncMock()
+    resolve_owner = AsyncMock(return_value=durable_owner)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_owner)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", upstream_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_compaction"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            forwarded_file_owner_account_id="acc_forwarded_owner",
+        )
+
+    assert _proxy_error_code(exc_info.value) == expected_error_code
+    resolve_owner.assert_awaited_once_with(payload, {})
+    selection.assert_not_awaited()
+    upstream_compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_compact_rejects_missing_durable_owner_proof_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    selection = AsyncMock()
+    upstream_compact = AsyncMock()
+    resolve_owner = AsyncMock(return_value="acc_durable_owner")
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_owner)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", upstream_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "input_file", "file_id": "file_missing_forwarded_proof"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            forwarded_request=True,
+            forwarded_file_owner_account_id=None,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    resolve_owner.assert_awaited_once_with(payload, {})
+    selection.assert_not_awaited()
+    upstream_compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_file_owner_database_failure_stops_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_file_owner_failure")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_compact_file_owner_failure",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    selection = AsyncMock()
+    upstream_compact = AsyncMock()
+    settle_compact = AsyncMock()
+
+    async def fail_lookup(_repository, _file_ids) -> dict[str, str]:
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        fail_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", upstream_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "input_file", "file_id": "file_db_failure"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+            forwarded_file_owner_account_id="acc_forwarded_owner",
+        )
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    settle_compact.assert_awaited_once_with(
+        api_key=api_key,
+        api_key_reservation=reservation,
+        response=None,
+        request_service_tier=None,
+    )
+    selection.assert_not_awaited()
+    upstream_compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_file_owner_lookup_cancellation_settles_reservation_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_file_owner_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_compact_file_owner_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    selection = AsyncMock()
+    upstream_compact = AsyncMock()
+    settle_compact = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", upstream_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "input_file", "file_id": "file_compact_cancelled_lookup"}],
+        }
+    )
+
+    request_task = asyncio.create_task(
+        service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+            forwarded_file_owner_account_id="acc_forwarded_owner",
+        )
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    settle_compact.assert_awaited_once_with(
+        api_key=api_key,
+        api_key_reservation=reservation,
+        response=None,
+        request_service_tier=None,
+    )
+    selection.assert_not_awaited()
+    upstream_compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_compact_file_owner_failure_leaves_settlement_to_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_forwarded_compact_file_owner_failure")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_forwarded_compact_file_owner_failure",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    selection = AsyncMock()
+    settle_compact = AsyncMock()
+
+    async def fail_lookup(_repository, _file_ids) -> dict[str, str]:
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        fail_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_compact_failure"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+            forwarded_request=True,
+            forwarded_file_owner_account_id="acc_forwarded_owner",
+        )
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    settle_compact.assert_not_awaited()
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_compact_file_owner_cancellation_leaves_settlement_to_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_forwarded_compact_file_owner_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_forwarded_compact_file_owner_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    selection = AsyncMock()
+    settle_compact = AsyncMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact)
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_compact_cancel"}],
+        }
+    )
+
+    request_task = asyncio.create_task(
+        service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+            forwarded_request=True,
+            forwarded_file_owner_account_id="acc_forwarded_owner",
+        )
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    settle_compact.assert_not_awaited()
+    selection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_terminal_compact_rejection_settles_only_at_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    api_key = _make_api_key_data("key_forwarded_terminal_compact_rejection")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_forwarded_terminal_compact_rejection",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    origin_release = AsyncMock()
+    receiver_settle = AsyncMock()
+    receiver_service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    receiver_owner_failure = proxy_module.ProxyResponseError(
+        502,
+        openai_error(
+            "file_owner_unavailable",
+            "Durable file ownership is temporarily unavailable",
+            error_type="server_error",
+        ),
+    )
+    monkeypatch.setattr(
+        receiver_service,
+        "_resolve_forwarded_file_account_for_responses",
+        AsyncMock(side_effect=receiver_owner_failure),
+    )
+    monkeypatch.setattr(receiver_service, "_settle_compact_api_key_usage", receiver_settle)
+    receiver_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact",
+            "input": [
+                {"type": "input_file", "file_id": "file_forwarded_terminal_compact"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        }
+    )
+    receiver_request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+        }
+    )
+
+    async def forward_to_rejecting_receiver(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        proxy_support._signal_propagated_responses_owner_forward_dispatched()
+        receiver_response = await proxy_api._stream_responses(
+            receiver_request,
+            receiver_payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=receiver_service)),
+            api_key=api_key,
+            codex_session_affinity=True,
+            prefer_http_bridge=True,
+            skip_limit_enforcement=True,
+            api_key_reservation_override=reservation,
+            include_rate_limit_headers=False,
+            forwarded_request=True,
+            forwarded_headers={},
+            forwarded_file_owner_account_id="acc_forwarded_owner",
+            enforce_openai_sdk_contract=False,
+        )
+        assert receiver_response.status_code == 502
+        proxy_support._signal_propagated_responses_owner_forward_rejected()
+        raise proxy_module.ProxyResponseError(
+            receiver_response.status_code,
+            json.loads(bytes(receiver_response.body)),
+        )
+        yield ""
+
+    origin_context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_http_responses=forward_to_rejecting_receiver)),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", origin_release)
+    origin_request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    origin_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_origin_forward"}],
+            "stream": True,
+        }
+    )
+
+    response = await proxy_api._stream_responses(
+        origin_request,
+        origin_payload,
+        context=origin_context,
+        api_key=api_key,
+        prefer_http_bridge=True,
+    )
+
+    assert response.status_code == 502
+    receiver_settle.assert_not_awaited()
+    origin_release.assert_awaited_once_with(reservation)
 
 
 @pytest.mark.asyncio
@@ -18854,6 +21148,48 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
 
 
 @pytest.mark.asyncio
+async def test_prepare_websocket_file_owner_database_failure_stops_before_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    api_key = _make_api_key_data("key_websocket_file_owner_failure")
+    reserve_usage = AsyncMock()
+
+    async def fail_lookup(_repository, _file_ids) -> dict[str, str]:
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        fail_lookup,
+    )
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._prepare_websocket_response_create_request(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "instructions": "read",
+                "input": [{"type": "input_file", "file_id": "file_websocket_db_failure"}],
+            },
+            headers={},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=api_key,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    reserve_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "incremental_input",
     [
@@ -33037,25 +35373,179 @@ async def test_cb_context_open_circuit_closes_request_context_manager(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_lookup_file_pin_returns_live_entry_and_evicts_expired(monkeypatch):
+async def test_resolve_file_account_reads_durable_repository_every_time(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    fake_now = [100.0]
+    resolved_owners = iter(("acc_owner_a", "acc_owner_b"))
+    looked_up_file_ids: list[str] = []
 
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: fake_now[0])
+    async def get_live_account_id(_repository, file_id: str) -> str:
+        looked_up_file_ids.append(file_id)
+        return next(resolved_owners)
 
-    await service._pin_file_account("file_live", "acc_live")
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_id",
+        get_live_account_id,
+    )
 
-    entry = await service._lookup_file_pin("file_live")
+    assert await service._resolve_file_account("file_live") == "acc_owner_a"
+    assert await service._resolve_file_account("file_live") == "acc_owner_b"
+    assert looked_up_file_ids == ["file_live", "file_live"]
 
-    assert entry is not None
-    assert entry.account_id == "acc_live"
 
-    fake_now[0] += service._FILE_ACCOUNT_PIN_TTL_SECONDS + 1
+@pytest.mark.asyncio
+async def test_responses_file_owner_resolution_batches_one_durable_lookup(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    lookup_batches: list[set[str]] = []
 
-    expired = await service._lookup_file_pin("file_live")
+    async def get_live_account_ids(_repository, file_ids) -> dict[str, str]:
+        lookup_batches.append(set(file_ids))
+        return {
+            "file_batch_a": "acc_batch_owner",
+            "file_batch_b": "acc_batch_owner",
+        }
 
-    assert expired is None
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        get_live_account_ids,
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Read both files.",
+            "input": [
+                {"type": "input_file", "file_id": "file_batch_a"},
+                {"type": "input_file", "file_id": "file_batch_b"},
+                {"type": "input_file", "file_id": "file_batch_a"},
+            ],
+        }
+    )
+
+    assert await service._resolve_file_account_for_responses(payload, {}) == "acc_batch_owner"
+    assert lookup_batches == [{"file_batch_a", "file_batch_b"}]
+
+
+@pytest.mark.asyncio
+async def test_finalize_file_database_lookup_failure_stops_before_upstream(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    selection = AsyncMock()
+
+    async def fail_lookup(_repository, _file_id: str) -> str | None:
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_id",
+        fail_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.finalize_file("file_db_failure", {})
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    selection.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "file_owner_unavailable"
+    assert request_logs.calls[0]["account_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_file_database_write_failure_does_not_return_upstream_result(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_unpersisted")
+    selection = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    upstream_create = AsyncMock(return_value={"file_id": "file_unpersisted", "upload_url": "https://upload.invalid"})
+    claim_calls: list[tuple[str, str, int]] = []
+
+    async def fail_claim(
+        _repository,
+        file_id: str,
+        account_id: str,
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        claim_calls.append((file_id, account_id, ttl_seconds))
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_file_ops.FileAccountPinRepository, "claim", fail_claim)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_ensure_previsible_unary_fresh_with_failover", AsyncMock(return_value=account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_create_file", upstream_create)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.create_file({"file_name": "document.txt"}, {})
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    upstream_create.assert_awaited_once()
+    assert claim_calls == [
+        (
+            "file_unpersisted",
+            "acc_unpersisted",
+            service._FILE_ACCOUNT_PIN_TTL_SECONDS,
+        )
+    ]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "file_owner_unavailable"
+    assert request_logs.calls[0]["account_id"] == account.id
+
+
+@pytest.mark.asyncio
+async def test_finalize_file_database_renewal_failure_logs_error_without_upstream_retry(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_finalize_unrenewed")
+    selection = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    upstream_finalize = AsyncMock(return_value={"status": "success"})
+    unexpected_failover = AsyncMock(
+        side_effect=AssertionError("post-success pin persistence failure must not retry upstream")
+    )
+
+    async def resolve_owner(_repository, _file_id: str) -> str:
+        return account.id
+
+    async def fail_claim(
+        _repository,
+        _file_id: str,
+        _account_id: str,
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        assert ttl_seconds == service._FILE_ACCOUNT_PIN_TTL_SECONDS
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_file_ops.FileAccountPinRepository, "get_live_account_id", resolve_owner)
+    monkeypatch.setattr(proxy_file_ops.FileAccountPinRepository, "claim", fail_claim)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_ensure_previsible_unary_fresh_with_failover", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_retry_previsible_unary_call_failover", unexpected_failover)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_finalize_file", upstream_finalize)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.finalize_file("file_finalize_unrenewed", {})
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    upstream_finalize.assert_awaited_once()
+    unexpected_failover.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "file_owner_unavailable"
+    assert request_logs.calls[0]["account_id"] == account.id
 
 
 @pytest.mark.asyncio
@@ -33224,7 +35714,685 @@ async def test_stream_http_bridge_or_retry_rejects_input_image_sediment_url(monk
 
 
 @pytest.mark.asyncio
-async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rejecting(monkeypatch):
+@pytest.mark.parametrize("forwarded_owner", [None, "acc_forwarded_owner"])
+async def test_stream_http_bridge_file_owner_database_failure_stops_before_upstream(
+    monkeypatch,
+    forwarded_owner,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    api_key = _make_api_key_data("key_forwarded_file_owner_failure") if forwarded_owner is not None else None
+    reservation = (
+        proxy_service.ApiKeyUsageReservationData(
+            reservation_id="reservation_forwarded_file_owner_failure",
+            key_id=api_key.id,
+            model="gpt-5.1",
+        )
+        if api_key is not None
+        else None
+    )
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+
+    async def fail_lookup(_repository, _file_ids) -> dict[str, str]:
+        raise RuntimeError("file pin database unavailable")
+
+    upstream_called = False
+
+    async def unexpected_stream(*_args, **_kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        yield "data: unexpected\n\n"
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        fail_lookup,
+    )
+    monkeypatch.setattr(service, "_stream_with_retry", unexpected_stream)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        release_reservation,
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_db_failure"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            forwarded_request=forwarded_owner is not None,
+            forwarded_file_owner_account_id=forwarded_owner,
+        ):
+            pass
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    assert upstream_called is False
+    release_reservation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_http_bridge_file_owner_lookup_cancellation_leaves_cleanup_to_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    api_key = _make_api_key_data("key_forwarded_file_owner_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_forwarded_file_owner_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_reservation = AsyncMock()
+    upstream_stream = MagicMock()
+    lookup_started = asyncio.Event()
+    lookup_blocker = asyncio.Event()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+
+    async def block_lookup(_repository, _file_ids) -> dict[str, str]:
+        lookup_started.set()
+        await lookup_blocker.wait()
+        raise AssertionError("cancelled lookup unexpectedly resumed")
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        block_lookup,
+    )
+    monkeypatch.setattr(service, "_stream_with_retry", upstream_stream)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        release_reservation,
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_cancelled_lookup"}],
+        }
+    )
+
+    stream = service._stream_http_bridge_or_retry(
+        payload=payload,
+        headers={},
+        codex_session_affinity=False,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=api_key,
+        api_key_reservation=reservation,
+        suppress_text_done_events=False,
+        forwarded_request=True,
+        forwarded_file_owner_account_id="acc_forwarded_owner",
+    )
+    request_task = asyncio.ensure_future(anext(stream))
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    request_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    release_reservation.assert_not_awaited()
+    upstream_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_receiver_waits_for_service_cleanup_handoff_before_streaming_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_forwarded_cleanup_handoff",
+        key_id="key_forwarded_cleanup_handoff",
+        model="gpt-5.1",
+    )
+    stream_started = asyncio.Event()
+    pre_handoff_event_sent = asyncio.Event()
+    allow_cleanup_handoff = asyncio.Event()
+    allow_first_event = asyncio.Event()
+
+    async def forwarded_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        stream_started.set()
+        pre_handoff_event_sent.set()
+        yield proxy_service.CODEX_KEEPALIVE_FRAME
+        await allow_cleanup_handoff.wait()
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        await allow_first_event.wait()
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_forwarded_cleanup_handoff","status":"completed"}}\n\n'
+        )
+
+    service = SimpleNamespace(stream_http_responses=forwarded_stream)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS", 0.01)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+        }
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_cleanup_handoff"}],
+            "stream": True,
+        }
+    )
+
+    response_task = asyncio.create_task(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=None,
+            prefer_http_bridge=True,
+            skip_limit_enforcement=True,
+            api_key_reservation_override=reservation,
+            include_rate_limit_headers=False,
+            forwarded_request=True,
+            forwarded_headers={},
+            forwarded_file_owner_account_id="acc_forwarded_cleanup_handoff",
+            enforce_openai_sdk_contract=False,
+        )
+    )
+    try:
+        await asyncio.wait_for(stream_started.wait(), timeout=1)
+        await asyncio.wait_for(pre_handoff_event_sent.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+        assert not response_task.done()
+
+        allow_cleanup_handoff.set()
+        response = await asyncio.wait_for(response_task, timeout=1)
+        assert isinstance(response, StreamingResponse)
+
+        allow_first_event.set()
+        chunks = [chunk async for chunk in response.body_iterator]
+        body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+        assert proxy_service.CODEX_KEEPALIVE_FRAME in body
+        assert "resp_forwarded_cleanup_handoff" in body
+    finally:
+        allow_cleanup_handoff.set()
+        allow_first_event.set()
+        if not response_task.done():
+            response_task.cancel()
+        await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_session_submit_signals_service_cleanup_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_cleanup_handoff",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-cleanup-handoff", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_cleanup_handoff"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    cleanup_ready = asyncio.Event()
+    cleanup_token = proxy_support._bind_propagated_responses_service_cleanup_ready(cleanup_ready)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    detach = AsyncMock()
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=10,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+    )
+    next_event = asyncio.create_task(anext(events))
+    try:
+        await asyncio.wait_for(cleanup_ready.wait(), timeout=0.1)
+    finally:
+        next_event.cancel()
+        await asyncio.gather(next_event, return_exceptions=True)
+        await events.aclose()
+        proxy_support._reset_propagated_responses_service_cleanup_ready(cleanup_token)
+
+    detach.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
+async def test_forwarded_owner_response_ready_signals_origin_cleanup_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_owner_response_cleanup_handoff",
+        key_id="key_owner_response_cleanup_handoff",
+        model="gpt-5.1",
+    )
+    response_ready = asyncio.Event()
+    allow_event = asyncio.Event()
+
+    async def owner_stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+        on_response_ready = cast(Callable[[], None], kwargs["on_response_ready"])
+        on_response_ready()
+        response_ready.set()
+        await allow_event.wait()
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_owner_response_cleanup_handoff","status":"completed"}}\n\n'
+        )
+
+    service._http_bridge_owner_client = SimpleNamespace(stream_responses=owner_stream)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    cleanup_ready = asyncio.Event()
+    cleanup_token = proxy_support._bind_propagated_responses_service_cleanup_ready(cleanup_ready)
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="owner-instance",
+        owner_endpoint="http://owner.invalid",
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-owner-cleanup-handoff", None),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_owner_cleanup_handoff"}],
+            "stream": True,
+        }
+    )
+    stream = cast(
+        AsyncGenerator[str, None],
+        service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=payload,
+            headers={},
+            api_key_reservation=reservation,
+            codex_session_affinity=False,
+            downstream_turn_state=None,
+            request_started_at=time.monotonic(),
+            proxy_api_authorization=None,
+            file_owner_account_id="acc_owner_cleanup_handoff",
+        ),
+    )
+    next_event = asyncio.ensure_future(anext(stream))
+    try:
+        await asyncio.wait_for(response_ready.wait(), timeout=1)
+        await asyncio.wait_for(cleanup_ready.wait(), timeout=0.1)
+        allow_event.set()
+        assert "resp_owner_response_cleanup_handoff" in await asyncio.wait_for(next_event, timeout=1)
+    finally:
+        allow_event.set()
+        if not next_event.done():
+            next_event.cancel()
+        await asyncio.gather(next_event, return_exceptions=True)
+        await stream.aclose()
+        proxy_support._reset_propagated_responses_service_cleanup_ready(cleanup_token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_status", [None, 503], ids=["ambiguous-transport", "definitive-non-200"])
+async def test_owner_forward_dispatch_callbacks_classify_response_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    response_status: int | None,
+) -> None:
+    settings = SimpleNamespace(
+        upstream_connect_timeout_seconds=1.0,
+        stream_idle_timeout_seconds=1.0,
+    )
+    events: list[str] = []
+
+    class _Response:
+        status = 503
+
+        async def text(self) -> str:
+            events.append("response-text")
+            return "owner unavailable"
+
+    class _RequestContext:
+        async def __aenter__(self) -> _Response:
+            events.append("request-enter")
+            if response_status is None:
+                raise aiohttp.ClientConnectionError("lost owner response")
+            return _Response()
+
+        async def __aexit__(self, *_args: object) -> None:
+            events.append("request-exit")
+
+    class _Session:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, *_args: object, **_kwargs: object) -> _RequestContext:
+            events.append("request-built")
+            return _RequestContext()
+
+    monkeypatch.setattr(proxy_http_bridge_forwarding, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_http_bridge_forwarding, "build_owner_forward_headers", lambda **_kwargs: {})
+    monkeypatch.setattr(proxy_http_bridge_forwarding.aiohttp, "ClientSession", lambda **_kwargs: _Session())
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": "hello",
+            "stream": True,
+        }
+    )
+    context = proxy_http_bridge_forwarding.HTTPBridgeForwardContext(
+        origin_instance="origin",
+        target_instance="owner",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    stream = proxy_http_bridge_forwarding.HTTPBridgeOwnerClient().stream_responses(
+        owner_endpoint="http://owner.invalid",
+        payload=payload,
+        headers={},
+        context=context,
+        request_started_at=time.monotonic(),
+        on_request_dispatched=lambda: events.append("dispatched"),
+        on_response_rejected=lambda: events.append("rejected"),
+        on_response_ready=lambda: events.append("ready"),
+    )
+
+    expected_error = aiohttp.ClientConnectionError if response_status is None else proxy_module.ProxyResponseError
+    with pytest.raises(expected_error):
+        await anext(stream)
+
+    assert events[:3] == ["request-built", "dispatched", "request-enter"]
+    assert ("rejected" in events) is (response_status == 503)
+    assert "ready" not in events
+
+
+@pytest.mark.asyncio
+async def test_forwarded_receiver_cancellation_after_cleanup_handoff_releases_only_on_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.http_responses_session_bridge_enabled = True
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="reservation_cross_replica_cleanup_owner",
+        key_id="key_cross_replica_cleanup_owner",
+        model="gpt-5.1",
+    )
+    origin_release = AsyncMock()
+    receiver_release = AsyncMock()
+    receiver_cleanup_ready = asyncio.Event()
+    receiver_first_event = asyncio.Event()
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "read",
+            "input": [{"type": "input_file", "file_id": "file_cross_replica_cleanup_owner"}],
+            "stream": True,
+        }
+    )
+
+    async def receiver_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        try:
+            proxy_support._signal_propagated_responses_service_cleanup_ready()
+            receiver_cleanup_ready.set()
+            await receiver_first_event.wait()
+            yield (
+                'data: {"type":"response.completed","response":'
+                '{"id":"resp_cross_replica_cleanup_owner","status":"completed"}}\n\n'
+            )
+        finally:
+            await receiver_release(reservation)
+
+    receiver_context = cast(
+        proxy_api.ProxyContext,
+        SimpleNamespace(service=SimpleNamespace(stream_http_responses=receiver_stream)),
+    )
+    receiver_request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/bridge/responses",
+            "headers": [],
+        }
+    )
+
+    class _HermeticOwnerClient:
+        async def stream_responses(
+            self,
+            *,
+            on_response_ready: Callable[[], None],
+            **_kwargs: object,
+        ) -> AsyncIterator[str]:
+            receiver_task = asyncio.create_task(
+                proxy_api._stream_responses(
+                    receiver_request,
+                    payload.model_copy(deep=True),
+                    context=receiver_context,
+                    api_key=None,
+                    prefer_http_bridge=True,
+                    skip_limit_enforcement=True,
+                    api_key_reservation_override=reservation,
+                    include_rate_limit_headers=False,
+                    forwarded_request=True,
+                    forwarded_headers={},
+                    forwarded_file_owner_account_id="acc_cross_replica_cleanup_owner",
+                    enforce_openai_sdk_contract=False,
+                ),
+                context=contextvars.Context(),
+            )
+            receiver_response = await receiver_task
+            assert isinstance(receiver_response, StreamingResponse)
+            on_response_ready()
+            receiver_body = cast(AsyncGenerator[Any, None], receiver_response.body_iterator)
+            try:
+                async for chunk in receiver_body:
+                    yield chunk.decode() if isinstance(chunk, bytes) else str(chunk)
+            finally:
+                await receiver_body.aclose()
+
+    origin_service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    origin_service._http_bridge_owner_client = _HermeticOwnerClient()
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="owner-instance",
+        owner_endpoint="http://owner.invalid",
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-cross-replica-cleanup", None),
+    )
+
+    def origin_stream(
+        stream_payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        **kwargs: object,
+    ) -> AsyncIterator[str]:
+        return origin_service._forward_http_bridge_request_to_owner(
+            owner_forward=owner_forward,
+            payload=stream_payload,
+            headers=headers,
+            api_key_reservation=cast(
+                proxy_service.ApiKeyUsageReservationData | None,
+                kwargs["api_key_reservation"],
+            ),
+            codex_session_affinity=False,
+            downstream_turn_state=None,
+            request_started_at=time.monotonic(),
+            proxy_api_authorization=None,
+            file_owner_account_id="acc_cross_replica_cleanup_owner",
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api, "_release_reservation", origin_release)
+    origin_request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    response = await proxy_api._stream_responses(
+        origin_request,
+        payload.model_copy(deep=True),
+        context=cast(
+            proxy_api.ProxyContext, SimpleNamespace(service=SimpleNamespace(stream_http_responses=origin_stream))
+        ),
+        api_key=None,
+        prefer_http_bridge=True,
+    )
+    assert isinstance(response, StreamingResponse)
+    await asyncio.wait_for(receiver_cleanup_ready.wait(), timeout=1)
+    body = cast(AsyncGenerator[Any, None], response.body_iterator)
+    body_task = asyncio.create_task(anext(body))
+    await asyncio.sleep(0)
+    body_task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await body_task
+        await body.aclose()
+        receiver_release.assert_awaited_once_with(reservation)
+        origin_release.assert_not_awaited()
+    finally:
+        receiver_first_event.set()
+        if not body_task.done():
+            body_task.cancel()
+        await asyncio.gather(body_task, return_exceptions=True)
+        await body.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_owner", "forwarded_owner", "forwarded_request", "expected_error_code"),
+    [
+        (None, "acc_forwarded_owner", False, "file_owner_unavailable"),
+        ("acc_reclaimed_owner", "acc_forwarded_owner", False, "continuity_owner_conflict"),
+        ("acc_forwarded_owner", None, True, "file_owner_unavailable"),
+    ],
+)
+async def test_stream_http_bridge_revalidates_forwarded_file_owner(
+    monkeypatch,
+    durable_owner,
+    forwarded_owner,
+    forwarded_request,
+    expected_error_code,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=False,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    resolve_owner = AsyncMock(return_value=durable_owner)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_owner)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_forwarded_owner"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            forwarded_request=forwarded_request,
+            forwarded_file_owner_account_id=forwarded_owner,
+        ):
+            pass
+
+    assert _proxy_error_code(exc_info.value) == expected_error_code
+    resolve_owner.assert_awaited_once_with(payload, {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_owner", "forwarded_owner"),
+    [
+        ("acc_doc", "acc_doc"),
+        (None, None),
+    ],
+    ids=["matching-proof", "opaque-no-pin-no-proof"],
+)
+async def test_stream_http_bridge_or_retry_routes_valid_forwarded_input_file(
+    monkeypatch,
+    durable_owner,
+    forwarded_owner,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
@@ -33243,7 +36411,8 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
             gateway_safe_mode=False,
         ),
     )
-    await service._pin_file_account("file_doc", "acc_doc")
+    resolve_file_owner = AsyncMock(return_value=durable_owner)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", resolve_file_owner)
     payload = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",
@@ -33252,17 +36421,18 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
         }
     )
 
-    calls: list[tuple[object, str | None]] = []
+    calls: list[tuple[object, str | None, bool]] = []
 
     async def fake_stream_with_retry(
         payload,
         headers,
         *,
         rewritten_file_account_id: str | None = None,
+        file_account_resolution_complete: bool = False,
         **kwargs,
     ):
         del headers, kwargs
-        calls.append((payload, rewritten_file_account_id))
+        calls.append((payload, rewritten_file_account_id, file_account_resolution_complete))
         yield "data: retry\n\n"
 
     monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
@@ -33278,11 +36448,14 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
             api_key=None,
             api_key_reservation=None,
             suppress_text_done_events=False,
+            forwarded_request=True,
+            forwarded_file_owner_account_id=forwarded_owner,
         )
     ]
 
     assert output == ["data: retry\n\n"]
-    assert calls == [(payload, "acc_doc")]
+    assert calls == [(payload, durable_owner, True)]
+    resolve_file_owner.assert_awaited_once_with(payload, {})
 
 
 def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
@@ -34813,11 +37986,13 @@ async def test_files_create_persists_conversation_id_on_refresh_connection_reset
     account_b = _make_account("acc_files_create_refresh_b")
     record_error = AsyncMock()
     record_success = AsyncMock()
+    pin_file_account = AsyncMock()
     seen_excluded_account_ids: list[set[str]] = []
 
     _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
     monkeypatch.setattr(service._load_balancer, "record_error", record_error)
     monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_pin_file_account", pin_file_account)
     monkeypatch.setattr(
         service,
         "_ensure_fresh",
@@ -34847,6 +38022,7 @@ async def test_files_create_persists_conversation_id_on_refresh_connection_reset
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    pin_file_account.assert_awaited_once_with("file_ok", account_b.id)
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
@@ -34927,7 +38103,7 @@ async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(monke
         "core_finalize_file",
         AsyncMock(side_effect=AssertionError("strict file owner must not fail over or invoke upstream")),
     )
-    await service._pin_file_account("file_pinned", account.id)
+    monkeypatch.setattr(service, "_resolve_file_account", AsyncMock(return_value=account.id))
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service.finalize_file("file_pinned", {"session_id": "sid-files-finalize"})
@@ -34965,7 +38141,7 @@ async def test_files_finalize_pinned_initial_selection_does_not_fall_back(monkey
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=fallback_account))
     finalize_file = AsyncMock(side_effect=AssertionError("pinned finalize must not invoke a fallback account"))
     monkeypatch.setattr(proxy_service, "core_finalize_file", finalize_file)
-    await service._pin_file_account("file_pinned_initial", pinned_account.id)
+    monkeypatch.setattr(service, "_resolve_file_account", AsyncMock(return_value=pinned_account.id))
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service.finalize_file("file_pinned_initial", {"session_id": "sid-files-finalize"})

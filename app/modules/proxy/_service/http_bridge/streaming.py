@@ -94,6 +94,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.owner_forwarding import (
+    _owner_forward_failure_allows_local_recovery,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
     _codex_keepalive_frame,
@@ -151,6 +154,7 @@ from app.modules.proxy._service.support import (
     _is_local_account_cap_code,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
 )
@@ -604,17 +608,11 @@ class _HTTPBridgeStreamingMixin:
         payload_size_estimate_bytes = len(
             json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
-        # File pins are process-local. A remote owner must trust only the
-        # origin-resolved value carried by the authenticated forward context;
-        # re-looking it up here would turn a valid cross-replica pin into a miss.
-        local_file_owner_account_id = (
-            None
-            if forwarded_file_owner_account_id is not None
-            else await self._resolve_file_account_for_responses(payload, headers)
-        )
-        rewritten_file_account_id = resolve_required_account_id(
-            ("signed forwarding context", forwarded_file_owner_account_id),
-            ("local file pin", local_file_owner_account_id),
+        rewritten_file_account_id = await self._resolve_forwarded_file_account_for_responses(
+            payload,
+            headers,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+            require_forwarded_file_owner=forwarded_request,
         )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
@@ -650,6 +648,7 @@ class _HTTPBridgeStreamingMixin:
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
+                file_account_resolution_complete=True,
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -1398,6 +1397,18 @@ class _HTTPBridgeStreamingMixin:
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
+            if forwarded_request:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "bridge_forward_loop_prevented",
+                        (
+                            "HTTP bridge request was forwarded back to a non-owner instance; "
+                            "refusing takeover to avoid a forward loop"
+                        ),
+                        error_type="server_error",
+                    ),
+                )
             await _current_origin_legacy_owner_anchor_lookup(
                 durable_bridge=self._durable_bridge,
                 bridge_session_key=session_or_forward.key,
@@ -1434,6 +1445,8 @@ class _HTTPBridgeStreamingMixin:
                         default_message="HTTP bridge owner request failed",
                     )
                     return
+                if not _owner_forward_failure_allows_local_recovery(exc):
+                    raise
                 owner_forward_fresh_replay = owner_unavailable_allows_account_neutral_replay(exc)
                 if owner_forward_fresh_replay:
                     switch_to_account_neutral_replay()
@@ -1718,17 +1731,6 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state: _WebSocketRequestState | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
-                    retry_reservation_reacquired = False
-                    if api_key is not None and api_key_reservation is not None:
-                        retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
-                            api_key,
-                            request_model=recovery_payload.model,
-                            request_service_tier=_normalize_service_tier_value(
-                                dict(recovery_payload.to_payload()).get("service_tier"),
-                            ),
-                            request_usage_budget=estimate_api_key_request_usage(recovery_payload),
-                        )
-                        retry_reservation_reacquired = True
 
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
@@ -1760,10 +1762,6 @@ class _HTTPBridgeStreamingMixin:
                         request_deadline=request_deadline,
                     ):
                         yield event_block
-                except BaseException:
-                    if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                        await self._release_websocket_reservation(retry_api_key_reservation)
-                    raise
                 finally:
                     if owner_recovery_scope_id is not None:
                         _release_http_bridge_unanchored_handoff(
@@ -2246,7 +2244,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
                 retry_previous_response_id = None
                 retry_request_stage = "context_overflow_recover"
-                retry_preferred_account_id = None
+                retry_preferred_account_id = rewritten_file_account_id
                 allow_previous_response_recovery_rebind = False
             elif should_rollover_after_context_overflow:
                 _log_http_bridge_event(
@@ -2395,6 +2393,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                 retry_request_state.request_stage = retry_request_stage
                 retry_request_state.preferred_account_id = retry_preferred_account_id
+                retry_request_state.file_required_preferred_account = file_required_preferred_account
                 retry_request_state.excluded_account_ids.update(request_state.excluded_account_ids)
 
                 retry_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
@@ -2555,6 +2554,11 @@ class _HTTPBridgeStreamingMixin:
                 continue
             break
         try:
+            # A successful submit installs the request-state finalizer that
+            # settles or releases the reservation. Signal before the next
+            # cancellation point so the API startup guard cannot race that
+            # finalizer while no upstream event has arrived yet.
+            _signal_propagated_responses_service_cleanup_ready()
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)
             _signal_propagated_capacity_startup_ready()

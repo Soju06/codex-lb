@@ -37,9 +37,6 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload as _event_type_from_payload,
 )
 from app.modules.proxy._service.support import (
-    _FilePinEntry as _FilePinEntry,
-)
-from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
 )
 from app.modules.proxy._service.support import (

@@ -623,13 +623,20 @@ async def _clear_durable_http_bridge_response_anchor(
     if session.durable_session_id is None or session.durable_owner_epoch is None:
         return
     try:
-        await service._durable_bridge.clear_live_session_response_anchor(
+        lookup = await service._durable_bridge.clear_live_session_response_anchor(
             session_id=session.durable_session_id,
             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
             owner_epoch=session.durable_owner_epoch,
         )
     except Exception:
         logger.warning("Failed to clear durable HTTP bridge response anchor after stuck timeout", exc_info=True)
+        return
+    if lookup is None or lookup.owner_epoch != session.durable_owner_epoch or lookup.latest_response_id is not None:
+        # None means the durable row is gone entirely (e.g. purged); an
+        # epoch or anchor mismatch means a newer owner already claimed the
+        # session before this fenced write executed. Either way, the anchor
+        # was never actually cleared, so do not report an invalidation that
+        # did not happen.
         return
     _log_http_bridge_event(
         "durable_anchor_invalidated",
@@ -640,6 +647,7 @@ async def _clear_durable_http_bridge_response_anchor(
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
+
 
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(

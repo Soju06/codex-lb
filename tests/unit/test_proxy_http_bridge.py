@@ -19537,6 +19537,58 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_full
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("returned_lookup", "expect_logged"),
+    [
+        pytest.param(None, False, id="session_row_gone"),
+        pytest.param("fenced_out", False, id="fenced_out_by_newer_owner"),
+        pytest.param("cleared", True, id="fenced_write_actually_applied"),
+    ],
+)
+async def test_clear_durable_http_bridge_response_anchor_logs_only_on_confirmed_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    returned_lookup: str | None,
+    expect_logged: bool,
+) -> None:
+    # A fenced UPDATE that a newer owner already raced past returns that
+    # owner's current (unmodified) snapshot rather than None, so the return
+    # value must be inspected before reporting an invalidation that did not
+    # happen (regression for the case where the return value was ignored).
+    session = _make_bridge_session(key_value="clear-anchor-confirm")
+    session.durable_session_id = "durable-session-1"
+    session.durable_owner_epoch = 3
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    lookup: proxy_service.DurableBridgeLookup | None
+    if returned_lookup is None:
+        lookup = None
+    else:
+        fenced_out = returned_lookup == "fenced_out"
+        lookup = proxy_service.DurableBridgeLookup(
+            session_id="durable-session-1",
+            canonical_kind="session_header",
+            canonical_key="clear-anchor-confirm",
+            api_key_scope="__anonymous__",
+            account_id="acc-bridge",
+            owner_instance_id=("instance-b" if fenced_out else settings.http_responses_session_bridge_instance_id),
+            owner_epoch=4 if fenced_out else 3,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state="http_turn_stuck",
+            latest_response_id="resp_newer_owner" if fenced_out else None,
+        )
+    durable_bridge = SimpleNamespace(clear_live_session_response_anchor=AsyncMock(return_value=lookup))
+    service = SimpleNamespace(_durable_bridge=durable_bridge)
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    await http_bridge_upstream_events_module._clear_durable_http_bridge_response_anchor(service, session)
+
+    assert ("event=durable_anchor_invalidated" in caplog.text) is expect_logged
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_eventless_timeout_yields_to_locked_send_failure_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

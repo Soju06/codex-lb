@@ -45,6 +45,7 @@ _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", 
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
+_EXPLICIT_PROMPT_CACHE_CONTENT_TYPES = frozenset({"input_text", "input_image", "input_file"})
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -800,6 +801,7 @@ _ESTIMATED_CHARS_PER_TOKEN = 4
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
+    _strip_subscription_prompt_cache_controls(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
     # ``tools`` is deliberately NOT canonicalized here: the wire payload must
@@ -810,6 +812,49 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
+
+
+def responses_request_has_explicit_prompt_cache_controls(payload: ResponsesRequest) -> bool:
+    """Whether a request asks for public-API explicit prompt caching."""
+
+    extra = payload.model_extra
+    if isinstance(extra, dict) and "prompt_cache_options" in extra:
+        return True
+    return _contains_explicit_prompt_cache_breakpoint(payload.input)
+
+
+def _contains_explicit_prompt_cache_breakpoint(value: JsonValue) -> bool:
+    if isinstance(value, list):
+        return any(_contains_explicit_prompt_cache_breakpoint(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES and "prompt_cache_breakpoint" in value:
+        return True
+    return any(_contains_explicit_prompt_cache_breakpoint(child) for child in value.values())
+
+
+def _strip_subscription_prompt_cache_controls(payload: MutableJsonObject) -> None:
+    """Remove controls rejected by the Codex subscription upstream.
+
+    OpenAI-compatible model sources use ``model_dump_for_forwarding`` and do
+    not pass through this subscription-only serializer.
+    """
+
+    payload.pop("prompt_cache_options", None)
+    _strip_subscription_prompt_cache_breakpoints(payload.get("input"))
+
+
+def _strip_subscription_prompt_cache_breakpoints(value: JsonValue | None) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _strip_subscription_prompt_cache_breakpoints(item)
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("type") in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES:
+        value.pop("prompt_cache_breakpoint", None)
+    for child in value.values():
+        _strip_subscription_prompt_cache_breakpoints(child)
 
 
 def _strip_poisoned_local_compact_fallback_items(payload: MutableJsonObject) -> None:

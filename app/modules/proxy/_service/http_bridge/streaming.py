@@ -2679,6 +2679,7 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
                     retry_request_state.recovery_attempt_session_id = request_state.recovery_attempt_session_id
                     retry_request_state.recovery_attempt_owner_epoch = request_state.recovery_attempt_owner_epoch
+                    retry_request_state.recovery_attempt_claimed = True
                 _apply_http_bridge_downstream_turn_state(
                     retry_request_state,
                     downstream_turn_state=downstream_turn_state,

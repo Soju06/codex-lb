@@ -610,6 +610,37 @@ async def _cancel_http_bridge_reader_child(
         return task.done()
 
 
+async def _clear_durable_http_bridge_response_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+) -> None:
+    """Invalidate a durable proxy-injected anchor that proved eventless.
+
+    Runs while ``session`` still owns the durable row (before retirement
+    releases the lease), so the fenced write lands under the session's own
+    owner epoch instead of silently losing the fence to a released owner.
+    """
+    if session.durable_session_id is None or session.durable_owner_epoch is None:
+        return
+    try:
+        await service._durable_bridge.clear_live_session_response_anchor(
+            session_id=session.durable_session_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+        )
+    except Exception:
+        logger.warning("Failed to clear durable HTTP bridge response anchor after stuck timeout", exc_info=True)
+        return
+    _log_http_bridge_event(
+        "durable_anchor_invalidated",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -838,6 +869,21 @@ class _HTTPBridgeUpstreamEventsMixin:
                                         request_state.failure_detail_override = (
                                             _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
                                         )
+                                # A delta-only request has no other way to
+                                # convey prior context once its anchor is
+                                # cleared, so only clear anchors codex-lb
+                                # injected onto a full-resend-shaped payload.
+                                expired_proxy_injected_anchor = any(
+                                    request_state.proxy_injected_previous_response_id
+                                    and request_state.proxy_injected_anchor_had_full_resend_payload
+                                    for request_state in session.pending_requests
+                                )
+                            # Clear while this owner still holds the durable
+                            # row. This must precede both the non-cancellable
+                            # receive-task retire path and the ordinary retry
+                            # path below.
+                            if expired_proxy_injected_anchor:
+                                await _clear_durable_http_bridge_response_anchor(self, session)
                             if receive_task is not None:
                                 receive_cancelled = await _cancel_http_bridge_reader_child(
                                     receive_task,

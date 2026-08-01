@@ -141,6 +141,25 @@ def _make_eventless_http_bridge_owner(
     )
 
 
+class _SilentEventlessUpstream:
+    """Upstream double that never produces a response event, for eventless-timeout tests."""
+
+    def __init__(self) -> None:
+        self.first_receive_started = asyncio.Event()
+        self.closed = False
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        self.first_receive_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send_text(self, text: str) -> None:
+        pass
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
     request_state = _make_eventless_http_bridge_owner()
 
@@ -19443,6 +19462,78 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
         session=session,
     )
     assert "http_bridge_event event=missing_response_created_timeout" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("proxy_injected", "had_full_resend_payload", "expect_clear"),
+    [
+        pytest.param(True, True, True, id="full_resend_proxy_injected_anchor_is_cleared"),
+        pytest.param(True, False, False, id="delta_only_proxy_injected_anchor_stays"),
+        pytest.param(False, False, False, id="client_supplied_anchor_stays"),
+    ],
+)
+async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_full_resend(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_injected: bool,
+    had_full_resend_payload: bool,
+    expect_clear: bool,
+) -> None:
+    # A delta-only proxy-injected anchor (``proxy_injected`` True,
+    # ``had_full_resend_payload`` False) has no other way to convey prior
+    # context once cleared, so it must stay anchored despite the timeout,
+    # same as a client-supplied anchor codex-lb never owns.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _SilentEventlessUpstream()
+    session = _make_bridge_session(key_value="eventless-anchor-clear")
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    session.durable_session_id = "durable-session-1"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        sse_keepalive_interval_seconds=0.0,
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    clear_anchor = AsyncMock(return_value=None)
+    monkeypatch.setattr(service._durable_bridge, "clear_live_session_response_anchor", clear_anchor)
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    await asyncio.wait_for(upstream.first_receive_started.wait(), timeout=0.5)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner = _make_eventless_http_bridge_owner(request_id="req-anchor-owner", sent_at=0.0)
+    owner.started_at = time.monotonic() - 30.0
+    owner.response_create_sent_at = None
+    owner.response_create_gate = gate
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    owner.proxy_injected_previous_response_id = proxy_injected
+    owner.proxy_injected_anchor_had_full_resend_payload = had_full_resend_payload
+    async with session.pending_lock:
+        session.pending_requests.append(owner)
+        session.queued_request_count = 1
+
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        owner,
+        owner.request_text,
+    )
+    await asyncio.wait_for(reader_task, timeout=1.0)
+
+    if expect_clear:
+        clear_anchor.assert_awaited_once_with(
+            session_id="durable-session-1",
+            instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_epoch=3,
+        )
+    else:
+        clear_anchor.assert_not_awaited()
 
 
 @pytest.mark.asyncio

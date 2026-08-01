@@ -8,7 +8,10 @@ When HTTP bridge processing of `response.completed` removes a request from
 pending ownership, it MUST retain the request's downstream event queue for the
 remainder of that completed operation. Later asynchronous bookkeeping or
 request detachment MUST NOT revoke that claimed queue before the completed
-event and end-of-stream marker are enqueued.
+operation's selected terminal event and end-of-stream marker are enqueued. If
+fail-closed bookkeeping replaces the upstream completion with a terminal
+failure, that selected failure event is the terminal event governed by this
+requirement.
 
 While the claimed completed-delivery operation remains active, ordinary stream
 idle accounting MUST NOT replace the upstream completion with a synthetic idle
@@ -24,7 +27,7 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **GIVEN** an HTTP bridge stream is waiting on its request event queue
 - **AND** an upstream `response.completed` event removes that request from pending ownership
 - **WHEN** request detachment overlaps later completed-event bookkeeping
-- **THEN** the stream receives the completed event exactly once
+- **THEN** the stream receives the terminal event selected for downstream delivery exactly once
 - **AND** the stream receives its end-of-stream marker
 
 #### Scenario: Completed bookkeeping exceeds the idle window

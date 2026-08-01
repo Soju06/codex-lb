@@ -289,6 +289,8 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
     await asyncio.wait_for(terminal_claimed.wait(), timeout=1.0)
     assert request_state.completed_delivery_scope is not None
     assert request_state.completed_delivery_scope.active is True
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is False
+    assert request_state.event_queue is None
     await asyncio.sleep(0.02)
     assert not stream_task.done()
 

@@ -160,6 +160,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
     )
 
     request_state.latency_first_upstream_event_ms = 25
+    request_state.last_upstream_activity_at = 150.0
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,

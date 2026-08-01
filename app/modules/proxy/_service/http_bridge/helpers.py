@@ -733,8 +733,11 @@ def _http_bridge_eventless_precreated_deadline(
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
-    activity_at = request_state.last_upstream_activity_at
-    return max(sent_at, activity_at or sent_at) + min(
+    # Non-response telemetry (for example ``codex.rate_limits``) may update
+    # the generic activity marker, but it must not extend the response.create
+    # acknowledgement deadline. The eventless watchdog is intentionally
+    # anchored to the send time until a response-lifecycle event is observed.
+    return sent_at + min(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
     )

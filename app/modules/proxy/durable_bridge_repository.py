@@ -258,10 +258,15 @@ class DurableBridgeRepository:
                 HttpBridgeRetryCircuit.last_detail.is_(None),
                 HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
             )
+            # ``updated_at_epoch`` is an observation timestamp, not a
+            # concurrency version. A replica whose wall clock lags the writer
+            # already in the row must still merge its failure when its write
+            # is newer than the version it loaded.
+            failure_is_newer_than_base = excluded.updated_at_epoch > base_updated_at_epoch
             conflict_failures = case(
                 (reset_lineage, 1),
                 (
-                    excluded.updated_at_epoch > HttpBridgeRetryCircuit.updated_at_epoch,
+                    failure_is_newer_than_base,
                     func.greatest(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,
@@ -326,10 +331,11 @@ class DurableBridgeRepository:
                 HttpBridgeRetryCircuit.last_detail.is_(None),
                 HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
             )
+            failure_is_newer_than_base = excluded.updated_at_epoch > base_updated_at_epoch
             conflict_failures = case(
                 (reset_lineage, 1),
                 (
-                    excluded.updated_at_epoch > HttpBridgeRetryCircuit.updated_at_epoch,
+                    failure_is_newer_than_base,
                     func.max(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,

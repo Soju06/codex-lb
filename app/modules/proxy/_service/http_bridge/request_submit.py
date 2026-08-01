@@ -1146,6 +1146,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     try:
                         await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                     except BaseException:
+                        request_state.recovery_attempt_dispatched = True
                         # Publish retirement while lifecycle ownership is still
                         # held; a gate waiter must never reuse an ambiguously sent
                         # response.create socket between unlock and cleanup.
@@ -1153,6 +1154,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         session.upstream_control.reconnect_requested = True
                         session.upstream_control.retire_after_drain = True
                         raise
+                    request_state.recovery_attempt_dispatched = True
                     session.last_used_at = _service_time().monotonic()
                 except asyncio.CancelledError:
                     if recovery_receipt is not None and not upstream_send_started:

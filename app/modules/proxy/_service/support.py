@@ -837,6 +837,10 @@ class _WebSocketRequestState:
     # True when recovery already atomically claimed the journal row as
     # REPLAYED. Claimed replays must not be re-journaled at dispatch.
     recovery_attempt_claimed: bool = False
+    # Set once the upstream send is attempted, including an ambiguous send
+    # failure. Pre-dispatch admission/setup failures may safely roll back a
+    # claimed recovery journal; an attempted send must remain consumed.
+    recovery_attempt_dispatched: bool = False
     recovery_attempt_event_observed: bool = False
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved

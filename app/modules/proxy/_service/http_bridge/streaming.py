@@ -2178,12 +2178,12 @@ class _HTTPBridgeStreamingMixin:
         try:
             yielded_any = False
             durable_recovery_fresh_replay = False
-            durable_recovery_fresh_replay_dispatched = False
+            retry_request_state: _WebSocketRequestState | None = None
 
             async def rollback_pre_dispatch_recovery_claim() -> None:
                 if not (
                     durable_recovery_fresh_replay
-                    and not durable_recovery_fresh_replay_dispatched
+                    and (retry_request_state is None or not retry_request_state.recovery_attempt_dispatched)
                     and durable_recovery_attempt_fingerprint is not None
                     and durable_recovery_attempt_session_id is not None
                     and durable_recovery_attempt_owner_epoch is not None
@@ -2700,7 +2700,6 @@ class _HTTPBridgeStreamingMixin:
                     request_deadline=request_deadline,
                 )
                 try:
-                    durable_recovery_fresh_replay_dispatched = True
                     async for event_block in retry_events:
                         yield event_block
                 finally:

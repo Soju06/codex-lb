@@ -7116,8 +7116,20 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
     assert connect_count == 2
 
 
+@pytest.mark.parametrize(
+    ("developer_message_extra", "preserves_full_resend"),
+    [
+        pytest.param({}, True, id="unowned-developer-message"),
+        pytest.param({"id": "msg_response_owned"}, False, id="response-owned-developer-message"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridge_send(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_classifies_responses_lite_developer_interleaved_full_resend(
+    async_client,
+    monkeypatch,
+    developer_message_extra,
+    preserves_full_resend,
+):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -7157,9 +7169,30 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
     session_headers = {"x-codex-session-id": "fresh-reattach-full-resend"}
     historical_input = [
         {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {
             "role": "user",
             "content": [{"type": "input_text", "text": "first question"}],
-        }
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_historical_shell",
+            "name": "shell",
+            "input": "printf historical",
+        },
+        {
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "historical control"}],
+            **developer_message_extra,
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_historical_shell",
+            "output": "historical",
+        },
     ]
     first = await asyncio.wait_for(
         async_client.post(
@@ -7210,8 +7243,11 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
     assert len(first_upstream.sent_text) == 1
     assert len(replay_upstream.sent_text) == 1
     replay_payload = json.loads(replay_upstream.sent_text[0])
-    assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == full_resend
+    if preserves_full_resend:
+        assert "previous_response_id" not in replay_payload
+        assert replay_payload["input"] == full_resend
+    else:
+        assert replay_payload["previous_response_id"] == "resp_bridge_custom_1"
 
 
 @pytest.mark.asyncio

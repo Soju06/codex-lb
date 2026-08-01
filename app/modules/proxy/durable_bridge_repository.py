@@ -259,10 +259,18 @@ class DurableBridgeRepository:
                 HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
             )
             # ``updated_at_epoch`` is an observation timestamp, not a
-            # concurrency version. A replica whose wall clock lags the writer
-            # already in the row must still merge its failure when its write
-            # is newer than the version it loaded.
-            failure_is_newer_than_base = excluded.updated_at_epoch > base_updated_at_epoch
+            # concurrency version. Treat an unchanged loaded row as a CAS
+            # match, even when a replica's wall clock lags it. The failure
+            # count guard still rejects an older snapshot that was loaded from
+            # the same row after a newer failure had already been merged.
+            failure_from_loaded_row = and_(
+                HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
+                excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            failure_is_newer_than_base = or_(
+                excluded.updated_at_epoch > base_updated_at_epoch,
+                failure_from_loaded_row,
+            )
             conflict_failures = case(
                 (reset_lineage, 1),
                 (
@@ -331,7 +339,14 @@ class DurableBridgeRepository:
                 HttpBridgeRetryCircuit.last_detail.is_(None),
                 HttpBridgeRetryCircuit.updated_at_epoch > base_updated_at_epoch,
             )
-            failure_is_newer_than_base = excluded.updated_at_epoch > base_updated_at_epoch
+            failure_from_loaded_row = and_(
+                HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
+                excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            failure_is_newer_than_base = or_(
+                excluded.updated_at_epoch > base_updated_at_epoch,
+                failure_from_loaded_row,
+            )
             conflict_failures = case(
                 (reset_lineage, 1),
                 (

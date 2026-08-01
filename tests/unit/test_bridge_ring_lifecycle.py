@@ -441,9 +441,9 @@ async def test_retry_circuit_merges_lagging_wall_clock_failure_from_loaded_base(
             conflict_cooldown_until_epoch=2060.0,
         )
 
-        # This replica loaded the row at 1000, then its wall clock lagged the
-        # writer that persisted 2000. The failure is still new relative to
-        # the loaded base and must open the shared circuit.
+        # This replica loaded the row at 2000, then its wall clock lagged the
+        # writer that persisted it. The unchanged loaded row is a CAS match,
+        # so the failure must still open the shared circuit.
         await repository.upsert_retry_circuit(
             session_key_kind="session_header",
             session_key_value="sid-retry-clock-skew",
@@ -452,7 +452,7 @@ async def test_retry_circuit_merges_lagging_wall_clock_failure_from_loaded_base(
             cooldown_until_epoch=0.0,
             last_detail="stream_incomplete",
             updated_at_epoch=1500.0,
-            base_updated_at_epoch=1000.0,
+            base_updated_at_epoch=2000.0,
             failure_threshold=2,
             conflict_cooldown_until_epoch=1560.0,
         )

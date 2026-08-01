@@ -828,7 +828,12 @@ def _contains_explicit_prompt_cache_breakpoint(value: JsonValue) -> bool:
         return any(_contains_explicit_prompt_cache_breakpoint(item) for item in value)
     if not isinstance(value, dict):
         return False
-    if value.get("type") in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES and "prompt_cache_breakpoint" in value:
+    value_type = value.get("type")
+    if (
+        isinstance(value_type, str)
+        and value_type in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES
+        and "prompt_cache_breakpoint" in value
+    ):
         return True
     return any(_contains_explicit_prompt_cache_breakpoint(child) for child in value.values())
 
@@ -851,7 +856,8 @@ def _strip_subscription_prompt_cache_breakpoints(value: JsonValue | None) -> Non
         return
     if not isinstance(value, dict):
         return
-    if value.get("type") in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES:
+    value_type = value.get("type")
+    if isinstance(value_type, str) and value_type in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES:
         value.pop("prompt_cache_breakpoint", None)
     for child in value.values():
         _strip_subscription_prompt_cache_breakpoints(child)

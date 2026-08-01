@@ -32,6 +32,7 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
     # failure classes while retaining the more specific event in logs.
     "upstream_keepalive_timeout": "stream_idle_timeout",
     "missing_response_created_timeout": "stream_idle_timeout",
+    "response_create_gate_timeout_stuck_pending": "stream_idle_timeout",
 }
 
 

@@ -20578,6 +20578,27 @@ async def test_http_bridge_retry_circuit_counts_missing_response_created_timeout
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_counts_stuck_gate_timeout() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-stuck-gate-circuit")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+    )
+
+    for _ in range(2):
+        await service._record_http_bridge_retry_circuit_failure(
+            hard_session,
+            detail="response_create_gate_timeout_stuck_pending",
+        )
+
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    assert state.consecutive_failures == 2
+    assert state.last_detail == "stream_idle_timeout"
+    assert state.cooldown_until > time.monotonic()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-submit-cooldown")

@@ -1017,7 +1017,11 @@ class _WebSocketMixin:
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(status_code, error_payload)
+                                            _wrapped_websocket_error_event(
+                                                status_code,
+                                                error_payload,
+                                                expose_stale_previous_response_classifier=codex_session_affinity,
+                                            )
                                         )
                                     )
                                 continue
@@ -4632,7 +4636,15 @@ class _WebSocketMixin:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
         async with client_send_lock:
             await websocket.send_text(
-                _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
+                _serialize_websocket_error_event(
+                    _wrapped_websocket_error_event(
+                        status_code,
+                        payload,
+                        expose_stale_previous_response_classifier=(
+                            request_state.expose_stale_previous_response_classifier
+                        ),
+                    )
+                )
             )
 
     async def _emit_websocket_proxy_request_timeout(

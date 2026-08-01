@@ -22,9 +22,13 @@ from app.modules.proxy.affinity import _codex_session_selection_key
 pytestmark = pytest.mark.integration
 
 
-def _assert_codex_previous_response_stale_error(error: dict[str, object]) -> None:
-    assert error["code"] == proxy_module.PREVIOUS_RESPONSE_STALE_CODE
-    assert error["message"] == proxy_module.PREVIOUS_RESPONSE_STALE_MESSAGE
+def _assert_previous_response_not_found_error(error: dict[str, object]) -> None:
+    assert error["code"] == proxy_module.PREVIOUS_RESPONSE_NOT_FOUND_CODE
+    assert error["message"] == proxy_module.PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE
+    # The sanitized error must never carry the raw upstream "param" field
+    # (upstream sends "param": "previous_response_id"); its absence is what
+    # distinguishes the sanitized canonical code from a raw envelope leak.
+    assert error.get("param") is None
 
 
 def _without_installation_metadata(value: Any) -> Any:
@@ -5193,7 +5197,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
 
     assert event["type"] == "error"
     assert event["status"] == 502
-    _assert_codex_previous_response_stale_error(event["error"])
+    _assert_previous_response_not_found_error(event["error"])
 
 
 def test_backend_responses_websocket_masks_short_previous_response_not_found_without_retry(
@@ -5373,8 +5377,7 @@ def test_backend_responses_websocket_masks_short_previous_response_not_found_wit
             failed_2 = json.loads(websocket.receive_text())
 
     assert failed_2["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_2)
+    _assert_previous_response_not_found_error(failed_2["response"]["error"])
     assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert connect_count == 1
     assert captured_preferred_accounts == [None]
@@ -5533,12 +5536,12 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert created_event["type"] == "response.created"
     assert created_event["response"]["id"] == "resp_ws_inflight"
     assert failed_event["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_event)
+    _assert_previous_response_not_found_error(failed_event["response"]["error"])
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_event)
     assert completed_event["type"] == "response.completed"
     assert completed_event["response"]["id"] == "resp_ws_inflight"
     assert any(
-        call["status"] == "error" and call["error_code"] == proxy_module.PREVIOUS_RESPONSE_STALE_CODE
+        call["status"] == "error" and call["error_code"] == proxy_module.PREVIOUS_RESPONSE_NOT_FOUND_CODE
         for call in log_calls
     )
     assert any(call["status"] == "success" and call["request_id"] == "resp_ws_inflight" for call in log_calls)
@@ -5653,9 +5656,8 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
             failed_event = json.loads(websocket.receive_text())
 
     assert failed_event["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
+    _assert_previous_response_not_found_error(failed_event["response"]["error"])
     serialized = json.dumps(failed_event)
-    assert "previous_response_not_found" not in serialized
     assert "resp_chatgpt_prev_anchor" not in serialized
 
 
@@ -5750,9 +5752,8 @@ def test_backend_responses_websocket_masks_pretty_previous_response_not_found_fr
             failed_event = json.loads(websocket.receive_text())
 
     assert failed_event["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
+    _assert_previous_response_not_found_error(failed_event["response"]["error"])
     serialized = json.dumps(failed_event)
-    assert "previous_response_not_found" not in serialized
     assert "resp_chatgpt_pretty_prev_anchor" not in serialized
 
 
@@ -5923,13 +5924,12 @@ def test_backend_responses_websocket_masks_previous_response_not_found_when_mess
             failed_2 = json.loads(websocket.receive_text())
 
     assert failed_2["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_2)
+    _assert_previous_response_not_found_error(failed_2["response"]["error"])
     assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert connect_count == 1
 
 
-def test_backend_responses_websocket_never_exposes_raw_previous_response_not_found_to_client(
+def test_backend_responses_websocket_never_exposes_raw_previous_response_id_to_client(
     app_instance,
     monkeypatch,
 ):
@@ -6046,8 +6046,7 @@ def test_backend_responses_websocket_never_exposes_raw_previous_response_not_fou
 
     serialized_event = json.dumps(event)
     assert event["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(event["response"]["error"])
-    assert "previous_response_not_found" not in serialized_event
+    _assert_previous_response_not_found_error(event["response"]["error"])
     assert "resp_live_anchor" not in serialized_event
     assert connect_count == 1
 
@@ -6258,8 +6257,8 @@ def test_backend_responses_websocket_keeps_session_alive_after_foreign_previous_
     assert created_2["response"]["id"] == "resp_ws_followup_created"
     assert failed_2["type"] == "response.failed"
     assert failed_2["response"]["id"] == "resp_ws_followup_created"
-    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_2)
+    _assert_previous_response_not_found_error(failed_2["response"]["error"])
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert created_3["type"] == "response.created"
     assert completed_3["type"] == "response.completed"
     assert created_3["response"]["id"] == "resp_ws_after_error"
@@ -6508,8 +6507,8 @@ def test_backend_responses_websocket_keeps_session_alive_after_anonymous_prev_nf
     assert created_3["response"]["id"] == "resp_ws_followup_created"
     assert failed_3["type"] == "response.failed"
     assert failed_3["response"]["id"] == "resp_ws_followup_created"
-    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_3)
+    _assert_previous_response_not_found_error(failed_3["response"]["error"])
+    assert "resp_ws_prev_anchor" not in json.dumps(failed_3)
     assert completed_2["type"] == "response.completed"
     assert completed_2["response"]["id"] == "resp_ws_inflight"
     assert created_4["type"] == "response.created"
@@ -6769,8 +6768,8 @@ def test_backend_responses_websocket_matches_previous_response_error_to_anchor_w
     assert created_4["response"]["id"] == "resp_ws_followup_b"
     assert failed_3["type"] == "response.failed"
     assert failed_3["response"]["id"] == "resp_ws_followup_a"
-    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_3)
+    _assert_previous_response_not_found_error(failed_3["response"]["error"])
+    assert "resp_ws_prev_anchor_a" not in json.dumps(failed_3)
     assert completed_4["type"] == "response.completed"
     assert completed_4["response"]["id"] == "resp_ws_followup_b"
     assert created_5["response"]["id"] == "resp_ws_after_error"
@@ -7177,10 +7176,10 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert failed_3["type"] == "response.failed"
     assert failed_2["response"]["id"] == "resp_ws_followup_same_anchor_a"
     assert failed_3["response"]["id"] == "resp_ws_followup_same_anchor_b"
-    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
-    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_2)
-    assert "previous_response_not_found" not in json.dumps(failed_3)
+    _assert_previous_response_not_found_error(failed_2["response"]["error"])
+    _assert_previous_response_not_found_error(failed_3["response"]["error"])
+    assert "resp_ws_prev_anchor_shared" not in json.dumps(failed_2)
+    assert "resp_ws_prev_anchor_shared" not in json.dumps(failed_3)
     assert created_4["response"]["id"] == "resp_ws_after_same_anchor_error"
     assert completed_4["response"]["id"] == "resp_ws_after_same_anchor_error"
     assert connect_count == 2
@@ -9666,7 +9665,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
 
     assert event["type"] == "error"
     assert event["status"] == 502
-    _assert_codex_previous_response_stale_error(event["error"])
+    _assert_previous_response_not_found_error(event["error"])
     error_logs = [call for call in log_calls if call.get("status") == "error"]
     assert len(error_logs) == 1
     failure_detail = error_logs[0]["failure_detail"]
@@ -9845,7 +9844,7 @@ def test_backend_responses_websocket_logs_proxy_injected_stale_anchor_metadata(
     assert first_created["type"] == "response.created"
     assert first_completed["type"] == "response.completed"
     assert failed_event["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_event["response"]["error"])
+    _assert_previous_response_not_found_error(failed_event["response"]["error"])
     assert connect_count == 1
     first_payload = json.loads(upstream_socket.sent_text[0])
     second_payload = json.loads(upstream_socket.sent_text[1])
@@ -10067,10 +10066,10 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
     assert created_3["response"]["id"] == "resp_ws_grouped_followup_b"
     assert failed_2["type"] == "response.failed"
     assert failed_3["type"] == "response.failed"
-    _assert_codex_previous_response_stale_error(failed_2["response"]["error"])
-    _assert_codex_previous_response_stale_error(failed_3["response"]["error"])
-    assert "previous_response_not_found" not in json.dumps(failed_2)
-    assert "previous_response_not_found" not in json.dumps(failed_3)
+    _assert_previous_response_not_found_error(failed_2["response"]["error"])
+    _assert_previous_response_not_found_error(failed_3["response"]["error"])
+    assert "resp_ws_grouped_anchor" not in json.dumps(failed_2)
+    assert "resp_ws_grouped_anchor" not in json.dumps(failed_3)
 
     error_logs = [call for call in log_calls if call.get("status") == "error"]
     assert len(error_logs) == 2

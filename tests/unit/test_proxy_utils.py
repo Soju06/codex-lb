@@ -22499,7 +22499,7 @@ async def test_process_upstream_websocket_text_masks_anonymous_missing_tool_outp
     for emitted_text in upstream_control.downstream_texts:
         assert '"type":"response.failed"' in emitted_text
         assert '"code":"stream_incomplete"' in emitted_text
-        assert "codex_previous_response_stale" not in emitted_text
+        assert "previous_response_not_found" not in emitted_text
         assert "call_missing_output" not in emitted_text
     assert finalize_request_state.await_count == 2
     finalized_requests = [call.args[0] for call in finalize_request_state.await_args_list]

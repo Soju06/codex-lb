@@ -18209,6 +18209,124 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_forks_model_transition_after_owner_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "continue on the new model"}],
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-model-conflict-parent",
+        canonical_kind="session_header",
+        canonical_key="shared-root",
+        api_key_scope="__anonymous__",
+        account_id="acc-model-owner",
+        owner_instance_id=None,
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_model_parent",
+        latest_response_id="resp_model_parent",
+        model="gpt-5.6-sol",
+    )
+    owner_conflict = ProxyResponseError(
+        502,
+        openai_error(
+            "continuity_owner_conflict",
+            "Durable continuity aliases resolve to conflicting upstream owners.",
+        ),
+    )
+    creation_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+    creation_calls: list[dict[str, Any]] = []
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        creation_keys.append(key)
+        creation_calls.append(kwargs)
+        if len(creation_calls) == 1:
+            raise owner_conflict
+        session = _make_bridge_session(key=key)
+        session.account = cast(
+            Any,
+            SimpleNamespace(id="acc-model-alternate", status=AccountStatus.ACTIVE),
+        )
+        session.request_model = payload.model
+        return session
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        **_kwargs: Any,
+    ):
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={
+                "x-codex-turn-state": "http_turn_model_parent",
+                "x-codex-session-id": "shared-root",
+            },
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+            downstream_turn_state="http_turn_model_child",
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(creation_calls) == 2
+    assert creation_keys[0].affinity_kind in {"session_header", "turn_state_header"}
+    assert is_http_bridge_account_neutral_replay(
+        kind=creation_keys[1].affinity_kind,
+        key=creation_keys[1].affinity_key,
+    )
+    assert creation_calls[0]["preferred_account_id"] == "acc-model-owner"
+    assert creation_calls[0]["preferred_account_has_continuity_provenance"] is True
+    assert creation_calls[1]["preferred_account_id"] is None
+    assert creation_calls[1]["preferred_account_has_continuity_provenance"] is False
+    assert creation_calls[1]["exclude_account_ids"] == {"acc-model-owner"}
+    assert creation_calls[1]["allow_forward_to_owner"] is False
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_preserves_verified_replay_kind_for_durable_model_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

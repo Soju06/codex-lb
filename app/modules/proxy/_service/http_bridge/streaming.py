@@ -68,7 +68,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
-    _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_payload_looks_like_full_resend,
@@ -232,6 +231,11 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
     code = error.get("code")
     message = error.get("message")
     return (str(code) if code is not None else None, str(message) if message is not None else None)
+
+
+def _http_bridge_owner_failure_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+    code, _message = _proxy_error_code_message(exc)
+    return code in {"previous_response_owner_unavailable", "continuity_owner_conflict"}
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -1191,7 +1195,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal durable_full_resend_retains_prior_output
 
             if (
-                not _http_bridge_is_previous_response_owner_unavailable(exc)
+                not _http_bridge_owner_failure_allows_account_neutral_replay(exc)
                 or forwarded_request
                 or rewritten_file_account_id is not None
                 or durable_full_resend_anchor_count is None
@@ -1294,6 +1298,51 @@ class _HTTPBridgeStreamingMixin:
             durable_lookup = None
             file_required_preferred_account = False
 
+        def switch_model_transition_to_account_neutral_fork(exc: ProxyResponseError) -> bool:
+            nonlocal account_neutral_recovery
+            nonlocal affinity
+            nonlocal bridge_session_key
+            nonlocal force_local_recovery_creation
+            nonlocal incoming_turn_state_header
+            nonlocal preferred_account_has_continuity_provenance
+            nonlocal request_state
+            nonlocal session_creation_headers
+            nonlocal session_header_fallback_key
+
+            if (
+                durable_model_transition_lookup is None
+                or not _http_bridge_owner_failure_allows_account_neutral_replay(exc)
+                or owner_unavailable_allows_account_neutral_replay(exc)
+                or request_state.previous_response_id is not None
+                or rewritten_file_account_id is not None
+            ):
+                return False
+            failed_owner_id = request_state.preferred_account_id
+            _log_http_bridge_event(
+                "model_transition_owner_conflict_fork",
+                bridge_session_key,
+                account_id=failed_owner_id,
+                model=effective_payload.model,
+                detail="outcome=retry_without_previous_model_owner",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
+            if failed_owner_id is not None:
+                fresh_replay_excluded_account_ids.add(failed_owner_id)
+            session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
+            incoming_turn_state_header = None
+            session_header_fallback_key = None
+            affinity = _AffinityPolicy()
+            replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(uuid4().hex)
+            bridge_session_key = _HTTPBridgeSessionKey(replay_kind, replay_key, bridge_session_key.api_key_id)
+            account_neutral_recovery = True
+            force_local_recovery_creation = True
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
+            preferred_account_has_continuity_provenance = False
+            return True
+
         if required_continuity_owner_missing:
             owner_unavailable = ProxyResponseError(
                 502,
@@ -1347,6 +1396,8 @@ class _HTTPBridgeStreamingMixin:
                     exclude_account_ids=fresh_replay_excluded_account_ids or None,
                 )
             except ProxyResponseError as exc:
+                if switch_model_transition_to_account_neutral_fork(exc):
+                    continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(

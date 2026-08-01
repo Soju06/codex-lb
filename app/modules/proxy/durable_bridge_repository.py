@@ -930,6 +930,41 @@ class DurableBridgeRepository:
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
+    async def rollback_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+    ) -> bool:
+        """Return a pre-dispatch replay claim to UNKNOWN under the owner fence."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            result = await self._session.execute(
+                update(HttpBridgeRecoveryAttemptRecord)
+                .where(
+                    HttpBridgeRecoveryAttemptRecord.session_id == session_id,
+                    HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
+                    HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.REPLAYED,
+                    HttpBridgeRecoveryAttemptRecord.response_id.is_(None),
+                )
+                .values(state=HttpBridgeRecoveryAttemptState.UNKNOWN)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def _execute_fenced_session_update(
         self,
         *,

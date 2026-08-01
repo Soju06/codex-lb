@@ -2178,6 +2178,28 @@ class _HTTPBridgeStreamingMixin:
         try:
             yielded_any = False
             durable_recovery_fresh_replay = False
+            durable_recovery_fresh_replay_dispatched = False
+
+            async def rollback_pre_dispatch_recovery_claim() -> None:
+                if not (
+                    durable_recovery_fresh_replay
+                    and not durable_recovery_fresh_replay_dispatched
+                    and durable_recovery_attempt_fingerprint is not None
+                    and durable_recovery_attempt_session_id is not None
+                    and durable_recovery_attempt_owner_epoch is not None
+                ):
+                    return
+                try:
+                    await self._durable_bridge.rollback_recovery_attempt_replayed(
+                        session_id=durable_recovery_attempt_session_id,
+                        api_key_id=bridge_session_key.api_key_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=durable_recovery_attempt_owner_epoch,
+                        request_fingerprint=durable_recovery_attempt_fingerprint,
+                    )
+                except Exception:
+                    logger.warning("Failed to roll back pre-dispatch HTTP bridge recovery claim", exc_info=True)
+
             async for event_block in session_events:
                 yield event_block
                 yielded_any = True
@@ -2422,6 +2444,8 @@ class _HTTPBridgeStreamingMixin:
                     recovery_origin_owner_epoch = (
                         request_state.recovery_attempt_owner_epoch or session.durable_owner_epoch
                     )
+                    durable_recovery_attempt_session_id = recovery_origin_session_id
+                    durable_recovery_attempt_owner_epoch = recovery_origin_owner_epoch
                     _log_http_bridge_event(
                         "durable_recovery_fresh_replay",
                         bridge_session_key,
@@ -2675,6 +2699,7 @@ class _HTTPBridgeStreamingMixin:
                     request_deadline=request_deadline,
                 )
                 try:
+                    durable_recovery_fresh_replay_dispatched = True
                     async for event_block in retry_events:
                         yield event_block
                 finally:
@@ -2683,6 +2708,7 @@ class _HTTPBridgeStreamingMixin:
                     except Exception:
                         pass
             except BaseException:
+                await rollback_pre_dispatch_recovery_claim()
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
                     await self._release_websocket_reservation(retry_api_key_reservation)
                 raise

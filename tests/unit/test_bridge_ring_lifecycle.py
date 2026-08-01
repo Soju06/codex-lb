@@ -524,6 +524,51 @@ async def test_retry_circuit_reset_starts_new_failure_lineage(
 
 
 @pytest.mark.asyncio
+async def test_recovery_attempt_pre_dispatch_claim_can_be_rolled_back(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-recovery-rollback",
+            session_key_value="sid-recovery-rollback",
+        )
+        attempt = await repository.record_recovery_attempt(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+            request_id="request-recovery-rollback",
+            account_id=None,
+            model="gpt-5.4",
+            replay_safe=True,
+        )
+        assert attempt is not None
+        assert await repository.mark_recovery_attempt_replayed(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        assert await repository.rollback_recovery_attempt_replayed(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        restored = await repository.lookup_recovery_attempt(
+            session_id=claim.id,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        assert restored is not None
+        assert restored.state.value == "unknown"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_ring_purge_removes_dead_members_and_keeps_recent(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

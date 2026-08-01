@@ -446,6 +446,24 @@ class DurableBridgeSessionCoordinator:
                 response_id=response_id,
             )
 
+    async def rollback_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rollback_recovery_attempt_replayed(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+            )
+
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)

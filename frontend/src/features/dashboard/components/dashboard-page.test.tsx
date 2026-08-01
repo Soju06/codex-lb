@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders } from "@/test/utils";
@@ -7,15 +7,23 @@ import { createDashboardOverview, createDashboardProjections } from "@/test/mock
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import type { RecentRequestsTableProps } from "@/features/dashboard/components/recent-requests-table";
 
 import { DashboardPage } from "./dashboard-page";
 
-const { accountCardsSpy, accountListSpy, accountSummaryLineSpy } = vi.hoisted(() => ({
+const {
+  accountCardsSpy,
+  accountListSpy,
+  accountSummaryLineSpy,
+  recentRequestsTableSpy,
+} = vi.hoisted(() => ({
   accountCardsSpy: vi.fn(),
   accountListSpy: vi.fn(),
   accountSummaryLineSpy: vi.fn(),
+  recentRequestsTableSpy: vi.fn(),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -86,7 +94,10 @@ vi.mock("@/features/dashboard/components/filters/request-filters", async () => {
 });
 
 vi.mock("@/features/dashboard/components/recent-requests-table", () => ({
-  RecentRequestsTable: () => <div data-testid="recent-requests-table" />,
+  RecentRequestsTable: (props: RecentRequestsTableProps) => {
+    recentRequestsTableSpy(props);
+    return <div data-testid="recent-requests-table" />;
+  },
 }));
 
 vi.mock("@/features/dashboard/components/stats-grid", () => ({
@@ -121,11 +132,13 @@ describe("DashboardPage", () => {
     accountCardsSpy.mockReset();
     accountListSpy.mockReset();
     accountSummaryLineSpy.mockReset();
+    recentRequestsTableSpy.mockReset();
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
     useRequestLogsMock.mockReset();
     buildDashboardViewMock.mockReset();
+    window.localStorage.removeItem(REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY);
     useDashboardPreferencesStore.setState({
       accountBurnrateEnabled: true,
       accountViewMode: "cards",
@@ -245,6 +258,49 @@ describe("DashboardPage", () => {
     expect(within(requestLogsSection as HTMLElement).getByText("Loading...")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reset/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId("recent-requests-table")).not.toBeInTheDocument();
+  });
+
+  it("customizes and restores the request-log table without a global width control", async () => {
+    const user = userEvent.setup();
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("button", { name: "Columns (12)" })).toBeInTheDocument();
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Width$/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Columns (12)" }));
+    expect(screen.getByText("Visible columns")).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Plan" }));
+
+    expect(screen.getByRole("menu", { name: "Columns (11)" })).toBeInTheDocument();
+    const selectedProps = recentRequestsTableSpy.mock.lastCall?.[0] as
+      | RecentRequestsTableProps
+      | undefined;
+    expect(selectedProps?.visibleColumns).not.toContain("plan");
+
+    act(() => {
+      selectedProps?.onColumnWidthChange?.("account", 240);
+    });
+    const resizedProps = recentRequestsTableSpy.mock.lastCall?.[0] as
+      | RecentRequestsTableProps
+      | undefined;
+    expect(resizedProps?.columnWidths?.account).toBe(240);
+
+    await user.keyboard("{Escape}");
+    await user.click(
+      screen.getByRole("button", { name: "Restore default column layout" }),
+    );
+
+    const restoredProps = recentRequestsTableSpy.mock.lastCall?.[0] as
+      | RecentRequestsTableProps
+      | undefined;
+    expect(restoredProps?.visibleColumns).toHaveLength(12);
+    expect(restoredProps?.columnWidths).toEqual({});
+    expect(
+      window.localStorage.getItem(REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY),
+    ).toBeNull();
   });
 
   it("renders the account summary line in the Accounts header using overview accounts", () => {

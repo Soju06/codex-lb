@@ -185,6 +185,29 @@ class DurableBridgeSessionCoordinator:
             )
             return _to_lookup(snapshot) if snapshot is not None else None
 
+    async def lookup_previous_response_target(
+        self,
+        *,
+        previous_response_id: str,
+        api_key_id: str | None,
+    ) -> DurableBridgeLookup | None:
+        """Resolve only a previously registered previous-response continuity anchor."""
+
+        api_key_scope = durable_bridge_api_key_scope(api_key_id)
+        async with self._session() as session:
+            repository = DurableBridgeRepository(session)
+            snapshot = await repository.resolve_alias(
+                alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
+                alias_value=previous_response_id,
+                api_key_scope=api_key_scope,
+            )
+            if snapshot is None:
+                snapshot = await repository.find_session_by_latest_response_id(
+                    response_id=previous_response_id,
+                    api_key_scope=api_key_scope,
+                )
+            return _to_lookup(snapshot) if snapshot is not None else None
+
     async def lookup_sessions(self, *, session_ids: Sequence[str]) -> list[DurableBridgeLookup]:
         """Batch-load durable session snapshots for ownership reconciliation."""
 
@@ -256,6 +279,33 @@ class DurableBridgeSessionCoordinator:
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
                 latest_pending_tool_calls=latest_pending_tool_calls,
                 state=state,
+            )
+        if snapshot is None:
+            return None
+        return _to_lookup(snapshot)
+
+    async def rebind_session_account_if_current(
+        self,
+        *,
+        session_id: str,
+        expected_owner_epoch: int,
+        expected_account_id: str | None,
+        expected_latest_response_id: str | None,
+        account_id: str,
+        model: str | None,
+        service_tier: str | None,
+    ) -> DurableBridgeLookup | None:
+        """Move a session's continuity owner while the observed snapshot holds."""
+
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).rebind_session_account_if_current(
+                session_id=session_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_account_id=expected_account_id,
+                expected_latest_response_id=expected_latest_response_id,
+                account_id=account_id,
+                model=model,
+                service_tier=service_tier,
             )
         if snapshot is None:
             return None

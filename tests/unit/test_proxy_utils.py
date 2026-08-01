@@ -54,7 +54,13 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
+from app.db.models import (
+    Account,
+    AccountStatus,
+    HttpBridgeSessionState,
+    ModelSource,
+    StickySessionKind,
+)
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -3755,6 +3761,684 @@ async def test_compact_previous_response_owner_ignores_legacy_session_header_aff
     assert select_account.await_args.kwargs["legacy_sticky_key"] == "sid-root"
 
 
+_COMPACT_NEUTRAL_FULL_RESEND_INPUT: list[dict[str, object]] = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+    {"role": "user", "content": "please compact"},
+]
+
+
+def test_compact_account_neutral_replay_payload_strips_anchor_for_verified_full_resend() -> None:
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_owner_a",
+        }
+    )
+
+    replay = proxy_compact_service._compact_account_neutral_replay_payload(payload)
+
+    assert replay is not None
+    assert "previous_response_id" not in replay.to_payload()
+    assert replay.to_payload()["input"] == payload.to_payload()["input"]
+    assert replay.to_payload()["model"] == "gpt-5.1"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"previous_response_id": None}, "missing anchor"),
+        ({"input": [{"role": "user", "content": "only one item"}]}, "single-item input"),
+        ({"input": "raw string input"}, "string input"),
+        (
+            {
+                "input": [
+                    {"role": "user", "content": "hello"},
+                    {"id": "item_abc", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
+                ]
+            },
+            "server-assigned item ids",
+        ),
+        (
+            {
+                "input": [
+                    {"type": "compaction", "encrypted_content": "enc123"},
+                    {"role": "user", "content": "continue"},
+                ]
+            },
+            "encrypted compaction state",
+        ),
+        (
+            {
+                "input": [
+                    {"role": "user", "content": [{"type": "input_file", "file_id": "file_abc"}]},
+                    {"role": "user", "content": "go"},
+                ]
+            },
+            "account-scoped file handle",
+        ),
+        ({"conversation": "conv_123"}, "conversation handle"),
+        (
+            {
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": ("Local compact fallback preserved the latest encrypted reasoning state."),
+                            }
+                        ],
+                    },
+                    {"type": "compaction", "encrypted_content": "bad-local-summary"},
+                    {"role": "user", "content": "continue"},
+                ]
+            },
+            "multi-item input that serializes to a single wire item",
+        ),
+    ],
+)
+def test_compact_account_neutral_replay_payload_rejects_unsafe_histories(
+    overrides: dict[str, object], reason: str
+) -> None:
+    source: dict[str, object] = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+        "previous_response_id": "resp_owner_a",
+    }
+    source.update(overrides)
+    if source["previous_response_id"] is None:
+        source.pop("previous_response_id")
+    payload = ResponsesCompactRequest.model_validate(source)
+
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None, reason
+
+
+def test_compact_account_neutral_replay_payload_rejects_wire_trimmed_history() -> None:
+    """An oversized history trimmed for the wire is not a full resend.
+
+    ``to_payload`` replaces the omitted middle items with a trim marker, so the
+    wire input stays a multi-item account-neutral list. Only the owner can
+    resolve the omitted context from the dropped anchor, so replaying the
+    trimmed history on another account would compact an incomplete
+    conversation.
+    """
+
+    oversized_input: list[dict[str, object]] = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"turn {index} " + "x" * 12_000}
+        for index in range(60)
+    ]
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": oversized_input,
+            "previous_response_id": "resp_owner_oversized",
+        }
+    )
+    wire_input = payload.to_payload()["input"]
+    assert isinstance(wire_input, list)
+    assert 1 < len(wire_input) < len(oversized_input)
+
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def _compact_durable_anchor_lookup(
+    *,
+    account_id: str | None,
+    stored_count: int | None,
+    stored_fingerprint: str | None,
+    latest_response_id: str | None = "resp_compact_replay",
+) -> proxy_service.DurableBridgeLookup:
+    return proxy_service.DurableBridgeLookup(
+        session_id="durable-compact-replay",
+        canonical_kind="session_header",
+        canonical_key="sid-replay",
+        api_key_scope="__anonymous__",
+        account_id=account_id,
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=latest_response_id,
+        latest_input_item_count=stored_count,
+        latest_input_full_fingerprint=stored_fingerprint,
+    )
+
+
+def _compact_neutral_prefix_fingerprint(item_count: int) -> str:
+    return proxy_service._fingerprint_input_items(
+        cast(list[JsonValue], _COMPACT_NEUTRAL_FULL_RESEND_INPUT[:item_count])
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_previous_response_owner_unavailable_recovers_with_account_neutral_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+    service = proxy_service.ProxyService(_repo_factory(request_logs, sticky_sessions=sticky_sessions))
+    owner = _make_account("acc_compact_replay_owner")
+    replacement = _make_account("acc_compact_replay_replacement")
+    request_logs.response_owner_by_id[("resp_compact_replay", None, "sid-replay")] = owner.id
+    anchor_lookup = _compact_durable_anchor_lookup(
+        account_id=owner.id,
+        stored_count=1,
+        stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+    )
+    lookup_anchor = AsyncMock(return_value=anchor_lookup)
+    monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_target", lookup_anchor)
+    rebind_session = AsyncMock(
+        return_value=_compact_durable_anchor_lookup(
+            account_id=replacement.id,
+            stored_count=None,
+            stored_fingerprint=None,
+            latest_response_id=None,
+        )
+    )
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account_if_current", rebind_session)
+    selection_calls: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_calls.append(kwargs)
+        if kwargs.get("preferred_account_id") == owner.id:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 60s",
+                error_code=None,
+            )
+        return AccountSelection(account=replacement, error_message=None)
+
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    await service.compact_responses(payload, {"session_id": "sid-replay"}, codex_session_affinity=True)
+
+    assert len(selection_calls) == 2
+    assert selection_calls[0]["preferred_account_id"] == owner.id
+    assert selection_calls[0]["fallback_on_preferred_account_unavailable"] is False
+    assert selection_calls[1]["preferred_account_id"] is None
+    assert selection_calls[1]["fallback_on_preferred_account_unavailable"] is True
+    assert owner.id in cast(set[str], selection_calls[1]["exclude_account_ids"])
+    recovery_affinity = cast(proxy_affinity._AffinityPolicy, selection_calls[1]["affinity_policy"])
+    assert recovery_affinity.key is None
+    assert recovery_affinity.kind is None
+    assert core_compact.await_count == 1
+    assert core_compact.await_args is not None
+    upstream_payload, upstream_headers = core_compact.await_args.args[0], core_compact.await_args.args[1]
+    assert "previous_response_id" not in upstream_payload.to_payload()
+    assert upstream_payload.to_payload()["input"] == payload.to_payload()["input"]
+    assert "session_id" not in upstream_headers
+    assert lookup_anchor.await_count == 1
+    assert lookup_anchor.await_args is not None
+    assert lookup_anchor.await_args.kwargs["previous_response_id"] == "resp_compact_replay"
+    assert lookup_anchor.await_args.kwargs["api_key_id"] is None
+
+    # The recovered compaction is account-scoped state from the replacement
+    # account, so continuity ownership must follow it: the client's sticky key
+    # and the durable session that proved the anchored history both rebind, or
+    # the next turn routes back to the lost owner with the new account's
+    # encrypted compaction state.
+    owner_affinity = cast(proxy_affinity._AffinityPolicy, selection_calls[0]["affinity_policy"])
+    assert owner_affinity.selection_key is not None
+    sticky_sessions.upsert.assert_awaited_once_with(
+        owner_affinity.selection_key,
+        replacement.id,
+        kind=owner_affinity.kind,
+    )
+    # The durable move is a compare-and-set on the snapshot that proved the
+    # history, so a turn that completed for the same session in the meantime
+    # keeps its own continuity instead of being force-taken over.
+    assert rebind_session.await_count == 1
+    assert rebind_session.await_args is not None
+    rebind_kwargs = rebind_session.await_args.kwargs
+    assert rebind_kwargs["session_id"] == anchor_lookup.session_id
+    assert rebind_kwargs["expected_owner_epoch"] == anchor_lookup.owner_epoch
+    assert rebind_kwargs["expected_account_id"] == owner.id
+    assert rebind_kwargs["expected_latest_response_id"] == "resp_compact_replay"
+    assert rebind_kwargs["account_id"] == replacement.id
+
+
+@pytest.mark.asyncio
+async def test_compact_recovery_never_rebinds_a_hard_turn_state_sticky_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn-state key is the lost owner's own opaque state, never rebindable.
+
+    Recovery can run with a synthesized turn-state key that resolves to no owner.
+    Pointing that key at the replacement account would authorize a later resend
+    of the lost owner's turn state on a different account, which is exactly the
+    cross-account send the rebind exists to prevent, so only the durable session
+    that proved the history moves.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+    service = proxy_service.ProxyService(_repo_factory(request_logs, sticky_sessions=sticky_sessions))
+    owner = _make_account("acc_compact_turn_state_owner")
+    replacement = _make_account("acc_compact_turn_state_replacement")
+    turn_state = proxy_affinity.ensure_http_downstream_turn_state({})
+    request_logs.response_owner_by_id[("resp_compact_replay", None, None)] = owner.id
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(
+            return_value=_compact_durable_anchor_lookup(
+                account_id=owner.id,
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    rebind_session = AsyncMock(
+        return_value=_compact_durable_anchor_lookup(
+            account_id=replacement.id,
+            stored_count=None,
+            stored_fingerprint=None,
+            latest_response_id=None,
+        )
+    )
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account_if_current", rebind_session)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        if kwargs.get("preferred_account_id") == owner.id:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 60s",
+                error_code=None,
+            )
+        return AccountSelection(account=replacement, error_message=None)
+
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    await service.compact_responses(payload, {"x-codex-turn-state": turn_state})
+
+    assert core_compact.await_count == 1
+    sticky_sessions.upsert.assert_not_awaited()
+    assert rebind_session.await_count == 1
+    assert rebind_session.await_args is not None
+    assert rebind_session.await_args.kwargs["account_id"] == replacement.id
+
+
+@pytest.mark.asyncio
+async def test_compact_recovery_keeps_compaction_when_durable_rebind_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that moved on keeps its own continuity, and the client keeps its compaction.
+
+    A normal bridge turn for the same canonical session can complete between the
+    proof lookup and this post-success rebind. The compare-and-set then matches
+    nothing, so the newer turn's account, anchor, and aliases survive. The
+    compaction already succeeded upstream, so the refusal is logged only.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+    service = proxy_service.ProxyService(_repo_factory(request_logs, sticky_sessions=sticky_sessions))
+    owner = _make_account("acc_compact_cas_owner")
+    replacement = _make_account("acc_compact_cas_replacement")
+    request_logs.response_owner_by_id[("resp_compact_replay", None, "sid-replay")] = owner.id
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(
+            return_value=_compact_durable_anchor_lookup(
+                account_id=owner.id,
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+            )
+        ),
+    )
+    rebind_session = AsyncMock(return_value=None)
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account_if_current", rebind_session)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        if kwargs.get("preferred_account_id") == owner.id:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 60s",
+                error_code=None,
+            )
+        return AccountSelection(account=replacement, error_message=None)
+
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    response = await service.compact_responses(payload, {"session_id": "sid-replay"}, codex_session_affinity=True)
+
+    assert response.object == "response.compaction"
+    assert core_compact.await_count == 1
+    assert rebind_session.await_count == 1
+    sticky_sessions.upsert.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("lookup_result", "reason"),
+    [
+        (None, "no durable record of the anchored turn"),
+        (
+            _compact_durable_anchor_lookup(account_id=None, stored_count=None, stored_fingerprint=None),
+            "durable record without a stored prefix",
+        ),
+        (
+            _compact_durable_anchor_lookup(
+                account_id="acc_compact_replay_other_owner",
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+            ),
+            "durable owner disagrees with the pinned owner",
+        ),
+        (
+            _compact_durable_anchor_lookup(
+                account_id="acc_compact_replay_owner",
+                stored_count=1,
+                stored_fingerprint="sha256:not-the-recorded-prefix",
+            ),
+            "request input does not open with the recorded prefix",
+        ),
+        (
+            _compact_durable_anchor_lookup(
+                account_id="acc_compact_replay_owner",
+                stored_count=3,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(3),
+            ),
+            "request input adds nothing after the recorded prefix",
+        ),
+        (
+            _compact_durable_anchor_lookup(
+                account_id="acc_compact_replay_owner",
+                stored_count=2,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(2),
+            ),
+            "anchored response output is not retained after the recorded prefix",
+        ),
+        (
+            _compact_durable_anchor_lookup(
+                account_id="acc_compact_replay_owner",
+                stored_count=1,
+                stored_fingerprint=_compact_neutral_prefix_fingerprint(1),
+                latest_response_id="resp_compact_replay_newer",
+            ),
+            "recorded prefix describes a newer response than the requested anchor",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_compact_previous_response_owner_unavailable_without_anchor_proof_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    lookup_result: proxy_service.DurableBridgeLookup | None,
+    reason: str,
+) -> None:
+    """A self-contained wire payload alone must not drop the anchor.
+
+    The client may send only the turns after ``previous_response_id`` and rely on
+    the owner to hold everything before it. Without the proxy's own record
+    proving the request still opens with the anchored turn's history, recovery
+    would compact a partial conversation on the replacement account.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_compact_replay_owner")
+    request_logs.response_owner_by_id[("resp_compact_replay", None, "sid-replay")] = owner.id
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 60s",
+            error_code=None,
+        )
+    )
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    record_fail_closed = MagicMock()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+    monkeypatch.setattr(proxy_service, "_record_continuity_fail_closed", record_fail_closed)
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(return_value=lookup_result),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-replay"}, codex_session_affinity=True)
+
+    assert exc_info.value.status_code == 503, reason
+    assert core_compact.await_count == 0, reason
+    assert select_account.await_count == 1, reason
+    record_fail_closed.assert_called_once()
+    assert record_fail_closed.call_args.kwargs["surface"] == "compact"
+    assert record_fail_closed.call_args.kwargs["reason"] == "owner_account_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_compact_previous_response_owner_unavailable_without_retained_output_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resend that skips the anchored response's output must stay owner-bound.
+
+    The request re-sends exactly the input recorded for the anchored turn and
+    then a new user message, so the prefix fingerprint matches, but the assistant
+    output `previous_response_id` stands for is absent and only the owner can
+    supply it.
+    """
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_compact_replay_owner")
+    request_logs.response_owner_by_id[("resp_compact_replay", None, None)] = owner.id
+    recorded_prefix: list[dict[str, object]] = [{"role": "user", "content": "hello"}]
+    input_items = [*recorded_prefix, {"role": "user", "content": "please compact"}]
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 60s",
+            error_code=None,
+        )
+    )
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(
+            return_value=_compact_durable_anchor_lookup(
+                account_id=owner.id,
+                stored_count=len(recorded_prefix),
+                stored_fingerprint=proxy_service._fingerprint_input_items(cast(list[JsonValue], recorded_prefix)),
+            )
+        ),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": input_items,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {})
+
+    assert exc_info.value.status_code == 503
+    assert core_compact.await_count == 0
+    assert select_account.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_previous_response_anchor_lookup_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_compact_replay_owner")
+    request_logs.response_owner_by_id[("resp_compact_replay", None, None)] = owner.id
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 60s",
+            error_code=None,
+        )
+    )
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_target",
+        AsyncMock(side_effect=RuntimeError("durable store unavailable")),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": _COMPACT_NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_compact_replay",
+        }
+    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {})
+
+    assert exc_info.value.status_code == 503
+    assert core_compact.await_count == 0
+    # A failed anchor lookup must not reselect: the owner pin stays in force.
+    assert select_account.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_previous_response_owner_unavailable_non_neutral_payload_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_compact_replay_pinned")
+    request_logs.response_owner_by_id[("resp_compact_pinned", None, None)] = owner.id
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="Rate limit exceeded. Try again in 60s",
+            error_code=None,
+        )
+    )
+    core_compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    record_fail_closed = MagicMock()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", core_compact)
+    monkeypatch.setattr(proxy_service, "_record_continuity_fail_closed", record_fail_closed)
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-terra",
+            "instructions": "summarize",
+            "input": [
+                {"type": "compaction", "encrypted_content": "enc_prior_summary"},
+                {"role": "user", "content": "continue"},
+            ],
+            "previous_response_id": "resp_compact_pinned",
+        }
+    )
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {})
+
+    assert exc_info.value.status_code == 503
+    assert core_compact.await_count == 0
+    assert select_account.await_count == 1
+    record_fail_closed.assert_called_once()
+    assert record_fail_closed.call_args.kwargs["surface"] == "compact"
+    assert record_fail_closed.call_args.kwargs["reason"] == "owner_account_unavailable"
+    assert record_fail_closed.call_args.kwargs["previous_response_id"] == "resp_compact_pinned"
+
+
 @pytest.mark.asyncio
 async def test_compact_registered_synthesized_turn_state_is_a_strict_selection_constraint(
     monkeypatch: pytest.MonkeyPatch,
@@ -4461,12 +5145,12 @@ class _RequestLogsRecorder:
 
 
 class _RepoContext:
-    def __init__(self, request_logs: _RequestLogsRecorder) -> None:
+    def __init__(self, request_logs: _RequestLogsRecorder, sticky_sessions: AsyncMock | None = None) -> None:
         self._repos = ProxyRepositories(
             accounts=cast(AccountsRepository, AsyncMock()),
             usage=cast(UsageRepository, AsyncMock()),
             request_logs=cast(RequestLogsRepository, request_logs),
-            sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
+            sticky_sessions=cast(StickySessionsRepository, sticky_sessions or AsyncMock()),
             api_keys=cast(ApiKeysRepository, AsyncMock()),
             additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
         )
@@ -4478,9 +5162,11 @@ class _RepoContext:
         return False
 
 
-def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepoFactory:
+def _repo_factory(
+    request_logs: _RequestLogsRecorder, *, sticky_sessions: AsyncMock | None = None
+) -> proxy_service.ProxyRepoFactory:
     def factory() -> _RepoContext:
-        return _RepoContext(request_logs)
+        return _RepoContext(request_logs, sticky_sessions)
 
     return factory
 

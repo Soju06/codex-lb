@@ -1725,6 +1725,91 @@ async def test_stale_expiry_cleanup_cannot_delete_fresh_rebound_owner(async_clie
     assert persisted_owner == new_owner
 
 
+@pytest.mark.asyncio
+async def test_stale_expiry_race_reread_reports_concurrent_tombstone() -> None:
+    """The race-safe max-age expiry path (see get_account_id_and_abandonment)
+    re-reads the row when its delete-on-expiry predicate misses a concurrent
+    write, and must apply the abandonment check to that re-read row, not just
+    the initial snapshot — otherwise a mapping tombstoned by the purge job in
+    the gap between the stale read and the delete attempt would be reported
+    as a plain miss (never-seen key) instead of authorized-to-reselect."""
+    from sqlalchemy import update
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id="acc_race_tombstone_owner",
+                email="race-tombstone@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    key = "\ncodex_live_call:tombstone-race"
+    stale_read = asyncio.Event()
+    tombstoned = asyncio.Event()
+
+    async with SessionLocal() as setup_session:
+        repo = StickySessionsRepository(setup_session)
+        await repo.upsert(key, "acc_race_tombstone_owner", kind=StickySessionKind.CODEX_SESSION)
+        await setup_session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(updated_at=utcnow() - timedelta(hours=3))
+        )
+        await setup_session.commit()
+
+    class PausedAfterStaleReadRepository(StickySessionsRepository):
+        async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
+            row = await super().get_entry(key, kind=kind)
+            await self._session.commit()
+            stale_read.set()
+            await tombstoned.wait()
+            return row
+
+    async with SessionLocal() as stale_session, SessionLocal() as tombstone_session:
+        stale_repo = PausedAfterStaleReadRepository(stale_session)
+        resolution = asyncio.create_task(
+            stale_repo.get_account_id_and_abandonment(
+                key,
+                kind=StickySessionKind.CODEX_SESSION,
+                max_age_seconds=60,
+            )
+        )
+        await asyncio.wait_for(stale_read.wait(), timeout=1)
+        # Same account_id, but updated_at moves — this is exactly what the
+        # purge job's tombstone step does, and it's enough to miss the
+        # delete-on-expiry predicate (which pins on the originally observed
+        # updated_at), forcing the race-safe re-read.
+        await tombstone_session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(updated_at=utcnow(), continuity_abandoned_at=utcnow())
+        )
+        await tombstone_session.commit()
+        tombstoned.set()
+        resolved = await asyncio.wait_for(resolution, timeout=1)
+
+    async with SessionLocal() as verification_session:
+        persisted_row = await StickySessionsRepository(verification_session).get_entry(
+            key, kind=StickySessionKind.CODEX_SESSION
+        )
+
+    assert resolved.account_id is None
+    assert resolved.continuity_abandoned is True
+    assert persisted_row is not None
+    assert persisted_row.continuity_abandoned_at is not None
+
+
 def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
     api_key_a = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
     api_key_b = cast(ApiKeyData, SimpleNamespace(id="api-key-b"))

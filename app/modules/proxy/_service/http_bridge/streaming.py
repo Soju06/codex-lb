@@ -2619,9 +2619,16 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                             continue
-                        keepalive_count += 1
+                        completed_delivery_scope = request_state.completed_delivery_scope
+                        completed_delivery_in_progress = (
+                            completed_delivery_scope is not None and completed_delivery_scope.active
+                        )
+                        if completed_delivery_in_progress:
+                            keepalive_count = 0
+                        else:
+                            keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
-                        if keepalive_count > max_keepalive_count:
+                        if not completed_delivery_in_progress and keepalive_count > max_keepalive_count:
                             logger.info(
                                 "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
                                 "max_keepalive_count=%s",

@@ -4,7 +4,7 @@ import asyncio
 from collections import deque
 from types import SimpleNamespace
 from typing import Any, Callable, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -14,6 +14,7 @@ from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.db.models import AccountStatus, Base
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 
 pytestmark = pytest.mark.unit
@@ -168,6 +169,155 @@ async def test_cancelled_http_bridge_request_retires_session_before_retry_overla
     assert session.closed is True
     upstream_close.assert_awaited_once()
     release_reservation.assert_awaited_once_with(cancelled_request.api_key_reservation)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_detach_revokes_queue_before_releasing_pending_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    request_state = _make_request_state(
+        "req-detach-lock",
+        response_id="resp-detach-lock",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_http_bridge_session(deque([request_state]), queued_request_count=1)
+    observations: list[bool] = []
+    backing_lock = anyio.Lock()
+
+    class ObservedPendingLock:
+        async def __aenter__(self) -> ObservedPendingLock:
+            await backing_lock.acquire()
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            if request_state not in session.pending_requests:
+                observations.append(request_state.event_queue is None)
+            backing_lock.release()
+
+    session.pending_lock = cast(Any, ObservedPendingLock())
+
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+    assert observations
+    assert observations[0] is True
+
+
+@pytest.mark.parametrize("terminal_outcome", ["completed", "error"])
+@pytest.mark.asyncio
+async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_outcome: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    queue_waiting = asyncio.Event()
+    terminal_claimed = asyncio.Event()
+    release_terminal = asyncio.Event()
+    parse_sse_data_json = Mock(wraps=http_bridge_upstream_events.parse_sse_data_json)
+    parse_sse_event_payload = Mock(wraps=http_bridge_upstream_events.parse_sse_event_payload)
+    monkeypatch.setattr(http_bridge_upstream_events, "parse_sse_data_json", parse_sse_data_json)
+    monkeypatch.setattr(http_bridge_upstream_events, "parse_sse_event_payload", parse_sse_event_payload)
+
+    class ObservedQueue(asyncio.Queue[str | None]):
+        async def get(self) -> str | None:
+            queue_waiting.set()
+            return await super().get()
+
+    event_queue = ObservedQueue()
+    request_state = _make_request_state(
+        "req-terminal-race",
+        response_id="resp-terminal-race",
+        awaiting_response_created=False,
+        event_queue=event_queue,
+    )
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+
+    async def block_after_terminal_claim(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        assert request_state not in session.pending_requests
+        terminal_claimed.set()
+        await release_terminal.wait()
+        if terminal_outcome == "error":
+            raise RuntimeError("terminal persistence failed")
+        return True
+
+    finalize_request = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", block_after_terminal_claim)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=0.002,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+
+    async def consume_stream() -> list[str]:
+        return [
+            event_block
+            async for event_block in service._stream_http_bridge_session_events(
+                session,
+                request_state=request_state,
+                text_data="{}",
+                queue_limit=8,
+                propagate_http_errors=False,
+                downstream_turn_state=None,
+            )
+        ]
+
+    stream_task = asyncio.create_task(consume_stream())
+    await asyncio.wait_for(queue_waiting.wait(), timeout=1.0)
+    terminal_text = '{"type":"response.completed","response":{"id":"resp-terminal-race","status":"completed"}}'
+    terminal_task = asyncio.create_task(service._process_http_bridge_upstream_text(session, terminal_text))
+    await asyncio.wait_for(terminal_claimed.wait(), timeout=1.0)
+    assert request_state.completed_delivery_scope is not None
+    assert request_state.completed_delivery_scope.active is True
+    await asyncio.sleep(0.02)
+    assert not stream_task.done()
+
+    release_terminal.set()
+    if terminal_outcome == "completed":
+        await asyncio.wait_for(terminal_task, timeout=1.0)
+    else:
+        with pytest.raises(RuntimeError, match="terminal persistence failed"):
+            await asyncio.wait_for(terminal_task, timeout=1.0)
+    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+
+    event_types = [
+        payload["type"]
+        for event_block in event_blocks
+        if isinstance(payload := proxy_service.parse_sse_data_json(event_block), dict)
+    ]
+    if terminal_outcome == "completed":
+        assert event_types[-1] == "response.completed"
+        assert event_types.count("response.completed") == 1
+        assert "response.failed" not in event_types
+        finalize_request.assert_awaited_once()
+    else:
+        assert event_types[-1] == "response.failed"
+        assert "stream_idle_timeout" in "".join(event_blocks)
+        finalize_request.assert_not_awaited()
+    assert request_state.completed_delivery_scope is not None
+    assert request_state.completed_delivery_scope.active is False
+    assert parse_sse_data_json.call_count == 1
+    assert parse_sse_event_payload.call_count == 1
 
 
 def test_retiring_http_bridge_session_is_not_reusable() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -6128,7 +6129,15 @@ async def _stream_response_error_events(
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
-        yield format_sse_event(
+        retry_hint = ""
+        if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
+            # Preserve the HTTP Retry-After signal when a streaming response
+            # has already started and the exception must be represented as an
+            # SSE event.  The SSE retry field is milliseconds, while the
+            # exception stores seconds.  Clients that do not implement the
+            # directive safely ignore the extra comment line.
+            retry_hint = f"retry: {max(1, math.ceil(exc.retry_after_seconds * 1000))}\n"
+        yield retry_hint + format_sse_event(
             response_failed_event(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",

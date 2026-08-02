@@ -109,7 +109,7 @@ services:
     restart: unless-stopped
 
   postgres-upgrade:
-    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:01136fdc26ce0234df32e09f1dd7a43e9a1012c5055c9d04a2f7c789c833ba90
+    image: pgautoupgrade/pgautoupgrade:18-alpine@sha256:9892fd41b60f12d8a3d0272ce40f4d8f745184e82b03e7fe310ef98d8a29080c
     profiles: ["postgres-upgrade"]
     environment:
       POSTGRES_USER: codex_lb

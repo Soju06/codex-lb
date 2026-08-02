@@ -16,8 +16,8 @@ import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
@@ -524,7 +524,13 @@ _CLAIM_CONTENTION_UNPENALIZED_ATTR = "_codex_lb_claim_contention_unpenalized"
 
 class _RefreshFailoverProxy(Protocol):
     async def _handle_stream_error(
-        self, account: Account, error: Any, code: str, http_status: int | None = None
+        self,
+        account: Account,
+        error: Any,
+        code: str,
+        http_status: int | None = None,
+        *,
+        privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Any: ...
 
 
@@ -563,6 +569,7 @@ async def failover_after_previsible_refresh_error(
     select_next_account: Callable[[set[str]], Awaitable[AccountSelection]],
     request_id: str,
     kind: str,
+    privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
 ) -> Account:
     """Pick the next account after a previsible-unary freshness/connect failure.
 
@@ -598,8 +605,8 @@ async def failover_after_previsible_refresh_error(
             kind,
             getattr(exc, "code", None),
             request_id,
-            current.id,
-            exc_info=True,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else current.id,
+            exc_info=None if privacy_policy.redacts_sensitive_details else True,
         )
     else:
         logger.warning(
@@ -607,8 +614,8 @@ async def failover_after_previsible_refresh_error(
             kind,
             "claim contention" if claim else "failed",
             request_id,
-            current.id,
-            exc_info=True,
+            "<redacted>" if privacy_policy.redacts_sensitive_details else current.id,
+            exc_info=None if privacy_policy.redacts_sensitive_details else True,
         )
     if not claim and not _should_retry_transient_stream_error("upstream_unavailable", message):
         _raise_proxy_unavailable_for_account(message, current)
@@ -629,7 +636,15 @@ async def failover_after_previsible_refresh_error(
     if not claim:
         # Genuine transport / connect failure: penalize the skipped account so a
         # persistently broken account backs off. Claim contention never penalizes.
-        await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
+        if privacy_policy.redacts_sensitive_details:
+            await proxy._handle_stream_error(
+                current,
+                {"message": message},
+                "upstream_unavailable",
+                privacy_policy=privacy_policy,
+            )
+        else:
+            await proxy._handle_stream_error(current, {"message": message}, "upstream_unavailable")
     return selected_account
 
 
@@ -764,6 +779,7 @@ class _WebSocketRequestState:
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
+    propagate_http_errors: bool = False
     request_kind: str = "normal"
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
@@ -804,6 +820,7 @@ class _WebSocketRequestState:
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
+    durable_capability_lineage_required: bool = False
     file_required_preferred_account: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
@@ -824,6 +841,7 @@ class _WebSocketRequestState:
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
+    response_create_admission_reacquire_required: bool = False
     account_response_create_lease: AccountLease | None = None
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
@@ -832,6 +850,8 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    added_tool_call_types: dict[str, str] = field(default_factory=dict)
+    tool_call_manifest_invalid: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -854,9 +874,12 @@ class _WebSocketRequestState:
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     account_capacity_waiting: bool = False
+    account_capacity_wait_suppress_keepalive: bool = False
     account_capacity_wait_reason: str | None = None
     account_capacity_wait_started_at: float | None = None
     account_capacity_wait_retry_after_seconds: float | None = None
+    capacity_startup_wait_event: asyncio.Event | None = None
+    capacity_startup_ready_event: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -888,7 +911,7 @@ class _HTTPBridgeSession:
     affinity: _AffinityPolicy
     request_model: str | None
     account: Account
-    upstream: UpstreamResponsesWebSocket
+    upstream: UpstreamWebSocket
     upstream_control: _WebSocketUpstreamControl
     pending_requests: deque[_WebSocketRequestState]
     pending_lock: anyio.Lock
@@ -1172,7 +1195,7 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
 def _record_websocket_route_metadata(
     request_state: _WebSocketRequestState,
     *,
-    upstream: UpstreamResponsesWebSocket | None = None,
+    upstream: UpstreamWebSocket | None = None,
     route: ResolvedUpstreamRoute | None = None,
     fallback_used: bool | None = None,
 ) -> None:

@@ -12,7 +12,11 @@ metadata:
   {{- end }}
 spec:
   parentRefs:
+    {{- if .Values.gatewayApi.gateway.create }}
+    - name: {{ include "codex-lb.fullname" . }}
+    {{- else }}
     {{- toYaml .Values.gatewayApi.parentRefs | nindent 4 }}
+    {{- end }}
   {{- if .Values.gatewayApi.hostnames }}
   hostnames:
     {{- toYaml .Values.gatewayApi.hostnames | nindent 4 }}

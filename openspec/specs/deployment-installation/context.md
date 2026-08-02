@@ -148,9 +148,12 @@ Phase 3 (10 removed):
   timeout fixed 30.0 s and recycle window fixed 1800 s
   (`_POSTGRES_POOL_*` constants in `app/db/session.py`).
   `CODEX_LB_DATABASE_POOL_SIZE` / `CODEX_LB_DATABASE_MAX_OVERFLOW` stay:
-  PostgreSQL HA operators must budget
-  `(pool_size + max_overflow) x replicas <= max_connections`, and the
-  Helm chart pins both.
+  PostgreSQL HA operators must budget both independently pooled engines in
+  every supported one-worker replica:
+  `(pool_size + max_overflow) x 2 x replicas`, while reserving server
+  connections for PostgreSQL internals, migrations, and operations. The owned
+  CLI launcher pins one worker; custom multi-worker launchers are unsupported.
+  The Helm chart pins both pool inputs.
 - Soft-drain/probe thresholds (6): drain at 85%/90%, error window 60 s /
   count 2, probe quiet 60 s, success streak 3. They encode the
   deterministic-failover design and interlock — raising one without the

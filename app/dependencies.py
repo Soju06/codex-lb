@@ -32,6 +32,7 @@ from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.service import ModelSourcesService
 from app.modules.oauth.service import OauthService
+from app.modules.proxy.capability_lineage_repository import CapabilityLineageRepository
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -220,6 +221,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
             quota_planner=QuotaPlannerRepository(session),
+            capability_lineage=CapabilityLineageRepository(session),
         )
 
 

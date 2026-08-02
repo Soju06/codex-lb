@@ -754,3 +754,28 @@ React 19, TypeScript, Zod, TanStack Query, Vitest, Tailwind CSS, i18next.
   typecheck/lint, `git diff --check`, and the final diff review. Mark this task's
   steps complete only when every command passes. Do not archive the change in
   this task.
+
+---
+
+### Task 10: Harden conversation polling and URL edge cases
+
+**Files:**
+- Modify: `frontend/src/features/dashboard/hooks/use-conversations.ts`
+- Modify: `frontend/src/features/dashboard/api.ts`
+- Modify: `app/modules/request_logs/api.py`
+- Test: `frontend/src/features/dashboard/hooks/use-conversations.test.ts`
+- Test: `frontend/src/features/dashboard/api.test.ts`
+- Test: `tests/integration/test_conversations_api.py`
+
+**Interfaces:**
+- Consumes: URL-backed conversation filters and stored conversation IDs.
+- Produces: live rolling-window polling, opaque dot-only detail URLs, and
+  equivalent slash/no-slash collection routes.
+
+- [x] Recompute the conversation `since` cutoff inside each polling query
+  function and preserve the logical filter identity in the query key.
+- [x] Encode dot-only detail IDs with an opaque path representation and add a
+  client regression test.
+- [x] Register the trailing-slash collection route before the catch-all detail
+  route and add an API regression test.
+- [x] Run focused frontend/backend tests and `openspec validate --specs`.

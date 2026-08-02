@@ -18,8 +18,16 @@ function getIntlLocale(): string {
 }
 
 const numberFormatters = new Map<string, Intl.NumberFormat>();
-const compactFormatters = new Map<string, Intl.NumberFormat>();
-const currencyFormatters = new Map<string, Intl.NumberFormat>();
+const compactFormatter = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 2,
+});
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 const dateFormatters = new Map<string, Intl.DateTimeFormat>();
 const timeFormatters = new Map<string, Intl.DateTimeFormat>();
 const chartDateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
@@ -41,24 +49,6 @@ function getCachedFormatter<TFormatter>(
 function getNumberFormatter(): Intl.NumberFormat {
   const locale = getIntlLocale();
   return getCachedFormatter(numberFormatters, locale, () => new Intl.NumberFormat(locale));
-}
-
-function getCompactFormatter(): Intl.NumberFormat {
-  const locale = getIntlLocale();
-  return getCachedFormatter(compactFormatters, locale, () => new Intl.NumberFormat(locale, {
-    notation: "compact",
-    maximumFractionDigits: 2,
-  }));
-}
-
-function getCurrencyFormatter(): Intl.NumberFormat {
-  const locale = getIntlLocale();
-  return getCachedFormatter(currencyFormatters, locale, () => new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }));
 }
 
 function getDateFormatter(): Intl.DateTimeFormat {
@@ -157,12 +147,12 @@ export function formatNumber(value: unknown): string {
 
 export function formatCompactNumber(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : getCompactFormatter().format(numeric);
+  return numeric === null ? "--" : compactFormatter.format(numeric);
 }
 
 export function formatCurrency(value: unknown): string {
   const numeric = toNumber(value);
-  return numeric === null ? "--" : getCurrencyFormatter().format(numeric);
+  return numeric === null ? "--" : currencyFormatter.format(numeric);
 }
 
 export function formatPercent(value: unknown): string {
@@ -274,6 +264,42 @@ export function formatTimeLong(iso: string | null | undefined): FormattedDateTim
     time: getTimeFormatter().format(date),
     date: getDateFormatter().format(date),
   };
+}
+
+export function formatConversationDuration(
+  firstIso: string | null | undefined,
+  lastIso: string | null | undefined,
+): string {
+  const first = parseDate(firstIso);
+  const last = parseDate(lastIso);
+  if (!first || !last) {
+    return "—";
+  }
+
+  const totalSeconds = Math.max(0, Math.floor((last.getTime() - first.getTime()) / 1000));
+  if (totalSeconds === 0) {
+    return t("formatters.duration.seconds", { count: 0 });
+  }
+  if (totalSeconds < 60) {
+    return t("formatters.duration.seconds", { count: totalSeconds });
+  }
+  if (totalSeconds < 3600) {
+    return t("formatters.duration.minutesSeconds", {
+      minutes: Math.floor(totalSeconds / 60),
+      seconds: totalSeconds % 60,
+    });
+  }
+  if (totalSeconds < 86400) {
+    return t("formatters.duration.hoursMinutes", {
+      hours: Math.floor(totalSeconds / 3600),
+      minutes: Math.floor((totalSeconds % 3600) / 60),
+    });
+  }
+
+  return t("formatters.duration.daysHours", {
+    days: Math.floor(totalSeconds / 86400),
+    hours: Math.floor((totalSeconds % 86400) / 3600),
+  });
 }
 
 export function formatDateTimeInline(iso: string | null | undefined): string {

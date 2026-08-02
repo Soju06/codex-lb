@@ -203,6 +203,21 @@ _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
 
+async def _await_task_deferring_cancellation(
+    task: asyncio.Task[T],
+) -> tuple[T, asyncio.CancelledError | None]:
+    """Finish critical cleanup while preserving the caller's cancellation."""
+
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancellation
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancellation = cancellation or exc
+
+
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeRuntimeConfig:
     enabled: bool
@@ -1580,6 +1595,7 @@ async def _persist_http_bridge_previous_response_alias(
     registration_generation: int,
     input_item_count: int | None,
     input_full_fingerprint: str | None,
+    pending_tool_calls: Mapping[str, str] | None,
     instance_id: str,
     lease_ttl_seconds: float,
     local_alias_was_published: bool = True,
@@ -1595,6 +1611,7 @@ async def _persist_http_bridge_previous_response_alias(
             lease_ttl_seconds=lease_ttl_seconds,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            pending_tool_calls=pending_tool_calls,
         )
     except Exception:
         logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)

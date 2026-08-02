@@ -112,6 +112,23 @@ def _record_api_key_assignment_cutover(
     )
 
 
+def _api_key_assignment_cutover_recorder(
+    api_key: object | None,
+    affinity_source: str | None,
+    sticky_kind: object | None,
+) -> Callable[[str, bool], None]:
+    def record(result: str, hard_owner_required: bool) -> None:
+        _record_api_key_assignment_cutover(
+            api_key=api_key,
+            affinity_source=affinity_source,
+            sticky_kind=sticky_kind,
+            hard_owner_required=hard_owner_required,
+            result=result,
+        )
+
+    return record
+
+
 def _record_upstream_transport_decision(
     *,
     downstream_transport: str,

@@ -294,10 +294,11 @@ jobs:
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Install frontend dependencies
         run: make frontend-install
@@ -321,10 +322,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Ruff check
         run: make lint
@@ -342,10 +344,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Ty check
         run: make typecheck
@@ -395,10 +398,11 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -449,10 +453,11 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -547,10 +552,11 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
@@ -569,10 +575,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Validate migration policy and drift
         run: make migration-check
@@ -604,10 +611,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Validate migration policy and drift on PostgreSQL
         run: make migration-check-postgres
@@ -640,10 +648,11 @@ jobs:
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
           python-version: "3.13"
           enable-cache: true
+          prune-cache: true
 
       - name: Build and verify package
         run: make package
@@ -690,7 +699,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif

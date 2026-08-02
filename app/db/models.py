@@ -719,6 +719,23 @@ class StickySession(Base):
     )
 
 
+class CapabilityLineageMarker(Base):
+    __tablename__ = "capability_lineage_markers"
+
+    marker_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class DashboardSettings(Base):
     __tablename__ = "dashboard_settings"
 
@@ -1703,6 +1720,7 @@ class HttpBridgeSessionRecord(Base):
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

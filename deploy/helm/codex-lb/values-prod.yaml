@@ -45,9 +45,10 @@ ingress:
   certManager:
     enabled: true
 config:
-  # Connection pool budget: (databasePoolSize + databaseMaxOverflow) × maxReplicas ≤ PostgreSQL max_connections
-  # For maxReplicas=20: (3+2)×20=100 = PG default max_connections
-  databasePoolSize: 3
-  databaseMaxOverflow: 2
+  # Each supported replica has one worker with two pools. For maxReplicas=20:
+  # (databasePoolSize + databaseMaxOverflow) × 2 × 1 × 20 = (1+1)×2×20 = 80.
+  # This fits PG's default max_connections=100 and reserves 20 connections for DB operations.
+  databasePoolSize: 1
+  databaseMaxOverflow: 1
 externalSecrets:
   enabled: true

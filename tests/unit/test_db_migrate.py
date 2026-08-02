@@ -2019,6 +2019,53 @@ def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path
         engine.dispose()
 
 
+def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    db_path = tmp_path / "capability-lineage.db"
+    url = _db_url(db_path)
+    parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
+    target_revision = "20260731_000000_add_capability_lineage_markers"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    script_directory = ScriptDirectory.from_config(config)
+    assert script_directory.get_heads() == [target_revision]
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            existing_columns = {
+                table: tuple(column["name"] for column in inspector.get_columns(table))
+                for table in ("accounts", "sticky_sessions", "usage_history", "http_bridge_sessions")
+            }
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert inspector.has_table("capability_lineage_markers")
+            assert {column["name"] for column in inspector.get_columns("capability_lineage_markers")} == {
+                "marker_hash",
+                "created_at",
+                "last_seen_at",
+            }
+            assert connection.execute(text("SELECT COUNT(*) FROM capability_lineage_markers")).scalar_one() == 0
+            assert {
+                table: tuple(column["name"] for column in inspector.get_columns(table)) for table in existing_columns
+            } == existing_columns
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert not inspector.has_table("capability_lineage_markers")
+            assert {
+                table: tuple(column["name"] for column in inspector.get_columns(table)) for table in existing_columns
+            } == existing_columns
+    finally:
+        engine.dispose()
+
+
 def test_check_schema_drift_detects_missing_dashboard_hot_path_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "missing-hot-path-indexes.db"
     url = _db_url(db_path)

@@ -149,6 +149,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_local_account_cap_code,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _ttft_event_visible_at,
@@ -191,6 +192,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
     _prompt_cache_key_from_request_model,
+    _request_allows_bare_session_cap_spillover,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
@@ -210,6 +212,7 @@ from app.modules.proxy.helpers import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
@@ -289,6 +292,24 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     )
 
 
+def _http_bridge_unanchored_fork_can_spill_on_cap(
+    *,
+    error_code: str | None,
+    affinity_kind: str,
+    original_request_unanchored: bool,
+    payload: ResponsesRequest,
+    preferred_account_id: str | None,
+) -> bool:
+    return (
+        _is_local_account_cap_code(error_code)
+        and affinity_kind == "internal_unanchored_parallel"
+        and original_request_unanchored
+        and preferred_account_id is not None
+        and payload.previous_response_id is None
+        and _request_allows_bare_session_cap_spillover(payload)
+    )
+
+
 def _http_bridge_capacity_wait_plan(
     exc: ProxyResponseError,
     *,
@@ -350,8 +371,13 @@ async def _iter_account_capacity_wait_sse(
     reason: str | None,
     sleep_seconds: float,
     emit_keepalives: bool,
+    request_state: _WebSocketRequestState | None = None,
 ) -> AsyncIterator[str]:
     if not emit_keepalives:
+        if request_state is not None and request_state.capacity_startup_ready_event is not None:
+            request_state.capacity_startup_ready_event.clear()
+        if request_state is not None and request_state.capacity_startup_wait_event is not None:
+            request_state.capacity_startup_wait_event.set()
         _signal_propagated_capacity_startup_wait()
     wait_started_at = _service_time().monotonic()
     remaining_sleep_seconds = sleep_seconds
@@ -559,6 +585,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -582,6 +610,8 @@ class _HTTPBridgeStreamingMixin:
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_startup_wait_event,
+            capacity_startup_ready_event=capacity_startup_ready_event,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -605,6 +635,8 @@ class _HTTPBridgeStreamingMixin:
         forwarded_file_owner_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
         base_settings = _service_get_settings()
@@ -714,6 +746,8 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_startup_wait_event,
+                capacity_startup_ready_event=capacity_startup_ready_event,
             ):
                 yield line
         finally:
@@ -749,6 +783,8 @@ class _HTTPBridgeStreamingMixin:
         rewritten_file_account_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        capacity_startup_wait_event: asyncio.Event | None = None,
+        capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
@@ -771,7 +807,7 @@ class _HTTPBridgeStreamingMixin:
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
             if bridge_uses_responses_lite:
-                return self._prepare_http_bridge_request(
+                request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
                     headers,
                     api_key=api_key,
@@ -780,14 +816,18 @@ class _HTTPBridgeStreamingMixin:
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
                 )
-            return self._prepare_http_bridge_request(
-                request_payload,
-                headers,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                request_id=request_id,
-                client_ip=client_ip,
-            )
+            else:
+                request_state, text_data = self._prepare_http_bridge_request(
+                    request_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                )
+            request_state.capacity_startup_wait_event = capacity_startup_wait_event
+            request_state.capacity_startup_ready_event = capacity_startup_ready_event
+            return request_state, text_data
 
         async def stream_quarantined_request_via_http(
             key: _HTTPBridgeSessionKey,
@@ -951,17 +991,52 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_anchor_fingerprint: str | None = None
         durable_full_resend_fresh_payload: ResponsesRequest | None = None
         durable_full_resend_is_account_neutral: bool | None = None
+        durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_prior_output = False
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
-        durable_anchor_trimmable = durable_lookup is not None and _input_prefix_matches_stored_context(
-            payload.input,
-            stored_count=durable_lookup.latest_input_item_count or 0,
-            stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
-        )
-        if durable_lookup is not None and payload_looks_like_full_resend and durable_anchor_trimmable:
-            durable_full_resend_anchor_count = durable_lookup.latest_input_item_count
-            durable_full_resend_anchor_fingerprint = durable_lookup.latest_input_full_fingerprint
+
+        def classify_durable_full_resend(
+            lookup: DurableBridgeLookup,
+        ) -> tuple[int | None, str | None, bool]:
+            stored_count = lookup.latest_input_item_count
+            if (
+                not payload_looks_like_full_resend
+                or stored_count is None
+                or not _input_prefix_matches_stored_context(
+                    payload.input,
+                    stored_count=stored_count,
+                    stored_fingerprint=lookup.latest_input_full_fingerprint,
+                )
+                or not isinstance(payload.input, list)
+            ):
+                return None, None, False
+            replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                cast(list[JsonValue], payload.input),
+                stored_count=stored_count,
+            )
+            safe_fresh_context = False
+            if replay_projection is not None:
+                safe_fresh_context = responses_input_suffix_retains_prior_output(
+                    replay_projection.input_items,
+                    stored_count=replay_projection.stored_prefix_count,
+                ) or (
+                    lookup.latest_pending_tool_calls is not None
+                    and responses_input_suffix_matches_pending_tool_calls(
+                        replay_projection.input_items,
+                        stored_count=replay_projection.stored_prefix_count,
+                        pending_tool_calls=lookup.latest_pending_tool_calls,
+                    )
+                )
+            return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
+
+        if durable_lookup is not None:
+            (
+                durable_full_resend_anchor_count,
+                durable_full_resend_anchor_fingerprint,
+                durable_full_resend_has_safe_fresh_context,
+            ) = classify_durable_full_resend(durable_lookup)
+        durable_anchor_trimmable = durable_full_resend_anchor_count is not None
         durable_model_transition_lookup = (
             durable_lookup
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
@@ -1057,7 +1132,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
-            if (
+            fresh_reattach_can_use_durable_anchor = (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
@@ -1065,7 +1140,24 @@ class _HTTPBridgeStreamingMixin:
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
+            )
+            if (
+                fresh_reattach_can_use_durable_anchor
+                and payload_looks_like_full_resend
+                and durable_full_resend_has_safe_fresh_context
             ):
+                # The client already supplied a complete fresh request. Adding
+                # a durable anchor here can strand it on the new WebSocket.
+                _log_http_bridge_event(
+                    "fresh_reattach_full_resend_preserved",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail="outcome=client_unanchored_full_resend",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
+            elif fresh_reattach_can_use_durable_anchor:
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
                 )
@@ -1251,6 +1343,7 @@ class _HTTPBridgeStreamingMixin:
             without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        unanchored_fork_spill_attempted = False
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             nonlocal durable_full_resend_fresh_payload
@@ -1422,6 +1515,29 @@ class _HTTPBridgeStreamingMixin:
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    exc_code, _exc_message = _proxy_error_code_message(exc)
+                    if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
+                        error_code=exc_code,
+                        affinity_kind=bridge_session_key.affinity_kind,
+                        original_request_unanchored=original_request_unanchored,
+                        payload=effective_payload,
+                        preferred_account_id=request_state.preferred_account_id,
+                    ):
+                        unanchored_fork_spill_attempted = True
+                        _log_http_bridge_event(
+                            "unanchored_fork_cap_spill",
+                            bridge_session_key,
+                            account_id=request_state.preferred_account_id,
+                            model=effective_payload.model,
+                            detail=f"reason={exc_code}, outcome=retry_without_preferred_account",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(effective_payload.model)
+                            if effective_payload.model
+                            else None,
+                        )
+                        request_state.preferred_account_id = None
+                        preferred_account_has_continuity_provenance = False
+                        continue
                     wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -1439,6 +1555,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1544,8 +1661,46 @@ class _HTTPBridgeStreamingMixin:
                             )
                         else:
                             if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
-                                should_attempt_turn_state_takeover = True
                                 durable_lookup = fresh_turn_state_lookup
+                                if fresh_turn_state_lookup is None:
+                                    durable_full_resend_anchor_count = None
+                                    durable_full_resend_anchor_fingerprint = None
+                                    durable_full_resend_has_safe_fresh_context = False
+                                else:
+                                    (
+                                        durable_full_resend_anchor_count,
+                                        durable_full_resend_anchor_fingerprint,
+                                        durable_full_resend_has_safe_fresh_context,
+                                    ) = classify_durable_full_resend(fresh_turn_state_lookup)
+                                    continuity_preferred_account_id = fresh_turn_state_lookup.account_id
+                                    request_state.preferred_account_id = resolve_required_account_id(
+                                        (
+                                            "refreshed previous response or bridge",
+                                            continuity_preferred_account_id,
+                                        ),
+                                        ("input file", rewritten_file_account_id),
+                                    )
+                                    preferred_account_has_continuity_provenance = (
+                                        continuity_preferred_account_id is not None
+                                        and request_state.preferred_account_id == continuity_preferred_account_id
+                                    )
+                                refreshed_continuity_routable = (
+                                    fresh_turn_state_lookup is None
+                                    or fresh_turn_state_lookup.latest_response_id is None
+                                    or fresh_turn_state_lookup.account_id is not None
+                                )
+                                should_attempt_turn_state_takeover = refreshed_continuity_routable and (
+                                    not payload_looks_like_full_resend
+                                    or (
+                                        fresh_turn_state_lookup is not None
+                                        and fresh_turn_state_lookup.account_id is not None
+                                        and durable_full_resend_anchor_count is not None
+                                        and (
+                                            durable_full_resend_has_safe_fresh_context
+                                            or fresh_turn_state_lookup.latest_response_id is not None
+                                        )
+                                    )
+                                )
                 if (
                     not owner_forward_fresh_replay
                     and not should_attempt_previous_response_recovery
@@ -1669,6 +1824,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1698,6 +1854,42 @@ class _HTTPBridgeStreamingMixin:
                 # behavior) and an upstream missing-tool-output error is
                 # classified and masked as a retryable continuity failure.
                 recovery_payload = effective_payload
+                recovery_anchor_input_count: int | None = None
+                recovery_anchor_input_fingerprint: str | None = None
+                if (
+                    not owner_forward_fresh_replay
+                    and not durable_full_resend_has_safe_fresh_context
+                    and recovery_payload.previous_response_id is None
+                    and durable_lookup is not None
+                    and durable_lookup.latest_response_id is not None
+                    and durable_full_resend_anchor_count is not None
+                    and durable_full_resend_anchor_fingerprint is not None
+                    and isinstance(recovery_payload.input, list)
+                    and len(recovery_payload.input) > durable_full_resend_anchor_count
+                ):
+                    recovery_input = cast(list[JsonValue], recovery_payload.input)
+                    recovery_anchor_input_count = len(recovery_input)
+                    recovery_anchor_input_fingerprint = _fingerprint_input_items(recovery_input)
+                    recovery_payload = recovery_payload.model_copy(
+                        update={
+                            "previous_response_id": durable_lookup.latest_response_id,
+                            "input": recovery_input[durable_full_resend_anchor_count:],
+                        }
+                    )
+                    if durable_lookup.latest_response_id != session.last_completed_response_id:
+                        session.last_pending_tool_calls = {}
+                    session.last_completed_response_id = durable_lookup.latest_response_id
+                    session.last_completed_input_count = durable_full_resend_anchor_count
+                    session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
+                    _log_http_bridge_event(
+                        "owner_forward_recovery_anchor_injected",
+                        bridge_session_key,
+                        account_id=durable_lookup.account_id,
+                        model=recovery_payload.model,
+                        detail=f"response_id={durable_lookup.latest_response_id}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(recovery_payload.model) if recovery_payload.model else None,
+                    )
                 recovery_injected_input = _http_bridge_interrupted_tool_outputs_input(
                     session,
                     payload=recovery_payload,
@@ -1740,6 +1932,11 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
                     retry_request_state.excluded_account_ids.update(request_state.excluded_account_ids)
+                    if recovery_anchor_input_count is not None:
+                        retry_request_state.input_item_count = recovery_anchor_input_count
+                        retry_request_state.input_full_fingerprint = recovery_anchor_input_fingerprint
+                        retry_request_state.proxy_injected_previous_response_id = True
+                        retry_request_state.fresh_upstream_request_is_retry_safe = False
 
                     async for event_block in self._stream_http_bridge_session_events(
                         session,
@@ -1768,7 +1965,8 @@ class _HTTPBridgeStreamingMixin:
                 return
         session = session_or_forward
         if (
-            durable_full_resend_anchor_count is not None
+            not durable_full_resend_has_safe_fresh_context
+            and durable_full_resend_anchor_count is not None
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
@@ -1936,7 +2134,9 @@ class _HTTPBridgeStreamingMixin:
                 # keep the replay-safety decision made when the anchor was
                 # injected.
                 request_state.fresh_upstream_request_is_retry_safe = (
-                    True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
+                    (durable_full_resend_anchor_count is None or durable_full_resend_has_safe_fresh_context)
+                    if store_context_trim_applied
+                    else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
         initial_handoff_session = session
         initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
@@ -2050,6 +2250,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -2153,6 +2354,7 @@ class _HTTPBridgeStreamingMixin:
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
                             emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -2342,6 +2544,7 @@ class _HTTPBridgeStreamingMixin:
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
                     ):
                         yield line
                     if _service_time().monotonic() >= request_deadline:
@@ -2462,6 +2665,7 @@ class _HTTPBridgeStreamingMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
+        request_state.propagate_http_errors = propagate_http_errors
         while True:
             try:
                 if account_neutral_recovery:
@@ -2525,6 +2729,7 @@ class _HTTPBridgeStreamingMixin:
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
                         emit_keepalives=not propagate_http_errors,
+                        request_state=request_state,
                     ):
                         yield line
                 finally:
@@ -2541,6 +2746,10 @@ class _HTTPBridgeStreamingMixin:
             if downstream_turn_state is not None and not account_neutral_recovery:
                 await self._register_http_bridge_turn_state(session, downstream_turn_state)
             _signal_propagated_capacity_startup_ready()
+            if request_state.capacity_startup_wait_event is not None:
+                request_state.capacity_startup_wait_event.clear()
+            if request_state.capacity_startup_ready_event is not None:
+                request_state.capacity_startup_ready_event.set()
             event_queue = request_state.event_queue
             assert event_queue is not None
             yielded_any = False
@@ -2568,6 +2777,8 @@ class _HTTPBridgeStreamingMixin:
                     except asyncio.TimeoutError:
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
+                            if request_state.account_capacity_wait_suppress_keepalive:
+                                continue
                             keepalive_sent = True
                             yielded_any = True
                             downstream_response_id = _websocket_downstream_response_id(request_state)
@@ -2697,3 +2908,4 @@ class _HTTPBridgeStreamingMixin:
             with anyio.CancelScope(shield=True):
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
+                await self._maybe_release_idle_http_bridge_session_lease(session)

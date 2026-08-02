@@ -86,13 +86,23 @@ async def validate_proxy_api_key_authorization(
     return await _validate_api_key_token(token)
 
 
-async def validate_required_proxy_api_key_authorization(authorization: str | None) -> ApiKeyData:
+async def validate_required_proxy_api_key_authorization(
+    authorization: str | None,
+    x_api_key: str | None = None,
+) -> ApiKeyData:
     """Validate a proxy API key even when global proxy auth is disabled."""
 
     token = _extract_bearer_token(authorization)
-    if not token:
-        raise ProxyAuthError("Missing API key in Authorization header")
-    return await _validate_api_key_token(token)
+    fallback_token = x_api_key.strip() if x_api_key else None
+    if token:
+        try:
+            return await _validate_api_key_token(token)
+        except ProxyAuthError:
+            if not fallback_token:
+                raise
+    if fallback_token:
+        return await _validate_api_key_token(fallback_token)
+    raise ProxyAuthError("Missing API key in Authorization header")
 
 
 async def _validate_api_key_token(token: str) -> ApiKeyData:
@@ -125,7 +135,10 @@ async def validate_required_proxy_api_key(
     """Require a valid proxy API key regardless of the global auth setting."""
 
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
-    return await validate_required_proxy_api_key_authorization(authorization)
+    x_api_key = request.headers.get("x-api-key")
+    if x_api_key is None:
+        return await validate_required_proxy_api_key_authorization(authorization)
+    return await validate_required_proxy_api_key_authorization(authorization, x_api_key)
 
 
 # --- Self-service usage endpoint auth (always requires valid key) ---

@@ -154,6 +154,54 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
 
 
 @pytest.mark.asyncio
+async def test_validate_required_proxy_websocket_request_passes_x_api_key_fallback(monkeypatch):
+    async def fake_denial(_websocket):
+        return None
+
+    api_key = ApiKeyData(
+        id="key_voice",
+        name="Voice Key",
+        key_prefix="sk-voice",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 8, 2),
+        last_used_at=None,
+    )
+
+    async def pass_auth(authorization: str | None, x_api_key: str | None = None):
+        assert authorization == "Bearer openai-oauth-token"
+        assert x_api_key == "sk-clb-voice"
+        return api_key
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
+    monkeypatch.setattr(
+        proxy_api_module,
+        "validate_required_proxy_api_key_authorization",
+        pass_auth,
+    )
+
+    resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
+        cast(
+            WebSocket,
+            SimpleNamespace(
+                headers={
+                    "authorization": "Bearer openai-oauth-token",
+                    "x-api-key": "sk-clb-voice",
+                }
+            ),
+        ),
+        require_api_key=True,
+    )
+
+    assert response is None
+    assert resolved_api_key == api_key
+
+
+@pytest.mark.asyncio
 async def test_validate_proxy_websocket_request_supports_legacy_auth_override(monkeypatch):
     async def fake_denial(_websocket):
         return None

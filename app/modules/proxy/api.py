@@ -6256,7 +6256,12 @@ async def _validate_proxy_websocket_request(
         return None, denial
     try:
         if require_api_key:
-            api_key = await validate_required_proxy_api_key_authorization(websocket.headers.get("authorization"))
+            authorization = websocket.headers.get("authorization")
+            x_api_key = websocket.headers.get("x-api-key")
+            if x_api_key is None:
+                api_key = await validate_required_proxy_api_key_authorization(authorization)
+            else:
+                api_key = await validate_required_proxy_api_key_authorization(authorization, x_api_key)
         else:
             api_key = await _validate_proxy_api_key_authorization_for_connection(
                 websocket.headers.get("authorization"),

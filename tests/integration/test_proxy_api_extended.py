@@ -902,6 +902,53 @@ async def test_codex_realtime_call_requires_api_key_even_when_global_auth_is_dis
 
 
 @pytest.mark.asyncio
+async def test_codex_realtime_call_accepts_x_api_key_fallback_with_openai_authorization(
+    async_client,
+    monkeypatch,
+):
+    await _import_account(async_client, "acc_codex_voice_fallback", "codex-voice-fallback@example.com")
+    key_response = await async_client.post("/api/api-keys/", json={"name": "realtime-x-api-key"})
+    assert key_response.status_code == 200
+    proxy_api_key = key_response.json()["key"]
+    upstream_headers: dict[str, str] | None = None
+
+    async def fake_codex_control_request(
+        _path,
+        *,
+        headers,
+        **_kwargs,
+    ):
+        nonlocal upstream_headers
+        upstream_headers = dict(headers)
+        return core_proxy.CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={
+                "content-type": "application/sdp",
+                "location": "/v1/realtime/calls/rtc_x_api_key",
+            },
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+
+    response = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"v=offer\r\n",
+        headers={
+            "authorization": "Bearer openai-oauth-token",
+            "content-type": "application/sdp",
+            "x-api-key": proxy_api_key,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.content == b"v=answer\r\n"
+    assert upstream_headers is not None
+    assert "authorization" not in {name.lower() for name in upstream_headers}
+    assert "x-api-key" not in {name.lower() for name in upstream_headers}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("location", "call_id"),
     [

@@ -1272,12 +1272,14 @@ def test_filter_inbound_headers_strips_auth_and_account():
         "Content-Encoding": "gzip",
         "Content-Type": "application/json",
         "X-Codex-Installation-Id": "client-installation",
+        "X-API-Key": "sk-clb-private",
         "X-Request-Id": "req_1",
     }
     filtered = filter_inbound_headers(headers)
     assert "Authorization" not in filtered
     assert "chatgpt-account-id" not in filtered
     assert "X-Codex-Installation-Id" not in filtered
+    assert "X-API-Key" not in filtered
     assert filtered["Content-Encoding"] == "gzip"
     assert filtered["Content-Type"] == "application/json"
     assert filtered["X-Request-Id"] == "req_1"

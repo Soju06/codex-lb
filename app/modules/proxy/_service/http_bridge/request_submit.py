@@ -230,17 +230,20 @@ async def _send_http_bridge_request_text_with_archive_id(
 ) -> None:
     token = set_request_id(request_state.archive_request_id)
     try:
-        request_state.response_create_sent_at = _service_time().monotonic()
+        # Do not let serialization, proxy backpressure, or a prior attempt's
+        # timestamp consume the upstream acknowledgement budget.
+        request_state.response_create_sent_at = None
         session.upstream_reader_wakeup.set()
         try:
             await session.upstream.send_text(text_data)
         except BaseException:
-            # A failed or cancelled send is settled by its caller. Disarm the
-            # owner watchdog before lifecycle ownership is released so the
-            # reader cannot race that cleanup and settle the request twice.
-            request_state.response_create_sent_at = None
+            # A failed or cancelled send is settled by its caller. Keep the
+            # owner watchdog disarmed so the reader cannot race that cleanup
+            # and settle the request twice.
             session.upstream_reader_wakeup.set()
             raise
+        request_state.response_create_sent_at = _service_time().monotonic()
+        session.upstream_reader_wakeup.set()
     finally:
         reset_request_id(token)
 

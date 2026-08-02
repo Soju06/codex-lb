@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -266,7 +267,9 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         *,
         changed_at: datetime,
         commit: bool = True,
+        acquire_writer_lock: bool = True,
     ) -> bool:
+        del acquire_writer_lock
         row = self.rows.get(key_id)
         if row is None:
             return False
@@ -847,6 +850,74 @@ async def test_update_key_tracks_assignment_scope_after_clear() -> None:
     )
     assert cleared.account_assignment_scope_enabled is False
     assert cleared.assigned_account_ids == []
+
+
+@pytest.mark.asyncio
+async def test_update_key_acquires_writer_section_before_assignment_transaction_mutation(monkeypatch) -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    repo._accounts = {
+        "acc-a": Account(
+            id="acc-a",
+            chatgpt_account_id=None,
+            email="a@example.com",
+            plan_type="plus",
+            access_token_encrypted=b"access",
+            refresh_token_encrypted=b"refresh",
+            id_token_encrypted=b"id",
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        ),
+    }
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="assignment-writer-order",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+
+    writer_section_active = False
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def fake_writer_section():
+        nonlocal writer_section_active
+        events.append("writer_enter")
+        writer_section_active = True
+        try:
+            yield
+        finally:
+            writer_section_active = False
+            events.append("writer_exit")
+
+    original_update = repo.update
+    original_replace = repo.replace_account_assignments_if_changed
+
+    async def guarded_update(*args, **kwargs):
+        assert writer_section_active is True
+        events.append("update")
+        return await original_update(*args, **kwargs)
+
+    async def guarded_replace(*args, **kwargs):
+        assert writer_section_active is True
+        assert kwargs["acquire_writer_lock"] is False
+        events.append("replace_assignments")
+        return await original_replace(*args, **kwargs)
+
+    monkeypatch.setattr("app.modules.api_keys.service.sqlite_writer_section", fake_writer_section)
+    monkeypatch.setattr(repo, "update", guarded_update)
+    monkeypatch.setattr(repo, "replace_account_assignments_if_changed", guarded_replace)
+
+    await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            assigned_account_ids=["acc-a"],
+            assigned_account_ids_set=True,
+        ),
+    )
+
+    assert events == ["writer_enter", "update", "replace_assignments", "writer_exit"]
 
 
 @pytest.mark.asyncio

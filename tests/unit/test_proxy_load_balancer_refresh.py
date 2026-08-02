@@ -1104,6 +1104,7 @@ async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) 
 @pytest.mark.asyncio
 async def test_select_account_uses_canonical_quota_key_for_upstream_limit_alias(monkeypatch) -> None:
     account = _make_account("acc-additional-alias", email="alias@example.com")
+    account.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     usage_repo = StubUsageRepository(
@@ -1136,7 +1137,7 @@ async def test_select_account_uses_canonical_quota_key_for_upstream_limit_alias(
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
     )
 
     balancer = LoadBalancer(
@@ -2530,18 +2531,11 @@ async def test_select_account_handles_mapped_quota_when_account_catalog_omits_mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("plan_type", ["plus", "free", "edu"])
-@pytest.mark.parametrize(
-    ("catalog_supports_account", "expected_error_code"),
-    [
-        pytest.param(False, ADDITIONAL_QUOTA_DATA_UNAVAILABLE, id="catalog-omitted"),
-        pytest.param(True, None, id="catalog-supported"),
-    ],
-)
-async def test_authoritative_catalog_controls_quota_exempt_plan_evidence_requirement(
+@pytest.mark.parametrize("catalog_supports_account", [False, True], ids=["catalog-omitted", "catalog-supported"])
+async def test_additional_quota_plan_scope_rejects_ineligible_plan_even_when_catalog_supports_it(
     monkeypatch,
     plan_type: str,
     catalog_supports_account: bool,
-    expected_error_code: str | None,
 ) -> None:
     account = _make_account(f"acc-gated-catalog-{plan_type}", f"gated-catalog-{plan_type}@example.com")
     account.plan_type = plan_type
@@ -2581,13 +2575,10 @@ async def test_authoritative_catalog_controls_quota_exempt_plan_evidence_require
     )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
-    if catalog_supports_account:
-        assert selection.account is not None
-        assert selection.account.id == account.id
-    else:
-        assert selection.account is None
+    assert selection.account is None
     assert selection.catalog_omission_quota_admission is None
-    assert selection.error_code == expected_error_code
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex-spark'"
 
 
 @pytest.mark.parametrize(
@@ -3450,7 +3441,7 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 
 
 @pytest.mark.asyncio
-async def test_select_account_allows_plus_plan_without_additional_quota_rows(monkeypatch) -> None:
+async def test_select_account_rejects_plus_plan_for_pro_scoped_additional_quota_model(monkeypatch) -> None:
     account = _make_account("acc-plus-no-gated-rows", "plus-no-gated-rows@example.com")
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -3483,35 +3474,64 @@ async def test_select_account_allows_plus_plan_without_additional_quota_rows(mon
     )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
-    assert selection.account is not None
-    assert selection.account.id == account.id
-    assert selection.error_code is None
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex-spark'"
 
 
 @pytest.mark.asyncio
-async def test_select_account_treats_standard_quota_as_advisory_for_plus_gated_model_without_additional_rows(
+async def test_select_account_routes_pro_scoped_additional_quota_model_only_to_pro_class_account(
     monkeypatch,
 ) -> None:
-    account = _make_account("acc-plus-standard-exhausted", "plus-standard-exhausted@example.com")
+    plus = _make_account("acc-a-plus", "plus@example.com")
+    k12 = _make_account("acc-b-k12", "k12@example.com")
+    k12.plan_type = "k12"
+    pro = _make_account("acc-z-pro", "pro@example.com")
+    pro.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
-    primary_entry = UsageHistory(
-        id=1,
-        account_id=account.id,
-        recorded_at=now,
-        window="primary",
-        used_percent=100.0,
-        reset_at=now_epoch + 300,
-        window_minutes=5,
+    accounts_repo = StubAccountsRepository([plus, k12, pro])
+    usage_repo = StubUsageRepository(
+        primary={
+            plus.id: UsageHistory(
+                id=1,
+                account_id=plus.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=0.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            ),
+            k12.id: UsageHistory(
+                id=2,
+                account_id=k12.id,
+                recorded_at=now,
+                window="primary",
+                used_percent=0.0,
+                reset_at=now_epoch + 300,
+                window_minutes=5,
+            ),
+        },
+        secondary={},
     )
-    accounts_repo = StubAccountsRepository([account])
-    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
     sticky_repo = StubStickySessionsRepository()
-    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+    additional_usage_repo = StubAdditionalUsageRepository(
+        primary={
+            pro.id: _additional_entry(
+                3,
+                account_id=pro.id,
+                window="primary",
+                used_percent=80.0,
+                reset_at=now_epoch + 300,
+                recorded_at=now,
+            )
+        },
+        secondary={},
+    )
 
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus"})),
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus", "edu", "pro"})),
     )
 
     balancer = LoadBalancer(
@@ -3522,10 +3542,13 @@ async def test_select_account_treats_standard_quota_as_advisory_for_plus_gated_m
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        routing_strategy="single_account",
+    )
 
     assert selection.account is not None
-    assert selection.account.id == account.id
+    assert selection.account.id == pro.id
 
 
 @pytest.mark.asyncio
@@ -3630,7 +3653,7 @@ async def test_select_account_fails_closed_for_unmapped_plan_without_additional_
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
     assert selection.account is None
-    assert selection.error_code == ADDITIONAL_QUOTA_DATA_UNAVAILABLE
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
 
 
 @pytest.mark.asyncio

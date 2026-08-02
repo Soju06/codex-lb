@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -1321,6 +1322,77 @@ async def test_v1_responses_missing_previous_response_owner_fails_closed_before_
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_account_cutover_removed_owner_requires_terminal_conversation_reset(
+    async_client,
+    monkeypatch,
+):
+    account_ids: list[str] = []
+    for raw_account_id, email in (
+        ("acc_cutover_http_owner", "cutover-http-owner@example.com"),
+        ("acc_cutover_http_alternate", "cutover-http-alternate@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+        account_ids.append(response.json()["accountId"])
+
+    response = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert response.status_code == 200
+    response = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cutover-http-terminal-reset",
+            "assignedAccountIds": [account_ids[0]],
+        },
+    )
+    assert response.status_code == 200
+    api_key_payload = response.json()
+    response = await async_client.patch(
+        f"/api/api-keys/{api_key_payload['id']}",
+        json={"assignedAccountIds": [account_ids[1]]},
+    )
+    assert response.status_code == 200
+
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("cutover owner lookup miss must fail before upstream stream attempt")
+        if False:
+            yield ""
+
+    async def removed_owner(self, *, previous_response_id, api_key, session_id, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return account_ids[0]
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", removed_owner)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "continue",
+            "previous_response_id": "resp_cutover_http_missing_owner",
+        },
+        headers={
+            "Authorization": f"Bearer {api_key_payload['key']}",
+            "session_id": "sid_cutover_http_missing_owner",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "message": (
+            "The previous upstream conversation is no longer available after the account-pool change. "
+            "Start a new Codex conversation with /new, then retry."
+        ),
+        "type": "invalid_request_error",
+        "code": "continuity_reset_required",
+        "param": "previous_response_id",
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_previous_response_owner_lookup_failure_without_http_bridge_returns_upstream_unavailable(
     async_client,
     monkeypatch,
@@ -2614,6 +2686,57 @@ async def test_v1_chat_completions_invalid_tool_calls_returns_openai_400(async_c
     body = resp.json()
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["code"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_applies_officeai_reasoning_control(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    raw_account_id = "acc_officeai_reasoning"
+    auth_json = _make_auth_json(raw_account_id, "officeai-reasoning@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    control_path = tmp_path / "officeai-reasoning.json"
+    control_path.write_text(
+        json.dumps({"version": 1, "enabled": True, "effort": "maximum"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "default_officeai_reasoning_control_path",
+        lambda _database_url: control_path,
+    )
+
+    seen_efforts: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        seen_efforts.append(payload.reasoning.effort if payload.reasoning else None)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_officeai_reasoning"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    for request_payload in (
+        {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "use control"}],
+            "stream": True,
+        },
+        {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "preserve explicit"}],
+            "reasoning_effort": "low",
+            "stream": True,
+        },
+    ):
+        async with async_client.stream("POST", "/v1/chat/completions", json=request_payload) as chat_response:
+            assert chat_response.status_code == 200
+            _ = [line async for line in chat_response.aiter_lines() if line]
+
+    assert seen_efforts == ["xhigh", "low"]
 
 
 @pytest.mark.asyncio

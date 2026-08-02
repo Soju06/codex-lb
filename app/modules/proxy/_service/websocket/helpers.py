@@ -323,6 +323,10 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.continuity import (
+    continuity_error_type_and_param,
+    continuity_owner_unavailable_fields,
+)
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -1220,11 +1224,19 @@ def _rewrite_websocket_previous_response_owner_unavailable_event(
         previous_response_id=request_state.previous_response_id,
         session_id=request_state.session_id,
     )
+    error_code, error_message = continuity_owner_unavailable_fields(
+        request_state.api_key,
+        owner_account_id=request_state.preferred_account_id,
+        fallback_code="upstream_unavailable",
+        fallback_message="Previous response owner account is unavailable; retry later.",
+    )
+    error_type, error_param = continuity_error_type_and_param(error_code)
     rewritten_event_payload = response_failed_event(
-        "upstream_unavailable",
-        "Previous response owner account is unavailable; retry later.",
-        error_type="server_error",
+        error_code,
+        error_message,
+        error_type=error_type,
         response_id=_websocket_downstream_response_id(request_state),
+        error_param=error_param,
     )
     rewritten_text = json.dumps(rewritten_event_payload, ensure_ascii=True, separators=(",", ":"))
     rewritten_event_block = format_sse_event(rewritten_event_payload)

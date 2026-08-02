@@ -1890,6 +1890,19 @@ async def _close_unmanaged_websocket(websocket: Any | None) -> None:
         await result
 
 
+async def _close_unmanaged_response(response: Any | None) -> None:
+    if response is None:
+        return
+    close = getattr(response, "aclose", None)
+    if not callable(close):
+        close = getattr(response, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if asyncio.iscoroutine(result):
+        await result
+
+
 async def _stream_responses_via_websocket(
     *,
     payload_dict: JsonObject,
@@ -2769,6 +2782,7 @@ async def _stream_responses_with_session(
         if route is not None:
             owns_codex_client = codex_client is None
             active_codex_client = codex_client or CodexClient(create_codex_session())
+            raw_resp: Any | None = None
             try:
                 request_kwargs: dict[str, Any] = {
                     "json": payload_dict,
@@ -2871,8 +2885,11 @@ async def _stream_responses_with_session(
                         break
                 return
             finally:
-                if owns_codex_client:
-                    await active_codex_client.close()
+                try:
+                    await _close_unmanaged_response(raw_resp)
+                finally:
+                    if owns_codex_client:
+                        await active_codex_client.close()
 
         async with _service_circuit_breaker_context(
             client_session.post(

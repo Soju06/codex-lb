@@ -450,29 +450,52 @@ class ApiKeysRepository:
         *,
         changed_at: datetime,
         commit: bool = True,
+        acquire_writer_lock: bool = True,
     ) -> bool:
-        async with sqlite_writer_section():
-            stmt = self._select_api_key().where(ApiKey.id == key_id)
-            bind = self._session.get_bind()
-            if bind.dialect.name == "postgresql":
-                stmt = stmt.with_for_update()
-            result = await self._session.execute(stmt)
-            row = result.scalar_one_or_none()
-            if row is None:
-                return False
+        if acquire_writer_lock:
+            async with sqlite_writer_section():
+                return await self._replace_account_assignments_if_changed(
+                    key_id,
+                    account_ids,
+                    changed_at=changed_at,
+                    commit=commit,
+                )
+        return await self._replace_account_assignments_if_changed(
+            key_id,
+            account_ids,
+            changed_at=changed_at,
+            commit=commit,
+        )
 
-            existing_ids = {assignment.account_id for assignment in row.account_assignments}
-            incoming_ids = set(account_ids)
-            changed = existing_ids != incoming_ids
-            if changed:
-                row.account_assignment_generation = int(row.account_assignment_generation or 1) + 1
-                row.account_assignment_changed_at = changed_at
-                await self.replace_account_assignments(key_id, account_ids, commit=False)
-            if commit:
-                await self._session.commit()
-            if changed:
-                await self._session.refresh(row, attribute_names=["account_assignments"])
-            return changed
+    async def _replace_account_assignments_if_changed(
+        self,
+        key_id: str,
+        account_ids: list[str],
+        *,
+        changed_at: datetime,
+        commit: bool,
+    ) -> bool:
+        stmt = self._select_api_key().where(ApiKey.id == key_id)
+        bind = self._session.get_bind()
+        if bind.dialect.name == "postgresql":
+            stmt = stmt.with_for_update()
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+
+        existing_ids = {assignment.account_id for assignment in row.account_assignments}
+        incoming_ids = set(account_ids)
+        changed = existing_ids != incoming_ids
+        if changed:
+            row.account_assignment_generation = int(row.account_assignment_generation or 1) + 1
+            row.account_assignment_changed_at = changed_at
+            await self.replace_account_assignments(key_id, account_ids, commit=False)
+        if commit:
+            await self._session.commit()
+        if changed:
+            await self._session.refresh(row, attribute_names=["account_assignments"])
+        return changed
 
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None:
         await self._session.execute(

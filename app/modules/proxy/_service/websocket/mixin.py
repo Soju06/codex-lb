@@ -433,7 +433,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import continuity_owner_unavailable_error, resolve_required_account_id
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -2342,13 +2342,19 @@ class _WebSocketMixin:
             and account.id != preferred_account_id
         ):
             await proxy._load_balancer.release_account_lease(selection.lease)
-            message = "Previous response owner account is unavailable; retry later."
+            owner_error = continuity_owner_unavailable_error(
+                api_key,
+                owner_account_id=preferred_account_id,
+            )
+            error = owner_error.payload["error"]
+            error_code = str(error["code"])
+            message = str(error["message"])
             _record_continuity_fail_closed(
                 surface="websocket_connect",
                 reason="owner_account_unavailable",
                 previous_response_id=request_state.previous_response_id,
                 session_id=request_state.session_id,
-                upstream_error_code="previous_response_owner_unavailable",
+                upstream_error_code=error_code,
             )
             await proxy._emit_websocket_connect_failure(
                 websocket,
@@ -2356,13 +2362,9 @@ class _WebSocketMixin:
                 account_id=preferred_account_id,
                 api_key=api_key,
                 request_state=request_state,
-                status_code=502,
-                payload=openai_error(
-                    "previous_response_owner_unavailable",
-                    message,
-                    error_type="server_error",
-                ),
-                error_code="previous_response_owner_unavailable",
+                status_code=owner_error.status_code,
+                payload=owner_error.payload,
+                error_code=error_code,
                 error_message=message,
             )
             return None
@@ -2411,7 +2413,13 @@ class _WebSocketMixin:
                     error_message=error_message,
                 )
                 return None
-            message = "Previous response owner account is unavailable; retry later."
+            owner_error = continuity_owner_unavailable_error(
+                api_key,
+                owner_account_id=preferred_account_id,
+            )
+            error = owner_error.payload["error"]
+            owner_error_code = str(error["code"])
+            message = str(error["message"])
             _record_continuity_fail_closed(
                 surface="websocket_connect",
                 reason="owner_account_unavailable",
@@ -2425,13 +2433,9 @@ class _WebSocketMixin:
                 account_id=preferred_account_id,
                 api_key=api_key,
                 request_state=request_state,
-                status_code=502,
-                payload=openai_error(
-                    "previous_response_owner_unavailable",
-                    message,
-                    error_type="server_error",
-                ),
-                error_code="previous_response_owner_unavailable",
+                status_code=owner_error.status_code,
+                payload=owner_error.payload,
+                error_code=owner_error_code,
                 error_message=message,
             )
             return None

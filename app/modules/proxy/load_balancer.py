@@ -943,6 +943,15 @@ class LoadBalancer:
                 # may own account-scoped upstream state. Capture this pool
                 # before PAUSED/REAUTH_REQUIRED/etc. can manufacture uniqueness.
                 continuity_owner_candidates = scoped_accounts
+            if mapped_limit_name is not None and additional_limit_name is None:
+                accounts = _filter_accounts_for_additional_quota_plan_scope(
+                    accounts,
+                    quota_key=mapped_limit_name,
+                )
+                continuity_owner_candidates = _filter_accounts_for_additional_quota_plan_scope(
+                    continuity_owner_candidates,
+                    quota_key=mapped_limit_name,
+                )
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
@@ -2862,6 +2871,19 @@ def _additional_quota_applies_to_plan(*, quota_key: str | None, plan_type: str |
     if normalized_plan in definition.applies_to_plans:
         return True
     return normalized_plan not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
+
+
+def _filter_accounts_for_additional_quota_plan_scope(
+    accounts: list[Account],
+    *,
+    quota_key: str,
+) -> list[Account]:
+    definition = get_additional_quota_definition(quota_key)
+    if definition is None or definition.applies_to_plans is None:
+        return accounts
+    return [
+        account for account in accounts if account_plan_matches_allowed(account.plan_type, definition.applies_to_plans)
+    ]
 
 
 def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:

@@ -203,6 +203,10 @@ from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
 )
+from app.modules.proxy.officeai_reasoning import (
+    apply_officeai_reasoning_override,
+    default_officeai_reasoning_control_path,
+)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
@@ -3481,6 +3485,14 @@ async def v1_chat_completions(
                 nested=True,
             )
         responses_payload = payload.to_responses_request()
+        settings = get_settings()
+        apply_officeai_reasoning_override(
+            responses_payload,
+            original_chat_request=payload,
+            config_path=default_officeai_reasoning_control_path(settings.database_url),
+            authenticated_api_key_prefix=api_key.key_prefix if api_key is not None else None,
+            registry=get_model_registry(),
+        )
         enforce_strict_text_format(responses_payload)
         if responses_shaped_payload:
             enforce_strict_function_tools_format(responses_payload.tools)

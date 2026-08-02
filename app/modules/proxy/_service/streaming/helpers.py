@@ -381,7 +381,7 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,  # noqa: F401
 )
-from app.modules.proxy.continuity import continuity_owner_unavailable_fields
+from app.modules.proxy.continuity import continuity_error_type_and_param, continuity_owner_unavailable_fields
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -534,7 +534,10 @@ def _rewrite_previous_response_stream_error(
             previous_response_id=previous_response_id,
             upstream_error_code=normalized_code,
         )
-        rewritten_code, rewritten_message = continuity_owner_unavailable_fields(api_key)
+        rewritten_code, rewritten_message = continuity_owner_unavailable_fields(
+            api_key,
+            owner_account_id=preferred_account_id,
+        )
         if rewritten_code == "continuity_reset_required":
             _record_api_key_assignment_cutover(
                 api_key=api_key,
@@ -631,11 +634,13 @@ def _build_rewritten_stream_response_failed_event(
     error_code: str,
     error_message: str,
 ) -> tuple[str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None]:
+    error_type, error_param = continuity_error_type_and_param(error_code)
     rewritten_event_payload = response_failed_event(
         error_code,
         error_message,
-        error_type="server_error",
+        error_type=error_type,
         response_id=response_id,
+        error_param=error_param,
     )
     rewritten_event_block = format_sse_event(rewritten_event_payload)
     rewritten_payload = parse_sse_data_json(rewritten_event_block)

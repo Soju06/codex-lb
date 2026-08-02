@@ -351,7 +351,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     getattr(
                         runtime_settings,
                         "http_responses_session_bridge_response_created_timeout_seconds",
-                        5.0,
+                        20.0,
                     )
                 )
                 receive_timeout = await _http_bridge_receive_timeout_with_eventless_deadline(

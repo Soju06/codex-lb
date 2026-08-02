@@ -237,7 +237,6 @@ async def run_sticky_selection_path(
     sticky_kind = request.sticky_kind
     reallocate_sticky = request.reallocate_sticky
     sticky_source = request.sticky_source
-    legacy_sticky_key = request.legacy_sticky_key
     legacy_existing_account_id = request.legacy_existing_account_id
     spill_bare_session_on_account_cap = request.spill_bare_session_on_account_cap
     require_unambiguous_account = request.require_unambiguous_account
@@ -322,7 +321,6 @@ async def run_sticky_selection_path(
             bare_session_key = (
                 sticky_kind == StickySessionKind.CODEX_SESSION
                 and sticky_source == "session_header"
-                and legacy_sticky_key is not None
                 and not sticky_existing_is_legacy
             )
             cap_spillover_allowed = spill_bare_session_on_account_cap and lease_kind is not None and bare_session_key

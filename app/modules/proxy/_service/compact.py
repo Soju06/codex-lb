@@ -51,7 +51,11 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import continuity_owner_unavailable_fields, resolve_required_account_id
+from app.modules.proxy.continuity import (
+    continuity_owner_unavailable_error,
+    continuity_owner_unavailable_fields,
+    resolve_required_account_id,
+)
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountConcurrencyCaps,
@@ -682,14 +686,7 @@ class _CompactMixin:
                         session_id=previous_response_lookup_session_id,
                         upstream_error_code="owner_lookup_miss",
                     )
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            error_code,
-                            message,
-                            error_type="server_error",
-                        ),
-                    )
+                    raise continuity_owner_unavailable_error(api_key)
 
         # File pins are account ownership, not locality. Resolved turn-state or
         # previous-response owners above still take precedence (and conflicts
@@ -910,6 +907,27 @@ class _CompactMixin:
                     elif last_exc is not None:
                         break
                     else:
+                        if previous_response_preferred_account_id is not None:
+                            owner_error = continuity_owner_unavailable_error(
+                                api_key,
+                                owner_account_id=previous_response_preferred_account_id,
+                            )
+                            if owner_error.status_code == 400:
+                                _service_global("_record_api_key_assignment_cutover")(
+                                    api_key=api_key,
+                                    affinity_source="continuity_owner",
+                                    sticky_kind=None,
+                                    hard_owner_required=True,
+                                    result="reset_required",
+                                )
+                                _record_continuity_fail_closed(
+                                    surface="compact",
+                                    reason="owner_account_unavailable",
+                                    previous_response_id=previous_response_id,
+                                    session_id=previous_response_lookup_session_id,
+                                    upstream_error_code=selection.error_code or "no_accounts",
+                                )
+                                raise owner_error
                         log_error_code = selection.error_code or "no_accounts"
                         log_error_message = selection.error_message or "No active accounts available"
                         status_code = 429 if log_error_code == "account_response_create_cap" else 503

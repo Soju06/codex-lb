@@ -89,9 +89,9 @@ class _BufferedResponse:
 
 
 class _SessionOwnedContent:
-    def __init__(self, content: Any, session: aiohttp.ClientSession) -> None:
+    def __init__(self, content: Any, close_response: Any) -> None:
         self._content = content
-        self._session = session
+        self._close_response = close_response
 
     def iter_chunked(self, size: int) -> Any:
         return self._iter_and_close(self._content.iter_chunked(size))
@@ -101,17 +101,31 @@ class _SessionOwnedContent:
             async for chunk in iterator:
                 yield chunk
         finally:
-            await self._session.close()
+            await self._close_response()
 
 
 class _SessionOwnedResponse:
     def __init__(self, response: Any, session: aiohttp.ClientSession) -> None:
         self._response = response
         self._session = session
+        self._closed = False
         self.status = getattr(response, "status", getattr(response, "status_code", 0))
         self.status_code = getattr(response, "status_code", self.status)
         self.headers = getattr(response, "headers", {}) or {}
-        self.content = _SessionOwnedContent(response.content, session)
+        self.content = _SessionOwnedContent(response.content, self.aclose)
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            close = getattr(self._response, "close", None)
+            if callable(close):
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+        finally:
+            await self._session.close()
 
     async def read(self) -> bytes:
         try:
@@ -124,7 +138,7 @@ class _SessionOwnedResponse:
                 return result.encode()
             return b""
         finally:
-            await self._session.close()
+            await self.aclose()
 
     async def text(self) -> str:
         return (await self.read()).decode("utf-8", errors="replace")
@@ -212,17 +226,25 @@ class CodexClient:
                                 retryable_same_contract=False,
                             ) from None
                 return CodexRequestResult(response, candidate, index > 0)
-            except CodexTransportError:
-                if index == len(endpoints) - 1 or not allow_fallback:
+            except CodexTransportError as exc:
+                # A typed pre-dispatch failure proves that no request reached
+                # the upstream, so replaying the same contract on the next
+                # pool endpoint is safe even for non-idempotent methods.
+                if index == len(endpoints) - 1 or not (
+                    allow_fallback or (exc.retryable_same_contract and not exc.is_tls_verification_failure)
+                ):
                     raise
             except Exception as exc:
-                if index == len(endpoints) - 1 or not allow_fallback:
+                retryable_same_contract = is_pre_dispatch_connection_failure(exc)
+                if index == len(endpoints) - 1 or not (
+                    allow_fallback or (retryable_same_contract and not isinstance(exc, aiohttp.ClientSSLError))
+                ):
                     raise _transport_error(
                         "request",
                         endpoint.id,
                         exc,
                         failure_phase="connect" if is_pre_dispatch_connection_failure(exc) else "request",
-                        retryable_same_contract=is_pre_dispatch_connection_failure(exc),
+                        retryable_same_contract=retryable_same_contract,
                     ) from None
         raise RuntimeError("unreachable Codex client fallback state")
 

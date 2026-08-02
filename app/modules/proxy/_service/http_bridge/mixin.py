@@ -90,7 +90,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_models_compatible,
     _http_bridge_owner_check_required,
     _http_bridge_owner_instance,
-    _http_bridge_owner_lookup_unavailable_error_envelope,
+    _http_bridge_owner_lookup_unavailable_error,
     _http_bridge_parallel_fork_key,
     _http_bridge_previous_response_alias_key,
     _http_bridge_previous_response_owner_unavailable_error,
@@ -808,10 +808,7 @@ class _HTTPBridgeMixin(
                                     session_id=incoming_turn_state or incoming_session_key,
                                     upstream_error_code="owner_lookup_failed",
                                 )
-                                raise ProxyResponseError(
-                                    502,
-                                    _http_bridge_owner_lookup_unavailable_error_envelope(),
-                                ) from exc
+                                raise _http_bridge_owner_lookup_unavailable_error() from exc
                             if _http_bridge_can_local_recover_without_ring(
                                 key=key,
                                 headers=headers,
@@ -838,10 +835,7 @@ class _HTTPBridgeMixin(
                                 session_id=incoming_turn_state or incoming_session_key,
                                 upstream_error_code="ring_lookup_failed",
                             )
-                            raise ProxyResponseError(
-                                502,
-                                _http_bridge_owner_lookup_unavailable_error_envelope(),
-                            ) from exc
+                            raise _http_bridge_owner_lookup_unavailable_error() from exc
                         if ring_lookup_failed or _http_bridge_can_local_recover_without_ring(
                             key=key,
                             headers=headers,
@@ -1809,7 +1803,10 @@ class _HTTPBridgeMixin(
                         CONTINUITY_OWNER_UNAVAILABLE,
                     }
                 ):
-                    raise _http_bridge_previous_response_owner_unavailable_error()
+                    raise _http_bridge_previous_response_owner_unavailable_error(
+                        api_key=api_key,
+                        owner_account_id=preferred_account_id,
+                    )
                 status_code = 429 if is_local_account_cap else 503
                 error_type = "rate_limit_error" if status_code == 429 else "server_error"
                 raise ProxyResponseError(
@@ -1828,7 +1825,10 @@ class _HTTPBridgeMixin(
                     selected_account_id=account.id,
                 )
                 if preferred_account_is_continuity_owner:
-                    raise _http_bridge_previous_response_owner_unavailable_error()
+                    raise _http_bridge_previous_response_owner_unavailable_error(
+                        api_key=api_key,
+                        owner_account_id=preferred_account_id,
+                    )
                 raise ProxyResponseError(
                     503,
                     openai_error(
@@ -2071,7 +2071,10 @@ class _HTTPBridgeMixin(
             session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
         )
         if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
-            raise _http_bridge_previous_response_owner_unavailable_error()
+            raise _http_bridge_previous_response_owner_unavailable_error(
+                api_key=request_state.api_key,
+                owner_account_id=required_preferred_account_id,
+            )
         _require_http_bridge_bound_account_not_excluded(
             hard_close_account_bound, session.account.id, excluded_account_ids
         )
@@ -2158,7 +2161,10 @@ class _HTTPBridgeMixin(
             if account is None:
                 await release_selected_account_lease()
                 if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
-                    raise _http_bridge_previous_response_owner_unavailable_error()
+                    raise _http_bridge_previous_response_owner_unavailable_error(
+                        api_key=request_state.api_key,
+                        owner_account_id=required_preferred_account_id,
+                    )
                 if (
                     reuse_current_account_lease
                     and not hard_close_account_bound
@@ -2178,7 +2184,10 @@ class _HTTPBridgeMixin(
                 ):
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if required_preferred_account_id in excluded_account_ids:
-                        raise _http_bridge_previous_response_owner_unavailable_error()
+                        raise _http_bridge_previous_response_owner_unavailable_error(
+                            api_key=request_state.api_key,
+                            owner_account_id=required_preferred_account_id,
+                        )
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
                     _require_http_bridge_bound_account_not_excluded(
@@ -2214,7 +2223,10 @@ class _HTTPBridgeMixin(
                 if selection.lease is not None:
                     await self._load_balancer.release_account_lease(selection.lease)
                 record_selected_account_takeover(account.id, required_preferred_account_id)
-                raise _http_bridge_previous_response_owner_unavailable_error()
+                raise _http_bridge_previous_response_owner_unavailable_error(
+                    api_key=request_state.api_key,
+                    owner_account_id=required_preferred_account_id,
+                )
             selected_account_lease = (
                 session.account_lease or request_state.websocket_stream_lease
                 if reuse_current_account_lease and account.id == session.account.id

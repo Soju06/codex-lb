@@ -28,7 +28,7 @@ from app.core.balancer.logic import (
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.affinity import _codex_session_selection_key, _soft_affinity_selection_key
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -2898,6 +2898,37 @@ async def test_hard_codex_session_owner_outside_selection_pool_fails_closed(scop
     assert sticky_repo.account_id == owner.id
     assert sticky_repo.deleted == []
     assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_generation_scoped_session_header_rebinds_when_soft_owner_is_excluded() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("soft-owner-excluded")
+    assert alternate is not None
+    sticky_key = _soft_affinity_selection_key(
+        "soft-session",
+        kind=StickySessionKind.CODEX_SESSION,
+        source="session_header",
+        api_key_id="key-generation-13",
+        account_assignment_generation=13,
+    )
+    sticky_repo.account_ids_by_key = {sticky_key: owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=sticky_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=None,
+        spill_bare_session_on_account_cap=True,
+        lease_kind="stream",
+        exclude_account_ids={owner.id},
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    assert selected.error_code is None
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == [(sticky_key, alternate.id, StickySessionKind.CODEX_SESSION)]
+    await balancer.release_account_lease(selected.lease)
 
 
 @pytest.mark.asyncio

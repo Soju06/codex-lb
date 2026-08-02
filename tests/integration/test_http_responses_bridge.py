@@ -7570,6 +7570,138 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_account_cutover_requires_terminal_conversation_reset(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_cutover_owner",
+        "http-bridge-cutover-owner@example.com",
+    )
+    alternate_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_cutover_alternate",
+        "http-bridge-cutover-alternate@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    first_upstream = _ClosingBridgeUpstreamWebSocket()
+    selection_calls: list[tuple[str, str | None, int]] = []
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        request_stage = cast(str, kwargs.get("request_stage", "first_turn"))
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        api_key = cast(proxy_module.ApiKeyData, kwargs["api_key"])
+        selection_calls.append((request_stage, preferred_account_id, api_key.account_assignment_generation))
+        if preferred_account_id is None:
+            return AccountSelection(account=owner_account, error_message=None, error_code=None)
+        assert kwargs.get("fallback_on_preferred_account_unavailable") is False
+        assert kwargs.get("preferred_account_is_continuity_owner") is True
+        return AccountSelection(
+            account=None,
+            error_message="Required continuity owner account no longer exists",
+            error_code=CONTINUITY_OWNER_UNAVAILABLE,
+        )
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return first_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    create_key = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "http-bridge-cutover-key",
+            "assignedAccountIds": [owner_account_id],
+        },
+    )
+    assert create_key.status_code == 200
+    key_payload = create_key.json()
+    auth_headers = {"Authorization": f"Bearer {key_payload['key']}"}
+    enable_api_key_auth = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable_api_key_auth.status_code == 200
+
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-cutover-terminal-reset",
+            },
+            headers=auth_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+
+    update_key = await async_client.patch(
+        f"/api/api-keys/{key_payload['id']}",
+        json={"assignedAccountIds": [alternate_account_id]},
+    )
+    assert update_key.status_code == 200
+
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": "http-bridge-cutover-terminal-reset",
+                "previous_response_id": first.json()["id"],
+            },
+            headers=auth_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert second.status_code == 400
+    assert second.json()["error"] == {
+        "message": (
+            "The previous upstream conversation is no longer available after the account-pool change. "
+            "Start a new Codex conversation with /new, then retry."
+        ),
+        "type": "invalid_request_error",
+        "code": "continuity_reset_required",
+        "param": "previous_response_id",
+    }
+    assert selection_calls == [
+        ("first_turn", None, 1),
+        ("follow_up", owner_account.id, 2),
+    ]
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_over_stale_local_lane(
     async_client,
     app_instance,

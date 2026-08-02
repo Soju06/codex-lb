@@ -169,6 +169,9 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.continuity import (
+    CONTINUITY_RESET_REQUIRED_CODE,
+    continuity_error_type_and_param,
+    continuity_owner_unavailable_fields,
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
@@ -2022,15 +2025,29 @@ def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelop
     )
 
 
-def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseError:
-    return ProxyResponseError(
-        502,
-        openai_error(
-            "previous_response_owner_unavailable",
-            "Previous response owner account is unavailable; retry later.",
-            error_type="server_error",
-        ),
+def _http_bridge_owner_lookup_unavailable_error() -> ProxyResponseError:
+    return ProxyResponseError(502, _http_bridge_owner_lookup_unavailable_error_envelope())
+
+
+def _http_bridge_previous_response_owner_unavailable_error(
+    api_key: ApiKeyData | None = None,
+    *,
+    owner_account_id: str | None = None,
+) -> ProxyResponseError:
+    error_code, error_message = continuity_owner_unavailable_fields(
+        api_key,
+        owner_account_id=owner_account_id,
     )
+    error_type, error_param = continuity_error_type_and_param(error_code)
+    status_code = 400 if error_code == CONTINUITY_RESET_REQUIRED_CODE else 502
+    payload = openai_error(
+        error_code,
+        error_message,
+        error_type=error_type,
+    )
+    if error_param is not None:
+        payload["error"]["param"] = error_param
+    return ProxyResponseError(status_code, payload)
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

@@ -16,7 +16,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
     _http_bridge_live_turn_state_alias_owner,
-    _http_bridge_owner_lookup_unavailable_error_envelope,
+    _http_bridge_owner_lookup_unavailable_error,
     _http_bridge_previous_response_alias_key,
     _http_bridge_turn_state_alias_key,
     _is_missing_durable_bridge_table_error,
@@ -497,10 +497,7 @@ class _HTTPBridgeSessionRegistryMixin:
                     kind=session.key.affinity_kind,
                     key=session.key.affinity_key,
                 ):
-                    raise ProxyResponseError(
-                        502,
-                        _http_bridge_owner_lookup_unavailable_error_envelope(),
-                    ) from exc
+                    raise _http_bridge_owner_lookup_unavailable_error() from exc
                 logger.warning("Durable bridge tables missing; using in-memory bridge session fallback", exc_info=True)
                 return
             raise

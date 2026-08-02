@@ -8,7 +8,7 @@ import pytest
 from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
-from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
+from app.core.clients.codex import CodexClient, CodexTransportError, require_route_or_direct_egress_opt_in
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
@@ -22,6 +22,15 @@ class _Response:
 
     def json(self) -> dict[str, bool]:
         return {"ok": True}
+
+
+class _BodyReadFailureResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "application/json"}
+
+    async def read(self) -> bytes:
+        raise OSError("body read failed after response headers")
 
 
 class _Session:
@@ -91,6 +100,41 @@ class _SocksConnector:
 
     def __init__(self, **kwargs: Any) -> None:
         self.calls.append(kwargs)
+
+
+class _SocksHttpResponse:
+    status = 200
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.content = _FakeSocksHttpContent()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeSocksHttpContent:
+    async def iter_chunked(self, _size: int):
+        yield b'data: {"type":"response.completed"}\n\n'
+
+
+class _SocksHttpSession:
+    latest: "_SocksHttpSession | None" = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.response = _SocksHttpResponse()
+        self.closed = False
+        _SocksHttpSession.latest = self
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> _SocksHttpResponse:
+        del method, url, kwargs
+        return self.response
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 @pytest.fixture
@@ -200,6 +244,32 @@ async def test_pre_response_failure_uses_same_pool_fallback(route: ResolvedUpstr
 
 
 @pytest.mark.asyncio
+async def test_pre_dispatch_post_failure_uses_same_pool_fallback(route: ResolvedUpstreamRoute) -> None:
+    class _ConnectorFailFirstSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> _Response:
+            self.calls.append({"method": method, "url": url, **kwargs})
+            if len(self.calls) == 1:
+                connection_key = ConnectionKey("upstream.test", 443, True, True, None, None, None)
+                raise aiohttp.ClientConnectorError(connection_key, ConnectionResetError())
+            return _Response(headers={"content-type": "application/json"})
+
+    session = _ConnectorFailFirstSession()
+    client = CodexClient(session)
+
+    result = await client.request_with_route_metadata("POST", "https://upstream.test", route=route, json={"x": 1})
+
+    assert result.fallback_used is True
+    assert result.route.endpoint_id == "ep_2"
+    assert [call["proxy"] for call in session.calls] == [
+        "http://u:p@proxy.test:8080",
+        "http://proxy-two.test:8081",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_non_idempotent_request_failure_does_not_fallback(route: ResolvedUpstreamRoute) -> None:
     session = _Session(fail_first=True)
     client = CodexClient(session)
@@ -208,6 +278,30 @@ async def test_non_idempotent_request_failure_does_not_fallback(route: ResolvedU
         await client.request_with_route_metadata("POST", "https://upstream.test", route=route, json={"x": 1})
 
     assert "ep_1" in str(exc_info.value)
+    assert len(session.calls) == 1
+    assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
+
+
+@pytest.mark.asyncio
+async def test_post_body_read_failure_after_headers_does_not_fallback(route: ResolvedUpstreamRoute) -> None:
+    class _HeadersThenBodyFailureSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> object:
+            self.calls.append({"method": method, "url": url, **kwargs})
+            if len(self.calls) == 1:
+                return _BodyReadFailureResponse()
+            return _Response(headers={"content-type": "application/json"})
+
+    session = _HeadersThenBodyFailureSession()
+    client = CodexClient(session)
+
+    with pytest.raises(CodexTransportError) as exc_info:
+        await client.request_with_route_metadata("POST", "https://upstream.test", route=route, json={"x": 1})
+
+    assert exc_info.value.failure_phase == "body_read"
+    assert exc_info.value.retryable_same_contract is False
     assert len(session.calls) == 1
     assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
 
@@ -293,4 +387,62 @@ async def test_socks_websocket_uses_proxy_connector_and_closes_session(
     await result.context.__aexit__(None, None, None)
 
     assert session.context.exited is True
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_socks_streaming_response_aclose_releases_response_and_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "socks5", "proxy.test", 1080),
+    )
+    _SocksHttpSession.latest = None
+    monkeypatch.setattr("app.core.clients.codex.ProxyConnector", _SocksConnector)
+    monkeypatch.setattr("app.core.clients.codex.aiohttp.ClientSession", _SocksHttpSession)
+    client = CodexClient(_Session())
+
+    result = await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test",
+        route=route,
+        buffer_response=False,
+    )
+    await result.response.aclose()
+
+    session = _SocksHttpSession.latest
+    assert session is not None
+    assert session.response.closed is True
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_socks_streaming_content_cancel_releases_response_and_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "socks5", "proxy.test", 1080),
+    )
+    _SocksHttpSession.latest = None
+    monkeypatch.setattr("app.core.clients.codex.ProxyConnector", _SocksConnector)
+    monkeypatch.setattr("app.core.clients.codex.aiohttp.ClientSession", _SocksHttpSession)
+    client = CodexClient(_Session())
+
+    result = await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test",
+        route=route,
+        buffer_response=False,
+    )
+    chunks = result.response.content.iter_chunked(1024)
+    assert await anext(chunks) == b'data: {"type":"response.completed"}\n\n'
+    await chunks.aclose()
+
+    session = _SocksHttpSession.latest
+    assert session is not None
+    assert session.response.closed is True
     assert session.closed is True

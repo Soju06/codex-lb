@@ -4810,7 +4810,9 @@ def _make_api_key_data(
     *,
     transport_policy_override: str | None = None,
     account_assignment_generation: int = 1,
+    assigned_account_ids: list[str] | None = None,
 ) -> ApiKeyData:
+    assigned_account_ids = assigned_account_ids or []
     return ApiKeyData(
         id=key_id,
         name=key_id,
@@ -4824,7 +4826,9 @@ def _make_api_key_data(
         created_at=utcnow(),
         last_used_at=None,
         transport_policy_override=transport_policy_override,
+        account_assignment_scope_enabled=bool(assigned_account_ids),
         account_assignment_generation=account_assignment_generation,
+        assigned_account_ids=assigned_account_ids,
     )
 
 
@@ -17868,13 +17872,24 @@ async def test_select_websocket_connect_account_records_fail_closed_for_preferre
     ]
 
 
+@pytest.mark.parametrize("assignment_cutover", [False, True])
 @pytest.mark.asyncio
 async def test_select_websocket_connect_account_preferred_owner_missing_fails_closed(
     monkeypatch,
     caplog,
+    assignment_cutover,
 ):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = (
+        _make_api_key_data(
+            "key-websocket-cutover",
+            account_assignment_generation=2,
+            assigned_account_ids=["acc_other"],
+        )
+        if assignment_cutover
+        else None
+    )
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_owner_missing",
         model="gpt-5.1",
@@ -17885,6 +17900,7 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
         previous_response_id="resp_prev_owner",
         preferred_account_id="acc_owner",
         session_id="turn_ws_owner_missing",
+        api_key=api_key,
     )
     counter = _ObservedCounter()
 
@@ -17914,7 +17930,7 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
         routing_strategy="usage_weighted",
         model="gpt-5.1",
         request_state=request_state,
-        api_key=None,
+        api_key=api_key,
         client_send_lock=anyio.Lock(),
         websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
         reallocate_sticky=False,
@@ -17928,11 +17944,28 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
     await_args = websocket_send.await_args
     assert await_args is not None
     sent_payload = json.loads(await_args.args[0])
-    assert sent_payload["status"] == 502
-    assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
-    assert sent_payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    if assignment_cutover:
+        assert sent_payload == {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "message": (
+                    "The previous upstream conversation is no longer available after the account-pool change. "
+                    "Start a new Codex conversation with /new, then retry."
+                ),
+                "type": "invalid_request_error",
+                "code": "continuity_reset_required",
+                "param": "previous_response_id",
+            },
+        }
+        expected_error_code = "continuity_reset_required"
+    else:
+        assert sent_payload["status"] == 502
+        assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
+        assert sent_payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+        expected_error_code = "previous_response_owner_unavailable"
     assert request_logs.calls[0]["account_id"] == "acc_owner"
-    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    assert request_logs.calls[0]["error_code"] == expected_error_code
     assert "continuity_fail_closed surface=websocket_connect reason=owner_account_unavailable" in caplog.text
     assert "resp_prev_owner" not in caplog.text
     assert counter.samples == [
@@ -17941,6 +17974,72 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
             "value": 1.0,
         }
     ]
+
+
+def test_websocket_owner_unavailable_after_assignment_cutover_is_terminal():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_cutover_owner_unavailable",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        api_key=_make_api_key_data(
+            "key-websocket-cutover-event",
+            account_assignment_generation=2,
+            assigned_account_ids=["acc_replacement_owner"],
+        ),
+        previous_response_id="resp_cutover_owner",
+        preferred_account_id="acc_cutover_owner",
+        session_id="turn_ws_cutover_owner",
+    )
+
+    _event, payload, _event_type, _text = proxy_service._rewrite_websocket_previous_response_owner_unavailable_event(
+        request_state=request_state,
+    )
+
+    assert payload is not None
+    response = cast(dict[str, JsonValue], payload["response"])
+    assert response["error"] == {
+        "message": (
+            "The previous upstream conversation is no longer available after the account-pool change. "
+            "Start a new Codex conversation with /new, then retry."
+        ),
+        "type": "invalid_request_error",
+        "code": "continuity_reset_required",
+        "param": "previous_response_id",
+    }
+
+
+def test_websocket_owner_unavailable_after_assignment_change_retaining_owner_stays_retryable():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_retained_owner_unavailable",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        api_key=_make_api_key_data(
+            "key-websocket-retained-owner-event",
+            account_assignment_generation=2,
+            assigned_account_ids=["acc_retained_owner", "acc_additional_owner"],
+        ),
+        previous_response_id="resp_retained_owner",
+        preferred_account_id="acc_retained_owner",
+        session_id="turn_ws_retained_owner",
+    )
+
+    _event, payload, _event_type, _text = proxy_service._rewrite_websocket_previous_response_owner_unavailable_event(
+        request_state=request_state,
+    )
+
+    assert payload is not None
+    response = cast(dict[str, JsonValue], payload["response"])
+    assert response["error"] == {
+        "message": "Previous response owner account is unavailable; retry later.",
+        "type": "server_error",
+        "code": "upstream_unavailable",
+    }
 
 
 @pytest.mark.asyncio
@@ -29576,14 +29675,25 @@ async def test_stream_missing_tool_output_proxy_error_is_masked_to_stream_incomp
     record_success.assert_not_awaited()
 
 
+@pytest.mark.parametrize("assignment_changed", [False, True])
 @pytest.mark.asyncio
-async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypatch):
+async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypatch, assignment_changed):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_owner = _make_account("acc_prev_owner_stream")
     account_other = _make_account("acc_other_stream")
-    request_logs.response_owner_by_id[("resp_prev_anchor", None, "sid-stream")] = account_owner.id
+    api_key = (
+        _make_api_key_data(
+            "key-retained-owner-usage-limit",
+            account_assignment_generation=2,
+            assigned_account_ids=[account_owner.id, account_other.id],
+        )
+        if assignment_changed
+        else None
+    )
+    api_key_id = api_key.id if api_key is not None else None
+    request_logs.response_owner_by_id[("resp_prev_anchor", api_key_id, "sid-stream")] = account_owner.id
     select_account_calls: list[dict[str, object]] = []
     handle_stream_error = AsyncMock(return_value={"failure_class": "rate_limit"})
     record_success = AsyncMock()
@@ -29626,18 +29736,32 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
         }
     )
 
-    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    chunks = [
+        chunk
+        async for chunk in service.stream_responses(
+            payload,
+            {"session_id": "sid-stream"},
+            api_key=api_key,
+        )
+    ]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
-    assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
-    assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
-    assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert event["response"]["error"] == {
+        "message": "Previous response owner account is unavailable; retry later.",
+        "type": "server_error",
+        "code": "previous_response_owner_unavailable",
+    }
+    expected_error_code = "previous_response_owner_unavailable"
+    assert request_logs.lookup_calls == [("resp_prev_anchor", api_key_id, "sid-stream")]
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    assert request_logs.calls[0]["error_code"] == expected_error_code
     assert request_logs.calls[0]["account_id"] == account_owner.id
     assert len(select_account_calls) == 1
-    assert select_account_calls[0]["account_ids"] is None
+    if assignment_changed:
+        assert select_account_calls[0]["account_ids"] == {account_owner.id, account_other.id}
+    else:
+        assert select_account_calls[0]["account_ids"] is None
     assert select_account_calls[0]["required_account_id"] == account_owner.id
     handle_stream_error.assert_awaited_once()
     handle_await_args = handle_stream_error.await_args
@@ -30008,6 +30132,7 @@ async def test_stream_cutover_owner_unavailable_returns_continuity_reset_require
     api_key = _make_api_key_data(
         "key-cutover-stream",
         account_assignment_generation=2,
+        assigned_account_ids=["acc_replacement_owner"],
     )
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -30040,9 +30165,12 @@ async def test_stream_cutover_owner_unavailable_returns_continuity_reset_require
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "continuity_reset_required"
+    assert event["response"]["error"]["type"] == "invalid_request_error"
+    assert event["response"]["error"]["param"] == "previous_response_id"
     assert (
         event["response"]["error"]["message"]
-        == "The previous upstream conversation is no longer available after the account-pool change."
+        == "The previous upstream conversation is no longer available after the account-pool change. "
+        "Start a new Codex conversation with /new, then retry."
     )
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "continuity_reset_required"
@@ -30109,23 +30237,28 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
 
 
 @pytest.mark.asyncio
-async def test_compact_cutover_missing_owner_returns_continuity_reset_required(monkeypatch):
+async def test_compact_cutover_removed_owner_returns_continuity_reset_required(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     api_key = _make_api_key_data(
         "key-cutover-compact",
         account_assignment_generation=2,
+        assigned_account_ids=["acc_cutover_compact_replacement"],
     )
-    account_a = _make_account("acc_cutover_compact_a")
-    account_b = _make_account("acc_cutover_compact_b")
+    removed_owner = _make_account("acc_cutover_compact_owner")
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(
+        service,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value=removed_owner.id),
+    )
+    monkeypatch.setattr(
         service._load_balancer,
-        "_load_selection_inputs",
-        AsyncMock(return_value=SimpleNamespace(accounts=[account_a, account_b])),
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=None, error_message="No active accounts available")),
     )
 
     payload = ResponsesCompactRequest.model_validate(
@@ -30133,7 +30266,7 @@ async def test_compact_cutover_missing_owner_returns_continuity_reset_required(m
             "model": "gpt-5.1",
             "instructions": "summarize",
             "input": [],
-            "previous_response_id": "resp_cutover_compact_missing",
+            "previous_response_id": "resp_cutover_compact_removed",
         }
     )
 
@@ -30144,11 +30277,14 @@ async def test_compact_cutover_missing_owner_returns_continuity_reset_required(m
             api_key=api_key,
         )
 
-    assert exc_info.value.status_code == 502
+    assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "continuity_reset_required"
+    assert exc_info.value.payload["error"]["type"] == "invalid_request_error"
+    assert exc_info.value.payload["error"]["param"] == "previous_response_id"
     assert (
         exc_info.value.payload["error"]["message"]
-        == "The previous upstream conversation is no longer available after the account-pool change."
+        == "The previous upstream conversation is no longer available after the account-pool change. "
+        "Start a new Codex conversation with /new, then retry."
     )
 
 

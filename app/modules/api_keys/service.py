@@ -5,6 +5,7 @@ import json
 import secrets
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -122,6 +123,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         changed_at: datetime,
         commit: bool = True,
+        acquire_writer_lock: bool = True,
     ) -> bool: ...
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
 
@@ -658,46 +660,51 @@ class ApiKeysService:
             existing_limits = await self._repository.get_limits_by_key(key_id)
             limit_rows = _build_reset_limit_rows(key_id=key_id, now=now, existing_limits=existing_limits)
 
+        writer_section = sqlite_writer_section() if payload.assigned_account_ids_set else nullcontext()
         try:
-            row = await self._repository.update(
-                key_id,
-                name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
-                allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
-                apply_to_codex_model=apply_to_codex_model,
-                enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
-                enforced_reasoning_effort=(
-                    enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
-                ),
-                enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
-                traffic_class=traffic_class_update,
-                transport_policy_override=transport_policy_override_update,
-                usage_sections=usage_sections,
-                account_assignment_scope_enabled=account_assignment_scope_enabled,
-                source_assignment_scope_enabled=source_assignment_scope_enabled,
-                expires_at=expires_at if payload.expires_at_set else _UNSET,
-                is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
-                commit=False,
-            )
-            if row is None:
-                raise ApiKeyNotFoundError(f"API key not found: {key_id}")
-
-            if payload.assigned_source_ids_set:
-                assert assigned_source_ids is not None
-                await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
-
-            if limit_rows is not None:
-                await self._repository.upsert_limits(key_id, limit_rows, commit=False)
-
-            if payload.assigned_account_ids_set:
-                assert assigned_account_ids is not None
-                await self._repository.replace_account_assignments_if_changed(
+            async with writer_section:
+                row = await self._repository.update(
                     key_id,
-                    assigned_account_ids,
-                    changed_at=utcnow(),
-                    commit=True,
+                    name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
+                    allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
+                    apply_to_codex_model=apply_to_codex_model,
+                    enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
+                    enforced_reasoning_effort=(
+                        enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
+                    ),
+                    enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
+                    traffic_class=traffic_class_update,
+                    transport_policy_override=transport_policy_override_update,
+                    usage_sections=usage_sections,
+                    account_assignment_scope_enabled=account_assignment_scope_enabled,
+                    source_assignment_scope_enabled=source_assignment_scope_enabled,
+                    expires_at=expires_at if payload.expires_at_set else _UNSET,
+                    is_active=(
+                        payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET
+                    ),
+                    commit=False,
                 )
-            else:
-                await self._repository.commit()
+                if row is None:
+                    raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+
+                if payload.assigned_source_ids_set:
+                    assert assigned_source_ids is not None
+                    await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
+
+                if limit_rows is not None:
+                    await self._repository.upsert_limits(key_id, limit_rows, commit=False)
+
+                if payload.assigned_account_ids_set:
+                    assert assigned_account_ids is not None
+                    await self._repository.replace_account_assignments_if_changed(
+                        key_id,
+                        assigned_account_ids,
+                        changed_at=utcnow(),
+                        commit=True,
+                        acquire_writer_lock=False,
+                    )
+                else:
+                    await self._repository.commit()
         except Exception:
             await self._repository.rollback()
             raise

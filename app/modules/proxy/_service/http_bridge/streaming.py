@@ -70,7 +70,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
-    _http_bridge_owner_lookup_unavailable_error_envelope,
+    _http_bridge_owner_lookup_unavailable_error,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
     _http_bridge_request_budget_seconds,
@@ -83,7 +83,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
     _http_bridge_turn_state_anchor_for_owner_failure,
-    _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
@@ -198,7 +197,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
-    api_key_assignment_cutover_active,
+    api_key_assignment_excludes_owner,
     continuity_reset_required_error,
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
@@ -223,8 +222,12 @@ def _http_bridge_cutover_owner_error(
     exc: ProxyResponseError,
     *,
     api_key: ApiKeyData | None,
+    owner_account_id: str | None = None,
 ) -> ProxyResponseError:
-    if api_key_assignment_cutover_active(api_key) and _http_bridge_is_previous_response_owner_unavailable(exc):
+    if api_key_assignment_excludes_owner(
+        api_key,
+        owner_account_id=owner_account_id,
+    ) and _http_bridge_is_previous_response_owner_unavailable(exc):
         _record_api_key_assignment_cutover(
             api_key=api_key,
             affinity_source="continuity_owner",
@@ -604,7 +607,8 @@ class _HTTPBridgeStreamingMixin:
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
-        runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        base_settings = _service_get_settings()
+        runtime_config = _http_bridge_runtime_config(dashboard_settings, base_settings)
         request_id = ensure_request_id()
         self._raise_for_unsupported_input_image_references(payload)
         payload_size_estimate_bytes = len(
@@ -622,7 +626,7 @@ class _HTTPBridgeStreamingMixin:
             ("signed forwarding context", forwarded_file_owner_account_id),
             ("local file pin", local_file_owner_account_id),
         )
-        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(base_settings)
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
@@ -633,7 +637,28 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
-        force_upstream_stream_transport = "http" if image_request else None
+        configured_upstream_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
+        if configured_upstream_transport == "default":
+            configured_upstream_transport = getattr(base_settings, "upstream_stream_transport", "auto")
+        http_transport_policy = (
+            getattr(api_key, "transport_policy_override", None)
+            or getattr(dashboard_settings, "http_downstream_transport_policy", None)
+            or getattr(base_settings, "http_downstream_transport_policy", "smart")
+        )
+        force_upstream_http = configured_upstream_transport == "http" or (
+            configured_upstream_transport not in {"http", "websocket"}
+            and http_transport_policy in {"always_http", "pinned"}
+        )
+        force_upstream_stream_transport = "http" if image_request or force_upstream_http else None
+        if runtime_config.enabled and force_upstream_http:
+            logger.info(
+                "stream_responses bypassing http bridge for configured HTTP upstream transport "
+                "configured_transport=%s policy=%s request_id=%s",
+                configured_upstream_transport,
+                http_transport_policy,
+                request_id,
+            )
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if runtime_config.enabled and (image_request or image_generation_request):
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "
@@ -901,7 +926,6 @@ class _HTTPBridgeStreamingMixin:
                 # non-durable first-match fallback.
                 raise
             except Exception as exc:
-                missing_durable_tables = _is_missing_durable_bridge_table_error(exc)
                 hard_continuity_lookup = (
                     bridge_session_key.strength == "hard"
                     or incoming_turn_state_header is not None
@@ -915,22 +939,8 @@ class _HTTPBridgeStreamingMixin:
                         session_id=incoming_turn_state_header or incoming_session_header,
                         upstream_error_code="durable_lookup_failed",
                     )
-                    logger.warning("Durable bridge continuity lookup failed; failing closed", exc_info=True)
-                    raise ProxyResponseError(
-                        502,
-                        _http_bridge_owner_lookup_unavailable_error_envelope(),
-                    ) from exc
-                if missing_durable_tables:
-                    logger.warning(
-                        "Durable bridge tables missing; using ordinary in-memory bridge fallback",
-                        exc_info=True,
-                    )
-                else:
-                    logger.warning(
-                        "Durable bridge lookup failed; falling back to non-durable request handling",
-                        exc_info=True,
-                    )
-                durable_lookup = None
+                logger.warning("Durable bridge continuity lookup failed; failing closed", exc_info=True)
+                raise _http_bridge_owner_lookup_unavailable_error() from exc
         effective_payload = payload
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
@@ -1366,7 +1376,11 @@ class _HTTPBridgeStreamingMixin:
                 session_id=request_state.session_id,
                 upstream_error_code="owner_lookup_miss",
             )
-            raise _http_bridge_cutover_owner_error(owner_unavailable, api_key=api_key)
+            raise _http_bridge_cutover_owner_error(
+                owner_unavailable,
+                api_key=api_key,
+                owner_account_id=request_state.preferred_account_id,
+            )
 
         while True:
             try:
@@ -1430,7 +1444,11 @@ class _HTTPBridgeStreamingMixin:
                         if _service_time().monotonic() >= request_deadline:
                             raise
                         continue
-                    translated = _http_bridge_cutover_owner_error(exc, api_key=api_key)
+                    translated = _http_bridge_cutover_owner_error(
+                        exc,
+                        api_key=api_key,
+                        owner_account_id=request_state.preferred_account_id,
+                    )
                     if translated is exc:
                         raise
                     raise translated from exc
@@ -1534,7 +1552,11 @@ class _HTTPBridgeStreamingMixin:
                     and not should_attempt_bootstrap_rebind
                     and not should_attempt_turn_state_takeover
                 ):
-                    translated = _http_bridge_cutover_owner_error(exc, api_key=api_key)
+                    translated = _http_bridge_cutover_owner_error(
+                        exc,
+                        api_key=api_key,
+                        owner_account_id=request_state.preferred_account_id,
+                    )
                     if translated is exc:
                         raise
                     raise translated from exc
@@ -1621,7 +1643,11 @@ class _HTTPBridgeStreamingMixin:
                             continue
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
                         if wait_plan is None:
-                            translated = _http_bridge_cutover_owner_error(capacity_exc, api_key=api_key)
+                            translated = _http_bridge_cutover_owner_error(
+                                capacity_exc,
+                                api_key=api_key,
+                                owner_account_id=request_state.preferred_account_id,
+                            )
                             if translated is capacity_exc:
                                 raise
                             raise translated from capacity_exc

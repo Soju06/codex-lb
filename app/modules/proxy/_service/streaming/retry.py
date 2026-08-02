@@ -61,7 +61,11 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import continuity_owner_unavailable_fields, resolve_required_account_id
+from app.modules.proxy.continuity import (
+    continuity_error_type_and_param,
+    continuity_owner_unavailable_fields,
+    resolve_required_account_id,
+)
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _is_account_model_unsupported_error,
@@ -81,8 +85,15 @@ _HTTP_DOWNSTREAM_TRANSPORT_POLICIES = frozenset({"smart", "always_http", "always
 logger = logging.getLogger(__name__)
 
 
-def _cutover_owner_unavailable_fields(api_key: ApiKeyData | None) -> tuple[str, str]:
-    error_code, message = continuity_owner_unavailable_fields(api_key)
+def _cutover_owner_unavailable_fields(
+    api_key: ApiKeyData | None,
+    *,
+    owner_account_id: str | None = None,
+) -> tuple[str, str]:
+    error_code, message = continuity_owner_unavailable_fields(
+        api_key,
+        owner_account_id=owner_account_id,
+    )
     if error_code == "continuity_reset_required":
         _record_api_key_assignment_cutover(
             api_key=api_key,
@@ -848,6 +859,7 @@ class _StreamingRetryMixin:
                     )
                     if len(selection_inputs.accounts) != 1:
                         error_code, message = _cutover_owner_unavailable_fields(api_key)
+                        error_type, error_param = continuity_error_type_and_param(error_code)
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -858,7 +870,9 @@ class _StreamingRetryMixin:
                         event = response_failed_event(
                             error_code,
                             message,
+                            error_type=error_type,
                             response_id=request_id,
+                            error_param=error_param,
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
@@ -1214,7 +1228,11 @@ class _StreamingRetryMixin:
                         )
                         return
                     if require_preferred_account and preferred_account_id is not None:
-                        error_code, message = _cutover_owner_unavailable_fields(api_key)
+                        error_code, message = _cutover_owner_unavailable_fields(
+                            api_key,
+                            owner_account_id=preferred_account_id,
+                        )
+                        error_type, error_param = continuity_error_type_and_param(error_code)
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1225,7 +1243,9 @@ class _StreamingRetryMixin:
                         event = response_failed_event(
                             error_code,
                             message,
+                            error_type=error_type,
                             response_id=request_id,
+                            error_param=error_param,
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
@@ -1347,7 +1367,11 @@ class _StreamingRetryMixin:
                             request_id,
                         )
                     else:
-                        error_code, message = _cutover_owner_unavailable_fields(api_key)
+                        error_code, message = _cutover_owner_unavailable_fields(
+                            api_key,
+                            owner_account_id=preferred_account_id,
+                        )
+                        error_type, error_param = continuity_error_type_and_param(error_code)
                         _record_continuity_fail_closed(
                             surface="http_stream",
                             reason="owner_account_unavailable",
@@ -1358,7 +1382,9 @@ class _StreamingRetryMixin:
                         event = response_failed_event(
                             error_code,
                             message,
+                            error_type=error_type,
                             response_id=request_id,
+                            error_param=error_param,
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(

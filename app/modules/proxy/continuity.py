@@ -12,7 +12,8 @@ HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX = "account-neutral-replay:v1:"
 HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS = frozenset({"prompt_cache", "session_header", "turn_state_header"})
 CONTINUITY_RESET_REQUIRED_CODE = "continuity_reset_required"
 CONTINUITY_RESET_REQUIRED_MESSAGE = (
-    "The previous upstream conversation is no longer available after the account-pool change."
+    "The previous upstream conversation is no longer available after the account-pool change. "
+    "Start a new Codex conversation with /new, then retry."
 )
 _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS = frozenset(
     {
@@ -57,23 +58,72 @@ def api_key_assignment_cutover_active(api_key: object | None) -> bool:
     return generation > 1
 
 
-def continuity_owner_unavailable_fields(api_key: object | None) -> tuple[str, str]:
-    if api_key_assignment_cutover_active(api_key):
+def api_key_assignment_excludes_owner(
+    api_key: object | None,
+    *,
+    owner_account_id: str | None,
+) -> bool:
+    """Return whether a changed explicit assignment set proves owner removal."""
+
+    if not owner_account_id or not api_key_assignment_cutover_active(api_key):
+        return False
+    if not bool(getattr(api_key, "account_assignment_scope_enabled", False)):
+        return False
+    assigned_account_ids = getattr(api_key, "assigned_account_ids", None)
+    if not isinstance(assigned_account_ids, (list, tuple, set, frozenset)):
+        return False
+    return owner_account_id not in assigned_account_ids
+
+
+def continuity_owner_unavailable_fields(
+    api_key: object | None,
+    *,
+    owner_account_id: str | None = None,
+    fallback_code: str = "previous_response_owner_unavailable",
+    fallback_message: str = "Previous response owner account is unavailable; retry later.",
+) -> tuple[str, str]:
+    if api_key_assignment_excludes_owner(api_key, owner_account_id=owner_account_id):
         return CONTINUITY_RESET_REQUIRED_CODE, CONTINUITY_RESET_REQUIRED_MESSAGE
-    return (
-        "previous_response_owner_unavailable",
-        "Previous response owner account is unavailable; retry later.",
+    return fallback_code, fallback_message
+
+
+def continuity_error_type_and_param(error_code: str) -> tuple[str, str | None]:
+    if error_code == CONTINUITY_RESET_REQUIRED_CODE:
+        return "invalid_request_error", "previous_response_id"
+    return "server_error", None
+
+
+def _continuity_proxy_error(error_code: str, message: str) -> ProxyResponseError:
+    error_type, error_param = continuity_error_type_and_param(error_code)
+    payload = openai_error(
+        error_code,
+        message,
+        error_type=error_type,
+    )
+    if error_param is not None:
+        payload["error"]["param"] = error_param
+    return ProxyResponseError(
+        400 if error_code == CONTINUITY_RESET_REQUIRED_CODE else 502,
+        payload,
     )
 
 
+def continuity_owner_unavailable_error(
+    api_key: object | None,
+    *,
+    owner_account_id: str | None = None,
+) -> ProxyResponseError:
+    error_code, message = continuity_owner_unavailable_fields(
+        api_key,
+        owner_account_id=owner_account_id,
+    )
+    return _continuity_proxy_error(error_code, message)
+
+
 def continuity_reset_required_error() -> ProxyResponseError:
-    return ProxyResponseError(
-        502,
-        openai_error(
-            CONTINUITY_RESET_REQUIRED_CODE,
-            CONTINUITY_RESET_REQUIRED_MESSAGE,
-            error_type="server_error",
-        ),
+    return _continuity_proxy_error(
+        CONTINUITY_RESET_REQUIRED_CODE,
+        CONTINUITY_RESET_REQUIRED_MESSAGE,
     )
 
 

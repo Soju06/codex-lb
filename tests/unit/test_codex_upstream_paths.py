@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import socket
 from typing import Any, cast
@@ -94,6 +95,36 @@ class _StreamResponse:
     status_code = 200
     headers = {"content-type": "text/event-stream"}
     content = _FakeStreamContent()
+
+
+class _ClosableStreamResponse(_StreamResponse):
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _CancelableStreamContent:
+    def __init__(self) -> None:
+        self.blocked = asyncio.Event()
+
+    async def iter_chunked(self, _size: int):
+        yield b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+        self.blocked.set()
+        await asyncio.Event().wait()
+
+
+class _CancelableStreamResponse:
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.content = _CancelableStreamContent()
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class _FakeStreamErrorContent:
@@ -478,6 +509,114 @@ async def test_stream_responses_uses_codex_client_when_route_is_resolved(route: 
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_closes_routed_http_response_after_terminal_event(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    response = _ClosableStreamResponse()
+    client = _CodexClient(response)
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, client),
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    assert response.closed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_client_cancellation_closes_routed_http_response(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    response = _CancelableStreamResponse()
+    client = _CodexClient(response)
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+    stream = stream_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        upstream_stream_transport_override="http",
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert await anext(stream) == 'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+
+    async def _next_event() -> str:
+        return await anext(stream)
+
+    pending = asyncio.create_task(_next_event())
+    await asyncio.wait_for(response.content.blocked.wait(), timeout=1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert response.closed is True
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_fails_over_after_pre_dispatch_post_connector_failure(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    class _ConnectorFailFirstSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> object:
+            self.calls.append({"method": method, "url": url, **kwargs})
+            if len(self.calls) == 1:
+                connection_key = ConnectionKey("chatgpt.test", 443, True, True, None, None, None)
+                raise aiohttp.ClientConnectorError(connection_key, ConnectionResetError())
+            return _StreamResponse()
+
+    route_with_fallback = ResolvedUpstreamRoute(
+        route.mode,
+        route.pool_id,
+        route.endpoint,
+        (ResolvedProxyEndpoint("ep_2", "http", "proxy-two.test", 8081),),
+    )
+    session = _ConnectorFailFirstSession()
+    client = CodexClient(session)
+    trace = UpstreamProxyRouteTrace()
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route_with_fallback,
+            codex_client=client,
+            route_trace=trace,
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    assert trace.endpoint_id == "ep_2"
+    assert trace.fallback_used is True
+    assert [call["proxy"] for call in session.calls] == [
+        "http://proxy.test:8080",
+        "http://proxy-two.test:8081",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_websocket_transport_uses_codex_client_when_route_is_resolved(
     route: ResolvedUpstreamRoute,
 ) -> None:
@@ -599,6 +738,52 @@ async def test_stream_responses_route_errors_do_not_expose_proxy_credentials(rou
     assert "OSError" in combined
     assert "user:pass" not in combined
     assert "proxy.test:8080" not in combined
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_does_not_fallback_after_stream_read_starts(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    class _HeadersThenStreamFailureSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> object:
+            self.calls.append({"method": method, "url": url, **kwargs})
+            if len(self.calls) == 1:
+                return _StreamErrorResponse()
+            return _StreamResponse()
+
+    route_with_fallback = ResolvedUpstreamRoute(
+        route.mode,
+        route.pool_id,
+        route.endpoint,
+        (ResolvedProxyEndpoint("ep_2", "http", "proxy-two.test", 8081),),
+    )
+    session = _HeadersThenStreamFailureSession()
+    trace = UpstreamProxyRouteTrace()
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route_with_fallback,
+            codex_client=CodexClient(session),
+            route_trace=trace,
+        )
+    ]
+
+    assert len(session.calls) == 1
+    assert session.calls[0]["proxy"] == "http://proxy.test:8080"
+    assert trace.endpoint_id == "ep_1"
+    assert trace.fallback_used is False
+    assert "response.failed" in "".join(events)
 
 
 @pytest.mark.asyncio

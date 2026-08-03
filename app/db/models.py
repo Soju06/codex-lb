@@ -1105,6 +1105,61 @@ class ApiKey(Base):
     )
 
 
+class OAuthLivePolicy(Base):
+    __tablename__ = "oauth_live_policies"
+
+    caller_account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    allowed_accounts: Mapped[list["OAuthLivePolicyAccount"]] = relationship(
+        "OAuthLivePolicyAccount",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class OAuthLivePolicyAccount(Base):
+    __tablename__ = "oauth_live_policy_accounts"
+    __table_args__ = (
+        Index(
+            "ix_oauth_live_policy_accounts_allowed_account_id",
+            "allowed_account_id",
+        ),
+    )
+
+    caller_account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("oauth_live_policies.caller_account_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    allowed_account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ApiKeyAccountAssignment(Base):
     __tablename__ = "api_key_accounts"
 

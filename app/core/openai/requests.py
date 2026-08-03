@@ -804,6 +804,7 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _strip_subscription_prompt_cache_controls(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
+    _strip_replayed_function_call_namespaces(payload)
     # ``tools`` is deliberately NOT canonicalized here: the wire payload must
     # forward client tool entries byte-preserved (array order, key order, and
     # unknown keys untouched) so reserved model tools survive upstream
@@ -861,6 +862,26 @@ def _strip_subscription_prompt_cache_breakpoints(value: JsonValue | None) -> Non
         value.pop("prompt_cache_breakpoint", None)
     for child in value.values():
         _strip_subscription_prompt_cache_breakpoints(child)
+
+
+def _strip_replayed_function_call_namespaces(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+
+    normalized_items: list[JsonValue] = []
+    changed = False
+    for item in input_value:
+        if is_json_mapping(item) and item.get("type") == "function_call" and "namespace" in item:
+            normalized_item = dict(item)
+            normalized_item.pop("namespace")
+            normalized_items.append(normalized_item)
+            changed = True
+            continue
+        normalized_items.append(item)
+
+    if changed:
+        payload["input"] = normalized_items
 
 
 def _strip_poisoned_local_compact_fallback_items(payload: MutableJsonObject) -> None:

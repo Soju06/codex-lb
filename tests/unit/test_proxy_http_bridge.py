@@ -258,13 +258,10 @@ def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_wi
     )
     client_safe_cap_seconds = http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
 
-    assert (
-        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
-            request_state,
-            stuck_gate_retire_after_seconds=300.0,
-        )
-        == 100.0 + min(300.0, client_safe_cap_seconds)
-    )
+    assert http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+        request_state,
+        stuck_gate_retire_after_seconds=300.0,
+    ) == 100.0 + min(300.0, client_safe_cap_seconds)
 
 
 @pytest.mark.asyncio

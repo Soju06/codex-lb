@@ -1400,46 +1400,47 @@ def test_full_resend_retained_output_rejects_unproven_fresh_developer_followup(
 
 
 def test_full_resend_retained_output_rejects_complete_tool_pair_between_output_and_user() -> None:
-    stored_prefix = [
+    stored_prefix: list[JsonValue] = [
         {
             "type": "message",
             "role": "user",
             "content": [{"type": "input_text", "text": "old"}],
         }
     ]
+    full_input: list[JsonValue] = [
+        *stored_prefix,
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "done"}],
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_extra",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_extra",
+            "output": "ok",
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "new"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_new"},
+            "content": [{"type": "input_text", "text": "control"}],
+        },
+    ]
     projected_full_input = project_responses_input_for_account_neutral_fresh_replay(
-        [
-            *stored_prefix,
-            {
-                "type": "message",
-                "role": "assistant",
-                "phase": "final_answer",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": "done"}],
-            },
-            {
-                "type": "custom_tool_call",
-                "call_id": "call_extra",
-                "name": "shell",
-                "input": "pwd",
-            },
-            {
-                "type": "custom_tool_call_output",
-                "call_id": "call_extra",
-                "output": "ok",
-            },
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "new"}],
-            },
-            {
-                "type": "message",
-                "role": "developer",
-                "internal_chat_message_metadata_passthrough": {"turn_id": "turn_new"},
-                "content": [{"type": "input_text", "text": "control"}],
-            },
-        ],
+        full_input,
         stored_count=len(stored_prefix),
     )
 

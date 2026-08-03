@@ -19,7 +19,7 @@ Live Voice has two authenticated legs: HTTP call creation and a control sideband
 
 ### Separate caller identity from serving accounts
 
-The OAuth resolver validates the supplied credential pair against the upstream usage endpoint. A matching imported seat retains its internal Account id as affinity material. An external caller receives `principal:{stable_seat_claim}` from verified `chatgpt_user_id` or `sub`. Its usage check follows the configured default upstream proxy route when routing is enabled.
+The OAuth resolver validates the supplied credential pair against the upstream usage endpoint. Every caller with a stable verified `chatgpt_user_id` or `sub` receives `principal:{stable_seat_claim}` whether or not an imported Account matches. A matching imported Account remains optional `caller_account_id` metadata for usage and route integration. Credentials without a stable claim fall back to one unambiguous imported Account id. External callers follow the configured default upstream proxy route when routing is enabled.
 
 The typed result contains `principal_id`, optional `caller_account_id` for usage integration, normalized ChatGPT account id, verified usage payload, and route. Raw credentials remain absent from logs and persistence.
 

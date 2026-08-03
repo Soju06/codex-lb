@@ -130,7 +130,9 @@ async def test_verified_oauth_principal_does_not_require_an_imported_account(
 
 
 @pytest.mark.asyncio
-async def test_shared_workspace_resolves_the_matching_seat_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_imported_seat_lifecycle_preserves_stable_principal_and_updates_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     account_a = _account("acc_a", chatgpt_user_id="user_a", id_token=b"id_a")
     account_b = _account("acc_b", chatgpt_user_id="user_b", id_token=b"id_b")
     access_token = _jwt({"sub": "auth0|seat_b"})
@@ -143,7 +145,13 @@ async def test_shared_workspace_resolves_the_matching_seat_alias(monkeypatch: py
         pool_id="caller_pool",
         endpoint=ResolvedProxyEndpoint("caller_ep", "http", "caller.test", 8080),
     )
-    route_account_ids: list[str] = []
+    default_route = ResolvedUpstreamRoute(
+        mode="default",
+        pool_id="default_pool",
+        endpoint=ResolvedProxyEndpoint("default_ep", "http", "default.test", 8080),
+    )
+    eligible_accounts = [account_a, account_b]
+    route_account_ids: list[str | None] = []
 
     class Repo:
         def __init__(self, session: object) -> None:
@@ -151,7 +159,7 @@ async def test_shared_workspace_resolves_the_matching_seat_alias(monkeypatch: py
 
         async def list_eligible_by_chatgpt_account_id(self, chatgpt_account_id: str) -> list[Account]:
             assert chatgpt_account_id == "workspace_account"
-            return [account_a, account_b]
+            return list(eligible_accounts)
 
     class Encryptor:
         def decrypt(self, ciphertext: bytes) -> str:
@@ -162,14 +170,15 @@ async def test_shared_workspace_resolves_the_matching_seat_alias(monkeypatch: py
         yield object()
 
     async def resolve_route(*args: object, **kwargs: object) -> ResolvedUpstreamRoute:
-        account_id = str(kwargs["account_id"])
+        account_id = kwargs["account_id"]
+        assert account_id is None or isinstance(account_id, str)
         route_account_ids.append(account_id)
-        return caller_route
+        return default_route if account_id is None else caller_route
 
     async def fetch_usage(*args: object, **kwargs: object) -> UsagePayload:
         assert kwargs["access_token"] == access_token
         assert kwargs["account_id"] == "workspace_account"
-        assert kwargs["route"] is caller_route
+        assert kwargs["route"] in (caller_route, default_route)
         return UsagePayload(workspace_id="workspace_1", workspace_label="Team")
 
     monkeypatch.setattr(codex_oauth_identity, "AccountsRepository", Repo)
@@ -178,17 +187,49 @@ async def test_shared_workspace_resolves_the_matching_seat_alias(monkeypatch: py
     monkeypatch.setattr(codex_oauth_identity, "resolve_upstream_route", resolve_route)
     monkeypatch.setattr(codex_oauth_identity, "fetch_usage", fetch_usage)
 
-    identity = await codex_oauth_identity.resolve_verified_codex_oauth_identity(
+    imported_identity = await codex_oauth_identity.resolve_verified_codex_oauth_identity(
         f"Bearer {access_token}",
         " workspace_account ",
     )
 
-    assert identity.caller_account_id == "acc_b"
-    assert identity.principal_id == "acc_b"
-    assert identity.chatgpt_account_id == "workspace_account"
-    assert identity.usage_payload.workspace_id == "workspace_1"
-    assert identity.route is caller_route
-    assert route_account_ids == ["acc_b"]
+    assert imported_identity.caller_account_id == "acc_b"
+    assert imported_identity.principal_id == "principal:auth0|seat_b"
+    assert imported_identity.chatgpt_account_id == "workspace_account"
+    assert imported_identity.usage_payload.workspace_id == "workspace_1"
+    assert imported_identity.route is caller_route
+
+    codex_oauth_identity.clear_codex_oauth_identity_cache()
+    eligible_accounts.clear()
+    external_identity = await codex_oauth_identity.resolve_verified_codex_oauth_identity(
+        f"Bearer {access_token}",
+        "workspace_account",
+    )
+
+    assert external_identity.caller_account_id is None
+    assert external_identity.principal_id == imported_identity.principal_id
+    assert external_identity.route is default_route
+    assert route_account_ids == ["acc_b", None]
+
+
+@pytest.mark.asyncio
+async def test_identity_without_stable_claim_uses_unique_imported_account_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    access_token = _jwt({})
+
+    async def fetch_usage(*args: object, **kwargs: object) -> UsagePayload:
+        return UsagePayload(workspace_id="workspace_1", workspace_label="Team")
+
+    account, route = _install_single_account_fakes(monkeypatch, fetch_usage)
+
+    identity = await codex_oauth_identity.resolve_verified_codex_oauth_identity(
+        f"Bearer {access_token}",
+        "workspace_account",
+    )
+
+    assert identity.principal_id == account.id
+    assert identity.caller_account_id == account.id
+    assert identity.route is route
 
 
 @pytest.mark.asyncio

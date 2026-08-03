@@ -2,7 +2,7 @@
 
 ### Requirement: Verified OAuth Live callers resolve to a stable principal
 
-The system SHALL validate a supplied ChatGPT bearer and `chatgpt-account-id` against the upstream usage endpoint before trusting identity claims. It SHALL derive a stable principal from verified per-seat claims. A matching imported seat MAY retain its internal Account id for affinity compatibility; a verified caller without an imported Account SHALL remain authorized through its independent principal. A credential without a stable claim SHALL require one unambiguous imported seat.
+The system SHALL validate a supplied ChatGPT bearer and `chatgpt-account-id` against the upstream usage endpoint before trusting identity claims. It SHALL derive a stable principal from verified per-seat claims. That principal SHALL remain unchanged when a matching imported Account is added, removed, paused, or otherwise becomes ineligible. A matching imported Account MAY remain attached separately as caller integration metadata for usage and route selection. A credential without a stable claim SHALL require one unambiguous imported Account and MAY use that Account id as its fallback principal.
 
 #### Scenario: External OAuth caller is accepted
 
@@ -11,12 +11,12 @@ The system SHALL validate a supplied ChatGPT bearer and `chatgpt-account-id` aga
 - **THEN** upstream credential validation succeeds through the configured default route
 - **AND** the caller receives an independent stable principal
 
-#### Scenario: Imported caller uses its Account affinity
+#### Scenario: Imported Account lifecycle preserves caller affinity
 
-- **GIVEN** a verified caller matches one imported seat
-- **WHEN** the resolver derives its principal
-- **THEN** the existing internal Account id remains the affinity material
-- **AND** repeated Live requests retain a stable caller scope
+- **GIVEN** verified OAuth credentials carry a stable seat claim
+- **WHEN** a matching imported Account is added, removed, paused, or otherwise becomes ineligible
+- **THEN** the principal remains derived from the same stable seat claim
+- **AND** caller Account metadata may change independently without changing the Live ownership scope
 
 #### Scenario: Identity remains ambiguous
 

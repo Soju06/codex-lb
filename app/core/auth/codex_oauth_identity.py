@@ -167,12 +167,16 @@ async def _validate_identity_uncached(
         if caller is None and stable_principal is None:
             raise ProxyAuthError("Unknown or ambiguous ChatGPT identity")
         caller_account_id = caller.id if caller is not None else None
-        if caller_account_id is None:
+        if stable_principal is not None:
             principal_id = f"principal:{stable_principal}"
+        elif caller_account_id is not None:
+            principal_id = caller_account_id
+        else:
+            raise ProxyAuthError("Unknown or ambiguous ChatGPT identity")
+
+        if caller_account_id is None:
             route = validation_route
         else:
-            # Imported callers use their Account id as stable affinity material.
-            principal_id = caller_account_id
             route = (
                 validation_route
                 if caller_account_id == validation_account_id

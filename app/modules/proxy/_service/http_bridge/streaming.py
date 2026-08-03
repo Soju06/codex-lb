@@ -933,6 +933,11 @@ class _HTTPBridgeStreamingMixin:
             replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                 cast(list[JsonValue], payload.input),
                 stored_count=stored_count,
+                # Classification only: inline Responses-Lite developer IDs
+                # must remain visible until the exact-manifest check rejects
+                # response-owned messages. Cross-account replay uses the
+                # default ID-stripping projection below.
+                preserve_developer_message_ids=True,
             )
             safe_fresh_context = False
             if replay_projection is not None:

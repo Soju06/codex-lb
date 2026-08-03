@@ -7116,8 +7116,32 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
     assert connect_count == 2
 
 
+@pytest.mark.parametrize(
+    ("developer_message_extra", "fresh_developer_message", "preserves_full_resend"),
+    [
+        pytest.param({}, None, True, id="unowned-developer-message"),
+        pytest.param({"id": "msg_response_owned"}, None, False, id="response-owned-developer-message"),
+        pytest.param(
+            {},
+            {
+                "type": "message",
+                "role": "developer",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn_fresh"},
+                "content": [{"type": "input_text", "text": "fresh control"}],
+            },
+            True,
+            id="fresh-developer-interleave",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridge_send(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_classifies_responses_lite_developer_interleaved_full_resend(
+    async_client,
+    monkeypatch,
+    developer_message_extra,
+    fresh_developer_message,
+    preserves_full_resend,
+):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -7157,9 +7181,30 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
     session_headers = {"x-codex-session-id": "fresh-reattach-full-resend"}
     historical_input = [
         {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {
             "role": "user",
             "content": [{"type": "input_text", "text": "first question"}],
-        }
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_historical_shell",
+            "name": "shell",
+            "input": "printf historical",
+        },
+        {
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "historical control"}],
+            **developer_message_extra,
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_historical_shell",
+            "output": "historical",
+        },
     ]
     first = await asyncio.wait_for(
         async_client.post(
@@ -7183,6 +7228,7 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
             "name": "shell",
             "input": "pwd",
         },
+        *([fresh_developer_message] if fresh_developer_message is not None else []),
         {
             "type": "custom_tool_call_output",
             "call_id": "call_custom_shell",
@@ -7210,8 +7256,11 @@ async def test_v1_responses_http_bridge_preserves_full_resend_before_fresh_bridg
     assert len(first_upstream.sent_text) == 1
     assert len(replay_upstream.sent_text) == 1
     replay_payload = json.loads(replay_upstream.sent_text[0])
-    assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == full_resend
+    if preserves_full_resend:
+        assert "previous_response_id" not in replay_payload
+        assert replay_payload["input"] == full_resend
+    else:
+        assert replay_payload["previous_response_id"] == "resp_bridge_custom_1"
 
 
 @pytest.mark.asyncio
@@ -7407,9 +7456,16 @@ async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_
     assert stale_session.closed is True
 
 
+@pytest.mark.parametrize(
+    "fresh_developer_followup",
+    [
+        pytest.param(False, id="ordinary-user-followup"),
+        pytest.param(True, id="fresh-developer-followup"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_replays_full_resend_once_then_stays_on_new_owner(
-    async_client, app_instance, monkeypatch
+    async_client, app_instance, monkeypatch, fresh_developer_followup
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     owner_account_id = await _import_account(
@@ -7474,10 +7530,21 @@ async def test_v1_responses_http_bridge_replays_full_resend_once_then_stays_on_n
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     historical_input = [
+        *(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                }
+            ]
+            if fresh_developer_followup
+            else []
+        ),
         {
             "role": "user",
             "content": [{"type": "input_text", "text": "first question"}],
-        }
+        },
     ]
     first = await asyncio.wait_for(
         async_client.post(
@@ -7505,19 +7572,46 @@ async def test_v1_responses_http_bridge_replays_full_resend_once_then_stays_on_n
     assert durable_lookup.latest_input_item_count == len(historical_input)
     assert durable_lookup.latest_input_full_fingerprint is not None
 
-    retained_prior_output = {
-        "type": "message",
-        "role": "assistant",
-        "status": "completed",
-        "content": [{"type": "output_text", "text": "first answer"}],
-    }
+    if fresh_developer_followup:
+        retained_prior_output = {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_previous"},
+            "content": [{"type": "output_text", "text": "first answer"}],
+        }
+        fresh_followup_items = [
+            {
+                "type": "message",
+                "role": "user",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+                "content": [{"type": "input_text", "text": "second question"}],
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+                "content": [{"type": "input_text", "text": "fresh control"}],
+            },
+        ]
+    else:
+        retained_prior_output = {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "first answer"}],
+        }
+        fresh_followup_items = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "second question"}],
+            }
+        ]
     full_resend = [
         *historical_input,
         retained_prior_output,
-        {
-            "role": "user",
-            "content": [{"type": "input_text", "text": "second question"}],
-        },
+        *fresh_followup_items,
     ]
     second = await asyncio.wait_for(
         async_client.post(

@@ -7490,6 +7490,33 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
         pytest.param(
             [
                 {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-previous"},
+                    "content": [{"type": "output_text", "text": "hello back"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "follow up"}],
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "new control message"}],
+                },
+            ],
+            None,
+            True,
+            False,
+            id="retained-assistant-output-with-fresh-developer-followup",
+        ),
+        pytest.param(
+            [
+                {
                     "type": "function_call",
                     "call_id": "call-1",
                     "name": "lookup",
@@ -7505,6 +7532,33 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
             True,
             False,
             id="self-contained-tool-loop",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "input": "pwd",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "new control message"}],
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": "/workspace",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                },
+            ],
+            {"call-1": "custom_tool_call"},
+            True,
+            False,
+            id="self-contained-tool-loop-with-fresh-developer-interleave",
         ),
         pytest.param(
             [

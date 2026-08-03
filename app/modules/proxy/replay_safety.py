@@ -156,8 +156,14 @@ def project_responses_input_for_account_neutral_fresh_replay(
     input_items: list[JsonValue],
     *,
     stored_count: int,
+    preserve_developer_message_ids: bool = False,
 ) -> AccountNeutralReplayProjection | None:
-    """Remove known response-owned bookkeeping after durable prefix proof."""
+    """Remove known response-owned bookkeeping after durable prefix proof.
+
+    ``preserve_developer_message_ids`` is classification-only evidence for
+    inline Responses-Lite messages. A projection created with that option must
+    not be serialized as an account-neutral replay payload.
+    """
 
     if stored_count <= 0 or stored_count > len(input_items):
         return None
@@ -165,7 +171,10 @@ def project_responses_input_for_account_neutral_fresh_replay(
     projected_items: list[JsonValue] = []
     projected_stored_count = 0
     for index, item in enumerate(input_items):
-        projected_item = _project_account_neutral_replay_item(item)
+        projected_item = _project_account_neutral_replay_item(
+            item,
+            preserve_developer_message_ids=preserve_developer_message_ids,
+        )
         if projected_item is not None:
             projected_items.append(projected_item)
         if index + 1 == stored_count:
@@ -177,7 +186,11 @@ def project_responses_input_for_account_neutral_fresh_replay(
     )
 
 
-def _project_account_neutral_replay_item(item: JsonValue) -> JsonValue | None:
+def _project_account_neutral_replay_item(
+    item: JsonValue,
+    *,
+    preserve_developer_message_ids: bool,
+) -> JsonValue | None:
     if not isinstance(item, dict):
         return item
 
@@ -190,6 +203,8 @@ def _project_account_neutral_replay_item(item: JsonValue) -> JsonValue | None:
         return None
 
     if "id" not in item:
+        return item
+    if preserve_developer_message_ids and item_type in (None, "message") and item.get("role") == "developer":
         return item
     projected_item = dict(item)
     projected_item.pop("id")
@@ -265,11 +280,17 @@ def responses_input_suffix_retains_prior_output(
         return False
     pending_suffix_calls, seen_suffix_call_ids = prefix_state
     retained_output_seen = False
+    retained_output_is_final_answer = False
     fresh_followup_seen = False
+    fresh_followup_count = 0
+    fresh_followup_is_user_message = False
+    fresh_developer_followup_seen = False
     for item in input_items[stored_count:]:
-        if not isinstance(item, dict):
+        if fresh_developer_followup_seen or not isinstance(item, dict):
             return False
         item_type_value = item.get("type")
+        if "type" in item and not _is_nonblank_string(item_type_value):
+            return False
         item_type = item_type_value if isinstance(item_type_value, str) else None
         if item_type in _TOOL_CALL_TYPES:
             if item.get("status") not in (None, "completed"):
@@ -283,7 +304,10 @@ def responses_input_suffix_retains_prior_output(
             # prove that an omitted parallel call was not part of the response.
             # Require a later completed assistant message as the turn boundary.
             retained_output_seen = False
+            retained_output_is_final_answer = False
             fresh_followup_seen = False
+            fresh_followup_count = 0
+            fresh_followup_is_user_message = False
             continue
         call_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type or "")
         if call_type is not None:
@@ -300,12 +324,28 @@ def responses_input_suffix_retains_prior_output(
             if pending_suffix_calls or not _is_retained_response_message(item):
                 return False
             retained_output_seen = True
+            retained_output_is_final_answer = item.get("phase") == "final_answer"
             fresh_followup_seen = False
+            fresh_followup_count = 0
+            fresh_followup_is_user_message = False
             continue
         if _is_fresh_followup_input(item):
             if not retained_output_seen or pending_suffix_calls:
                 return False
             fresh_followup_seen = True
+            fresh_followup_count += 1
+            fresh_followup_is_user_message = item_type in (None, "message") and item.get("role") == "user"
+            continue
+        if _fresh_developer_message_is_transparent(item):
+            if (
+                not fresh_followup_seen
+                or fresh_followup_count != 1
+                or not fresh_followup_is_user_message
+                or not retained_output_is_final_answer
+                or pending_suffix_calls
+            ):
+                return False
+            fresh_developer_followup_seen = True
             continue
         return False
     return retained_output_seen and fresh_followup_seen and not pending_suffix_calls
@@ -321,10 +361,20 @@ def responses_input_suffix_matches_pending_tool_calls(
 
     if stored_count <= 0 or len(input_items) <= stored_count or not pending_tool_calls:
         return False
-    prefix_state = _direct_tool_call_prefix_state(input_items[:stored_count])
-    if prefix_state is None or prefix_state[1] & pending_tool_calls.keys():
+    prefix_state = _direct_tool_call_prefix_state(
+        input_items[:stored_count],
+        allow_historical_developer_interleave=True,
+    )
+    if prefix_state is None or prefix_state[0] or prefix_state[1] & pending_tool_calls.keys():
         return False
     suffix = input_items[stored_count:]
+    if (
+        len(suffix) == 3
+        and isinstance(suffix[1], dict)
+        and _fresh_developer_message_is_transparent(suffix[1])
+        and _fresh_developer_interleave_is_bounded(suffix, index=1)
+    ):
+        suffix = [suffix[0], suffix[2]]
     if not all(
         isinstance(item, dict)
         and isinstance(item.get("type"), str)
@@ -349,6 +399,8 @@ def responses_input_suffix_matches_pending_tool_calls(
 
 def _direct_tool_call_prefix_state(
     input_items: list[JsonValue],
+    *,
+    allow_historical_developer_interleave: bool = False,
 ) -> tuple[deque[tuple[str, str]], set[str]] | None:
     pending_calls: deque[tuple[str, str]] = deque()
     seen_call_ids: set[str] = set()
@@ -379,6 +431,12 @@ def _direct_tool_call_prefix_state(
                 return None
             pending_calls.popleft()
             continue
+        if (
+            pending_calls
+            and allow_historical_developer_interleave
+            and _historical_pending_developer_message_is_transparent(item, item_type=item_type)
+        ):
+            continue
         if pending_calls and (
             (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
             or item_type in {"input_file", "input_image", "input_text"}
@@ -392,6 +450,73 @@ def _direct_tool_call_prefix_state(
         if isinstance(fallthrough_call_id, str) and fallthrough_call_id:
             seen_call_ids.add(fallthrough_call_id)
     return pending_calls, seen_call_ids
+
+
+def _historical_pending_developer_message_is_transparent(
+    item: Mapping[str, JsonValue],
+    *,
+    item_type: str | None,
+) -> bool:
+    return (
+        item_type in (None, "message")
+        and item.get("role") == "developer"
+        and item.get("id") is None
+        and item.get("phase") is None
+        and item.get("status") in (None, "completed")
+        and _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+        and _input_item_has_only_known_fields(item, item_type)
+        and _message_has_valid_account_neutral_content(item)
+    )
+
+
+def _fresh_developer_interleave_is_bounded(
+    input_items: list[JsonValue],
+    *,
+    index: int,
+) -> bool:
+    if len(input_items) != 3 or index != 1:
+        return False
+    preceding_item = input_items[0]
+    following_item = input_items[2]
+    if not isinstance(preceding_item, dict) or not isinstance(following_item, dict):
+        return False
+    call_type = preceding_item.get("type")
+    output_type = following_item.get("type")
+    call_id = preceding_item.get("call_id")
+    return (
+        call_type == "custom_tool_call"
+        and output_type == "custom_tool_call_output"
+        and _is_nonblank_string(call_id)
+        and following_item.get("call_id") == call_id
+    )
+
+
+def _fresh_developer_message_is_transparent(
+    item: Mapping[str, JsonValue],
+) -> bool:
+    item_type_value = item.get("type")
+    item_type = item_type_value if isinstance(item_type_value, str) else None
+    metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+    content = item.get("content")
+    return (
+        ("type" not in item or _is_nonblank_string(item.get("type")))
+        and item_type in (None, "message")
+        and item.get("role") == "developer"
+        and item.get("id") in (None, "")
+        and item.get("phase") is None
+        and item.get("status") in (None, "completed")
+        and isinstance(metadata, dict)
+        and _internal_chat_message_metadata_is_account_neutral(metadata)
+        and _input_item_has_only_known_fields(item, item_type)
+        and isinstance(content, list)
+        and len(content) == 1
+        and isinstance(content[0], dict)
+        and content[0].get("type") == "input_text"
+        and _input_content_part_is_self_contained(
+            cast(dict[str, JsonValue], content[0]),
+            allow_output=False,
+        )
+    )
 
 
 def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:

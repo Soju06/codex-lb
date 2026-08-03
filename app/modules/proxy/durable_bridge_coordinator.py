@@ -268,6 +268,7 @@ class DurableBridgeSessionCoordinator:
         instance_id: str,
         owner_epoch: int,
         draining: bool,
+        clear_continuity: bool = False,
     ) -> DurableBridgeLookup | None:
         async with self._session() as session:
             snapshot = await DurableBridgeRepository(session).release_session(
@@ -275,6 +276,7 @@ class DurableBridgeSessionCoordinator:
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 draining=draining,
+                clear_continuity=clear_continuity,
             )
         if snapshot is None:
             return None

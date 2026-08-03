@@ -6,7 +6,7 @@ The proxy MUST retain the existing waiter-triggered retirement behavior for stal
 
 The owner-side watchdog MUST apply only while the request owns the response-create gate, awaits `response.created`, has neither a response id nor recorded `response.created` latency, has received no matched `response.*` lifecycle event, and has produced no downstream-visible output or sequence evidence. Non-response telemetry such as `codex.rate_limits` MUST NOT suppress this watchdog. Any matched `response.*` lifecycle event, response-created milestone, or downstream-visible evidence MUST suppress the owner-side watchdog and leave existing timeout behavior unchanged.
 
-When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a structured low-cardinality log and the existing stuck-retirement Prometheus counter, terminally fail and settle every pending request exactly once, and retire the whole bridge session. It MUST NOT transparently replay the timed-out request, move it to another account, or write an account-health failure for the missing-created timeout.
+When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a structured low-cardinality log and the existing stuck-retirement Prometheus counter, terminally fail and settle every pending request exactly once, write the selected account's transient health failure, and retire the whole bridge session. It MUST NOT transparently replay the timed-out request or move that timed-out request to another account.
 
 #### Scenario: Lone eventless gate owner is retired before the client timeout
 
@@ -38,10 +38,10 @@ When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a
 - **THEN** this watchdog does not retire the session
 - **AND** existing stream, request-budget, and waiter-triggered timeout behavior remains authoritative
 
-#### Scenario: Timeout is fail-closed and account-neutral
+#### Scenario: Timeout is fail-closed and health-accounted
 
 - **GIVEN** an eventless pre-created owner reaches the owner-side deadline
 - **WHEN** terminal cleanup runs
 - **THEN** every pending request is settled exactly once and the whole session is retired
 - **AND** the proxy does not replay the timed-out request or submit it on another account
-- **AND** the selected account is not marked unhealthy solely because `response.created` was missing
+- **AND** the selected account records a transient health failure so later requests can avoid repeating the eventless account

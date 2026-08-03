@@ -1761,6 +1761,54 @@ async def test_durable_bridge_same_account_closed_takeover_preserves_restart_anc
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_terminal_release_can_clear_restart_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-terminal-clear",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_old",
+        latest_response_id="resp_old",
+        allow_takeover=True,
+    )
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+        clear_continuity=True,
+    )
+
+    assert released is not None
+    assert released.latest_turn_state is None
+    assert released.latest_response_id is None
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-terminal-clear",
+        api_key_id=None,
+        instance_id="instance-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert reclaimed.owner_instance_id == "instance-b"
+    assert reclaimed.latest_turn_state is None
+    assert reclaimed.latest_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_takeover_preserves_existing_anchor_when_replacement_has_none(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

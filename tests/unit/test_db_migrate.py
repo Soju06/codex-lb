@@ -1377,6 +1377,18 @@ def test_check_schema_drift_ignores_legacy_live_extra_request_log_column(tmp_pat
     assert check_schema_drift(url) == ()
 
 
+def test_check_schema_drift_ignores_legacy_live_security_lineage_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-security-lineage-columns.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    # The live database may already include schema from an older aggregate that
+    # kept security-lineage persistence. Current code tolerates those columns so
+    # newer deploys can move past that applied Alembic revision safely.
+    assert check_schema_drift(url) == ()
+
+
 def test_check_schema_drift_ignores_sqlite_real_float_reflection_for_sticky_thresholds(
     monkeypatch,
     tmp_path: Path,
@@ -2026,11 +2038,16 @@ def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp
     url = _db_url(db_path)
     parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
     target_revision = "20260731_000000_add_capability_lineage_markers"
+    merge_revision = "20260802_000000_merge_bridge_and_capability_lineage_heads"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     config = _build_alembic_config(url)
     script_directory = ScriptDirectory.from_config(config)
-    assert script_directory.get_heads() == [target_revision]
+    assert script_directory.get_heads() == [merge_revision]
+    assert script_directory.get_revision(merge_revision).down_revision == (
+        "20260729_000000_drop_legacy_bridge_pending_tool_columns",
+        target_revision,
+    )
 
     engine = create_engine(to_sync_database_url(url))
     try:

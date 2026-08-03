@@ -242,8 +242,14 @@ class _HTTPBridgeMixin(
         session: "_HTTPBridgeSession",
         *,
         reason: str,
+        clear_continuity: bool = False,
     ) -> None:
-        await _close_http_bridge_session_bounded(self, session, reason=reason)
+        await _close_http_bridge_session_bounded(
+            self,
+            session,
+            reason=reason,
+            clear_continuity=clear_continuity,
+        )
 
     def _schedule_http_bridge_session_closes(
         self,
@@ -1641,6 +1647,7 @@ class _HTTPBridgeMixin(
         session: "_HTTPBridgeSession",
         *,
         turn_state_lock_held: bool = False,
+        clear_continuity: bool = False,
     ) -> None:
         session.closed = True
         if turn_state_lock_held:
@@ -1663,6 +1670,7 @@ class _HTTPBridgeMixin(
                     instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                     owner_epoch=session.durable_owner_epoch,
                     draining=shutdown_state.is_bridge_drain_active(),
+                    clear_continuity=clear_continuity,
                 )
             except Exception:
                 logger.warning("Failed to release durable HTTP bridge session", exc_info=True)

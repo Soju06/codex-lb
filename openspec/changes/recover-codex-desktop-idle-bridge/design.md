@@ -53,7 +53,7 @@ Leading non-response telemetry such as `codex.rate_limits` does not change those
 
 When the deadline expires, reuse the reader-owned terminal failure and whole-session retirement path. Emit a stable `missing_response_created_timeout` detail, increment the existing stuck-retirement metric, settle every pending request exactly once, and close the bridge session.
 
-Do not transparently replay the timed-out request, submit it on another account, or mark the selected account unhealthy. Upstream acceptance is unknown, so duplicate submission and account movement are less safe than an explicit terminal failure. A later client request creates a fresh session through existing behavior.
+Do not transparently replay the timed-out request or submit that same request on another account. Upstream acceptance is unknown, so duplicate submission is less safe than an explicit terminal failure. Record a transient health failure for the selected account so a later client request creates a fresh session through existing selection and can avoid repeating an account that accepted `response.create` but emitted no `response.created`.
 
 Example: a request sends at monotonic time 1,000 with the default 300-second stuck threshold. With no matched response lifecycle event, it becomes eligible at 1,240 and receives an explicit terminal failure; it does not wait for a second request or the 300-second Desktop idle timeout.
 
@@ -66,7 +66,7 @@ Explicit `x-stainless-*` headers or an OpenAI User-Agent retain comment liveness
 ## Risks / Trade-offs
 
 - **A send fails after the timestamp is set.** Existing send-error cleanup retires or settles the request before the watchdog can act; tests cover that the timestamp alone is not sufficient eligibility.
-- **A quiet upstream accepted the request but emitted no event.** The proxy returns an explicit failure rather than risking a duplicate replay. The selected account remains healthy because silence is not proof of account failure.
+- **A quiet upstream accepted the request but emitted no event.** The proxy returns an explicit failure rather than risking a duplicate replay. The selected account receives a transient health failure because repeated missing-created timeouts on the same account are a live availability fault.
 - **A matched lifecycle event arrives just before timeout.** Eligibility is rechecked under the existing request/session synchronization before retirement, and any matched `response.*` event suppresses this watchdog.
 - **Whole-session retirement interrupts a healthy sibling.** This narrow design chooses fail-closed session cleanup rather than attempting unsafe sibling isolation on current `main`. Existing terminal settlement must cover every pending sibling exactly once.
 - **A client spoofs native identity.** The only benefit is an ignored vendor liveness event on the authenticated Codex backend route; explicit SDK markers still take precedence.

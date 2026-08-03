@@ -89,6 +89,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _record_http_bridge_stuck_retire,
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
@@ -2546,8 +2547,40 @@ class _HTTPBridgeStreamingMixin:
                         yield line
                 finally:
                     if gate_contention:
+                        should_retire_stale_gate = False
                         async with session.pending_lock:
                             session.queued_request_count = max(0, session.queued_request_count - 1)
+                            retire_after_seconds = float(
+                                getattr(
+                                    _service_get_settings(),
+                                    "http_responses_session_bridge_stuck_gate_retire_after_seconds",
+                                    300.0,
+                                )
+                            )
+                            now = _service_time().monotonic()
+                            should_retire_stale_gate = any(
+                                pending_request is not request_state
+                                and pending_request.transport == _REQUEST_TRANSPORT_HTTP
+                                and pending_request.response_create_gate_acquired
+                                and pending_request.response_create_gate is session.response_create_gate
+                                and pending_request.response_create_sent_at is None
+                                and pending_request.response_id is None
+                                and pending_request.response_event_count == 0
+                                and not pending_request.downstream_visible
+                                and pending_request.last_downstream_sequence_number is None
+                                and now - pending_request.started_at >= retire_after_seconds
+                                for pending_request in session.pending_requests
+                            )
+                        if should_retire_stale_gate and not session.closed:
+                            session.closed = True
+                            _record_http_bridge_stuck_retire(
+                                reason="response_create_gate_timeout_stuck_pending",
+                                session=session,
+                            )
+                            await self._retire_stale_pending_http_bridge_session(
+                                session,
+                                detail="response_create_gate_timeout_stuck_pending",
+                            )
                 if _service_time().monotonic() >= request_deadline:
                     raise
                 if gate_contention and session.closed:

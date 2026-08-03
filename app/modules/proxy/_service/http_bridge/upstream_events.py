@@ -624,16 +624,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 if not expired_owner:
                                     continue
                                 pending_count = len(session.pending_requests)
-                                for request_state in session.pending_requests:
-                                    if request_state.failure_phase_override is None:
-                                        request_state.failure_phase_override = "upstream"
-                                    if request_state.failure_detail_override is None:
-                                        request_state.failure_detail_override = (
-                                            _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
-                                        )
-                            # Claim the session before cancelling receive so a
-                            # gate waiter cannot reopen this ambiguous socket.
-                            session.closed = True
                             if receive_task is not None:
                                 receive_cancelled = await _cancel_http_bridge_reader_child(
                                     receive_task,
@@ -641,10 +631,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 )
                                 if receive_cancelled:
                                     receive_task = None
-                            _record_http_bridge_stuck_retire(
-                                reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
-                                session=session,
-                            )
                             _log_http_bridge_event(
                                 "missing_response_created_timeout",
                                 session.key,
@@ -657,11 +643,34 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     _extract_model_class(session.request_model) if session.request_model else None
                                 ),
                             )
+                            retried = await self._retry_http_bridge_precreated_request(
+                                session,
+                                allow_expired_deadline=True,
+                            )
+                            if retried:
+                                continue
+                            # Claim the session only after the safe pre-created
+                            # retry path refuses it. Reconnecting first prevents
+                            # a silent upstream websocket from stranding clients
+                            # until the request budget expires.
+                            session.closed = True
+                            _record_http_bridge_stuck_retire(
+                                reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                session=session,
+                            )
+                            async with session.pending_lock:
+                                for request_state in session.pending_requests:
+                                    if request_state.failure_phase_override is None:
+                                        request_state.failure_phase_override = "upstream"
+                                    if request_state.failure_detail_override is None:
+                                        request_state.failure_detail_override = (
+                                            _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+                                        )
                             await self._fail_http_bridge_reader_and_maybe_retire(
                                 session,
                                 error_code="upstream_request_timeout",
                                 error_message=receive_timeout.error_message,
-                                penalize_account=False,
+                                penalize_account=True,
                                 retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 force_retire=True,
                             )

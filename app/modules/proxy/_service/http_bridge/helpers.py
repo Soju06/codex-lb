@@ -188,7 +188,7 @@ from app.modules.proxy.ring_membership import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
+_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 15.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 
@@ -680,11 +680,12 @@ async def _close_http_bridge_session_bounded(
     session: "_HTTPBridgeSession",
     *,
     reason: str,
+    clear_continuity: bool = False,
 ) -> None:
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
     close_task = asyncio.create_task(
-        service._close_http_bridge_session(session),
+        service._close_http_bridge_session(session, clear_continuity=clear_continuity),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
 

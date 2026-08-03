@@ -298,6 +298,7 @@ from app.modules.proxy._service.support import (
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
+    _TransientStreamError,
     _ttft_event_latency_ms,
     _WebSocketUpstreamControl,
 )
@@ -491,6 +492,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
+        settlement.reset()
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
@@ -577,6 +579,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 settlement.account_health_error = True
                 settlement.error = {"message": error_message}
+                if allow_transient_retry and payload.previous_response_id is not None:
+                    raise _TransientStreamError(error_code, settlement.error)
                 yield format_sse_event(
                     response_failed_event(
                         error_code,

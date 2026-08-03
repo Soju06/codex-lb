@@ -3,8 +3,8 @@
 - [x] 1.1 Record the current monotonic `response.create` send timestamp in HTTP bridge request state and replace it on every real send.
 - [x] 1.2 Add a pure client-safe deadline helper that uses the smaller of the existing stuck-gate threshold and 240 seconds.
 - [x] 1.3 Enforce the deadline from the upstream reader without requiring a second gate waiter or SSE keepalives; recheck narrow eventless eligibility before acting.
-- [x] 1.4 Fail and retire the whole bridge session through existing settlement, logging, and Prometheus paths without replay, account movement, or account-health writes.
-- [x] 1.5 Add focused regressions for no-waiter expiry, send-time anchoring, leading telemetry, created/eventful/downstream protection, terminal settlement, and account neutrality.
+- [x] 1.4 Fail and retire the whole bridge session through existing settlement, logging, Prometheus, and transient account-health paths without replaying or moving the timed-out request.
+- [x] 1.5 Add focused regressions for no-waiter expiry, send-time anchoring, leading telemetry, created/eventful/downstream protection, terminal settlement, and health-accounted retirement.
 
 ## 2. Native Codex SSE liveness
 

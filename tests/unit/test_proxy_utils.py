@@ -30123,6 +30123,67 @@ async def test_stream_midstream_core_eof_with_previous_response_id_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_stream_previsible_core_eof_with_previous_response_id_retries(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_previsible_core_eof")
+    request_logs.response_owner_by_id[("resp_parent", None, "sid-stream")] = account.id
+    handle_stream_error = AsyncMock()
+    record_success = AsyncMock()
+    stream_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        nonlocal stream_calls
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        stream_calls += 1
+        if stream_calls == 1:
+            return
+        yield 'data: {"type":"response.completed","response":{"id":"resp_child_retry_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_parent",
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    completed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["id"] == "resp_child_retry_ok"
+    assert stream_calls == 2
+    assert request_logs.lookup_calls == [("resp_parent", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert [call["status"] for call in request_logs.calls] == ["error", "success"]
+    assert request_logs.calls[0]["error_code"] == "stream_incomplete"
+    assert request_logs.calls[-1]["request_id"] == "resp_child_retry_ok"
+    handle_stream_error.assert_not_awaited()
+    record_success.assert_awaited_once_with(account)
+
+
+@pytest.mark.asyncio
 async def test_stream_missing_tool_output_proxy_error_is_masked_to_stream_incomplete(monkeypatch, caplog):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -37083,7 +37144,7 @@ async def test_retry_http_bridge_precreated_request_does_not_send_after_admissio
         request_id="req_bridge_retry_deadline",
     )
     acquire_admission = AsyncMock(return_value=replacement_admission)
-    retry_times = iter((9.0, 11.0))
+    retry_times = iter((9.0, 9.5, 11.0))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_retry_deadline",
         model="gpt-5.6-sol",

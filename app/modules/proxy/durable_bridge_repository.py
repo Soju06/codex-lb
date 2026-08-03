@@ -385,6 +385,7 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         draining: bool,
+        clear_continuity: bool = False,
     ) -> DurableBridgeSessionSnapshot | None:
         """Release the lease with a single fenced UPDATE.
 
@@ -399,6 +400,16 @@ class DurableBridgeRepository:
             "state": HttpBridgeSessionState.DRAINING if draining else HttpBridgeSessionState.CLOSED,
             "closed_at": None if draining else now,
         }
+        if clear_continuity:
+            values.update(
+                {
+                    "latest_turn_state": None,
+                    "latest_response_id": None,
+                    "latest_input_item_count": None,
+                    "latest_input_full_fingerprint": None,
+                    "latest_pending_tool_calls_json": None,
+                }
+            )
         return await self._execute_fenced_session_update(
             session_id=session_id,
             instance_id=instance_id,

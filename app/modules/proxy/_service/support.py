@@ -67,6 +67,8 @@ _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_
 _TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
+_WEBSOCKET_CREATED_ONLY_CLOSE_MAX_REPLAYS = 1
+_WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS = 20
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
     {
         "turn_state_header",
@@ -786,6 +788,7 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    missing_response_created_retry_count: int = 0
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
@@ -1159,7 +1162,13 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
     if not request_state.request_text:
         return False
     if request_state.replay_count >= 1:
-        return False
+        unanchored_precreated_pending = (
+            request_state.previous_response_id is None
+            and request_state.response_id is None
+            and request_state.awaiting_response_created
+        )
+        if not unanchored_precreated_pending or request_state.replay_count >= _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS:
+            return False
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm
         and request_state.last_downstream_sequence_number == 0
@@ -1168,6 +1177,12 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         and request_state.response_event_count == 1
         and not request_state.downstream_visible
     )
+    if (
+        request_state.response_id is not None
+        and not sequenced_created_only_prewarm
+        and request_state.replay_count >= _WEBSOCKET_CREATED_ONLY_CLOSE_MAX_REPLAYS
+    ):
+        return False
     if request_state.last_downstream_sequence_number is not None and not sequenced_created_only_prewarm:
         return False
     if request_state.downstream_visible:

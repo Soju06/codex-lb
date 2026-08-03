@@ -6,9 +6,9 @@ A production Codex Desktop request on the HTTP-to-WebSocket bridge remained pend
 
 - Record the monotonic time of the current upstream `response.create` send.
 - Proactively expire an eventless request that remains pre-`response.created` for the smaller of the existing stuck-gate threshold and 240 seconds, even when no second gate waiter exists and periodic keepalives are disabled.
-- Fail the affected bridge session closed through existing terminal settlement and retirement paths, without transparent replay, account movement, or account-health penalties.
+- Fail the affected bridge session closed through existing terminal settlement and retirement paths, without transparent replay or moving the timed-out request to another account, while recording a transient account-health failure so later requests can avoid the eventless account.
 - Give verified native Codex identity parser-visible `codex.keepalive` frames even when payload-shape heuristics still require OpenAI-compatible event normalization; explicit SDK markers and public `/v1/responses` retain comment liveness.
-- Add regressions for the no-waiter deadline, protected created/eventful requests, account-neutral retirement, and contrasting Desktop/SDK/public heartbeat contracts.
+- Add regressions for the no-waiter deadline, protected created/eventful requests, health-accounted retirement without replay, and contrasting Desktop/SDK/public heartbeat contracts.
 
 ## Capabilities
 

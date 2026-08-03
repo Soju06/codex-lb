@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import anyio
 
+from app.core import shutdown as shutdown_state
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -127,6 +128,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
@@ -192,11 +194,35 @@ logger = logging.getLogger("app.modules.proxy.service")
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
+_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_MAX_RETRIES = 1
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+
+
+def _http_bridge_can_replay_same_anchor_before_created(request_state: _WebSocketRequestState) -> bool:
+    if not request_state.request_text:
+        return False
+    if request_state.replay_count >= _WEBSOCKET_TRANSPARENT_CLOSE_MAX_REPLAYS:
+        return False
+    return (
+        request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.awaiting_response_created
+        and request_state.response_event_count == 0
+        and request_state.last_downstream_sequence_number is None
+        and not request_state.downstream_visible
+        and not request_state.upstream_model_output_seen
+    )
+
+
+def _http_bridge_can_retry_missing_response_created(request_state: _WebSocketRequestState) -> bool:
+    return (
+        request_state.missing_response_created_retry_count < _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_MAX_RETRIES
+        and _http_bridge_can_replay_same_anchor_before_created(request_state)
+    )
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -1425,6 +1451,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         detail: str,
     ) -> None:
+        clear_continuity = detail == "missing_response_created_timeout"
         session.closed = True
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
@@ -1436,7 +1463,22 @@ class _HTTPBridgeRequestSubmitMixin:
             if should_close:
                 session.upstream_close_attempted = True
         if should_close:
-            await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
+            await self._close_http_bridge_session_bounded(
+                session,
+                reason="retire_stale_pending",
+                clear_continuity=clear_continuity,
+            )
+        elif clear_continuity and session.durable_session_id is not None and session.durable_owner_epoch is not None:
+            try:
+                await self._durable_bridge.release_live_session(
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    draining=shutdown_state.is_bridge_drain_active(),
+                    clear_continuity=True,
+                )
+            except Exception:
+                logger.warning("Failed to clear durable HTTP bridge continuity during stale retire", exc_info=True)
         _log_http_bridge_event(
             "retire_stale_pending",
             session.key,
@@ -1530,12 +1572,18 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         *,
         request_state: _WebSocketRequestState | None = None,
+        allow_expired_deadline: bool = False,
     ) -> bool:
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
         hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
+        now = _service_time().monotonic()
+        missing_created_retry = False
+        rebind_missing_created_owner = False
+        owner_rebind_affinity: _AffinityPolicy | None = None
+        selection_rebind_affinity: _AffinityPolicy | None = None
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -1543,7 +1591,19 @@ class _HTTPBridgeRequestSubmitMixin:
                     or any(pending_request is not request_state for pending_request in session.pending_requests)
                     or request_state.draining_until_terminal
                     or not _http_bridge_request_counts_against_queue(request_state)
-                    or not _websocket_request_can_replay_before_visible_output(request_state)
+                    or not (
+                        _websocket_request_can_replay_before_visible_output(request_state)
+                        or (
+                            allow_expired_deadline
+                            and hard_owner_bound
+                            and _http_bridge_can_retry_missing_response_created(request_state)
+                        )
+                    )
+                    or (
+                        not allow_expired_deadline
+                        and request_state.bridge_request_deadline is not None
+                        and request_state.bridge_request_deadline <= now
+                    )
                 ):
                     return False
             else:
@@ -1551,15 +1611,35 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state
                     for request_state in session.pending_requests
                     if not request_state.draining_until_terminal
-                    and _websocket_request_can_replay_before_visible_output(request_state)
+                    and (
+                        _websocket_request_can_replay_before_visible_output(request_state)
+                        or (
+                            allow_expired_deadline
+                            and hard_owner_bound
+                            and _http_bridge_can_retry_missing_response_created(request_state)
+                        )
+                    )
+                    and (
+                        allow_expired_deadline
+                        or request_state.bridge_request_deadline is None
+                        or request_state.bridge_request_deadline > now
+                    )
                 ]
                 if len(retryable_requests) != 1:
                     return False
                 request_state = retryable_requests[0]
-            if request_state.previous_response_id is not None and not (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
-                and request_state.fresh_upstream_request_text
+            if (
+                request_state.previous_response_id is not None
+                and not (
+                    request_state.proxy_injected_previous_response_id
+                    and request_state.fresh_upstream_request_is_retry_safe
+                    and request_state.fresh_upstream_request_text
+                )
+                and not (
+                    allow_expired_deadline
+                    and hard_owner_bound
+                    and _http_bridge_can_retry_missing_response_created(request_state)
+                )
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
@@ -1567,6 +1647,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 # injected retry-safe anchors are equivalent to the client's own
                 # full resend once the anchor is stripped.
                 return False
+            missing_created_retry = (
+                allow_expired_deadline
+                and hard_owner_bound
+                and _http_bridge_can_retry_missing_response_created(request_state)
+            )
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
                 response_events_seen=request_state.response_event_count,
@@ -1604,7 +1689,25 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    if not hard_owner_bound:
+                    if missing_created_retry and hard_owner_bound:
+                        request_state.preferred_account_id = None
+                        request_state.excluded_account_ids.add(session.account.id)
+                        request_state.affinity_policy = replace(
+                            request_state.affinity_policy,
+                            key=None,
+                            kind=None,
+                            reallocate_sticky=True,
+                        )
+                        rebind_missing_created_owner = True
+                        owner_rebind_affinity = session.affinity
+                        selection_rebind_affinity = replace(
+                            session.affinity,
+                            key=None,
+                            kind=None,
+                            reallocate_sticky=True,
+                            codex_session_source=None,
+                        )
+                    elif not hard_owner_bound:
                         request_state.excluded_account_ids.add(session.account.id)
             else:
                 require_preferred_reconnect = account_neutral_recovery
@@ -1616,6 +1719,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 elif not request_state.file_required_preferred_account and not hard_owner_bound:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)
+            if missing_created_retry:
+                request_state.missing_response_created_retry_count += 1
             if session.account.id in request_state.excluded_account_ids:
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None
@@ -1632,7 +1737,18 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
-            if hard_owner_bound:
+            if rebind_missing_created_owner:
+                await _call_with_supported_optional_kwargs(
+                    self._reconnect_http_bridge_session,
+                    session,
+                    optional_kwargs={
+                        "owner_rebind_affinity": owner_rebind_affinity,
+                        "selection_affinity": selection_rebind_affinity,
+                    },
+                    request_state=request_state,
+                    require_same_account=account_neutral_recovery,
+                )
+            elif hard_owner_bound:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,

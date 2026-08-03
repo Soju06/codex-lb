@@ -428,7 +428,7 @@ async def test_backend_responses_forwards_explicit_empty_tools(async_client, mon
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_strips_replayed_function_call_namespace_upstream(async_client, monkeypatch):
+async def test_v1_responses_strips_replayed_tool_call_namespaces_upstream(async_client, monkeypatch):
     raw_account_id = "acc_replayed_namespaced_function_call"
     auth_json = _make_auth_json(raw_account_id, "replayed-namespaced-call@example.com")
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
@@ -448,20 +448,29 @@ async def test_v1_responses_strips_replayed_function_call_namespace_upstream(asy
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    replayed_call = {
-        "type": "function_call",
-        "namespace": "collaboration",
-        "name": "spawn_agent",
-        "arguments": '{"message":"same task"}',
-        "call_id": "call_123",
-    }
+    replayed_calls = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "exec",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
     async with async_client.stream(
         "POST",
         "/v1/responses",
         json={
             "model": "gpt-5.6-sol",
             "instructions": "continue",
-            "input": [replayed_call],
+            "input": replayed_calls,
             "stream": True,
         },
     ) as resp:
@@ -475,7 +484,13 @@ async def test_v1_responses_strips_replayed_function_call_namespace_upstream(asy
             "name": "spawn_agent",
             "arguments": '{"message":"same task"}',
             "call_id": "call_123",
-        }
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
     ]
 
 

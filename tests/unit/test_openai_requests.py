@@ -115,60 +115,90 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert dumped["custom_field"] == "kept"
 
 
-def test_responses_to_payload_strips_replayed_function_call_namespace_only_on_wire():
-    replayed_call = {
-        "type": "function_call",
-        "namespace": "collaboration",
-        "name": "spawn_agent",
-        "arguments": '{"message":"same task"}',
-        "call_id": "call_123",
-    }
+def test_responses_to_payload_strips_replayed_tool_call_namespaces_only_on_wire():
+    replayed_calls = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "exec",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
     request = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.6-sol",
             "instructions": "continue",
-            "input": [replayed_call],
+            "input": replayed_calls,
         }
     )
 
-    assert request.input == [replayed_call]
+    assert request.input == replayed_calls
     assert request.to_payload()["input"] == [
         {
             "type": "function_call",
             "name": "spawn_agent",
             "arguments": '{"message":"same task"}',
             "call_id": "call_123",
-        }
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
     ]
-    assert request.input == [replayed_call]
+    assert request.input == replayed_calls
 
 
-def test_compact_to_payload_strips_replayed_function_call_namespace_only_on_wire():
-    replayed_call = {
-        "type": "function_call",
-        "namespace": "collaboration",
-        "name": "spawn_agent",
-        "arguments": '{"message":"same task"}',
-        "call_id": "call_123",
-    }
+def test_compact_to_payload_strips_replayed_tool_call_namespaces_only_on_wire():
+    replayed_calls = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "exec",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
     request = ResponsesCompactRequest.model_validate(
         {
             "model": "gpt-5.6-sol",
             "instructions": "continue",
-            "input": [replayed_call],
+            "input": replayed_calls,
         }
     )
 
-    assert request.input == [replayed_call]
+    assert request.input == replayed_calls
     assert request.to_payload()["input"] == [
         {
             "type": "function_call",
             "name": "spawn_agent",
             "arguments": '{"message":"same task"}',
             "call_id": "call_123",
-        }
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
     ]
-    assert request.input == [replayed_call]
+    assert request.input == replayed_calls
 
 
 def test_responses_preserves_service_tier():

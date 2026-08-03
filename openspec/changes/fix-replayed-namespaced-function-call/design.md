@@ -1,12 +1,12 @@
 ## Context
 
-Responses request models intentionally retain unknown input-item fields so local proxy features can inspect metadata added by newer clients. Namespaced side-effect calls use `namespace` together with `call_id` for replay deduplication, but OpenAI's Responses request schema does not accept `namespace` on historical `input` function calls. The same outbound field-stripping path is shared by normal and compact Responses requests.
+Responses request models intentionally retain unknown input-item fields so local proxy features can inspect metadata added by newer clients. Namespaced side-effect calls use `namespace` together with `call_id` for replay deduplication, but OpenAI's Responses request schema does not accept `namespace` on historical `input` tool calls. The same outbound field-stripping path is shared by normal and compact Responses requests.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Produce an upstream-compatible wire payload for replayed namespaced `function_call` items.
+- Produce an upstream-compatible wire payload for replayed namespaced `function_call`, `custom_tool_call`, and `apply_patch_call` items.
 - Keep namespace metadata available on the request model for local replay deduplication.
 - Cover both normal and compact Responses serialization and the public proxy path.
 - Leave client-provided top-level tool entries untouched.
@@ -22,7 +22,7 @@ Responses request models intentionally retain unknown input-item fields so local
 
 ### Normalize only the copied outbound payload
 
-The shared unsupported-field sanitizer will copy only affected input items and remove `namespace` when `type == "function_call"`. Request model input remains unchanged, so internal consumers retain the namespace.
+The shared unsupported-field sanitizer will copy only affected input items and remove `namespace` when the item type is one of the recognized replayed tool-call types. Request model input remains unchanged, so internal consumers retain the namespace.
 
 Stripping during model validation was rejected because it would erase local dedupe identity. Broad unknown-field filtering was rejected because it could silently remove future-compatible client data and expand the scope beyond issue #1450.
 
@@ -36,7 +36,7 @@ Unit tests will assert wire normalization and request-model preservation for nor
 
 ## Risks / Trade-offs
 
-- [Future upstream support for input-item namespace] The proxy will continue omitting the field → Scope the rewrite narrowly to historical `function_call` input items and preserve it internally.
+- [Future upstream support for input-item namespace] The proxy will continue omitting the field → Scope the rewrite narrowly to historical tool-call input items and preserve it internally.
 - [Accidental mutation of local request state] In-place item mutation could erase dedupe identity → Copy each changed item and replace only the outbound payload list.
 - [Top-level namespace tool regression] A broad namespace scrub could alter tool definitions → Do not traverse `tools`; retain existing byte-preservation coverage.
 

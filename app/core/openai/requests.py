@@ -42,7 +42,7 @@ _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content",
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
 _COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal", "update_plan"})
-_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
@@ -804,7 +804,7 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _strip_subscription_prompt_cache_controls(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
-    _strip_replayed_function_call_namespaces(payload)
+    _strip_replayed_tool_call_namespaces(payload)
     # ``tools`` is deliberately NOT canonicalized here: the wire payload must
     # forward client tool entries byte-preserved (array order, key order, and
     # unknown keys untouched) so reserved model tools survive upstream
@@ -864,7 +864,7 @@ def _strip_subscription_prompt_cache_breakpoints(value: JsonValue | None) -> Non
         _strip_subscription_prompt_cache_breakpoints(child)
 
 
-def _strip_replayed_function_call_namespaces(payload: MutableJsonObject) -> None:
+def _strip_replayed_tool_call_namespaces(payload: MutableJsonObject) -> None:
     input_value = payload.get("input")
     if not is_json_list(input_value):
         return
@@ -872,7 +872,7 @@ def _strip_replayed_function_call_namespaces(payload: MutableJsonObject) -> None
     normalized_items: list[JsonValue] = []
     changed = False
     for item in input_value:
-        if is_json_mapping(item) and item.get("type") == "function_call" and "namespace" in item:
+        if is_json_mapping(item) and item.get("type") in _TOOL_CALL_ITEM_TYPES and "namespace" in item:
             normalized_item = dict(item)
             normalized_item.pop("namespace")
             normalized_items.append(normalized_item)
@@ -1311,7 +1311,7 @@ def _compact_reconciled_tool_call_indices(
         if not isinstance(call_id, str) or not call_id:
             continue
         item_type = item.get("type")
-        if item_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        if item_type in _TOOL_CALL_ITEM_TYPES:
             call_indices_by_id.setdefault(call_id, []).append(index)
         elif item_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
             output_indices_by_id.setdefault(call_id, []).append(index)

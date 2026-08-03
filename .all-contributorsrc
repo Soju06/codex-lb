@@ -1152,6 +1152,17 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "johnjheejin",
+      "name": "daydreamer.jin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11205554?v=4",
+      "profile": "https://github.com/johnjheejin",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

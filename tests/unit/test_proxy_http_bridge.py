@@ -225,7 +225,6 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
     [
         ("response_id", "resp-created"),
         ("latency_response_created_ms", 12),
-        ("response_event_count", 1),
         ("downstream_visible", True),
         ("last_downstream_sequence_number", 0),
         ("awaiting_response_created", False),
@@ -247,6 +246,24 @@ def test_http_bridge_eventless_precreated_deadline_requires_narrow_owner_evidenc
             stuck_gate_retire_after_seconds=300.0,
         )
         is None
+    )
+
+
+def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_without_created() -> None:
+    request_state = _make_eventless_http_bridge_owner()
+    request_state.response_event_count = 3
+    request_state.upstream_model_output_seen = True
+    request_state.deferred_reasoning_downstream_texts.append(
+        'data: {"type":"response.output_item.added","item":{"type":"reasoning"}}\n\n'
+    )
+    client_safe_cap_seconds = http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
+
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == 100.0 + min(300.0, client_safe_cap_seconds)
     )
 
 
@@ -20256,6 +20273,9 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
     owner.preferred_account_id = "acc-bridge"
     owner.excluded_account_ids.add("acc-excluded")
+    if leading_telemetry:
+        owner.response_event_count = 1
+        owner.upstream_model_output_seen = True
     sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
     sibling = proxy_service._WebSocketRequestState(
         request_id="req-created-sibling",
@@ -20307,7 +20327,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.preferred_account_id == "acc-bridge"
     assert owner.excluded_account_ids == {"acc-excluded"}
     assert owner.replay_count == 0
-    assert owner.response_event_count == 0
+    assert owner.response_event_count == (1 if leading_telemetry else 0)
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
     retry_precreated.assert_awaited_once_with(session)

@@ -731,7 +731,6 @@ def _http_bridge_eventless_precreated_deadline(
         or sent_at is None
         or request_state.response_id is not None
         or request_state.latency_response_created_ms is not None
-        or request_state.response_event_count != 0
         or request_state.downstream_visible
         or request_state.last_downstream_sequence_number is not None
     ):

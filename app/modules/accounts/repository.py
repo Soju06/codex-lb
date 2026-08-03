@@ -168,6 +168,17 @@ class AccountsRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_eligible_by_chatgpt_account_id(self, chatgpt_account_id: str) -> list[Account]:
+        result = await self._session.execute(
+            select(Account)
+            .where(Account.chatgpt_account_id == chatgpt_account_id)
+            .where(
+                Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
+            )
+            .order_by(Account.id)
+        )
+        return list(result.scalars().all())
+
     async def upsert(
         self,
         account: Account,

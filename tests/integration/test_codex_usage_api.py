@@ -4,6 +4,7 @@ from datetime import timedelta, timezone
 
 import pytest
 
+from app.core.auth.codex_oauth_identity import clear_codex_oauth_identity_cache
 from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
 from app.core.clients.usage import ConsumeRateLimitResetCreditResponse
 from app.core.crypto import TokenEncryptor
@@ -75,12 +76,16 @@ async def _create_api_key(*, name: str, limits: list[LimitRuleInput] | None = No
 
 @pytest.fixture(autouse=True)
 def stub_codex_usage_caller_validation(monkeypatch):
+    clear_codex_oauth_identity_cache()
+
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
         assert access_token == "chatgpt-token"
         assert account_id is not None
         return UsagePayload.model_validate({"plan_type": "plus"})
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
+    yield
+    clear_codex_oauth_identity_cache()
 
 
 @pytest.mark.asyncio
@@ -722,7 +727,7 @@ async def test_codex_usage_exposes_reset_credit_availability(async_client, db_se
             }
         )
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
 
     response = await async_client.get(
         "/api/codex/usage",
@@ -771,7 +776,7 @@ async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db
             refreshed_account_ids.append(f"{account.id}:{ignore_refresh_disabled}:{access_token_override}")
             return True
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
     monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", stub_consume_rate_limit_reset_credit)
     monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
     cache_generation = get_account_selection_cache().generation
@@ -849,7 +854,7 @@ async def test_codex_usage_reset_consume_refreshes_matched_workspace_account(asy
             refreshed_account_ids.append(account.id)
             return True
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
     monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", stub_consume_rate_limit_reset_credit)
     monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
 
@@ -894,7 +899,7 @@ async def test_codex_usage_reset_consume_rejects_empty_redeem_request_id(async_c
     async def should_not_consume(**_: object) -> ConsumeRateLimitResetCreditResponse:
         raise AssertionError("empty redeem_request_id should not be forwarded upstream")
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
     monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", should_not_consume)
 
     response = await async_client.post(

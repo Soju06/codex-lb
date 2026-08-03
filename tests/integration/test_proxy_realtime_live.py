@@ -494,27 +494,41 @@ def test_duplicated_prefix_live_alias_logs_redacted_rejection(
     ],
     ids=["current-app", "v3"],
 )
-def test_path_realtime_sideband_rejects_query_call_id_before_service(
+def test_path_realtime_sideband_rejects_query_call_id_before_caller_resolution_and_service(
     app_instance,
     monkeypatch,
     path: str,
 ):
+    caller_resolution_called = False
     service_called = False
+
+    async def fail_resolve_caller(*_args, **_kwargs):
+        nonlocal caller_resolution_called
+        caller_resolution_called = True
+        raise AssertionError("path call_id conflict must fail before caller resolution")
 
     async def fail_proxy_live(*_args, **_kwargs):
         nonlocal service_called
         service_called = True
         raise AssertionError("path call_id conflict must fail before the sideband service")
 
+    monkeypatch.setattr(proxy_api_module, "resolve_realtime_caller_scope", fail_resolve_caller)
     monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", fail_proxy_live)
 
     with TestClient(app_instance) as client:
         with pytest.raises(WebSocketDenialResponse) as raised:
-            with client.websocket_connect(path, headers={"Authorization": "Bearer sk-clb-live-key"}):
+            with client.websocket_connect(
+                path,
+                headers={
+                    "Authorization": "Bearer oauth-live-token",
+                    "chatgpt-account-id": "workspace-live",
+                },
+            ):
                 pass
 
     assert raised.value.status_code == 400
     assert json.loads(raised.value.content)["error"]["code"] == "invalid_realtime_call_id"
+    assert caller_resolution_called is False
     assert service_called is False
 
 

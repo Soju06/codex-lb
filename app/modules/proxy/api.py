@@ -1302,20 +1302,28 @@ async def _proxy_realtime_live_websocket_route(
     redacted_path: str,
 ) -> None:
     _redact_realtime_live_websocket_scope(websocket, path=redacted_path)
-    caller_scope, denial = await _validate_realtime_caller_websocket_request(websocket)
+    denial = await _websocket_firewall_denial_response(websocket)
+    if denial is not None:
+        await websocket.send_denial_response(denial)
+        return
+    if protocol is RealtimeWebSocketProtocol.LIVE_V3 and any(key == "call_id" for key, _value in query_params):
+        await websocket.send_denial_response(
+            JSONResponse(
+                status_code=400,
+                content=openai_error(
+                    "invalid_realtime_call_id",
+                    "Path-based realtime sidebands must not include a call_id query parameter",
+                ),
+            )
+        )
+        return
+
+    caller_scope, denial = await _resolve_realtime_caller_websocket_request(websocket)
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
     assert caller_scope is not None
     try:
-        if protocol is RealtimeWebSocketProtocol.LIVE_V3 and any(key == "call_id" for key, _value in query_params):
-            raise ProxyResponseError(
-                400,
-                openai_error(
-                    "invalid_realtime_call_id",
-                    "Path-based realtime sidebands must not include a call_id query parameter",
-                ),
-            )
         await context.service.proxy_realtime_live_websocket(
             websocket,
             call_id,
@@ -6278,12 +6286,9 @@ async def _validate_proxy_websocket_request(
     return api_key, None
 
 
-async def _validate_realtime_caller_websocket_request(
+async def _resolve_realtime_caller_websocket_request(
     websocket: WebSocket,
 ) -> tuple[RealtimeCallerScope | None, JSONResponse | None]:
-    denial = await _websocket_firewall_denial_response(websocket)
-    if denial is not None:
-        return None, denial
     try:
         caller_scope = await resolve_realtime_caller_scope(
             websocket.headers.get("authorization"),

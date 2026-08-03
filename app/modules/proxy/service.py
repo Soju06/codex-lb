@@ -140,6 +140,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _await_cancelled_task as _await_cancelled_task,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _build_http_bridge_prewarm_text as _build_http_bridge_prewarm_text,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -749,8 +752,6 @@ from app.modules.proxy.work_admission import WorkAdmissionController
 
 logger = logging.getLogger(__name__)
 
-_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
-_TaskResultT = TypeVar("_TaskResultT")
 _ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
@@ -787,37 +788,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # window this ensures the client sees a terminal event within ≈70s when the
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
-
-
-async def _await_cancelled_task(
-    task: asyncio.Task[_TaskResultT],
-    *,
-    timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
-    label: str,
-    cleanup_tasks: set[asyncio.Task[None]] | None = None,
-) -> bool:
-    caller_task = asyncio.current_task()
-    # Give a new child one scheduling turn before cancellation so
-    # cancellation-resistant tasks enter the deferred-drain path.
-    if not task.done():
-        try:
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
-            raise
-    task.cancel()
-    try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
-    except asyncio.CancelledError:
-        if caller_task is not None and caller_task.cancelling():
-            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
-            raise
-        return True
-    except TimeoutError:
-        logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
-        return False
-    return True
 
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})

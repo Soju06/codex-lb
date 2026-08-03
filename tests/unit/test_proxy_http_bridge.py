@@ -23,6 +23,7 @@ from websockets.frames import Close
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY, ProxyResponseError
 from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     CodexUpstreamWebSocket,
     UpstreamWebSocket,
     UpstreamWebSocketMessage,
@@ -18631,6 +18632,169 @@ async def test_http_bridge_stale_reader_does_not_close_reconnected_upstream(
 
     assert session.upstream is new_upstream
     assert session.closed is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-liveness-timeout",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="bridge-liveness-timeout",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.admission_waiter_count = 1
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(
+                return_value=UpstreamWebSocketMessage(
+                    kind="error",
+                    error="Upstream websocket liveness failed",
+                    error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+                )
+            ),
+            close=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    retry_precreated = AsyncMock(return_value=True)
+    fail_pending = AsyncMock()
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    retry_precreated.assert_not_awaited()
+    fail_pending.assert_awaited_once()
+    fail_pending_args = fail_pending.await_args
+    assert fail_pending_args is not None
+    assert fail_pending_args.kwargs["error_code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert fail_pending_args.kwargs["penalize_account"] is False
+    retire.assert_awaited_once_with(session, detail=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE)
+    assert session.queued_request_count == 0
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_liveness_send_receive_race_settles_request_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RacingLivenessUpstream:
+        def __init__(self) -> None:
+            self.send_started = asyncio.Event()
+            self.receive_returned = asyncio.Event()
+            self.close = AsyncMock()
+
+        async def send_text(self, _text: str) -> None:
+            self.send_started.set()
+            await self.receive_returned.wait()
+            # Let the reader queue on lifecycle_lock before the submitter
+            # publishes its send-side failure ownership and releases the lock.
+            await asyncio.sleep(0)
+            raise UpstreamWebSocketTransportError(
+                "Codex upstream websocket send failed: heartbeat expired",
+                error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            )
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            await self.send_started.wait()
+            self.receive_returned.set()
+            return UpstreamWebSocketMessage(
+                kind="error",
+                error="Codex upstream websocket receive failed: heartbeat expired",
+                error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            )
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    sibling_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-liveness-race-sibling",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-bridge-liveness-race-sibling",
+        event_queue=sibling_queue,
+        transport="http",
+        skip_request_log=True,
+    )
+    request_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-liveness-race",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=request_queue,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    upstream = RacingLivenessUpstream()
+    session = _make_bridge_session(
+        key_value="bridge-liveness-race",
+        pending_requests=deque([sibling_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    service._http_bridge_sessions[session.key] = session
+    fail_pending = AsyncMock(wraps=service._fail_pending_websocket_requests)
+    retire = AsyncMock()
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            )
+        await asyncio.wait_for(reader_task, timeout=1.0)
+    finally:
+        if not reader_task.done():
+            reader_task.cancel()
+        await asyncio.gather(reader_task, return_exceptions=True)
+
+    assert exc_info.value.payload["error"]["code"] == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    fail_pending.assert_awaited_once()
+    failure_call = fail_pending.await_args
+    assert failure_call is not None
+    assert failure_call.kwargs["penalize_account"] is False
+    retry_precreated.assert_not_awaited()
+    for event_queue in (sibling_queue, request_queue):
+        terminal_event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+        assert terminal_event is not None
+        assert UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE in terminal_event
+        assert await asyncio.wait_for(event_queue.get(), timeout=0.1) is None
+    assert request_state.replay_count == 0
+    assert session.pending_requests == deque()
+    assert session.queued_request_count == 0
+    assert session.closed is True
+    retire.assert_awaited_once_with(session, detail=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE)
 
 
 @pytest.mark.asyncio

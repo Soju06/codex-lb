@@ -27,7 +27,12 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketMessage, UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+    UpstreamWebSocketMessage,
+    UpstreamWebSocketTransportError,
+    is_account_neutral_websocket_error_code,
+)
 from app.core.errors import response_failed_event
 from app.core.openai.parsing import parse_sse_event_payload
 from app.core.types import JsonValue
@@ -705,18 +710,33 @@ class _HTTPBridgeUpstreamEventsMixin:
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 retried = False
-                # A process-network receive failure follows a successful send;
+                # Account-neutral transport failures follow a successful send;
                 # replay is not safe merely because output is not visible.
-                if message.error_code != "proxy_network_unavailable":
+                account_neutral = is_account_neutral_websocket_error_code(message.error_code)
+                if not account_neutral:
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 async with session.lifecycle_lock:
+                    if session.closed and message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
+                        # A submitter holds this lock across send_text and marks
+                        # the session closed before releasing it on ambiguous
+                        # send failure. In that race the submitter owns terminal
+                        # settlement; the reader must not settle the same state.
+                        break
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
                         error_code=message.error_code or "stream_incomplete",
                         error_message=_upstream_websocket_disconnect_message(message),
-                        penalize_account=message.error_code != "proxy_network_unavailable",
+                        penalize_account=not account_neutral,
+                        **(
+                            # An admission waiter must not inherit a socket whose
+                            # heartbeat already proved it dead. Other failures
+                            # preserve the existing deferred-retirement handoff.
+                            {"force_retire": True}
+                            if message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                            else {}
+                        ),
                     )
                 break
         except asyncio.CancelledError:
@@ -729,18 +749,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                 exc_info=True,
             )
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
-            account_neutral = error_code == "proxy_network_unavailable"
+            account_neutral = is_account_neutral_websocket_error_code(error_code)
             async with session.lifecycle_lock:
-                await self._fail_http_bridge_reader_and_maybe_retire(
-                    session,
-                    error_code=error_code,
-                    error_message=(
-                        str(exc)
-                        if isinstance(exc, UpstreamWebSocketTransportError)
-                        else "HTTP bridge upstream reader crashed before response.completed"
-                    ),
-                    penalize_account=not account_neutral,
-                )
+                if not (session.closed and error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE):
+                    # Match the message path above when receive() raises while
+                    # a concurrent send failure already owns settlement.
+                    await self._fail_http_bridge_reader_and_maybe_retire(
+                        session,
+                        error_code=error_code,
+                        error_message=(
+                            str(exc)
+                            if isinstance(exc, UpstreamWebSocketTransportError)
+                            else "HTTP bridge upstream reader crashed before response.completed"
+                        ),
+                        penalize_account=not account_neutral,
+                        # Preserve ordinary crash handoff behavior, but never hand
+                        # a heartbeat-expired socket to an admission waiter.
+                        **({"force_retire": True} if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE else {}),
+                    )
         finally:
             await _cancel_http_bridge_reader_child(
                 wakeup_task,

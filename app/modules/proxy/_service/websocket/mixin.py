@@ -56,9 +56,11 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     UpstreamWebSocket,
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
+    is_account_neutral_websocket_error_code,
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
@@ -1698,32 +1700,55 @@ class _WebSocketMixin:
                     # send_str/send_bytes may fail after handing bytes to the
                     # kernel. Delivery is uncertain, so replay could duplicate
                     # a response.create even when no output is visible yet.
-                    async with pending_lock:
-                        sequenced_downstream_replay_refused = any(
-                            state.last_downstream_sequence_number is not None for state in pending_requests
-                        )
-                    await proxy._fail_pending_websocket_requests(
-                        account=account,
-                        account_id_value=account.id if account else None,
-                        pending_requests=pending_requests,
-                        pending_lock=pending_lock,
-                        error_code=exc.error_code,
-                        error_message=str(exc),
-                        api_key=api_key,
-                        websocket=websocket,
-                        client_send_lock=client_send_lock,
-                        response_create_gate=response_create_gate,
-                        downstream_activity=downstream_activity,
-                        penalize_account=exc.error_code != "proxy_network_unavailable",
-                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
+                    liveness_timeout = exc.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                    sender_owns_settlement = not liveness_timeout or (
+                        upstream_control is not None and upstream_control.claim_liveness_settlement("send")
                     )
-                    if sequenced_downstream_replay_refused:
-                        await _close_downstream_after_sequenced_replay_refusal(
-                            websocket,
-                            downstream_activity,
-                        )
+                    if sender_owns_settlement:
+                        try:
+                            async with pending_lock:
+                                sequenced_downstream_replay_refused = any(
+                                    state.last_downstream_sequence_number is not None for state in pending_requests
+                                )
+                            await proxy._fail_pending_websocket_requests(
+                                account=account,
+                                account_id_value=account.id if account else None,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                error_code=exc.error_code,
+                                error_message=str(exc),
+                                api_key=api_key,
+                                websocket=websocket,
+                                client_send_lock=client_send_lock,
+                                response_create_gate=response_create_gate,
+                                downstream_activity=downstream_activity,
+                                penalize_account=not is_account_neutral_websocket_error_code(exc.error_code),
+                                suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
+                            )
+                            if sequenced_downstream_replay_refused:
+                                await _close_downstream_after_sequenced_replay_refusal(
+                                    websocket,
+                                    downstream_activity,
+                                )
+                        finally:
+                            if liveness_timeout and upstream_control is not None:
+                                # Wake a receive path that observed the same
+                                # watchdog failure only after terminal effects
+                                # owned by this sender can no longer be cancelled.
+                                upstream_control.liveness_settlement_done.set()
+                    elif upstream_reader is not None:
+                        # The reader already removed the states from the deque.
+                        # Await its terminal writes, gate releases, and reservation
+                        # settlement instead of cancelling it based on an empty deque.
+                        await upstream_reader
+                        upstream_reader = None
+                    elif upstream_control is not None:
+                        await upstream_control.liveness_settlement_done.wait()
                     if upstream_reader is not None:
-                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        await _facade()._await_cancelled_task(
+                            upstream_reader,
+                            label="proxy websocket upstream reader",
+                        )
                         upstream_reader = None
                     upstream_control = None
                     if upstream is not None:
@@ -3742,12 +3767,28 @@ class _WebSocketMixin:
                             )
                         break
                     continue
+                if (
+                    message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                    and not upstream_control.claim_liveness_settlement("receive")
+                ):
+                    # The sender owns every pending request. Wait until its
+                    # terminal effects complete so this reader's finally block
+                    # cannot close the downstream while those states remain.
+                    await upstream_control.liveness_settlement_done.wait()
+                    break
                 replay_refusal_reasons: list[str] = []
                 replay_request_state = None
-                # A classified route/DNS receive failure happens after a
-                # completed send. Surface it account-neutrally rather than
-                # guessing that the upstream did not accept the request.
-                if message.error_code != "proxy_network_unavailable":
+                # Account-neutral transport failures happen after a completed
+                # send. Surface them rather than guessing that upstream did
+                # not accept the request. In particular, do not call the
+                # pre-created replay selector for a liveness timeout: the lost
+                # pong says nothing about whether response.create was accepted.
+                account_neutral = is_account_neutral_websocket_error_code(message.error_code)
+                if account_neutral:
+                    async with pending_lock:
+                        if any(state.last_downstream_sequence_number is not None for state in pending_requests):
+                            replay_refusal_reasons.append("sequenced_downstream_frame")
+                else:
                     replay_request_state = await _pop_replayable_precreated_websocket_request_state(
                         pending_requests,
                         pending_lock=pending_lock,
@@ -3779,9 +3820,20 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
-                    penalize_account=message.error_code != "proxy_network_unavailable",
+                    penalize_account=not account_neutral,
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
+                if message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
+                    # Release the routed-client/context owner immediately. The
+                    # next downstream request must open a socket on the current
+                    # host route instead of retaining this dead generation.
+                    try:
+                        await upstream.close()
+                    except Exception:
+                        _facade().logger.debug(
+                            "Failed to retire upstream websocket after liveness timeout",
+                            exc_info=True,
+                        )
                 if sequenced_downstream_replay_refused:
                     await _close_downstream_after_sequenced_replay_refusal(
                         websocket,
@@ -3867,6 +3919,11 @@ class _WebSocketMixin:
                 downstream_activity=downstream_activity,
             )
         finally:
+            if upstream_control.liveness_settlement_owner == "receive":
+                # A concurrent sender awaits the reader task itself, but the
+                # event also makes ownership completion explicit for callers
+                # that no longer retain that task handle.
+                upstream_control.liveness_settlement_done.set()
             async with pending_lock:
                 has_pending_requests = bool(pending_requests)
             if not upstream_control.reconnect_requested and has_pending_requests:

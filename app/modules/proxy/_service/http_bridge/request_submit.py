@@ -36,7 +36,11 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+    UpstreamWebSocketTransportError,
+    is_account_neutral_websocket_error_code,
+)
 from app.core.errors import (
     openai_error,
 )
@@ -962,31 +966,48 @@ class _HTTPBridgeRequestSubmitMixin:
             # handed to the kernel. Never reconnect-and-resend from this path;
             # only failures proven to precede dispatch may be replayed.
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
-            account_neutral = error_code == "proxy_network_unavailable"
-            await self._cleanup_http_bridge_submit_interruption(
-                session,
-                request_state=request_state,
-                gate_acquired=gate_acquired,
-                request_enqueued=request_enqueued,
-                counted_in_queue=True,
-                admission_waiter_registered=admission_waiter_registered,
-            )
-            await self._fail_pending_websocket_requests(
-                account=session.account,
-                account_id_value=session.account.id,
-                pending_requests=deque([request_state]),
-                pending_lock=anyio.Lock(),
-                error_code=error_code,
-                error_message=str(exc) or "Upstream websocket closed before response.completed",
-                api_key=None,
-                response_create_gate=session.response_create_gate,
-                penalize_account=not account_neutral,
-            )
-            session.closed = True
-            try:
-                await session.upstream.close()
-            except Exception:
-                logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
+            # Liveness expiry and local network loss are transport failures,
+            # not evidence against the selected account. Keep this in sync
+            # with the reader path's shared provenance classification.
+            account_neutral = is_account_neutral_websocket_error_code(error_code)
+            if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
+                # The sender marked the session closed while holding
+                # lifecycle_lock. It therefore owns the entire session deque,
+                # including older in-flight requests; settling only this
+                # request would strand its siblings after the reader yields.
+                async with session.lifecycle_lock:
+                    await self._fail_http_bridge_reader_and_maybe_retire(
+                        session,
+                        error_code=error_code,
+                        error_message=str(exc) or "Upstream websocket liveness failed",
+                        penalize_account=False,
+                        force_retire=True,
+                    )
+            else:
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=gate_acquired,
+                    request_enqueued=request_enqueued,
+                    counted_in_queue=True,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
+                await self._fail_pending_websocket_requests(
+                    account=session.account,
+                    account_id_value=session.account.id,
+                    pending_requests=deque([request_state]),
+                    pending_lock=anyio.Lock(),
+                    error_code=error_code,
+                    error_message=str(exc) or "Upstream websocket closed before response.completed",
+                    api_key=None,
+                    response_create_gate=session.response_create_gate,
+                    penalize_account=not account_neutral,
+                )
+                session.closed = True
+                try:
+                    await session.upstream.close()
+                except Exception:
+                    logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
             # Always raise 502 so the client can retry with
             # previous_response_id intact.  Returning 400
             # previous_response_not_found causes the client to drop

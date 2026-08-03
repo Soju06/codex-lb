@@ -1060,6 +1060,17 @@ class _WebSocketUpstreamControl:
     downstream_sequence_request_state: _WebSocketRequestState | None = None
     downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
+    # One watchdog expiry can wake receive() while the concurrent send also
+    # fails. Claim synchronously, before either path awaits settlement: the
+    # winner owns the whole pending deque and the loser must not cancel it.
+    # A control object belongs to one upstream generation, so this never resets.
+    liveness_settlement_owner: Literal["send", "receive"] | None = None
+    liveness_settlement_done: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def claim_liveness_settlement(self, owner: Literal["send", "receive"]) -> bool:
+        if self.liveness_settlement_owner is None:
+            self.liveness_settlement_owner = owner
+        return self.liveness_settlement_owner == owner
 
 
 @dataclass(slots=True)

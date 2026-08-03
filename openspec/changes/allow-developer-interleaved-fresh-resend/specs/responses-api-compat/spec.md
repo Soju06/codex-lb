@@ -2,28 +2,25 @@
 
 ## ADDED Requirements
 
-### Requirement: Responses-Lite exact manifest proof tolerates verified historical developer interleaving
+### Requirement: Responses-Lite replay proof tolerates only verified developer interleaving
 
 When a fresh durable HTTP bridge classifies a client-unanchored Responses-Lite
 full resend whose `additional_tools` bundle preserves developer messages inline,
-the exact durable pending-tool proof MUST allow a valid `developer` message
-between a supported direct tool call and that call's matching output in the
-fingerprint-verified stored prefix.
+the replay proof MUST tolerate a developer message only in the historical and
+fresh positions defined below. Every other developer position or shape MUST
+remain fail-closed.
 
-The developer message MUST have no response-owned ID or phase, MUST have no
-status or a `completed` status, MUST pass the existing account-neutral metadata,
-field, and content validation, and MUST NOT settle or reorder the pending call.
+A tolerated fresh developer message MUST have `type` omitted or equal to `message`,
+MUST have role `developer`, MUST have no non-empty response-owned ID or phase,
+MUST have no status or a `completed` status, MUST contain exact account-neutral
+metadata with one nonblank `turn_id`, MUST contain exactly one self-contained
+`input_text` content part, and MUST contain no unknown or account-scoped fields.
+Explicit null or malformed item types MUST fail closed.
+
 Classification MUST retain response-owned developer-message ID evidence until
-this check has completed, even when other response-owned IDs are projected out.
-The matching output MUST remain present with the same call ID and type. This
-exception MUST NOT apply to the alternative retained assistant-output proof or
-to the fresh suffix. The fresh suffix MUST remain a complete direct call/output
-set exactly equal to the durable manifest.
-
-This exception MUST apply only when the developer message remains inline in the
-validated Responses-Lite input. Non-Lite `input` or `messages` forms whose
-instruction-role messages are normalized into top-level `instructions` are
-outside this requirement.
+these checks have completed, even when other response-owned IDs are projected
+out. Non-Lite `input` or `messages` forms whose instruction-role messages are
+normalized into top-level `instructions` remain outside this requirement.
 
 #### Scenario: Verified historical Responses-Lite developer message is transparent
 
@@ -47,15 +44,30 @@ outside this requirement.
 - **WHEN** the matching output is missing or has another call ID or type
 - **THEN** exact manifest proof fails
 
-#### Scenario: Fresh inline developer message is not a tool-loop item
+#### Scenario: Bounded fresh custom-tool developer interleave is transparent
 
-- **GIVEN** a Responses-Lite input whose developer messages remain inline
-- **AND** a durable pending-tool manifest
-- **WHEN** the fresh suffix contains a developer message among its call/output items
+- **GIVEN** the fingerprint-verified stored prefix is followed by a fresh suffix
+- **AND** the durable pending-tool manifest contains exactly one `custom_tool_call`
+- **WHEN** the entire suffix is exactly that custom call, one valid developer message, and its matching custom-tool output
+- **THEN** exact manifest proof passes
+- **AND** the original full input is sent once without injecting `previous_response_id`
+
+#### Scenario: Other fresh tool-loop developer positions remain fail-closed
+
+- **GIVEN** a durable pending-tool manifest
+- **WHEN** a fresh developer message is used with a function or apply-patch call, appears in a parallel batch, is duplicated, lacks exact metadata, contains malformed or account-scoped content, or has leading or trailing suffix items
 - **THEN** exact manifest proof fails
 
-#### Scenario: Alternative retained-output proof stays narrow
+#### Scenario: Bounded retained-output developer follow-up is transparent
 
-- **GIVEN** a stored prefix contains a developer-interleaved historical call
-- **WHEN** the fresh suffix uses retained assistant output plus new user input instead of the exact durable manifest
-- **THEN** the developer exception does not make that alternative proof pass
+- **GIVEN** the fingerprint-verified stored prefix is followed by a completed assistant `final_answer`
+- **AND** exactly one explicit user message follows that retained output
+- **WHEN** one valid developer message is the terminal suffix item
+- **THEN** retained-output proof passes
+- **AND** the original full input is sent once without injecting `previous_response_id`
+
+#### Scenario: Unproven retained-output developer follow-up remains fail-closed
+
+- **GIVEN** a retained-output full resend
+- **WHEN** the latest assistant output is not `final_answer`, the developer message is not terminal, the fresh input is raw or contains multiple user items, the developer metadata or content is not account-neutral, or the stored prefix contains historical developer interleaving
+- **THEN** retained-output proof fails

@@ -1201,7 +1201,7 @@ async def test_codex_usage_allows_registered_chatgpt_account_id_with_bearer(asyn
         assert account_id == raw_chatgpt_account_id
         return UsagePayload.model_validate({"plan_type": "team"})
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
 
     await async_client.post("/api/dashboard-auth/logout", json={})
     allowed = await async_client.get(
@@ -1225,7 +1225,7 @@ async def test_codex_usage_blocks_unregistered_chatgpt_account_id(async_client, 
     async def should_not_call_fetch_usage(**_: object) -> UsagePayload:
         raise AssertionError("fetch_usage should not be called for unknown chatgpt-account-id")
 
-    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", should_not_call_fetch_usage)
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", should_not_call_fetch_usage)
 
     await async_client.post("/api/dashboard-auth/logout", json={})
     blocked = await async_client.get(

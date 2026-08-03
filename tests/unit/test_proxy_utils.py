@@ -5262,6 +5262,24 @@ async def test_select_codex_control_account_without_budget_honors_traffic_class(
     assert select_account.await_args.kwargs["traffic_class"] == proxy_service.TRAFFIC_CLASS_OPPORTUNISTIC
 
 
+@pytest.mark.asyncio
+async def test_select_codex_control_account_without_budget_honors_oauth_policy_scope(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    selected_account = _make_account("acc_oauth_allowed")
+    select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    result = await service._select_codex_control_account_without_budget(
+        affinity=proxy_service._AffinityPolicy(key=None, kind=None),
+        api_key=None,
+        allowed_account_ids=frozenset({selected_account.id}),
+    )
+
+    assert result is not None
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["account_ids"] == {selected_account.id}
+
+
 @pytest.fixture(autouse=True)
 def _install_default_proxy_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _make_proxy_settings()
@@ -5483,6 +5501,64 @@ async def test_codex_control_request_persists_conversation_id_and_passes_dashboa
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["conversation_id"] == "conv-control"
+
+
+@pytest.mark.asyncio
+async def test_realtime_codex_control_policy_scope_reaches_initial_and_post_401_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_live_scope_a")
+    account_b = _make_account("acc_live_scope_b")
+    allowed_account_ids = frozenset({account_a.id, account_b.id})
+    selection_scopes: list[frozenset[str] | None] = []
+
+    async def initial_selection(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_scopes.append(cast(frozenset[str] | None, kwargs.get("allowed_account_ids")))
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def failover_selection(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_scopes.append(cast(frozenset[str] | None, kwargs.get("allowed_account_ids")))
+        assert kwargs["exclude_account_ids"] == {account_a.id}
+        return AccountSelection(account=account_b, error_message=None)
+
+    async def preserve_selected_account(account: Account, **_kwargs: object) -> Account:
+        return account
+
+    upstream_accounts: list[str | None] = []
+
+    async def fake_codex_control_request(*_args: object, account_id: str | None, **_kwargs: object):
+        upstream_accounts.append(account_id)
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
+        return proxy_module.CodexControlResponse(status_code=201, body=b"answer", headers={})
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", initial_selection)
+    monkeypatch.setattr(service, "_select_account_with_budget", failover_selection)
+    monkeypatch.setattr(service, "_ensure_previsible_unary_fresh_with_failover", preserve_selected_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget_or_auth_error", preserve_selected_account)
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_codex_control_request", fake_codex_control_request)
+
+    response = await service.codex_control_request(
+        "realtime/calls",
+        method="POST",
+        payload=b"offer",
+        query_params={},
+        headers={},
+        allowed_account_ids=allowed_account_ids,
+        privacy_policy=proxy_module.CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME,
+    )
+
+    assert response.status_code == 201
+    assert upstream_accounts == [
+        account_a.chatgpt_account_id,
+        account_a.chatgpt_account_id,
+        account_b.chatgpt_account_id,
+    ]
+    assert selection_scopes == [allowed_account_ids, allowed_account_ids]
 
 
 class _JsonCompactResponse:

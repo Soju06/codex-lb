@@ -30,9 +30,15 @@ Stripping during model validation was rejected because it would erase local dedu
 
 Compact serialization already delegates to the standard unsupported-field sanitizer before compact-specific trimming. Adding the compatibility normalization there keeps both wire paths consistent without duplicating behavior.
 
+### Preserve local metadata during replay-safety classification
+
+Account-neutral replay classification uses the same general request normalization but must retain namespace metadata so unknown owner-scoped call identity continues to fail closed. A dedicated replay-safety payload method skips only namespace removal; actual HTTP, WebSocket, compact, and model-source egress still removes it.
+
+Configured OpenAI-compatible model sources preserve request fields that the Codex upstream path strips, so source egress reuses only the namespace sanitizer rather than the full Codex unsupported-field sanitizer.
+
 ### Prove behavior at serialization and public route boundaries
 
-Unit tests will assert wire normalization and request-model preservation for normal and compact requests. Integration tests will capture the payload forwarded by `/v1/responses` and the actual upstream WebSocket `response.create` frame, establishing regression coverage for both transport paths including the externally observed failure.
+Unit tests will assert wire normalization, malformed-item handling, request-model preservation, and fail-closed replay classification. Integration tests will capture payloads forwarded by `/v1/responses`, a configured Responses model source, and the actual upstream WebSocket `response.create` frame.
 
 ## Risks / Trade-offs
 

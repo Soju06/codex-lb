@@ -201,6 +201,20 @@ def test_compact_to_payload_strips_replayed_tool_call_namespaces_only_on_wire():
     assert request.input == replayed_calls
 
 
+@pytest.mark.parametrize("invalid_type", [[], {}])
+def test_responses_to_payload_ignores_unhashable_replayed_item_types(invalid_type: JsonValue):
+    malformed_item = {"type": invalid_type, "namespace": "client-metadata", "value": "kept"}
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": [malformed_item],
+        }
+    )
+
+    assert request.to_payload()["input"] == [malformed_item]
+
+
 def test_responses_preserves_service_tier():
     payload = {
         "model": "gpt-5.1",

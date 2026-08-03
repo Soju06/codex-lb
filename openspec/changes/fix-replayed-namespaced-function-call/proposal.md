@@ -8,7 +8,9 @@ Replaying a namespaced Responses API tool call currently forwards its local-only
 - Preserve the validated request input, including namespace metadata, for local deduplication and continuity processing.
 - Preserve client-provided top-level namespace tool definitions byte-identically.
 - Apply the same outbound normalization to standard and compact Responses requests.
-- Add regression coverage at request serialization and the public HTTP and WebSocket Responses proxy paths.
+- Apply namespace-only normalization to configured OpenAI-compatible Responses model-source egress.
+- Preserve namespace metadata while classifying HTTP bridge requests for cross-account replay safety.
+- Add regression coverage at request serialization and the public HTTP, model-source, and WebSocket Responses proxy paths.
 
 ## Capabilities
 
@@ -23,5 +25,5 @@ None.
 ## Impact
 
 - Affects Responses request serialization in `app/core/openai/requests.py`.
-- Adds unit, `/v1/responses`, and WebSocket `response.create` integration regression tests.
+- Adds unit, `/v1/responses`, model-source, and WebSocket `response.create` integration regression tests.
 - Does not change dependencies, settings, schemas, or user-facing documentation.

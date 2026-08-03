@@ -13,3 +13,9 @@
 
 - [x] 3.1 Run formatter, linter, focused tests, and relevant broader request/proxy tests.
 - [x] 3.2 Run strict change validation, repository spec validation, OpenSpec verification, and inspect the final diff.
+
+## 4. Review findings
+
+- [x] 4.1 Preserve namespaced call identity in HTTP bridge account-neutral replay classification and add fail-closed coverage.
+- [x] 4.2 Apply namespace-only normalization to configured Responses model-source egress without stripping source-compatible fields.
+- [x] 4.3 Guard recognized tool-call membership against malformed non-string item types and add regression coverage.

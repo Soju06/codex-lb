@@ -132,6 +132,7 @@ from app.core.openai.requests import (
     extract_input_file_ids,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
+    strip_replayed_tool_call_namespaces_from_payload,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import (
@@ -4176,6 +4177,7 @@ async def _source_responses_response(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
     source_payload = payload.model_dump_for_forwarding()
+    strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
     _drop_unsupported_source_response_tools(

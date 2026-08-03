@@ -1365,6 +1365,78 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_strips_replayed_tool_call_namespaces_for_model_source(async_client, monkeypatch):
+    model = "external-v1-namespaced-replay"
+    await _create_model_source(
+        async_client,
+        name="v1-namespaced-replay",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_namespaced_replay",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "call_id": "call_1",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "custom_tool_call",
+                    "namespace": "exec",
+                    "call_id": "call_2",
+                    "name": "exec",
+                    "input": "pwd",
+                },
+            ],
+            "stream": True,
+            "temperature": 0.2,
+            "metadata": {"client": "source-compatible"},
+        },
+    )
+    assert response.status_code == 200
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "spawn_agent",
+            "arguments": "{}",
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_2",
+            "name": "exec",
+            "input": "pwd",
+        },
+    ]
+    assert forwarded_payload["temperature"] == 0.2
+    assert forwarded_payload["metadata"] == {"client": "source-compatible"}
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
     model = "external-codex-responses-tools"
     await _create_model_source(

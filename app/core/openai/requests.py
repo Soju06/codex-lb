@@ -725,6 +725,12 @@ class ResponsesRequest(BaseModel):
     def to_payload(self) -> JsonObject:
         return _strip_unsupported_fields(self.model_dump_for_forwarding())
 
+    def to_replay_safety_payload(self) -> JsonObject:
+        return _strip_unsupported_fields(
+            self.model_dump_for_forwarding(),
+            strip_replayed_tool_call_namespaces=False,
+        )
+
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -798,13 +804,18 @@ _COMPACT_OMITTED_INLINE_IMAGE_TEXT = (
 _COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"""data:image/[^,\s]+,[^\s"'<>]+""")
 
 
-def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
+def _strip_unsupported_fields(
+    payload: MutableJsonObject,
+    *,
+    strip_replayed_tool_call_namespaces: bool = True,
+) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
     _strip_subscription_prompt_cache_controls(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
-    _strip_replayed_tool_call_namespaces(payload)
+    if strip_replayed_tool_call_namespaces:
+        strip_replayed_tool_call_namespaces_from_payload(payload)
     # ``tools`` is deliberately NOT canonicalized here: the wire payload must
     # forward client tool entries byte-preserved (array order, key order, and
     # unknown keys untouched) so reserved model tools survive upstream
@@ -864,7 +875,7 @@ def _strip_subscription_prompt_cache_breakpoints(value: JsonValue | None) -> Non
         _strip_subscription_prompt_cache_breakpoints(child)
 
 
-def _strip_replayed_tool_call_namespaces(payload: MutableJsonObject) -> None:
+def strip_replayed_tool_call_namespaces_from_payload(payload: MutableJsonObject) -> None:
     input_value = payload.get("input")
     if not is_json_list(input_value):
         return
@@ -872,8 +883,13 @@ def _strip_replayed_tool_call_namespaces(payload: MutableJsonObject) -> None:
     normalized_items: list[JsonValue] = []
     changed = False
     for item in input_value:
-        if is_json_mapping(item) and item.get("type") in _TOOL_CALL_ITEM_TYPES and "namespace" in item:
-            normalized_item = dict(item)
+        if not is_json_mapping(item):
+            normalized_items.append(item)
+            continue
+        item_mapping = item
+        item_type = item_mapping.get("type")
+        if isinstance(item_type, str) and item_type in _TOOL_CALL_ITEM_TYPES and "namespace" in item_mapping:
+            normalized_item = dict(item_mapping)
             normalized_item.pop("namespace")
             normalized_items.append(normalized_item)
             changed = True

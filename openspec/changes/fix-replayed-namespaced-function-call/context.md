@@ -6,7 +6,7 @@ Newer Codex clients can replay historical `function_call`, `custom_tool_call`, a
 
 ## Decision and constraints
 
-Treat the namespace as local metadata: retain it on the parsed request and remove it only from the copied wire payload. The rule applies only to replayed tool-call `input` items; top-level `tools` entries, other input-item types, and cross-account replay policy remain unchanged.
+Treat the namespace as local metadata: retain it on the parsed request and replay-safety classifier input, then remove it only from copied wire payloads. The rule applies only to replayed tool-call `input` items; top-level `tools` entries, other input-item types, and cross-account replay policy remain unchanged. Configured model-source requests receive only this namespace normalization so their otherwise supported OpenAI-compatible fields are preserved.
 
 ## Failure modes
 

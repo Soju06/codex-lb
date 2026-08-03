@@ -13,7 +13,7 @@ For standard and compact Responses requests, the proxy MUST omit `namespace` fro
 
 #### Scenario: Compact Responses replay omits tool-call namespace upstream
 
-- **WHEN** a compact Responses request replays a recognized tool-call input item with a namespace
+- **WHEN** `/v1/responses/compact` replays a recognized tool-call input item with a namespace
 - **THEN** its upstream payload omits the input item's `namespace`
 - **AND** preserves the remaining tool-call fields
 

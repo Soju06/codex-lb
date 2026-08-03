@@ -19,3 +19,4 @@
 - [x] 4.1 Preserve namespaced call identity in HTTP bridge account-neutral replay classification and add fail-closed coverage.
 - [x] 4.2 Apply namespace-only normalization to configured Responses model-source egress without stripping source-compatible fields.
 - [x] 4.3 Guard recognized tool-call membership against malformed non-string item types and add regression coverage.
+- [x] 4.4 Cover namespace stripping through the public compact route and actual upstream compact payload.

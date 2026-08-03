@@ -32,7 +32,7 @@ Compact serialization already delegates to the standard unsupported-field saniti
 
 ### Prove behavior at serialization and public route boundaries
 
-Unit tests will assert wire normalization and request-model preservation for normal and compact requests. An integration test will capture the payload forwarded by `/v1/responses`, establishing regression coverage at the externally failing path.
+Unit tests will assert wire normalization and request-model preservation for normal and compact requests. Integration tests will capture the payload forwarded by `/v1/responses` and the actual upstream WebSocket `response.create` frame, establishing regression coverage for both transport paths including the externally observed failure.
 
 ## Risks / Trade-offs
 

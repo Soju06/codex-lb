@@ -8,7 +8,7 @@ Replaying a namespaced Responses API `function_call` currently forwards its loca
 - Preserve the validated request input, including namespace metadata, for local deduplication and continuity processing.
 - Preserve client-provided top-level namespace tool definitions byte-identically.
 - Apply the same outbound normalization to standard and compact Responses requests.
-- Add regression coverage at request serialization and the public Responses proxy path.
+- Add regression coverage at request serialization and the public HTTP and WebSocket Responses proxy paths.
 
 ## Capabilities
 
@@ -23,5 +23,5 @@ None.
 ## Impact
 
 - Affects Responses request serialization in `app/core/openai/requests.py`.
-- Adds unit and `/v1/responses` integration regression tests.
+- Adds unit, `/v1/responses`, and WebSocket `response.create` integration regression tests.
 - Does not change dependencies, settings, schemas, or user-facing documentation.

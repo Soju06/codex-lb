@@ -17,6 +17,12 @@ For standard and compact Responses requests, the proxy MUST omit `namespace` fro
 - **THEN** its upstream payload omits the input item's `namespace`
 - **AND** preserves the remaining function-call fields
 
+#### Scenario: WebSocket response.create omits function-call namespace upstream
+
+- **WHEN** a Responses WebSocket request replays a namespaced `function_call` input item
+- **THEN** the upstream `response.create` frame omits only that item's `namespace`
+- **AND** preserves its `call_id`, `name`, and `arguments`
+
 #### Scenario: Top-level namespace tool remains byte-preserved
 
 - **WHEN** the client includes a top-level tool entry whose `type` is `namespace`

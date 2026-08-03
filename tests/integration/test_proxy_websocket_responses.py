@@ -1701,6 +1701,95 @@ def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_in
     assert expected_tools_bytes in frame
 
 
+def test_backend_responses_websocket_strips_replayed_function_call_namespace(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_ws_replayed_namespaced_call",
+                        "object": "response",
+                        "status": "in_progress",
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_replayed_namespaced_call",
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        del authorization, request
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return SimpleNamespace(id="acct_ws_namespaced_call", codex_installation_id=None), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "continue",
+        "input": [
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "spawn_agent",
+                "arguments": '{"message":"same task"}',
+                "call_id": "call_123",
+            }
+        ],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+    assert len(fake_upstream.sent_text) == 1
+    upstream_frame = json.loads(fake_upstream.sent_text[0])
+    assert upstream_frame["type"] == "response.create"
+    assert upstream_frame["input"] == [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        }
+    ]
+
+
 def test_backend_responses_websocket_lite_marker_requires_previous_response_linkage(app_instance, monkeypatch):
     def _response_batch(response_id: str) -> list[_FakeUpstreamMessage]:
         return [

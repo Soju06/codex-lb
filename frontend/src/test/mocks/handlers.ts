@@ -99,6 +99,11 @@ const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
 
+const OAuthLivePolicyPayloadSchema = z.object({
+  isActive: z.boolean(),
+  allowedAccountIds: z.array(z.string()),
+});
+
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: z
@@ -243,6 +248,10 @@ async function parseJsonBody<T>(
 
 type MockState = {
   accounts: AccountSummary[];
+  oauthLivePolicies: Record<
+    string,
+    { callerAccountId: string; isActive: boolean; allowedAccountIds: string[] }
+  >;
   requestLogs: RequestLogEntry[];
   conversations: ConversationEntry[];
   conversationDetails: ConversationDetails[];
@@ -328,6 +337,7 @@ type MockState = {
 function createInitialState(): MockState {
   return {
     accounts: createDefaultAccounts(),
+    oauthLivePolicies: {},
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -833,6 +843,43 @@ export const handlers = [
 
   http.get("/api/accounts", () => {
     return HttpResponse.json({ accounts: state.accounts });
+  }),
+
+  http.get("/api/accounts/:accountId/oauth-live-policy", ({ params }) => {
+    const accountId = String(params.accountId);
+    if (!findAccount(accountId)) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json(
+      state.oauthLivePolicies[accountId] ?? {
+        callerAccountId: accountId,
+        isActive: false,
+        allowedAccountIds: [],
+      },
+    );
+  }),
+
+  http.put("/api/accounts/:accountId/oauth-live-policy", async ({ params, request }) => {
+    const accountId = String(params.accountId);
+    if (!findAccount(accountId)) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    const payload = await parseJsonBody(request, OAuthLivePolicyPayloadSchema);
+    if (!payload || (payload.isActive && payload.allowedAccountIds.length === 0)) {
+      return HttpResponse.json(
+        { error: { code: "invalid_oauth_live_policy", message: "Invalid OAuth Live policy" } },
+        { status: 400 },
+      );
+    }
+    const policy = { callerAccountId: accountId, ...payload };
+    state.oauthLivePolicies[accountId] = policy;
+    return HttpResponse.json(policy);
   }),
 
   http.post("/api/accounts/import", async () => {

@@ -28,6 +28,8 @@ import {
   OauthStatusResponseSchema,
   RateLimitResetCreditsSnapshotSchema,
   RuntimeConnectAddressResponseSchema,
+  OAuthLivePolicySchema,
+  OAuthLivePolicyUpdateRequestSchema,
 } from "@/features/accounts/schemas";
 import type {
   AccountRoutingPolicy,
@@ -39,6 +41,22 @@ const OAUTH_BASE_PATH = "/api/oauth";
 
 export function listAccounts() {
   return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
+}
+
+export function getOAuthLivePolicy(accountId: string) {
+  return get(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/oauth-live-policy`,
+    OAuthLivePolicySchema,
+  );
+}
+
+export function updateOAuthLivePolicy(accountId: string, payload: unknown) {
+  const validated = OAuthLivePolicyUpdateRequestSchema.parse(payload);
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/oauth-live-policy`,
+    OAuthLivePolicySchema,
+    { body: validated },
+  );
 }
 
 export function importAccount(file: File) {

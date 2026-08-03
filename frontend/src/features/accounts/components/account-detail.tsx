@@ -10,6 +10,7 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountProxyBinding } from "@/features/accounts/components/account-proxy-binding";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
+import { OAuthLivePolicyCard } from "@/features/accounts/components/oauth-live-policy-card";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type {
   AccountRoutingPolicy,
@@ -172,6 +173,7 @@ export function AccountDetail({
         onReset={onResetUsage}
       />
       <AccountTokenInfo account={account} />
+      <OAuthLivePolicyCard accountId={account.accountId} readOnly={readOnly} />
       <AccountActions
         account={account}
         busy={busy}

@@ -35,6 +35,8 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/conversations/:conversationId",
 	// accounts
 	"GET /api/accounts",
+	"GET /api/accounts/:accountId/oauth-live-policy",
+	"PUT /api/accounts/:accountId/oauth-live-policy",
 	"POST /api/accounts/import",
 	"PATCH /api/accounts/:accountId",
 	"POST /api/accounts/:accountId/pause",

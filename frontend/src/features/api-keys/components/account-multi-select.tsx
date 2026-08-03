@@ -28,6 +28,8 @@ export type AccountMultiSelectProps = {
   ariaDescribedBy?: string;
   triggerClassName?: string;
   allowPausedAccounts?: boolean;
+  selectionMode?: "all-or-subset" | "explicit";
+  disabled?: boolean;
 };
 type LimitChip = {
   key: string;
@@ -142,6 +144,8 @@ export function AccountMultiSelect({
   ariaDescribedBy,
   triggerClassName,
   allowPausedAccounts = false,
+  selectionMode = "all-or-subset",
+  disabled = false,
 }: AccountMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
@@ -195,10 +199,6 @@ export function AccountMultiSelect({
     [onChange, value],
   );
 
-  const selectAll = useCallback(() => {
-    onChange([]);
-  }, [onChange]);
-
   const label =
     value.length === 0 ? placeholderLabel : t("apiKeys.accountSelect.selected", { count: value.length });
 
@@ -213,7 +213,7 @@ export function AccountMultiSelect({
             aria-invalid={ariaInvalid}
             aria-describedby={ariaDescribedBy}
             className={cn("w-full justify-between font-normal", triggerClassName)}
-            disabled={accountsQuery.isLoading}
+            disabled={disabled || accountsQuery.isLoading}
           >
             <span className="truncate text-left">
               {accountsQuery.isLoading ? t("apiKeys.accountSelect.loading") : label}
@@ -233,14 +233,18 @@ export function AccountMultiSelect({
             />
           </div>
           <DropdownMenuSeparator />
-          <DropdownMenuCheckboxItem
-            checked={value.length === 0}
-            onCheckedChange={selectAll}
-            onSelect={(event) => event.preventDefault()}
-          >
-            {t("apiKeys.accountSelect.all")}
-          </DropdownMenuCheckboxItem>
-          <DropdownMenuSeparator />
+          {selectionMode === "all-or-subset" ? (
+            <>
+              <DropdownMenuCheckboxItem
+                checked={value.length === 0}
+                onCheckedChange={() => onChange([])}
+                onSelect={(event) => event.preventDefault()}
+              >
+                {t("apiKeys.accountSelect.all")}
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+            </>
+          ) : null}
           {filtered.map((account) => (
             <DropdownMenuCheckboxItem
               key={account.accountId}
@@ -266,6 +270,7 @@ export function AccountMultiSelect({
               <button
                 type="button"
                 className="ml-0.5 hover:text-foreground"
+                disabled={disabled}
                 onClick={() => remove(account.accountId)}
               >
                 <X className="size-3" />

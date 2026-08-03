@@ -139,6 +139,17 @@ export const AccountsResponseSchema = z.object({
   accounts: z.array(AccountSummarySchema),
 });
 
+export const OAuthLivePolicySchema = z.object({
+  callerAccountId: z.string(),
+  isActive: z.boolean(),
+  allowedAccountIds: z.array(z.string()),
+});
+
+export const OAuthLivePolicyUpdateRequestSchema = z.object({
+  isActive: z.boolean(),
+  allowedAccountIds: z.array(z.string()),
+});
+
 export const AccountImportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
@@ -335,6 +346,10 @@ export const ImportStateSchema = z.object({
 
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type OAuthLivePolicy = z.infer<typeof OAuthLivePolicySchema>;
+export type OAuthLivePolicyUpdateRequest = z.infer<
+  typeof OAuthLivePolicyUpdateRequestSchema
+>;
 export type RateLimitResetCreditItem = z.infer<typeof RateLimitResetCreditItemSchema>;
 export type RateLimitResetCreditsSnapshot = z.infer<
   typeof RateLimitResetCreditsSnapshotSchema

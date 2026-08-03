@@ -54,6 +54,26 @@ describe("AccountMultiSelect", () => {
     });
   });
 
+  it("keeps an empty explicit selection empty and hides the all-accounts choice", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={[]}
+        onChange={onChange}
+        selectionMode="explicit"
+        placeholder="Select allowed accounts"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Select allowed accounts" }));
+
+    expect(screen.queryByRole("menuitemcheckbox", { name: "All accounts" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
+    expect(onChange).toHaveBeenCalledWith(["acc_primary"]);
+  });
+
   it("pluralizes the selected account count", async () => {
     renderWithProviders(
       <AccountMultiSelect value={["acc_primary", "acc_secondary"]} onChange={vi.fn()} />,

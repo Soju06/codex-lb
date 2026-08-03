@@ -38,6 +38,24 @@ vi.mock("@/features/accounts/hooks/use-oauth", () => ({
   })),
 }));
 
+vi.mock("@/features/accounts/hooks/use-oauth-live-policy", () => ({
+  useOAuthLivePolicy: vi.fn((accountId: string) => ({
+    policyQuery: {
+      data: {
+        callerAccountId: accountId,
+        isActive: false,
+        allowedAccountIds: [],
+      },
+      isLoading: false,
+      isError: false,
+    },
+    updateMutation: {
+      isPending: false,
+      mutate: vi.fn(),
+    },
+  })),
+}));
+
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: vi.fn(() => ({
     settingsQuery: {

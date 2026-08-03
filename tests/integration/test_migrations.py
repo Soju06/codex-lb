@@ -1416,7 +1416,7 @@ async def test_account_plan_downgrade_observations_migration_upgrade_and_downgra
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'plan-downgrade-observations.sqlite'}"
-    parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
+    parent_revision = "20260731_000000_add_capability_lineage_markers"
     observations_revision = "20260726_000000_add_account_plan_downgrade_observations"
     table_name = "account_plan_downgrade_observations"
     expected_columns = {

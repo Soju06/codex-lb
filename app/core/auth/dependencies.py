@@ -9,8 +9,8 @@ from fastapi import Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.requests import HTTPConnection
 
-from app.core.auth import generate_unique_account_id
 from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.auth.codex_oauth_identity import resolve_verified_codex_oauth_identity
 from app.core.auth.dashboard_access import (
     DashboardPermission,
     DashboardPrincipal,
@@ -19,18 +19,13 @@ from app.core.auth.dashboard_access import (
     guest_principal,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
-from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
-from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardAuthError, DashboardPermissionError, ProxyAuthError, ProxyUpstreamError
+from app.core.exceptions import DashboardAuthError, DashboardPermissionError, ProxyAuthError
 from app.core.request_locality import is_local_request
 from app.core.socket_peer import raw_socket_peer_host
-from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
-from app.db.models import AccountStatus
 from app.db.session import get_background_session
-from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyInvalidError, ApiKeysService
 from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
@@ -38,13 +33,6 @@ from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_das
 logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
-_CODEX_USAGE_IDENTITY_INACTIVE_WORKSPACE_STATUSES = {
-    AccountStatus.PAUSED,
-    AccountStatus.REAUTH_REQUIRED,
-    AccountStatus.DEACTIVATED,
-}
-
-
 # --- Error format markers ---
 
 
@@ -294,75 +282,19 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
     if not token:
         raise ProxyAuthError("Missing ChatGPT token in Authorization header")
 
-    raw_account_id = request.headers.get("chatgpt-account-id")
-    account_id = raw_account_id.strip() if raw_account_id else ""
-    if not account_id:
-        if token.startswith("sk-clb-"):
-            return await _validate_api_key_token(token)
-        raise ProxyAuthError("Missing chatgpt-account-id header")
+    if token.startswith("sk-clb-"):
+        return await _validate_api_key_token(token)
 
-    async with get_background_session() as session:
-        accounts_repo = AccountsRepository(session)
-        account = await accounts_repo.get_active_by_chatgpt_account_id(account_id)
-        if account is None:
-            raise ProxyAuthError("Unknown or inactive chatgpt-account-id")
-        local_account_id = account.id
-        local_account_email = account.email
-        try:
-            route = await resolve_upstream_route(
-                session,
-                account_id=local_account_id,
-                operation="usage_identity",
-                scope="account",
-                encryptor=TokenEncryptor(),
-            )
-        except UpstreamProxyRouteError as exc:
-            raise ProxyUpstreamError("Unable to resolve upstream proxy route for ChatGPT credentials") from exc
-
-    try:
-        usage_payload = await fetch_usage(
-            access_token=token,
-            account_id=account_id,
-            route=route,
-            allow_direct_egress=route is None,
-        )
-    except UsageFetchError as exc:
-        if exc.status_code == 429:
-            from app.core.exceptions import ProxyRateLimitError
-
-            raise ProxyRateLimitError(exc.message) from exc
-        if exc.status_code in (401, 403):
-            raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
-        raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
-    if usage_payload is not None and (usage_payload.workspace_id or usage_payload.workspace_label):
-        expected_account_id = generate_unique_account_id(
-            account_id,
-            local_account_email,
-            usage_payload.workspace_id,
-            usage_payload.workspace_label,
-        )
-        async with get_background_session() as session:
-            accounts_repo = AccountsRepository(session)
-            workspace_account = await accounts_repo.get_by_id(expected_account_id)
-            if workspace_account is not None and workspace_account.chatgpt_account_id == account_id:
-                if workspace_account.status in _CODEX_USAGE_IDENTITY_INACTIVE_WORKSPACE_STATUSES:
-                    raise ProxyAuthError("Unknown or inactive chatgpt-account-id")
-                local_account_id = workspace_account.id
-                try:
-                    route = await resolve_upstream_route(
-                        session,
-                        account_id=local_account_id,
-                        operation="usage_identity",
-                        scope="account",
-                        encryptor=TokenEncryptor(),
-                    )
-                except UpstreamProxyRouteError as exc:
-                    raise ProxyUpstreamError("Unable to resolve upstream proxy route for ChatGPT credentials") from exc
+    identity = await resolve_verified_codex_oauth_identity(
+        request.headers.get("Authorization"),
+        request.headers.get("chatgpt-account-id"),
+    )
     request.state.codex_usage_identity_access_token = token
-    request.state.codex_usage_identity_chatgpt_account_id = account_id
-    request.state.codex_usage_identity_account_id = local_account_id
-    request.state.codex_usage_identity_route = route
-    request.state.codex_usage_identity_payload = usage_payload
+    request.state.codex_usage_identity_chatgpt_account_id = identity.chatgpt_account_id
+    request.state.codex_usage_identity_account_id = identity.caller_account_id
+    request.state.codex_usage_identity_principal_id = identity.principal_id
+    request.state.codex_usage_identity_route = identity.route
+    request.state.codex_usage_identity_payload = identity.usage_payload
     return None
 
 

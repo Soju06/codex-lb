@@ -25,6 +25,7 @@ from app.modules.proxy._service.realtime_live import (
     realtime_call_id_from_location,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.realtime_auth import RealtimeCallerScope
 
 
 def _unscoped_api_key(*, key_id: str = "api-key-a") -> ApiKeyData:
@@ -200,6 +201,7 @@ class _ProxyService(_RealtimeLiveMixin):
         self._load_balancer = _FakeLoadBalancer()
         self.selection_calls: list[dict[str, object]] = []
         self.decrypt_calls: list[str] = []
+        self.request_log_calls: list[dict[str, object]] = []
         self._encryptor = SimpleNamespace(decrypt=self._decrypt)
         self._live_websocket_connector = live_websocket_connector
 
@@ -210,9 +212,9 @@ class _ProxyService(_RealtimeLiveMixin):
         self.decrypt_calls.append(value)
         return f"decrypted:{value}"
 
-    async def _resolve_realtime_call_owner(self, call_id: str, *, api_key):
+    async def _resolve_realtime_call_owner(self, call_id: str, *, caller_scope=None, api_key=None):
         assert call_id == "rtc_example"
-        assert api_key is not None
+        assert caller_scope is not None or api_key is not None
         return self.owner_account_id
 
     async def _select_account_with_budget_compatible(self, _deadline: float, **_kwargs):
@@ -225,7 +227,7 @@ class _ProxyService(_RealtimeLiveMixin):
         return None
 
     async def _write_request_log(self, **_kwargs) -> None:
-        return None
+        self.request_log_calls.append(_kwargs)
 
 
 @pytest.mark.parametrize(
@@ -875,6 +877,67 @@ async def test_live_sideband_accepts_only_absent_or_offered_upstream_subprotocol
     assert isinstance(connector_subprotocols, tuple)
     assert downstream.accepted_subprotocol == expected_accepted_subprotocol
     assert service._load_balancer.released == [lease]
+
+
+@pytest.mark.asyncio
+async def test_oauth_live_sideband_carries_policy_scope_and_logs_null_api_key() -> None:
+    lease = cast(AccountLease, object())
+    account = SimpleNamespace(
+        id="account-a",
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted="encrypted-token",
+        chatgpt_account_id="chatgpt-account-a",
+        codex_installation_id="installation-a",
+    )
+    downstream = _FakeDownstreamWebSocket()
+    upstream = _FakeUpstreamWebSocket()
+
+    async def fake_connect_live_websocket(*_args, **_kwargs):
+        return upstream
+
+    service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
+    caller_scope = RealtimeCallerScope.for_oauth(
+        principal_id="caller-account",
+        allowed_account_ids={"account-a"},
+    )
+
+    await service.proxy_realtime_live_websocket(
+        cast(Any, downstream),
+        "rtc_example",
+        {},
+        protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+        caller_scope=caller_scope,
+    )
+
+    assert service.selection_calls[0]["api_key"] is None
+    assert service.selection_calls[0]["allowed_account_ids"] == frozenset({"account-a"})
+    assert service.selection_calls[0]["preferred_account_id"] == "account-a"
+    assert service.selection_calls[0]["preferred_account_is_continuity_owner"] is True
+    assert service.selection_calls[0]["fallback_on_preferred_account_unavailable"] is False
+    assert service.request_log_calls[0]["api_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_live_sideband_rejects_owner_removed_from_current_policy_before_selection() -> None:
+    service = _ProxyService(SimpleNamespace(id="account-a"), None)
+    caller_scope = RealtimeCallerScope.for_oauth(
+        principal_id="caller-account",
+        allowed_account_ids={"account-b"},
+    )
+
+    with pytest.raises(ProxyResponseError) as raised:
+        await service.proxy_realtime_live_websocket(
+            cast(Any, _FakeDownstreamWebSocket()),
+            "rtc_example",
+            {},
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+            caller_scope=caller_scope,
+        )
+
+    assert raised.value.status_code == 404
+    assert raised.value.payload["error"]["code"] == "realtime_call_not_found"
+    assert service.selection_calls == []
+    assert service.decrypt_calls == []
 
 
 @pytest.mark.asyncio

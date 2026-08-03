@@ -6,9 +6,9 @@ Define private Codex Live Voice call-owner continuity, authenticated sideband ro
 
 ## Requirements
 
-### Requirement: Realtime call creation binds the final account under a required proxy key
+### Requirement: Call creation binds the final account under an authenticated caller scope
 
-The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/realtime/calls` even when ordinary proxy API-key authentication is disabled. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, it MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the proxy key, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body. Private call-creation diagnostics, including caller-local AuthManager metadata work and process-global shared refresh work, MUST redact internal account identifiers and suppress exception details; shared refresh diagnostics MUST use the strict policy regardless of which caller creates the singleflight task.
+`POST /backend-api/codex/realtime/calls` SHALL require either a registered Proxy API Key or a verified OAuth principal. A `sk-clb-` bearer SHALL use strict Key validation. OAuth SHALL require an active global policy with at least one currently active allowed Account. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, the proxy MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the authenticated caller, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body. Key callers retain `SHA256(api_key.id + NUL + call_id)`. OAuth callers use the same digest formula with `oauth:{principal_id}` as scope material. Private call-creation diagnostics MUST redact internal account identifiers and suppress exception details.
 
 #### Scenario: initial or replacement account creates the call
 
@@ -23,12 +23,30 @@ The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/
 - **THEN** the proxy binds only the bounded call id parsed from the path before the first `?`
 - **AND** it neither persists nor logs the discarded query or fragment text
 
-#### Scenario: private call creation has no registered key
+#### Scenario: private call creation has no authenticated caller
 
 - **GIVEN** ordinary proxy authentication is disabled
-- **WHEN** a caller omits a key or supplies an unregistered key to realtime call creation
+- **WHEN** a caller omits authorization, supplies a malformed bearer, or supplies an unregistered `sk-clb-` Key to realtime call creation
 - **THEN** the proxy rejects the request before selecting or contacting an upstream account
 - **AND** it does not create an anonymous ownership namespace
+
+#### Scenario: verified OAuth principal creates a call
+
+- **GIVEN** verified OAuth credentials and an active global policy with eligible serving Accounts
+- **WHEN** call creation succeeds
+- **THEN** the final serving Account binds under the OAuth principal
+- **AND** request logging uses nullable API-key attribution
+
+#### Scenario: registered Key remains compatible with Codex conversations
+
+- **GIVEN** a Codex provider uses `requires_openai_auth = true` and a registered Key through `env_key`
+- **WHEN** the client sends ordinary conversation traffic or creates and attaches a Live call
+- **THEN** existing Key assignments, limits, attribution, and caller-scoped ownership remain unchanged
+
+#### Scenario: global OAuth policy is inactive
+
+- **WHEN** valid OAuth credentials reach Live while the global policy is inactive or empty after active-account filtering
+- **THEN** the route returns `403 oauth_live_not_enabled` before account selection
 
 #### Scenario: successful response cannot be bound
 
@@ -56,7 +74,7 @@ The proxy SHALL require a registered proxy API key for `POST /backend-api/codex/
 
 ### Requirement: Every sideband route uses the exact bound owner without refresh or failover
 
-The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}`, and `WS /v1/realtime?call_id={call_id}` only to a registered proxy key and only for that key's live binding. All adapters MUST use one bounded call-id normalizer, current key-assignment check, exact-owner selection, fresh owner load, reattach stream lease, relay, and connector service. Current-app and v3 ingress MUST reject any downstream `call_id` query parameter before entering the live service or connector and MUST NOT reconcile it with the path id. Current-app and v3 ingress MUST connect upstream to `/v1/live/{call_id}`. Legacy ingress MUST consume exactly one downstream `call_id` and append its normalized value once after remaining ordered query pairs to `/v1/realtime`.
+The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}`, and `WS /v1/realtime?call_id={call_id}` to registered Proxy API Keys and verified OAuth principals. All three routes SHALL use the same caller resolver as call creation. All adapters MUST use one bounded call-id normalizer, current caller policy check, exact-owner selection, fresh owner load, reattach stream lease, relay, and connector service. OAuth sideband SHALL resolve ownership with `principal_id` and confirm that the immutable owner remains in the current global allowed set. Current-app and v3 ingress MUST reject any downstream `call_id` query parameter before entering the live service or connector and MUST NOT reconcile it with the path id. Current-app and v3 ingress MUST connect upstream to `/v1/live/{call_id}`. Legacy ingress MUST consume exactly one downstream `call_id` and append its normalized value once after remaining ordered query pairs to `/v1/realtime`.
 
 #### Scenario: returned Location joins through every supported ingress
 
@@ -80,7 +98,7 @@ The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}
 
 #### Scenario: caller or owner policy changed
 
-- **WHEN** another key knows the call id, the owner is no longer assigned, or the owner is missing, paused, deleted, capped, or unavailable
+- **WHEN** another caller knows the call id, the owner leaves the caller's current allowed scope, or the owner is missing, paused, deleted, capped, or unavailable
 - **THEN** attachment fails closed without revealing or substituting the owner
 - **AND** it neither refreshes credentials nor selects another account
 
@@ -132,6 +150,8 @@ The live connector MUST replace downstream proxy authorization, account identity
 
 Reserved realtime ownership is internal continuity state. Ordinary sticky-session operator APIs MUST hide it and MUST NOT delete it through single, bulk, filtered, or delete-all operations. The dashboard `RequestLogsResponseSchema` MUST accept a persisted full request row whose `requestKind` is `realtime_live` and transport is `websocket`; it MUST retain a closed enum rather than weakening request kinds to arbitrary strings.
 
+OAuth Live rows SHALL persist `api_key_id = NULL`. Key rows SHALL retain their existing API-key attribution. Both forms SHALL preserve the same credential-safe payload exclusions.
+
 #### Scenario: reserved owner is not an operator session
 
 - **GIVEN** reserved realtime ownership and ordinary sticky-session rows exist
@@ -147,10 +167,21 @@ Reserved realtime ownership is internal continuity state. Ordinary sticky-sessio
 
 ### Requirement: Private realtime compatibility preserves zero-config base behavior and public boundaries
 
-The capability MUST use existing configuration and key registration. It MUST add no setting, migration, dependency, dashboard navigation item, README section, `.env.example` line, public model entry, public `/v1/realtime/calls`, or public `/v1/realtime/client_secrets` implementation. Its user documentation MUST identify these routes as private Codex app compatibility rather than advertise a public Realtime API. Without a registered key the private routes are unavailable, while the untouched base proxy and dashboard MUST continue to start and operate with zero new setup.
+The capability MUST preserve existing Key configuration and registration. OAuth Live policy MUST default to inactive. It MUST add no dependency, dashboard navigation item, README section, `.env.example` line, public model entry, public `/v1/realtime/calls`, or public `/v1/realtime/client_secrets` implementation. Its user documentation MUST identify these routes as private Codex app compatibility rather than advertise a public Realtime API. The base proxy and dashboard MUST continue to start and operate with zero new setup.
 
 #### Scenario: operator does not use Live Voice
 
 - **WHEN** an operator starts the base proxy and dashboard without adding configuration for this capability
 - **THEN** existing startup and ordinary proxy/dashboard behavior remain available
 - **AND** no public model or documented public Realtime route advertises this private transport
+
+### Requirement: Explicit first-party client routing remains documented
+
+Documentation SHALL present two complete Codex client profiles. The built-in OAuth profile SHALL retain `model_provider = "openai"`. The registered-Key profile SHALL retain `requires_openai_auth = true` with `env_key = "CODEX_LB_API_KEY"`. Both profiles SHALL identify `experimental_realtime_webrtc_call_base_url` for `/backend-api/codex` and `experimental_realtime_ws_base_url` for `/v1`. An inactive global OAuth policy SHALL leave ordinary proxy, dashboard, and Key Live behavior available.
+
+#### Scenario: Operator configures either supported Codex profile
+
+- **WHEN** an operator follows the built-in OAuth profile or the registered-Key profile
+- **THEN** ordinary conversations use the selected provider contract
+- **AND** call creation and sideband both route through codex-lb
+- **AND** the OAuth Live policy controls only verified OAuth callers

@@ -149,6 +149,28 @@ def resolve_seat_identity(claims: "IdTokenClaims", auth_claims: "OpenAIAuthClaim
     return clean_account_identity_part(resolved_auth.chatgpt_user_id or claims.chatgpt_user_id or claims.sub)
 
 
+def resolve_seat_identity_aliases(
+    claims: "IdTokenClaims",
+    auth_claims: "OpenAIAuthClaims | None" = None,
+) -> frozenset[str]:
+    """Return every stable per-seat principal alias carried by one JWT.
+
+    Access and ID tokens can describe the same seat with different claim names:
+    ``chatgpt_user_id`` commonly uses a ``user-...`` value while ``sub`` can use
+    an Auth0 or social-login principal. Keeping all verified aliases lets callers
+    match an access token to the imported account's stored ID token without
+    assuming those two identifiers are byte-identical.
+    """
+
+    resolved_auth = auth_claims if auth_claims is not None else (claims.auth or OpenAIAuthClaims())
+    aliases = (
+        clean_account_identity_part(resolved_auth.chatgpt_user_id),
+        clean_account_identity_part(claims.chatgpt_user_id),
+        clean_account_identity_part(claims.sub),
+    )
+    return frozenset(alias for alias in aliases if alias is not None)
+
+
 def parse_auth_json(raw: bytes) -> AuthFile:
     data = json.loads(raw)
     model = AuthFile.model_validate(data)

@@ -1689,6 +1689,7 @@ class ProxyService(
         kind: str,
         request_stage: str = "first_turn",
         api_key: ApiKeyData | None = None,
+        allowed_account_ids: Collection[str] | None = None,
         sticky_key: str | None = None,
         sticky_kind: StickySessionKind | None = None,
         reallocate_sticky: bool = False,
@@ -1719,10 +1720,17 @@ class ProxyService(
                 "%s request budget exhausted before account selection request_id=%s", kind.title(), request_id
             )
             _raise_proxy_budget_exhausted()
-        scoped_account_ids = (
+        key_scoped_account_ids = (
             set(api_key.assigned_account_ids)
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
+        )
+        scoped_account_ids = (
+            key_scoped_account_ids
+            if allowed_account_ids is None
+            else set(allowed_account_ids)
+            if key_scoped_account_ids is None
+            else key_scoped_account_ids.intersection(allowed_account_ids)
         )
         effective_traffic_class = (
             TRAFFIC_CLASS_OPPORTUNISTIC

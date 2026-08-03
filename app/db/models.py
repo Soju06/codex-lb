@@ -7,6 +7,7 @@ from enum import Enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -1102,6 +1103,64 @@ class ApiKey(Base):
         back_populates="api_key",
         cascade="all, delete-orphan",
         lazy="selectin",
+    )
+
+
+class OAuthLivePolicy(Base):
+    __tablename__ = "oauth_live_global_policy"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_oauth_live_global_policy_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    allowed_accounts: Mapped[list["OAuthLivePolicyAccount"]] = relationship(
+        "OAuthLivePolicyAccount",
+        back_populates="policy",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class OAuthLivePolicyAccount(Base):
+    __tablename__ = "oauth_live_global_policy_accounts"
+    __table_args__ = (
+        Index(
+            "ix_oauth_live_global_policy_accounts_allowed_account_id",
+            "allowed_account_id",
+        ),
+    )
+
+    policy_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("oauth_live_global_policy.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    allowed_account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    policy: Mapped["OAuthLivePolicy"] = relationship(
+        "OAuthLivePolicy",
+        back_populates="allowed_accounts",
     )
 
 

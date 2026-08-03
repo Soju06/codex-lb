@@ -31,6 +31,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.realtime_auth import RealtimeCallerScope
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.sticky_repository import RESERVED_STICKY_SESSION_KEY_PREFIX
 
@@ -92,7 +93,8 @@ class _RealtimeLiveServiceProtocol(Protocol):
         *,
         request_id: str,
         kind: str,
-        api_key: ApiKeyData,
+        api_key: ApiKeyData | None,
+        allowed_account_ids: frozenset[str] | None,
         model: str | None,
         preferred_account_id: str,
         preferred_account_is_continuity_owner: bool,
@@ -113,7 +115,7 @@ class _RealtimeLiveServiceProtocol(Protocol):
         self,
         *,
         account_id: str | None,
-        api_key: ApiKeyData,
+        api_key: ApiKeyData | None,
         request_id: str,
         model: str | None,
         latency_ms: int,
@@ -155,12 +157,24 @@ def realtime_call_id_from_location(headers: Mapping[str, str]) -> str | None:
     return normalize_realtime_call_id(path_segments[4])
 
 
-def realtime_call_affinity_key(call_id: str, api_key: ApiKeyData) -> str:
+def realtime_call_affinity_key(call_id: str, caller: RealtimeCallerScope | ApiKeyData) -> str:
     normalized = normalize_realtime_call_id(call_id)
     if normalized is None:
         raise ValueError("Invalid realtime call id")
-    digest = hashlib.sha256(f"{api_key.id}\0{normalized}".encode()).hexdigest()
+    scope_material = caller.affinity_scope_material if isinstance(caller, RealtimeCallerScope) else caller.id
+    digest = hashlib.sha256(f"{scope_material}\0{normalized}".encode()).hexdigest()
     return f"{_REALTIME_CALL_AFFINITY_PREFIX}{digest}"
+
+
+def _caller_scope(
+    caller_scope: RealtimeCallerScope | None,
+    api_key: ApiKeyData | None,
+) -> RealtimeCallerScope:
+    if caller_scope is not None:
+        return caller_scope
+    if api_key is not None:
+        return RealtimeCallerScope.for_api_key(api_key)
+    raise TypeError("Realtime caller scope is required")
 
 
 def _valid_close_code(value: int | None, *, default: int) -> int:
@@ -396,7 +410,8 @@ class _RealtimeLiveMixin:
         *,
         response_headers: Mapping[str, str],
         account_id: str,
-        api_key: ApiKeyData,
+        caller_scope: RealtimeCallerScope | None = None,
+        api_key: ApiKeyData | None = None,
     ) -> str | None:
         call_id = realtime_call_id_from_location(response_headers)
         if call_id is None:
@@ -404,7 +419,8 @@ class _RealtimeLiveMixin:
             return None
 
         proxy = cast(_RealtimeLiveServiceProtocol, self)
-        affinity_key = realtime_call_affinity_key(call_id, api_key)
+        scope = _caller_scope(caller_scope, api_key)
+        affinity_key = realtime_call_affinity_key(call_id, scope)
         async with proxy._repo_factory() as repos:
             persisted_owner_id = await repos.sticky_sessions.get_account_id(
                 affinity_key,
@@ -427,10 +443,11 @@ class _RealtimeLiveMixin:
         self,
         call_id: str,
         *,
-        api_key: ApiKeyData,
+        caller_scope: RealtimeCallerScope | None = None,
+        api_key: ApiKeyData | None = None,
     ) -> str | None:
         proxy = cast(_RealtimeLiveServiceProtocol, self)
-        affinity_key = realtime_call_affinity_key(call_id, api_key)
+        affinity_key = realtime_call_affinity_key(call_id, _caller_scope(caller_scope, api_key))
         async with proxy._repo_factory() as repos:
             return await repos.sticky_sessions.get_account_id(
                 affinity_key,
@@ -446,7 +463,8 @@ class _RealtimeLiveMixin:
         query_params: Mapping[str, str] | Sequence[tuple[str, str]] = (),
         *,
         protocol: RealtimeWebSocketProtocol,
-        api_key: ApiKeyData,
+        caller_scope: RealtimeCallerScope | None = None,
+        api_key: ApiKeyData | None = None,
         client_ip: str | None = None,
     ) -> None:
         normalized_call_id = normalize_realtime_call_id(call_id)
@@ -457,10 +475,18 @@ class _RealtimeLiveMixin:
             )
 
         proxy = cast(_RealtimeLiveServiceProtocol, self)
-        owner_account_id = await self._resolve_realtime_call_owner(normalized_call_id, api_key=api_key)
-        if owner_account_id is None or (
-            api_key.account_assignment_scope_enabled and owner_account_id not in api_key.assigned_account_ids
-        ):
+        scope = _caller_scope(caller_scope, api_key)
+        if scope.api_key is not None:
+            owner_account_id = await self._resolve_realtime_call_owner(
+                normalized_call_id,
+                api_key=scope.api_key,
+            )
+        else:
+            owner_account_id = await self._resolve_realtime_call_owner(
+                normalized_call_id,
+                caller_scope=scope,
+            )
+        if owner_account_id is None or not scope.allows_account(owner_account_id):
             raise ProxyResponseError(
                 404,
                 openai_error("realtime_call_not_found", "Realtime call binding not found or expired"),
@@ -475,7 +501,8 @@ class _RealtimeLiveMixin:
             start + settings.proxy_request_budget_seconds,
             request_id=request_id,
             kind="realtime_live_websocket",
-            api_key=api_key,
+            api_key=scope.api_key,
+            allowed_account_ids=scope.allowed_account_ids,
             model=None,
             preferred_account_id=owner_account_id,
             preferred_account_is_continuity_owner=True,
@@ -614,7 +641,7 @@ class _RealtimeLiveMixin:
             try:
                 await proxy._write_request_log(
                     account_id=None,
-                    api_key=api_key,
+                    api_key=scope.api_key,
                     request_id=request_id,
                     model=None,
                     latency_ms=int((time.monotonic() - start) * 1000),

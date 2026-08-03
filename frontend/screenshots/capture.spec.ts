@@ -30,6 +30,10 @@ const SCREENSHOT_PORT = process.env.SCREENSHOT_PORT ?? "4173";
 const BASE_URL = process.env.SCREENSHOT_BASE_URL ?? `http://localhost:${SCREENSHOT_PORT}`;
 const THEME_KEY = "codex-lb-theme";
 const SETTLE_MS = 1500;
+const oauthLivePolicy = {
+  isActive: true,
+  allowedAccountIds: [accounts[0].accountId, accounts[2].accountId],
+};
 
 // CSS injected before page load to skip all animations/transitions instantly.
 const DISABLE_ANIMATIONS_CSS = `
@@ -89,6 +93,9 @@ async function interceptApi(
     }
     if (p === "/api/settings") return fulfill(route, settings);
     if (p === "/api/settings/upstream-proxy") return fulfill(route, upstreamProxyAdmin);
+    if (p === "/api/oauth-live-policy" || p === "/api/oauth-live-policy/") {
+      return fulfill(route, oauthLivePolicy);
+    }
     const usageResetCreditsMatch = p.match(/^\/api\/accounts\/([^/]+)\/usage-reset-credits$/);
     if (usageResetCreditsMatch) {
       const accountId = decodeURIComponent(usageResetCreditsMatch[1]);

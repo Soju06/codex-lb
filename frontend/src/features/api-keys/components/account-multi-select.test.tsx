@@ -37,6 +37,9 @@ describe("AccountMultiSelect", () => {
 
     expect(await screen.findByText("5h 82% left")).toBeInTheDocument();
     expect(screen.getByText("7d 67% left")).toBeInTheDocument();
+    const quotaOption = screen.getByRole("menuitemcheckbox", { name: /quota@example\.com/i });
+    expect(quotaOption).toHaveClass("[&>span:first-child]:top-[11px]");
+    expect(quotaOption).toHaveClass("[&>span:first-child]:translate-y-0");
     expect(screen.queryByText(/GPT-5\.3-Codex-Spark/i)).not.toBeInTheDocument();
   });
 
@@ -52,6 +55,48 @@ describe("AccountMultiSelect", () => {
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledWith(["acc_primary"]);
     });
+  });
+
+  it("keeps an empty explicit selection empty and hides the all-accounts choice", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={[]}
+        onChange={onChange}
+        selectionMode="explicit"
+        placeholder="Select allowed accounts"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Select allowed accounts" }));
+
+    expect(screen.queryByRole("menuitemcheckbox", { name: "All accounts" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
+    expect(onChange).toHaveBeenCalledWith(["acc_primary"]);
+  });
+
+  it("renders a compact email-only list with right-aligned selection marks", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_primary"]}
+        onChange={vi.fn()}
+        selectionMode="explicit"
+        presentation="compact"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
+
+    const option = screen.getByRole("menuitemcheckbox", { name: "primary@example.com" });
+    expect(option).toHaveClass("[&>span:first-child]:right-2");
+    expect(option).toHaveClass("[&>span:first-child]:top-1/2");
+    expect(screen.queryByText("Pro")).not.toBeInTheDocument();
+    expect(screen.queryByText(/left$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("primary@example.com", { selector: "[data-slot='badge']" })).not.toBeInTheDocument();
   });
 
   it("pluralizes the selected account count", async () => {

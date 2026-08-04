@@ -48,8 +48,10 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     bridge_drain_recovery_allowed_total,
     bridge_first_turn_timeout_total,
+    bridge_handoff_compatibility_rejection_total,
     bridge_instance_mismatch_total,
     bridge_reattach_total,
+    bridge_unanchored_handoff_recovery_total,
     http_bridge_prewarm_total,
     http_bridge_stuck_retire_total,
 )
@@ -120,6 +122,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeSession,
@@ -187,8 +190,15 @@ from app.modules.proxy.ring_membership import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
+_TaskResultT = TypeVar("_TaskResultT")
+_HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
+_http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float] = {}
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
+# A healthy upstream acknowledges response.create promptly. Keep the
+# Keep the owner-side watchdog within the client-safe contract while honoring
+# the configured stuck-gate threshold when it is shorter.
+_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 
@@ -306,14 +316,28 @@ def _http_bridge_pending_count_nowait(
     except Exception as exc:
         if type(exc).__name__ not in {"WouldBlock", "RuntimeError"}:
             raise
-        logger.warning(
-            "http_bridge_pending_count_unavailable context=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+        warning_key = (
             context,
             session.key.affinity_kind,
             _hash_identifier(session.key.affinity_key),
-            session.account.id,
-            session.request_model,
         )
+        now = time.monotonic()
+        last_logged = _http_bridge_pending_count_warning_last_logged.get(warning_key)
+        if last_logged is None or now - last_logged >= _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS:
+            _http_bridge_pending_count_warning_last_logged[warning_key] = now
+            if len(_http_bridge_pending_count_warning_last_logged) > 2048:
+                cutoff = now - _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS * 2
+                for key, timestamp in tuple(_http_bridge_pending_count_warning_last_logged.items()):
+                    if timestamp < cutoff:
+                        _http_bridge_pending_count_warning_last_logged.pop(key, None)
+            logger.warning(
+                "http_bridge_pending_count_unavailable context=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+                context,
+                session.key.affinity_kind,
+                warning_key[2],
+                session.account.id,
+                session.request_model,
+            )
         return None
     try:
         request_counts_against_queue = _service_global("_http_bridge_request_counts_against_queue")
@@ -388,6 +412,14 @@ def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int
         "stale": stale,
         "oldest_age_seconds": oldest_age_seconds,
     }
+
+
+def _http_bridge_inflight_creation_count(service: Any) -> int:
+    return sum(
+        1
+        for future in service._http_bridge_inflight_sessions.values()
+        if not getattr(future, "_http_bridge_handoff", False)
+    )
 
 
 def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
@@ -634,6 +666,51 @@ def _normalize_http_bridge_error_event(
     return normalized_event_block, normalized_payload, parsed_event, "response.failed"
 
 
+def _http_bridge_pending_state_is_stale(
+    request_state: _WebSocketRequestState,
+    *,
+    now: float,
+    threshold_seconds: float,
+    session_closed: bool = False,
+) -> bool:
+    """Identify pre-created bridge requests that never received upstream activity."""
+    if request_state.transport != _REQUEST_TRANSPORT_HTTP or request_state.skip_request_log:
+        return False
+    # Previous-response and turn-state identifiers preserve hard continuity
+    # while the socket is live. Once it closes, that continuity is already lost.
+    # A silent-but-open upstream must not preserve continuity forever: with
+    # zero upstream activity the anchored request wedges the create gate and
+    # every follow-up on the session, so cap the anchored wait at 2x the
+    # stuck-gate threshold before allowing retirement.
+    if not session_closed and (request_state.previous_response_id is not None or request_state.hard_continuity_anchor):
+        anchored_wait_started_at = (
+            request_state.response_create_gate_wait_started_at
+            if request_state.response_create_gate_wait_started_at is not None
+            else request_state.started_at
+        )
+        if max(0.0, now - anchored_wait_started_at) < threshold_seconds * 2.0:
+            return False
+    # Do not require the gate/awaiting flags: retry and reader re-enqueue
+    # paths re-register states whose admission flags were already cleared,
+    # and leaning on them starves the watchdog entirely (observed prod
+    # wedges 2026-07-20). A reattached stream can deliver events whose
+    # response.created was lost, so use the most recent upstream event as
+    # the silence clock instead of aging every active stream from its
+    # original gate wait.
+    if request_state.response_id is not None:
+        return False
+    if request_state.latency_response_created_ms is not None:
+        return False
+    wait_started_at = (
+        request_state.response_create_gate_wait_started_at
+        if request_state.response_create_gate_wait_started_at is not None
+        else request_state.started_at
+    )
+    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+        wait_started_at = request_state.last_upstream_activity_at
+    return max(0.0, now - wait_started_at) >= threshold_seconds
+
+
 def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestState) -> bool:
     return not request_state.draining_until_terminal
 
@@ -658,6 +735,10 @@ def _http_bridge_eventless_precreated_deadline(
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
+    # Non-response telemetry (for example ``codex.rate_limits``) may update
+    # the generic activity marker, but it must not extend the response.create
+    # acknowledgement deadline. The eventless watchdog is intentionally
+    # anchored to the send time until a response-lifecycle event is observed.
     return sent_at + min(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
@@ -784,7 +865,11 @@ def _http_bridge_compatible(
 
 
 def _http_bridge_alias_target_is_stale(session: _HTTPBridgeSession | None) -> bool:
-    return session is None or session.closed or not _http_bridge_session_account_active(session)
+    return (
+        session is None
+        or (session.closed and not session.handoff_in_progress)
+        or not _http_bridge_session_account_active(session)
+    )
 
 
 def _http_bridge_incompatible_model_fork_key(
@@ -1176,7 +1261,86 @@ def _require_http_bridge_bound_account_not_excluded(
         )
 
 
-def _raise_http_bridge_incompatible_admission_handoff() -> None:
+def _record_http_bridge_handoff_compatibility_rejection(
+    *,
+    session: "_HTTPBridgeSession",
+    key: "_HTTPBridgeSessionKey",
+    api_key: ApiKeyData | None,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    request_service_tier: str | None,
+    service_tier_supported: bool,
+) -> None:
+    continuity_anchor = (
+        "previous_response_id"
+        if previous_response_id is not None
+        else "turn_state"
+        if incoming_turn_state is not None
+        else "none"
+    )
+    preferred_account = (
+        "required" if require_preferred_account else "preferred" if preferred_account_id is not None else "none"
+    )
+    service_tier = (
+        "not_requested" if request_service_tier is None else "supported" if service_tier_supported else "unsupported"
+    )
+    api_key_scope = "scoped" if api_key is not None and api_key.id is not None else "unscoped"
+    if PROMETHEUS_AVAILABLE and bridge_handoff_compatibility_rejection_total is not None:
+        bridge_handoff_compatibility_rejection_total.labels(
+            continuity_anchor=continuity_anchor,
+            preferred_account=preferred_account,
+            service_tier=service_tier,
+            api_key_scope=api_key_scope,
+        ).inc()
+    logger.warning(
+        "http_bridge_handoff_compatibility_rejected bridge_kind=%s bridge_key=%s key_strength=%s "
+        "continuity_anchor=%s preferred_account=%s preferred_account_id=%s require_preferred=%s "
+        "service_tier=%s api_key_scope=%s existing_closed=%s admission_waiters=%s pending_count=%s",
+        key.affinity_kind,
+        _hash_identifier(key.affinity_key),
+        _http_bridge_key_strength(key),
+        continuity_anchor,
+        preferred_account,
+        _hash_identifier_or_none(preferred_account_id),
+        require_preferred_account,
+        service_tier,
+        api_key_scope,
+        session.closed,
+        getattr(session, "admission_waiter_count", 0),
+        len(session.pending_requests),
+    )
+
+
+def _record_http_bridge_unanchored_handoff_recovery(*, reason: str) -> None:
+    if PROMETHEUS_AVAILABLE and bridge_unanchored_handoff_recovery_total is not None:
+        bridge_unanchored_handoff_recovery_total.labels(reason=reason).inc()
+
+
+def _raise_http_bridge_incompatible_admission_handoff(
+    *,
+    session: "_HTTPBridgeSession",
+    key: "_HTTPBridgeSessionKey",
+    api_key: ApiKeyData | None,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    request_service_tier: str | None,
+    service_tier_supported: bool,
+) -> None:
+    _record_http_bridge_handoff_compatibility_rejection(
+        session=session,
+        key=key,
+        api_key=api_key,
+        incoming_turn_state=incoming_turn_state,
+        previous_response_id=previous_response_id,
+        preferred_account_id=preferred_account_id,
+        require_preferred_account=require_preferred_account,
+        request_service_tier=request_service_tier,
+        service_tier_supported=service_tier_supported,
+    )
     raise ProxyResponseError(
         503,
         openai_error(
@@ -1454,6 +1618,101 @@ def _is_missing_durable_bridge_table_error(exc: Exception) -> bool:
 
 def _http_bridge_durable_lease_ttl_seconds() -> float:
     return float(RING_STALE_THRESHOLD_SECONDS)
+
+
+def _http_bridge_durable_release_allowed(service: Any, session: Any) -> bool:
+    session_id = getattr(session, "durable_session_id", None)
+    owner_epoch = getattr(session, "durable_owner_epoch", None)
+    if session_id is None or owner_epoch is None:
+        return False
+    return not any(
+        not task.done() and getattr(task, "_http_bridge_recovery_session_id", None) == session_id
+        for task in service._background_cleanup_tasks
+    )
+
+
+async def _drain_cancelled_task(task: asyncio.Task[Any]) -> None:
+    await asyncio.gather(task, return_exceptions=True)
+
+
+def _cancel_and_track_cancelled_task(
+    task: asyncio.Task[Any],
+    *,
+    label: str,
+    cleanup_tasks: set[asyncio.Task[None]] | None,
+    cancel_task: bool = True,
+) -> None:
+    if cancel_task:
+        task.cancel()
+    cleanup_task = asyncio.create_task(_drain_cancelled_task(task), name=f"cancelled-task-cleanup-{label}")
+    if cleanup_tasks is not None:
+        cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(cleanup_tasks.discard)
+
+
+async def _await_cancelled_task(
+    task: asyncio.Task[_TaskResultT],
+    *,
+    timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
+    label: str,
+    cleanup_tasks: set[asyncio.Task[None]] | None = None,
+) -> bool:
+    caller_task = asyncio.current_task()
+    # Give a new child one scheduling turn before cancellation so
+    # cancellation-resistant tasks enter the deferred-drain path.
+    if not task.done():
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
+            raise
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        if caller_task is not None and caller_task.cancelling():
+            _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+            raise
+        return True
+    except TimeoutError:
+        logger.warning("Timed out waiting for %s cancellation", label)
+        _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
+        return False
+    return True
+
+
+async def _persist_http_bridge_replacement_account(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    account_id: str,
+) -> None:
+    if account_id == session.account.id or session.durable_session_id is None or session.durable_owner_epoch is None:
+        return
+    try:
+        rebound = await service._durable_bridge.rebind_session_account(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            account_id=account_id,
+            clear_continuity=True,
+        )
+    except Exception as exc:
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "bridge_continuity_persistence_failed",
+                "HTTP responses session account could not be persisted; retry the request.",
+            ),
+        ) from exc
+    if not rebound:
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "bridge_continuity_persistence_failed",
+                "HTTP responses session ownership changed during account recovery; retry the request.",
+            ),
+        )
 
 
 async def _release_http_bridge_unanchored_handoffs_for_request(
@@ -2005,6 +2264,11 @@ def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelop
     )
 
 
+def _mark_http_bridge_reader_handoff_reconnect_failed(session: Any, old_reader: Any) -> None:
+    if old_reader is not None:
+        session.closed = True
+
+
 def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseError:
     return ProxyResponseError(
         502,
@@ -2243,6 +2507,10 @@ def _log_http_bridge_event(
     cache_key_family: str | None = None,
     model_class: str | None = None,
     owner_check_applied: bool | None = None,
+    error_message: str | None = None,
+    upstream_close_code: int | None = None,
+    response_events_seen: int | None = None,
+    transport_classification: str | None = None,
 ) -> None:
     level = logging.INFO
     if event in {
@@ -2251,22 +2519,25 @@ def _log_http_bridge_event(
         "send_failure",
         "retry_fresh_upstream",
         "retry_precreated",
+        "retry_precreated_clean_close",
         "reconnect",
         "terminal_error",
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
         "owner_forward_fail",
+        "missing_response_created_timeout",
         "prompt_cache_locality_miss",
         "reallocation_orphan",
         "context_overflow_rollover",
-        "missing_response_created_timeout",
+        "reader_failure",
     }:
         level = logging.WARNING
     logger.log(
         level,
         "http_bridge_event event=%s bridge_kind=%s bridge_key=%s account_id=%s"
         " model=%s pending=%s detail=%s cache_key_family=%s model_class=%s"
-        " key_strength=%s owner_check_applied=%s",
+        " key_strength=%s owner_check_applied=%s error_message=%s upstream_close_code=%s"
+        " response_events_seen=%s transport_classification=%s",
         event,
         key.affinity_kind,
         _hash_identifier(key.affinity_key),
@@ -2278,6 +2549,10 @@ def _log_http_bridge_event(
         model_class,
         _http_bridge_key_strength(key),
         owner_check_applied,
+        error_message,
+        upstream_close_code,
+        response_events_seen,
+        transport_classification,
     )
 
 
@@ -2329,6 +2604,7 @@ for _helper_name in (
     "_record_bridge_drain_recovery_allowed",
     "_is_missing_durable_bridge_table_error",
     "_http_bridge_durable_lease_ttl_seconds",
+    "_persist_http_bridge_replacement_account",
     "_forwarded_http_bridge_session_key",
     "_http_bridge_requires_cluster_registration",
     "_effective_http_bridge_idle_ttl_seconds",

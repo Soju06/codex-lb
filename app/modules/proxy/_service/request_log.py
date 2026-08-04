@@ -22,11 +22,12 @@ _PERSISTENCE_TASK_NAME_PREFIXES = (
     "proxy-request-log-",
     "proxy-stream-api-key-settle-",
     "proxy-release_stream_api_key_reservation",
+    "http-bridge-recovery-settlement-",
 )
 
 
-def _is_persistence_task(task: asyncio.Task[None]) -> bool:
-    return task.get_name().startswith(_PERSISTENCE_TASK_NAME_PREFIXES)
+def _is_persistence_task(task: asyncio.Task[None], prefixes: tuple[str, ...] | None = None) -> bool:
+    return task.get_name().startswith(prefixes or _PERSISTENCE_TASK_NAME_PREFIXES)
 
 
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -291,7 +292,11 @@ class _RequestLogMixin:
             model=model,
         )
 
-    async def drain_persistence_tasks(self, timeout_seconds: float) -> bool:
+    async def drain_persistence_tasks(
+        self,
+        timeout_seconds: float,
+        task_name_prefixes: tuple[str, ...] | None = None,
+    ) -> bool:
         """Await detached request-log and settlement tasks, e.g. at shutdown.
 
         Persistence runs detached from the response path, so a graceful
@@ -309,14 +314,14 @@ class _RequestLogMixin:
             pending = {
                 task
                 for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks)
-                if not task.done() and _is_persistence_task(task)
+                if not task.done() and _is_persistence_task(task, task_name_prefixes)
             }
             if not pending:
                 # One scheduling tick so just-finished tasks' done callbacks
                 # (which may enqueue follow-up tasks) run before we re-check.
                 await asyncio.sleep(0)
                 if not any(
-                    _is_persistence_task(task)
+                    _is_persistence_task(task, task_name_prefixes)
                     for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks)
                     if not task.done()
                 ):

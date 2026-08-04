@@ -93,3 +93,30 @@ def test_estimate_api_key_request_usage_uses_conservative_input_for_file_referen
     budget = estimate_api_key_request_usage(payload)
 
     assert budget.input_tokens is None
+
+
+def test_estimate_api_key_request_usage_allows_structured_content_type_values() -> None:
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "continue",
+            "input": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": {
+                                "namespace": "multi_agent_v1",
+                                "name": "tool_search_output",
+                            },
+                            "text": "deferred tool metadata",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    budget = estimate_api_key_request_usage(payload)
+
+    assert budget.input_tokens is not None

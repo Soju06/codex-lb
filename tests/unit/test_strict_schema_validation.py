@@ -276,6 +276,48 @@ def test_normalize_responses_payload_accepts_valid_strict_schema():
     assert request.text.format.strict is True
 
 
+def test_subscription_serialization_strips_explicit_prompt_cache_controls_only():
+    request = normalize_responses_request_payload(
+        _json_object(
+            {
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "stable prefix",
+                                "prompt_cache_breakpoint": {"mode": "explicit"},
+                            },
+                            {"type": "input_text", "text": "changing suffix"},
+                        ],
+                    }
+                ],
+                "prompt_cache_key": "stable-key",
+                "prompt_cache_options": {"mode": "explicit"},
+            }
+        ),
+        openai_compat=False,
+    )
+
+    source_payload = request.model_dump_for_forwarding()
+    source_input = cast(list[dict[str, JsonValue]], source_payload["input"])
+    source_content = cast(list[dict[str, JsonValue]], source_input[0]["content"])
+    assert source_payload["prompt_cache_options"] == {"mode": "explicit"}
+    assert source_content[0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+
+    subscription_payload = request.to_payload()
+    subscription_input = cast(list[dict[str, JsonValue]], subscription_payload["input"])
+    subscription_content = cast(list[dict[str, JsonValue]], subscription_input[0]["content"])
+    assert "prompt_cache_options" not in subscription_payload
+    assert "prompt_cache_breakpoint" not in subscription_content[0]
+    assert subscription_content[0]["text"] == "stable prefix"
+    assert subscription_content[1]["text"] == "changing suffix"
+    assert subscription_payload["prompt_cache_key"] == "stable-key"
+
+
 def test_chat_completions_strict_schema_violation_surfaces_via_enforce_helper():
     payload = {
         "model": "gpt-5.5",

@@ -43,8 +43,8 @@ class ResponseFailedEvent(TypedDict):
 
 
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"
-PREVIOUS_RESPONSE_STALE_CODE = "codex_previous_response_stale"
-PREVIOUS_RESPONSE_STALE_MESSAGE = "Upstream previous response anchor expired; retry without previous_response_id."
+PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found"
+PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE = "Previous response was not found; retry without previous_response_id."
 
 
 def openai_error(code: str, message: str, error_type: str = "server_error") -> OpenAIErrorEnvelope:
@@ -91,7 +91,7 @@ def is_previous_response_not_found_error(
     param: str | None,
     message: str | None,
 ) -> bool:
-    if code == "previous_response_not_found":
+    if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
     if code != "invalid_request_error" or param != "previous_response_id":
         return False

@@ -70,7 +70,6 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
-    _claim_http_bridge_session_close,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
@@ -1413,7 +1412,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if should_reconnect:
                 session.pending_requests.clear()
-                should_reconnect = _claim_http_bridge_session_close(session)
+                session.upstream_close_attempted = True
         if not should_reconnect:
             return False
 
@@ -1427,42 +1426,27 @@ class _HTTPBridgeRequestSubmitMixin:
         detail: str,
     ) -> None:
         session.closed = True
-        if session.upstream_reader is asyncio.current_task():
-            session.upstream_reader = None
-        owns_close = _claim_http_bridge_session_close(session)
-
-        async def retire_session() -> None:
-            async with self._http_bridge_lock:
-                if self._http_bridge_sessions.get(session.key) is session:
-                    self._http_bridge_sessions.pop(session.key, None)
-                    self._unregister_http_bridge_turn_states_locked(session)
-                    self._unregister_http_bridge_previous_response_ids_locked(session)
-            if owns_close:
-                await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
-            _log_http_bridge_event(
-                "retire_stale_pending",
-                session.key,
-                account_id=session.account.id,
-                model=session.request_model,
-                pending_count=self._http_bridge_pending_count_nowait(session, context="retire_stale_pending_log"),
-                detail=detail,
-                cache_key_family=session.key.affinity_kind,
-                model_class=_extract_model_class(session.request_model) if session.request_model else None,
-            )
-
-        retire_task = asyncio.create_task(
-            retire_session(),
-            name=f"http-bridge-close-retire-{_hash_identifier(session.key.affinity_key)}",
+        async with self._http_bridge_lock:
+            if self._http_bridge_sessions.get(session.key) is session:
+                self._http_bridge_sessions.pop(session.key, None)
+                self._unregister_http_bridge_turn_states_locked(session)
+                self._unregister_http_bridge_previous_response_ids_locked(session)
+        async with session.pending_lock:
+            should_close = not session.upstream_close_attempted
+            if should_close:
+                session.upstream_close_attempted = True
+        if should_close:
+            await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
+        _log_http_bridge_event(
+            "retire_stale_pending",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=await self._http_bridge_pending_count(session),
+            detail=detail,
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
-        self._background_cleanup_tasks.add(retire_task)
-
-        def untrack_retirement(done_task: asyncio.Task[None]) -> None:
-            self._background_cleanup_tasks.discard(done_task)
-
-        retire_task.add_done_callback(untrack_retirement)
-        _, cancellation = await _await_task_deferring_cancellation(retire_task)
-        if cancellation is not None:
-            raise cancellation
 
     async def _retry_http_bridge_request_on_fresh_upstream(
         self: Any,

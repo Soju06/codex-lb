@@ -675,13 +675,6 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     )
 
 
-def _claim_http_bridge_session_close(session: "_HTTPBridgeSession") -> bool:
-    if session.upstream_close_attempted:
-        return False
-    session.upstream_close_attempted = True
-    return True
-
-
 async def _close_http_bridge_session_bounded(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -694,18 +687,14 @@ async def _close_http_bridge_session_bounded(
         service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
-    service._background_cleanup_tasks.add(close_task)
 
-    def untrack_close(done_task: asyncio.Task[None]) -> None:
-        service._background_cleanup_tasks.discard(done_task)
-
-    close_task.add_done_callback(untrack_close)
-
-    def observe_after_interruption(*, interruption: str) -> None:
+    def track_after_interruption(*, interruption: str) -> None:
         if close_task.done():
             return
+        service._background_cleanup_tasks.add(close_task)
 
         def close_done(done_task: asyncio.Task[None]) -> None:
+            service._background_cleanup_tasks.discard(done_task)
             try:
                 done_task.result()
             except asyncio.CancelledError:
@@ -740,7 +729,7 @@ async def _close_http_bridge_session_bounded(
             timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        observe_after_interruption(interruption="timeout")
+        track_after_interruption(interruption="timeout")
         logger.warning(
             "http_bridge_session_close_timeout reason=%s bridge_kind=%s bridge_key=%s "
             "account_id=%s model=%s timeout_seconds=%.1f background_cleanup_tasks=%d",
@@ -753,7 +742,7 @@ async def _close_http_bridge_session_bounded(
             len(service._background_cleanup_tasks),
         )
     except asyncio.CancelledError:
-        observe_after_interruption(interruption="cancellation")
+        track_after_interruption(interruption="cancellation")
         raise
     except Exception:
         logger.warning(

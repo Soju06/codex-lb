@@ -65,8 +65,6 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _await_task_deferring_cancellation,
-    _claim_http_bridge_session_close,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -2444,36 +2442,22 @@ class _HTTPBridgeStreamingMixin:
         error_code: str,
         error_message: str,
     ) -> None:
-        owns_close = False
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
                 self._http_bridge_sessions.pop(session.key, None)
-            owns_close = _claim_http_bridge_session_close(session)
-        close_cancellation: asyncio.CancelledError | None = None
-        try:
-            async with session.pending_lock:
-                session.queued_request_count = 0
-            await self._fail_pending_websocket_requests(
-                account=session.account,
-                account_id_value=session.account.id,
-                pending_requests=session.pending_requests,
-                pending_lock=session.pending_lock,
-                error_code=error_code,
-                error_message=error_message,
-                api_key=None,
-                response_create_gate=session.response_create_gate,
-            )
-        finally:
-            if owns_close:
-                close_task = asyncio.create_task(
-                    self._close_http_bridge_session_bounded(
-                        session,
-                        reason="local_terminal_error",
-                    )
-                )
-                _, close_cancellation = await _await_task_deferring_cancellation(close_task)
-        if close_cancellation is not None:
-            raise close_cancellation
+        async with session.pending_lock:
+            session.queued_request_count = 0
+        await self._fail_pending_websocket_requests(
+            account=session.account,
+            account_id_value=session.account.id,
+            pending_requests=session.pending_requests,
+            pending_lock=session.pending_lock,
+            error_code=error_code,
+            error_message=error_message,
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+        )
+        await self._close_http_bridge_session(session)
 
     async def _stream_http_bridge_session_events(
         self: Any,

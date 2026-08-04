@@ -33,19 +33,3 @@
     in the required PostgreSQL CI target instead.
 - [x] 3.3 Run strict scoped OpenSpec validation, all main-spec validation,
   OpenSpec verification, final diff review, and worktree-status inspection.
-
-## 4. HTTP Bridge Lifecycle Follow-up
-
-- [x] 4.1 Route failed registration, scheduled cleanup, reader retirement,
-  local terminal reset, and shutdown through one exact-once close-ownership
-  claim and the existing bounded cleanup path.
-- [x] 4.2 Preserve an owned close fallback through terminal-reset
-  pending-cleanup failure or cancellation, and make shutdown claim every
-  session before its first await, process owners sequentially, drain tracked
-  cleanup, and defer caller cancellation.
-- [x] 4.3 Add deterministic regressions for reader/direct close races,
-  previously detached retirement, terminal-reset interruption, shutdown
-  cancellation, individual close failure, and reader-owned shutdown drain.
-- [x] 4.4 Validate the expanded change and affected main specs, map every new
-  lifecycle scenario to implementation and regression evidence, obtain a clean
-  independent review, and inspect the final diff and worktree status.

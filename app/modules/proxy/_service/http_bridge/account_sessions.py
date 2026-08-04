@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from app.modules.proxy._service.http_bridge.helpers import (
-    _claim_http_bridge_session_close,
-    _extract_model_class,
-    _log_http_bridge_event,
-)
+from app.modules.proxy._service.http_bridge.helpers import _extract_model_class, _log_http_bridge_event
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.support import _HTTPBridgeSession
 
@@ -30,6 +26,5 @@ class _HTTPBridgeAccountSessionsMixin:
                 sessions_to_close.append(detached)
 
         for session in sessions_to_close:
-            if _claim_http_bridge_session_close(session):
-                await self._close_http_bridge_session_bounded(session, reason="account_binding_changed")
+            await self._close_http_bridge_session_bounded(session, reason="account_binding_changed")
         return len(sessions_to_close)

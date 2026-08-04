@@ -6,7 +6,7 @@ Normative behavior lives in this change's capability delta specs. This file reco
 
 The built-in Codex `openai` provider sends official ChatGPT OAuth as request authorization. The client cannot attach a second Codex-LB Proxy API Key to that provider. The keyless OAuth caller lane lets this first-party profile reach codex-lb from the same local/trusted origin boundary already used by ordinary zero-key proxy requests.
 
-The existing registered-Key profile remains available. It combines `requires_openai_auth = true` with `env_key = "CODEX_LB_API_KEY"`: OpenAI authentication keeps the Codex app's ChatGPT capabilities visible, and `env_key` supplies the Codex-LB bearer used by proxy routes.
+The registered-Key profile combines `requires_openai_auth = true` with `env_key = "CODEX_LB_API_KEY"`: OpenAI authentication keeps the Codex app's ChatGPT capabilities visible, and `env_key` supplies the Codex-LB bearer used by proxy routes.
 
 ## Operator example
 
@@ -20,4 +20,4 @@ The existing registered-Key profile remains available. It combines `requires_ope
 
 Loopback needs no configuration. `proxy_unauthenticated_client_cidrs` remains an existing advanced opt-in for explicitly trusted raw socket peers. Other remote callers use registered Proxy API Keys.
 
-The policy stores no OAuth credentials. Cross-machine authorization-row handling remains outside this feature. `refresh_token_reused` remains an operator-managed recovery event. Logs and acceptance evidence use only routes, status, counts, hashes, and presence booleans.
+The policy stores no OAuth credentials. Logs and acceptance evidence use only routes, status, counts, hashes, and presence booleans.

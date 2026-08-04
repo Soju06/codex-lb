@@ -23,9 +23,12 @@ SERVICE_PACKAGE_DIR = PROXY_DIR / "_service"
 HTTP_BRIDGE_MIXIN_PATH = PROXY_DIR / "_service" / "http_bridge" / "mixin.py"
 STREAMING_MIXIN_PATH = PROXY_DIR / "_service" / "streaming" / "mixin.py"
 
-MAX_SERVICE_LINES = 2_604
+# Ruff 0.16's formatter adds blank lines around top-level definitions. Keep
+# the ratchets at the formatted baseline so whitespace normalization does not
+# consume architectural budget.
+MAX_SERVICE_LINES = 2_617
 MAX_LOAD_BALANCER_LINES = 3_260
-MAX_HTTP_BRIDGE_MIXIN_LINES = 2_400
+MAX_HTTP_BRIDGE_MIXIN_LINES = 2_436
 MAX_STREAMING_MIXIN_LINES = 1_100
 MAX_PROXY_SERVICE_METHOD_LINES = 1_200
 MAX_LOAD_BALANCER_SELECT_ACCOUNT_LINES = 699

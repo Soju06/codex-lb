@@ -19,7 +19,7 @@ The built-in profile preserves the official OpenAI provider and requires no clie
 
 - **Bearer dispatch is explicit:** `sk-clb-` bearers enter strict Proxy Key validation. Every other bearer enters the keyless lane.
 - **Zero-key origin admission is shared:** Keyless Live calls reuse the ordinary proxy's loopback, trusted-proxy consensus, preserved raw-socket peer, and existing unauthenticated CIDR checks. Global API-key mode closes this lane.
-- **Possession is caller-scoped:** A purpose-separated HMAC of the bearer and normalized account header participates in the ownership digest. A call id alone grants no access.
+- **Possession defines caller scope:** A purpose-separated HMAC of the bearer and normalized account header participates in the ownership digest. A call id alone grants no access.
 - **Final success owns the call:** Ownership is captured after the final successful account returns a supported call `Location`.
 - **Ownership is durable and opaque:** The sticky-session store holds a bounded digest and owner reference. Raw call ids, credentials, SDP, attestation values, and frames remain outside persistence.
 - **Attachment enforces hard continuity:** Every ingress recomputes caller scope, resolves the exact owner, rechecks policy and account state, loads current persisted upstream identity, and acquires one stream lease.

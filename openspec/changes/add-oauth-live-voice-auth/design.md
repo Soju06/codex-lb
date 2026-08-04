@@ -1,6 +1,6 @@
 ## Context
 
-Live Voice has two authenticated legs: HTTP call creation and a control sideband WebSocket. The serving upstream account must remain identical across both legs. Official Codex supplies one ChatGPT OAuth bearer plus `chatgpt-account-id`; Key-based clients supply a registered Codex-LB Proxy API Key.
+Live Voice has two caller-scoped legs: HTTP call creation and a control sideband WebSocket. The serving upstream account must remain identical across both legs. Official Codex supplies one ChatGPT OAuth bearer plus `chatgpt-account-id`; Key-based clients supply a registered Codex-LB Proxy API Key.
 
 Ordinary proxy traffic already has a zero-key admission contract. When global API-key authentication is disabled, requests are accepted only from loopback or an explicitly configured raw-socket peer CIDR. Proxy-header projection preserves the raw peer and resolves trusted proxy chains fail closed.
 

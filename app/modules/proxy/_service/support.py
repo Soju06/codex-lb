@@ -77,6 +77,7 @@ _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
     }
 )
 _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
+_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS = 2.0
 _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
@@ -320,6 +321,13 @@ def _account_selection_recovery_sleep_seconds_from_message(
 
     if "hit your spend cap set by the owner of your workspace" in lowered:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    # A hard affinity row is an ownership constraint, so it must not spill to
+    # another account. Capacity/health transitions can nevertheless make the
+    # owner briefly unavailable; give that owner a short recovery window before
+    # surfacing a 503 rather than rebinding the logical session.
+    if error_code == "hard_affinity_saturated":
+        return _HARD_AFFINITY_RECOVERY_SLEEP_SECONDS
 
     if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
@@ -786,6 +794,13 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    # Counts only the one extra replay permitted after the initial recovery
+    # replay when the replacement upstream socket also closes cleanly before
+    # producing any response event.
+    clean_close_replay_count: int = 0
+    clean_close_retry_in_progress: bool = False
+    clean_close_retry_result: bool | None = None
+    clean_close_retry_close_generation: int | None = None
     auth_replay_count: int = 0
     auth_replay_counts_by_account: dict[str, int] = field(default_factory=dict)
     force_refresh_account_id: str | None = None
@@ -799,6 +814,9 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    # Session headers provide locality, but only a previous response or
+    # explicit turn-state header guarantees continuity for stale recovery.
+    hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
@@ -811,6 +829,19 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Stable fingerprint used by the durable recovery-attempt journal. It is
+    # populated only for a proof-gated fresh replay candidate.
+    recovery_attempt_fingerprint: str | None = None
+    recovery_attempt_session_id: str | None = None
+    recovery_attempt_owner_epoch: int | None = None
+    # True when recovery already atomically claimed the journal row as
+    # REPLAYED. Claimed replays must not be re-journaled at dispatch.
+    recovery_attempt_claimed: bool = False
+    # Set once the upstream send is attempted, including an ambiguous send
+    # failure. Pre-dispatch admission/setup failures may safely roll back a
+    # claimed recovery journal; an attempted send must remain consumed.
+    recovery_attempt_dispatched: bool = False
+    recovery_attempt_event_observed: bool = False
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto
@@ -832,6 +863,7 @@ class _WebSocketRequestState:
     upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
+    last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
     previous_response_not_found_rewritten: bool = False
     previous_response_owner_lookup_source: str | None = None
@@ -946,7 +978,13 @@ class _HTTPBridgeSession:
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
+    last_upstream_close_generation: int = 0
     closed: bool = False
+    # Set while a reader handoff is replacing the socket. Idle pruning must
+    # retain the registered session during this short transition even though
+    # ``closed`` is fail-closed for normal request reuse.
+    handoff_in_progress: bool = False
+    handoff_future: asyncio.Future["_HTTPBridgeSession"] | None = None
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
@@ -955,6 +993,19 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+
+def _complete_http_bridge_handoff(
+    session: _HTTPBridgeSession,
+    inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]],
+) -> None:
+    session.handoff_in_progress = False
+    future = session.handoff_future
+    session.handoff_future = None
+    if future is not None and not future.done():
+        future.set_result(session)
+    if inflight_sessions.get(session.key) is future:
+        inflight_sessions.pop(session.key, None)
 
 
 def _http_bridge_session_supports_service_tier(
@@ -1150,15 +1201,25 @@ def _clear_websocket_deferred_reasoning_downstream_texts(request_state: _WebSock
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
+    request_state.last_upstream_activity_at = time.monotonic()
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1
 
 
-def _websocket_request_can_replay_before_visible_output(request_state: _WebSocketRequestState) -> bool:
+def _websocket_request_can_replay_before_visible_output(
+    request_state: _WebSocketRequestState,
+    *,
+    allow_clean_close_retry: bool = False,
+) -> bool:
     if not request_state.request_text:
         return False
-    if request_state.replay_count >= 1:
+    if request_state.replay_count >= 1 and not (
+        allow_clean_close_retry
+        and request_state.replay_count == 1
+        and request_state.response_event_count == 0
+        and request_state.clean_close_replay_count == 0
+    ):
         return False
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm

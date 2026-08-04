@@ -1,8 +1,8 @@
 """Add the global OAuth Live policy.
 
-Revision ID: 20260803_000000_add_oauth_live_policies
-Revises: 20260731_000000_add_capability_lineage_markers
-Create Date: 2026-08-03
+Revision ID: 20260804_000000_add_oauth_live_policies
+Revises: 20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads
+Create Date: 2026-08-04
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260803_000000_add_oauth_live_policies"
-down_revision = "20260731_000000_add_capability_lineage_markers"
+revision = "20260804_000000_add_oauth_live_policies"
+down_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
 branch_labels = None
 depends_on = None
 

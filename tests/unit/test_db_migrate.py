@@ -2030,7 +2030,8 @@ def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     config = _build_alembic_config(url)
     script_directory = ScriptDirectory.from_config(config)
-    assert script_directory.get_heads() == ["20260803_000000_add_oauth_live_policies"]
+    heads = script_directory.get_heads()
+    assert len(heads) == 1
     ancestry = {script.revision for script in script_directory.walk_revisions()}
     assert target_revision in ancestry
 

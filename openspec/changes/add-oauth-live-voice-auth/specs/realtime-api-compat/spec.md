@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Call creation binds the final account under an authenticated caller scope
+### Requirement: Call creation binds the final account under an admitted caller scope
 
 `POST /backend-api/codex/realtime/calls` SHALL require either a registered Proxy API Key or a locally admitted keyless OAuth caller. A `sk-clb-` bearer SHALL use strict Key validation. Every other bearer SHALL pass the ordinary zero-key proxy origin contract before policy lookup: global API-key authentication is disabled, and the connection is loopback or its raw socket peer belongs to the existing explicit unauthenticated CIDR allowlist. Keyless OAuth SHALL require a normalized `chatgpt-account-id` and an active global policy with at least one currently active allowed Account. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, the proxy MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the caller, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, account header, SDP, attestation value, or frame body. Key callers retain `SHA256(api_key.id + NUL + call_id)`. Keyless callers use `oauth-local:HMAC-SHA256(K, bearer + NUL + normalized-account-id)` as scope material, where `K` is purpose-separated from the existing persistent encryption key. Private call-creation diagnostics MUST redact internal account identifiers and suppress exception details.
 
@@ -17,7 +17,7 @@
 - **THEN** the proxy binds only the bounded call id parsed from the path before the first `?`
 - **AND** it neither persists nor logs the discarded query or fragment text
 
-#### Scenario: private call creation has no authenticated caller
+#### Scenario: private call creation has no admitted caller
 
 - **GIVEN** ordinary proxy authentication is disabled
 - **WHEN** a caller omits authorization, supplies a malformed bearer, or supplies an unregistered `sk-clb-` Key to realtime call creation
@@ -45,7 +45,7 @@
 
 #### Scenario: global OAuth policy is inactive
 
-- **WHEN** valid OAuth credentials reach Live while the global policy is inactive or empty after active-account filtering
+- **WHEN** a locally admitted OAuth request reaches Live while the global policy is inactive or empty after active-account filtering
 - **THEN** the route returns `403 oauth_live_not_enabled` before account selection
 
 #### Scenario: successful response cannot be bound
@@ -157,10 +157,3 @@ Documentation SHALL present two complete Codex client profiles. The built-in OAu
 - **THEN** ordinary conversations use the selected provider contract
 - **AND** call creation and sideband both route through codex-lb
 - **AND** the OAuth Live policy controls only callers admitted through the existing zero-key origin boundary
-
-## RENAMED Requirements
-
-### Requirement: Realtime call creation binds the final account under a required proxy key
-
-- **FROM:** Realtime call creation binds the final account under a required proxy key
-- **TO:** Call creation binds the final account under an authenticated caller scope

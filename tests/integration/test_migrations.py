@@ -1406,8 +1406,8 @@ async def test_oauth_live_policy_migration_upgrade_and_downgrade(tmp_path):
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'oauth-live-policy.sqlite'}"
-    parent_revision = "20260731_000000_add_capability_lineage_markers"
-    policy_revision = "20260803_000000_add_oauth_live_policies"
+    parent_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+    policy_revision = "20260804_000000_add_oauth_live_policies"
     tables = {"oauth_live_global_policy", "oauth_live_global_policy_accounts"}
 
     def _schema_state(sync_conn):
@@ -1442,5 +1442,72 @@ async def test_oauth_live_policy_migration_upgrade_and_downgrade(tmp_path):
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == policy_revision
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'stamped-merge-rollup-repair.sqlite'}"
+    merge_revision = "20260724_000000_merge_request_log_schema_heads"
+    final_revision = "20260728_000000_merge_pending_tool_calls_and_rollup_repair_heads"
+    rollup_tables = {
+        "request_usage_hourly_rollups",
+        "request_usage_hourly_error_rollups",
+        "request_demand_quarter_rollups",
+    }
+
+    await to_thread.run_sync(lambda: command.stamp(_build_alembic_config(db_url), merge_revision))
+    # The stamped deployment path already has this durable bridge table.  Keep
+    # the fixture representative so the pending-tool-call migration can alter
+    # it just as it does on a real deployed database.
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE http_bridge_sessions (
+                        id VARCHAR(36) PRIMARY KEY,
+                        session_key_kind VARCHAR(64) NOT NULL,
+                        session_key_value TEXT NOT NULL,
+                        session_key_hash VARCHAR(64) NOT NULL,
+                        api_key_scope VARCHAR(255) NOT NULL,
+                        owner_instance_id VARCHAR(255),
+                        owner_epoch INTEGER NOT NULL DEFAULT 0,
+                        lease_expires_at DATETIME,
+                        state VARCHAR(16) NOT NULL DEFAULT 'active',
+                        account_id VARCHAR,
+                        model VARCHAR,
+                        service_tier VARCHAR,
+                        latest_turn_state TEXT,
+                        latest_response_id TEXT,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        closed_at DATETIME
+                    )
+                    """
+                )
+            )
+    finally:
+        await engine.dispose()
+    await to_thread.run_sync(lambda: run_upgrade(db_url, final_revision, bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(lambda sync_conn: set(sa_inspect(sync_conn).get_table_names()))
+        assert rollup_tables <= tables
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), merge_revision))
+        async with engine.connect() as conn:
+            tables_after_downgrade = await conn.run_sync(lambda sync_conn: set(sa_inspect(sync_conn).get_table_names()))
+        assert rollup_tables <= tables_after_downgrade
     finally:
         await engine.dispose()

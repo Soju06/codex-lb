@@ -5,6 +5,7 @@ import { useTimeFormatStore } from "@/hooks/use-time-format";
 import i18n from "@/i18n";
 import {
   formatChartDateTime,
+  formatConversationDuration,
   formatDateTimeInline,
   formatAccessTokenLabel,
   formatCachedTokensMeta,
@@ -118,6 +119,19 @@ describe("formatters", () => {
     const formatted = formatTimeLong("2026-01-01T00:00:00.000Z");
     expect(formatted.time).not.toBe("--");
     expect(formatted.date).not.toBe("--");
+  });
+
+  it("formats conversation durations as two units", () => {
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")).toBe("0s");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z")).toBe("1s");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-01T00:00:30.000Z")).toBe("30s");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-01T00:04:03.000Z")).toBe("4m 3s");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-01T02:15:00.000Z")).toBe("2h 15m");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-01T23:59:00.000Z")).toBe("23h 59m");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z")).toBe("1d 0h");
+    expect(formatConversationDuration("2026-01-01T00:00:00.000Z", "2026-01-03T03:42:00.000Z")).toBe("2d 3h");
+    expect(formatConversationDuration("2026-01-01T02:00:00.000Z", "2026-01-01T01:00:00.000Z")).toBe("0s");
+    expect(formatConversationDuration("bad-date", "2026-01-01T01:00:00.000Z")).toBe("—");
   });
 
   it("respects the configured 12h or 24h time format", () => {

@@ -14,8 +14,8 @@ import anyio
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
-from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -31,6 +31,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
@@ -1696,14 +1697,45 @@ def _websocket_receive_timeout_for_pending_requests(
     )
 
 
+class _WebSocketJsonObject(dict[str, JsonValue]):
+    def __init__(self, pairs: list[tuple[str, JsonValue]]) -> None:
+        super().__init__(pairs)
+        self.raw_pairs = tuple(pairs)
+
+
 def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_WebSocketJsonObject)
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _websocket_capability_metadata_values(payload: dict[str, JsonValue]) -> tuple[JsonValue, ...] | None:
+    normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
+    payload_pairs = payload.raw_pairs if isinstance(payload, _WebSocketJsonObject) else tuple(payload.items())
+    misplaced_values = [value for key, value in payload_pairs if key.lower() == normalized_name]
+    if misplaced_values:
+        # The reserved per-frame carrier is valid only inside
+        # ``client_metadata``. Surface a deliberately ambiguous carrier set so
+        # the shared parser rejects any top-level placement before selection.
+        return (misplaced_values[0], misplaced_values[0])
+    if not isinstance(payload, _WebSocketJsonObject):
+        return None
+    metadata_objects = [value for key, value in payload.raw_pairs if key == "client_metadata"]
+    values: list[JsonValue] = []
+    for metadata in metadata_objects:
+        if not isinstance(metadata, _WebSocketJsonObject):
+            continue
+        values.extend(value for key, value in metadata.raw_pairs if key.lower() == normalized_name)
+    if len(metadata_objects) > 1 and values:
+        # A duplicate top-level metadata container can otherwise erase the
+        # sole marker through last-key-wins JSON decoding. Treat the carrier
+        # as ambiguous so routing fails before selection.
+        values.append(values[0])
+    return tuple(values)
 
 
 def _is_websocket_response_create(payload: dict[str, JsonValue]) -> bool:

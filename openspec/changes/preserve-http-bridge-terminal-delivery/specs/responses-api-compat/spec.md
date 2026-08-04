@@ -19,6 +19,9 @@ failure, and the stream MUST continue emitting its existing liveness frames.
 The completed-queue claim and the terminal idle-timeout decision MUST be
 serialized under the bridge pending lock. If completed processing wins that
 serialization and claims a live queue, the timeout MUST be suppressed. If the
+terminal event and end-of-stream marker are already queued when a concurrent
+timeout finishes awaited recovery work, the completed claim MUST remain
+authoritative until the stream consumes that queued delivery. If the
 terminal idle timeout wins while no completed delivery is active, it MUST
 revoke the request's mutable event queue before releasing the pending lock so a
 later completed event cannot claim an orphaned queue.
@@ -58,6 +61,14 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **THEN** it revokes the mutable event queue while still holding that lock
 - **AND** it emits the existing synthetic idle failure
 - **AND** later completed processing does not deliver to the revoked queue
+
+#### Scenario: Completed delivery finishes during timeout recovery
+
+- **GIVEN** an HTTP bridge timeout path is awaiting pre-response recovery work
+- **AND** completed processing claims the live queue and enqueues its terminal event and end-of-stream marker
+- **WHEN** completed processing returns before the timeout path rechecks ownership
+- **THEN** the completed claim remains authoritative
+- **AND** the stream consumes the queued completion without emitting a synthetic idle failure
 
 #### Scenario: Completed bookkeeping aborts
 

@@ -84,7 +84,8 @@ def _service_inline_input_image_urls() -> Any:
 
 
 def _stream_keepalive_max_count() -> int:
-    return int(_service_global_or("_STREAM_KEEPALIVE_MAX_COUNT", _STREAM_KEEPALIVE_MAX_COUNT))
+    service_override = int(_service_global_or("_STREAM_KEEPALIVE_MAX_COUNT", _STREAM_KEEPALIVE_MAX_COUNT))
+    return max(1, service_override)
 
 
 def _prewarm_response_timeout_seconds() -> float:

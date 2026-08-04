@@ -14,8 +14,8 @@ processing already claimed the request.
 - Use that captured queue for completed delivery after asynchronous bookkeeping.
 - Serialize completed-queue claiming with the terminal idle-timeout decision
   under the bridge pending lock. A timeout that wins MUST revoke the mutable
-  queue before releasing the lock; a completed claim that wins MUST suppress
-  that timeout.
+  queue before releasing the lock; a completed claim that wins MUST remain
+  authoritative through queued terminal delivery and suppress that timeout.
 - Keep emitting liveness frames, without manufacturing an idle timeout, while
   that completed-delivery operation is actively doing bookkeeping.
 - Log the first completed-delivery timeout suppression with bounded request,

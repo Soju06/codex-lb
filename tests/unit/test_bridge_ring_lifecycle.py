@@ -22,6 +22,7 @@ from app.db.models import (
     AccountStatus,
     Base,
     BridgeRingMember,
+    HttpBridgeRetryCircuit,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
@@ -34,6 +35,7 @@ from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
+    durable_bridge_hash,
 )
 from app.modules.proxy.ring_membership import RingMembershipService
 
@@ -302,6 +304,266 @@ async def test_get_sessions_by_ids_chunks_large_id_sets(
 
         assert len(snapshots) == len(claims)
         assert {snapshot.id for snapshot in snapshots} == {claim.id for claim in claims}
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_upsert_counts_concurrent_failure_conflicts(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+
+        for updated_at in (1000.0, 1001.0):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value="sid-retry-conflict",
+                api_key_scope="key-1",
+                consecutive_failures=1,
+                cooldown_until_epoch=0.0,
+                last_detail="clean_close",
+                updated_at_epoch=updated_at,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=2000.0,
+            )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-conflict"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 2
+        assert row.cooldown_until_epoch == 2000.0
+        assert row.last_detail == "clean_close"
+        assert row.updated_at_epoch == 1001.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_conflict_cooldown_scales_with_merged_failures(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        for failures, updated_at in ((1, 1000.0), (1, 1001.0), (2, 1002.0)):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value="sid-retry-backoff-conflict",
+                api_key_scope="key-1",
+                consecutive_failures=failures,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=updated_at,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=updated_at + 60.0,
+            )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-backoff-conflict"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 3
+        assert row.cooldown_until_epoch >= 1122.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_ignores_out_of_order_failure_snapshot(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        for failures, updated_at, base_updated_at in (
+            (1, 1000.0, 0.0),
+            (2, 1002.0, 1000.0),
+            (1, 1001.0, 1002.0),
+        ):
+            await repository.upsert_retry_circuit(
+                session_key_kind="session_header",
+                session_key_value="sid-retry-out-of-order",
+                api_key_scope="key-1",
+                consecutive_failures=failures,
+                cooldown_until_epoch=0.0,
+                last_detail="stream_incomplete",
+                updated_at_epoch=updated_at,
+                base_updated_at_epoch=base_updated_at,
+                failure_threshold=2,
+                conflict_cooldown_until_epoch=updated_at + 60.0,
+            )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-out-of-order"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 2
+        assert row.updated_at_epoch == 1002.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_merges_lagging_wall_clock_failure_from_loaded_base(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-clock-skew",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=0.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=2060.0,
+        )
+
+        # This replica loaded the row at 2000, then its wall clock lagged the
+        # writer that persisted it. The unchanged loaded row is a CAS match,
+        # so the failure must still open the shared circuit.
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-clock-skew",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=1500.0,
+            base_updated_at_epoch=2000.0,
+            failure_threshold=2,
+            conflict_cooldown_until_epoch=1560.0,
+        )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-clock-skew"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.consecutive_failures == 2
+        assert row.cooldown_until_epoch >= 2060.0
+        assert row.updated_at_epoch == 2000.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_circuit_reset_starts_new_failure_lineage(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-reset-lineage",
+            api_key_scope="key-1",
+            consecutive_failures=3,
+            cooldown_until_epoch=2000.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=1000.0,
+        )
+
+        await repository.delete_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-reset-lineage",
+            api_key_scope="key-1",
+        )
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-reset-lineage",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=5000.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=2000.0,
+            base_updated_at_epoch=1000.0,
+        )
+
+        row = await session.get(
+            HttpBridgeRetryCircuit,
+            (
+                "session_header",
+                durable_bridge_hash("sid-retry-reset-lineage"),
+                "key-1",
+            ),
+        )
+        assert row is not None
+        assert row.cooldown_until_epoch == 0.0
+        assert row.consecutive_failures == 1
+        assert row.last_detail == "stream_incomplete"
+        assert row.updated_at_epoch == 2000.0
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_attempt_pre_dispatch_claim_can_be_rolled_back(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-recovery-rollback",
+            session_key_value="sid-recovery-rollback",
+        )
+        attempt = await repository.record_recovery_attempt(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+            request_id="request-recovery-rollback",
+            account_id=None,
+            model="gpt-5.4",
+            replay_safe=True,
+        )
+        assert attempt is not None
+        assert await repository.mark_recovery_attempt_replayed(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        assert await repository.rollback_recovery_attempt_replayed(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        restored = await repository.lookup_recovery_attempt(
+            session_id=claim.id,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        assert restored is not None
+        assert restored.state.value == "unknown"
     finally:
         await session.close()
 

@@ -437,6 +437,96 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
     finalize_request.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = _make_request_state(
+        "req-completed-during-recovery",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=event_queue,
+    )
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+
+    async def block_idle_recovery(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        recovery_started.set()
+        await release_recovery.wait()
+        return False
+
+    finalize_request = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", block_idle_recovery)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", AsyncMock())
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=0.001,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+
+    async def consume_stream() -> list[str]:
+        return [
+            event_block
+            async for event_block in service._stream_http_bridge_session_events(
+                session,
+                request_state=request_state,
+                text_data="{}",
+                queue_limit=8,
+                propagate_http_errors=False,
+                downstream_turn_state=None,
+            )
+        ]
+
+    stream_task = asyncio.create_task(consume_stream())
+    await asyncio.wait_for(recovery_started.wait(), timeout=1.0)
+
+    terminal_text = (
+        '{"type":"response.completed","response":{"id":"resp-completed-during-recovery","status":"completed"}}'
+    )
+    await service._process_http_bridge_upstream_text(session, terminal_text)
+
+    assert request_state.completed_delivery_scope is not None
+    assert request_state.completed_delivery_scope.active is False
+    assert request_state.completed_delivery_scope.terminal_enqueued is True
+    release_recovery.set()
+    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+
+    event_types = [
+        payload["type"]
+        for event_block in event_blocks
+        if isinstance(payload := proxy_service.parse_sse_data_json(event_block), dict)
+    ]
+    assert event_types[-1] == "response.completed"
+    assert event_types.count("response.completed") == 1
+    assert "response.failed" not in event_types
+    finalize_request.assert_awaited_once()
+
+
 def test_retiring_http_bridge_session_is_not_reusable() -> None:
     session = _make_http_bridge_session(deque(), queued_request_count=0)
     session.upstream_control.retire_after_drain = True

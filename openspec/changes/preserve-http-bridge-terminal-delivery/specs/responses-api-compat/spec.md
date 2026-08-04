@@ -16,6 +16,18 @@ requirement.
 While the claimed completed-delivery operation remains active, ordinary stream
 idle accounting MUST NOT replace the upstream completion with a synthetic idle
 failure, and the stream MUST continue emitting its existing liveness frames.
+The completed-queue claim and the terminal idle-timeout decision MUST be
+serialized under the bridge pending lock. If completed processing wins that
+serialization and claims a live queue, the timeout MUST be suppressed. If the
+terminal idle timeout wins while no completed delivery is active, it MUST
+revoke the request's mutable event queue before releasing the pending lock so a
+later completed event cannot claim an orphaned queue.
+
+The first idle-timeout suppression for one completed-delivery operation MUST
+emit one bounded diagnostic containing the request ID, downstream response ID,
+and elapsed seconds. Further liveness intervals for that same operation MUST
+NOT repeat the diagnostic.
+
 When that operation returns, raises, or is cancelled before delivery, idle
 timeout behavior MUST resume.
 
@@ -36,6 +48,16 @@ client-disconnect and drain behavior MUST remain unchanged.
 - **WHEN** later completed bookkeeping exceeds the configured stream idle window
 - **THEN** the stream continues emitting liveness frames
 - **AND** it does not emit a synthetic idle failure while that operation remains active
+- **AND** it logs the suppression once with request, response, and elapsed-time context
+
+#### Scenario: Terminal idle timeout wins before completed processing
+
+- **GIVEN** an HTTP bridge stream has exhausted its configured idle window
+- **AND** no completed-delivery operation has claimed its queue
+- **WHEN** the stream acquires the bridge pending lock before a concurrent completed event
+- **THEN** it revokes the mutable event queue while still holding that lock
+- **AND** it emits the existing synthetic idle failure
+- **AND** later completed processing does not deliver to the revoked queue
 
 #### Scenario: Completed bookkeeping aborts
 

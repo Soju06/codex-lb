@@ -12,8 +12,14 @@ processing already claimed the request.
 - Capture the downstream queue when completed-event processing removes the
   request from pending ownership.
 - Use that captured queue for completed delivery after asynchronous bookkeeping.
+- Serialize completed-queue claiming with the terminal idle-timeout decision
+  under the bridge pending lock. A timeout that wins MUST revoke the mutable
+  queue before releasing the lock; a completed claim that wins MUST suppress
+  that timeout.
 - Keep emitting liveness frames, without manufacturing an idle timeout, while
   that completed-delivery operation is actively doing bookkeeping.
+- Log the first completed-delivery timeout suppression with bounded request,
+  response, and elapsed-time context.
 - Add stream-level regressions for slow and failed completed bookkeeping.
 
 ## Capabilities

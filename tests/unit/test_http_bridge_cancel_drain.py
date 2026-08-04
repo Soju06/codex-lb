@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from types import SimpleNamespace
 from typing import Any, Callable, cast
@@ -208,8 +209,10 @@ async def test_http_bridge_detach_revokes_queue_before_releasing_pending_lock(
 @pytest.mark.asyncio
 async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     terminal_outcome: str,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     queue_waiting = asyncio.Event()
     terminal_claimed = asyncio.Event()
@@ -320,6 +323,118 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
     assert request_state.completed_delivery_scope.active is False
     assert parse_sse_data_json.call_count == 1
     assert parse_sse_event_payload.call_count == 1
+    suppression_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "HTTP bridge stream idle timeout suppressed during completed delivery" in record.getMessage()
+    ]
+    assert len(suppression_messages) == 1
+    assert "request_id=req-terminal-race" in suppression_messages[0]
+    assert "response_id=resp-terminal-race" in suppression_messages[0]
+    assert "elapsed_seconds=" in suppression_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    queue_waiting = asyncio.Event()
+
+    class ObservedQueue(asyncio.Queue[str | None]):
+        async def get(self) -> str | None:
+            queue_waiting.set()
+            return await super().get()
+
+    event_queue = ObservedQueue()
+    request_state = _make_request_state(
+        "req-timeout-first",
+        response_id="resp-timeout-first",
+        awaiting_response_created=False,
+        event_queue=event_queue,
+    )
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+    backing_lock = anyio.Lock()
+    queue_revoked_before_lock_release = False
+
+    class ObservedPendingLock:
+        async def __aenter__(self) -> ObservedPendingLock:
+            await backing_lock.acquire()
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            nonlocal queue_revoked_before_lock_release
+            if request_state.event_queue is None:
+                queue_revoked_before_lock_release = True
+            backing_lock.release()
+
+    session.pending_lock = cast(Any, ObservedPendingLock())
+
+    async def fake_submit_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+
+    async def fake_detach_http_bridge_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+    ) -> bool:
+        del target_session
+        assert request_state.event_queue is None
+        return False
+
+    finalize_request = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", fake_detach_http_bridge_request)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=0.001,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+
+    async def consume_stream() -> list[str]:
+        return [
+            event_block
+            async for event_block in service._stream_http_bridge_session_events(
+                session,
+                request_state=request_state,
+                text_data="{}",
+                queue_limit=8,
+                propagate_http_errors=False,
+                downstream_turn_state=None,
+            )
+        ]
+
+    stream_task = asyncio.create_task(consume_stream())
+    await asyncio.wait_for(queue_waiting.wait(), timeout=1.0)
+    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+
+    assert queue_revoked_before_lock_release is True
+    assert request_state.event_queue is None
+    assert request_state in session.pending_requests
+    assert "stream_idle_timeout" in "".join(event_blocks)
+
+    terminal_text = '{"type":"response.completed","response":{"id":"resp-timeout-first","status":"completed"}}'
+    await service._process_http_bridge_upstream_text(session, terminal_text)
+
+    assert request_state.completed_delivery_scope is None
+    assert event_queue.empty()
+    finalize_request.assert_awaited_once()
 
 
 def test_retiring_http_bridge_session_is_not_reusable() -> None:

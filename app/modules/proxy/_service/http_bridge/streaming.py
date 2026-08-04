@@ -2567,6 +2567,7 @@ class _HTTPBridgeStreamingMixin:
             yielded_any = False
             keepalive_sent = False
             keepalive_count = 0
+            completed_delivery_suppression_logged = False
             while True:
                 keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
@@ -2619,16 +2620,35 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                             continue
-                        completed_delivery_scope = request_state.completed_delivery_scope
-                        completed_delivery_in_progress = (
-                            completed_delivery_scope is not None and completed_delivery_scope.active
-                        )
-                        if completed_delivery_in_progress:
-                            keepalive_count = 0
-                        else:
-                            keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
-                        if not completed_delivery_in_progress and keepalive_count > max_keepalive_count:
+                        idle_timeout_won = False
+                        async with session.pending_lock:
+                            completed_delivery_scope = request_state.completed_delivery_scope
+                            completed_delivery_in_progress = (
+                                completed_delivery_scope is not None and completed_delivery_scope.active
+                            )
+                            if completed_delivery_in_progress:
+                                keepalive_count = 0
+                            else:
+                                keepalive_count += 1
+                                if keepalive_count > max_keepalive_count:
+                                    # The terminal idle timeout and completed
+                                    # queue claim share this lock. Revoking the
+                                    # mutable queue here prevents a later
+                                    # completion from claiming an orphaned
+                                    # downstream consumer.
+                                    request_state.event_queue = None
+                                    idle_timeout_won = True
+                        if completed_delivery_in_progress and not completed_delivery_suppression_logged:
+                            logger.info(
+                                "HTTP bridge stream idle timeout suppressed during completed delivery "
+                                "request_id=%s response_id=%s elapsed_seconds=%.2f",
+                                request_state.request_id,
+                                downstream_response_id,
+                                max(0.0, _service_time().monotonic() - request_state.started_at),
+                            )
+                            completed_delivery_suppression_logged = True
+                        if idle_timeout_won:
                             logger.info(
                                 "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
                                 "max_keepalive_count=%s",

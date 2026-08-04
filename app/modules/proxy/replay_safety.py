@@ -431,12 +431,13 @@ def _direct_tool_call_prefix_state(
                 return None
             pending_calls.popleft()
             continue
-        if (
-            pending_calls
-            and allow_historical_developer_interleave
-            and _historical_pending_developer_message_is_transparent(item, item_type=item_type)
-        ):
-            continue
+        if pending_calls and item.get("role") == "developer":
+            if allow_historical_developer_interleave and _historical_pending_developer_message_is_transparent(
+                item,
+                item_type=item_type,
+            ):
+                continue
+            return None
         if pending_calls and (
             (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
             or item_type in {"input_file", "input_image", "input_text"}
@@ -459,6 +460,7 @@ def _historical_pending_developer_message_is_transparent(
 ) -> bool:
     return (
         item_type in (None, "message")
+        and ("type" not in item or _is_nonblank_string(item.get("type")))
         and item.get("role") == "developer"
         and item.get("id") is None
         and item.get("phase") is None

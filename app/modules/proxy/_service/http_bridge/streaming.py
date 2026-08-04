@@ -1205,6 +1205,19 @@ class _HTTPBridgeStreamingMixin:
             if durable_full_resend_fresh_payload is None:
                 if not isinstance(payload.input, list):
                     return False
+                eligibility_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=durable_full_resend_anchor_count,
+                    preserve_developer_message_ids=True,
+                )
+                if eligibility_projection is None:
+                    return False
+                durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
+                    eligibility_projection.input_items,
+                    stored_count=eligibility_projection.stored_prefix_count,
+                )
+                if not durable_full_resend_retains_prior_output:
+                    return False
                 replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
                     stored_count=durable_full_resend_anchor_count,
@@ -1214,10 +1227,6 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
                 ).model_copy(update={"input": replay_projection.input_items})
-                durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
-                    replay_projection.input_items,
-                    stored_count=replay_projection.stored_prefix_count,
-                )
             if not durable_full_resend_retains_prior_output:
                 return False
             if durable_full_resend_is_account_neutral is None:

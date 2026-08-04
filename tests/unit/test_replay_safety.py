@@ -754,7 +754,6 @@ def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_aft
         },
         {
             "type": "message",
-            "id": "msg_control",
             "role": "developer",
             "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
             "content": [{"type": "input_text", "text": "new control message"}],
@@ -780,6 +779,43 @@ def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_aft
             pending_tool_calls={"call_current": "custom_tool_call"},
         )
         is True
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_response_owned_fresh_developer() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "message",
+            "id": "msg_response_owned",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "new control message"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "/workspace",
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        pending_tool_calls={"call_current": "custom_tool_call"},
     )
 
 
@@ -987,6 +1023,21 @@ def test_full_resend_tool_loop_manifest_rejects_unproven_fresh_developer_positio
             id="explicit-developer-message",
         ),
         pytest.param(
+            {"type": None, "role": "developer", "content": "historical control"},
+            False,
+            id="null-type-developer-message",
+        ),
+        pytest.param(
+            {
+                "type": "bogus",
+                "role": "developer",
+                "id": "msg_owned",
+                "content": "historical control",
+            },
+            False,
+            id="malformed-type-response-owned-developer-message",
+        ),
+        pytest.param(
             {
                 "role": "developer",
                 "status": "completed",
@@ -1177,7 +1228,6 @@ def test_full_resend_retained_output_tolerates_fresh_developer_after_user() -> N
         },
         {
             "type": "message",
-            "id": "msg_control",
             "role": "developer",
             "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
             "content": [{"type": "input_text", "text": "new control message"}],
@@ -1195,6 +1245,45 @@ def test_full_resend_retained_output_tolerates_fresh_developer_after_user() -> N
             stored_count=projection.stored_prefix_count,
         )
         is True
+    )
+
+
+def test_full_resend_retained_output_rejects_response_owned_fresh_developer() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "id": "msg_answer",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {
+            "type": "message",
+            "id": "msg_user",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+        },
+        {
+            "type": "message",
+            "id": "msg_response_owned",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "new control message"}],
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
     )
 
 

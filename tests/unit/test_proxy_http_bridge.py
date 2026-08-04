@@ -17598,6 +17598,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         ("file", False, None),
         ("missing_prior_output", False, None),
         ("orphan_output", False, None),
+        ("response_owned_developer", False, None),
         ("missing_owner", False, None),
     ],
 )
@@ -17631,6 +17632,13 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },
     ]
+    if unsafe_replay_input == "response_owned_developer":
+        responses_lite_tools: proxy_service.JsonValue = {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        }
+        historical_input.insert(0, responses_lite_tools)
     if unsafe_replay_input == "file":
         historical_input.append(
             {
@@ -17704,6 +17712,19 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             *completed_search_bookkeeping,
             *([] if unsafe_replay_input == "missing_prior_output" else [retained_prior_output]),
             new_input,
+            *(
+                [
+                    {
+                        "type": "message",
+                        "id": "msg_response_owned",
+                        "role": "developer",
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                        "content": [{"type": "input_text", "text": "response-owned control"}],
+                    }
+                ]
+                if unsafe_replay_input == "response_owned_developer"
+                else []
+            ),
         ],
     }
     if unsafe_replay_input == "conversation":
@@ -17857,7 +17878,12 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             last_call = get_or_create.await_args
             assert last_call is not None
             assert last_call.kwargs["previous_response_id"] is None
-        if unsafe_replay_input in {"missing_owner", "missing_prior_output", "orphan_output"}:
+        if unsafe_replay_input in {
+            "missing_owner",
+            "missing_prior_output",
+            "orphan_output",
+            "response_owned_developer",
+        }:
             account_neutral_classifier.assert_not_called()
         else:
             account_neutral_classifier.assert_called_once()

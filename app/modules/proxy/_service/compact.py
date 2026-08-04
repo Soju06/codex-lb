@@ -1133,6 +1133,8 @@ class _CompactMixin:
                         log_status = "success"
                         return response
                     except ProxyResponseError as exc:
+                        if exc.failure_phase == "usage_settlement":
+                            raise
                         compact_continuity_error = _compact_previous_response_not_found_error(exc)
                         if compact_continuity_error is not None:
                             await proxy._settle_compact_api_key_usage(

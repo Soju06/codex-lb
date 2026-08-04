@@ -274,6 +274,72 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
 
 
 @pytest.mark.asyncio
+async def test_conversation_list_agrees_with_dashboard_activity_window(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = utcnow().replace(microsecond=0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    since = now - timedelta(days=1)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_conversation_window", "conversation-window@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-old",
+                    requested_at=now - timedelta(days=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-active",
+                    requested_at=now - timedelta(hours=1),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-a",
+                ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-outside",
+                    requested_at=now - timedelta(days=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-b",
+                ),
+                RequestLog(
+                    account_id="acc_conversation_window",
+                    request_id="conversation-window-deleted",
+                    requested_at=now - timedelta(hours=2),
+                    model="gpt-5.1",
+                    status="success",
+                    conversation_id="conv-deleted",
+                    deleted_at=now - timedelta(hours=1),
+                ),
+            ]
+        )
+        await session.commit()
+
+    conversations_response = await async_client.get("/api/conversations", params={"since": since.isoformat()})
+    dashboard_response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+
+    assert conversations_response.status_code == 200
+    assert dashboard_response.status_code == 200
+    conversations = conversations_response.json()
+    dashboard = dashboard_response.json()
+    assert [row["conversationId"] for row in conversations["conversations"]] == ["conv-a"]
+    assert conversations["total"] == 1
+    assert dashboard["summary"]["metrics"]["conversations"] == 1
+    assert dashboard["summary"]["metrics"]["conversationRequests"] == 1
+    assert sum(point["v"] for point in dashboard["trends"]["conversations"]) == 1.0
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_metrics_keep_soft_deleted_request_logs(async_client, db_setup):
     now = utcnow().replace(microsecond=0)
 

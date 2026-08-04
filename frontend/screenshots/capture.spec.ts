@@ -17,7 +17,12 @@ import {
   upstreamProxyAdmin,
   unauthenticatedSession,
 } from "./fixtures";
-import { createAccountSummary } from "../src/test/mocks/factories";
+import {
+  createAccountSummary,
+  createConversationDetails,
+  createConversationEntry,
+  createConversationsResponse,
+} from "../src/test/mocks/factories";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = path.resolve(__dirname, "../../docs/screenshots");
@@ -65,6 +70,15 @@ async function interceptApi(
       const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0));
       const slice = requestLogs.slice(offset, offset + limit);
       return fulfill(route, createRequestLogsResponse(slice, requestLogs.length, offset + limit < requestLogs.length));
+    }
+    if (p === "/api/conversations") {
+      return fulfill(
+        route,
+        createConversationsResponse([createConversationEntry({ conversationId: "conv_abc" })], 1, false),
+      );
+    }
+    if (p === "/api/conversations/conv_abc") {
+      return fulfill(route, createConversationDetails({ conversationId: "conv_abc" }));
     }
     if (p === "/api/accounts") return fulfill(route, { accounts: accountList });
     const trendsMatch = p.match(/^\/api\/accounts\/([^/]+)\/trends$/);
@@ -119,6 +133,7 @@ async function capture(
     fullPage?: boolean;
     session?: SessionOverride;
     waitFor?: string;
+    beforeScreenshot?: (page: Page) => Promise<void>;
   },
 ) {
   await applyTheme(page, opts.theme);
@@ -142,6 +157,10 @@ async function capture(
 
   // Short settle for JS-driven rendering (Recharts SVG mutations etc.)
   await page.waitForTimeout(SETTLE_MS);
+
+  if (opts.beforeScreenshot) {
+    await opts.beforeScreenshot(page);
+  }
 
   // For fullPage captures, un-fix the sticky footer so it flows at the document bottom
   // instead of floating at the original viewport boundary.
@@ -171,6 +190,39 @@ test("dashboard — light", async ({ page }) => {
 
 test("dashboard — dark", async ({ page }) => {
   await capture(page, { file: "dashboard-dark.jpg", theme: "dark", route: "/dashboard" });
+});
+
+test("dashboard conversations — desktop", async ({ page }) => {
+  await capture(page, {
+    file: "dashboard-conversations.jpg",
+    theme: "light",
+    route: "/dashboard?view=conversations",
+    waitFor: '[data-slot="table"]',
+  });
+});
+
+test("dashboard conversations — narrow", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture(page, {
+    file: "dashboard-conversations-narrow.jpg",
+    theme: "light",
+    route: "/dashboard?view=conversations",
+    waitFor: '[data-slot="table"]',
+  });
+});
+
+test("dashboard conversation details dialog", async ({ page }) => {
+  await capture(page, {
+    file: "dashboard-conversation-details.jpg",
+    theme: "light",
+    route: "/dashboard?view=conversations",
+    waitFor: '[data-slot="table"]',
+    beforeScreenshot: async (currentPage) => {
+      await currentPage.getByRole("button", { name: /view details/i }).click();
+      await currentPage.getByRole("dialog").waitFor();
+      await currentPage.getByTestId("conversation-details-information").waitFor();
+    },
+  });
 });
 
 test("accounts — light", async ({ page }) => {

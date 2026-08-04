@@ -92,6 +92,7 @@ from app.core.utils.sse import format_sse_event, parse_sse_data_json
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
+CODEX_LB_REQUIRED_CAPABILITY_HEADER = "x-codex-lb-required-capability"
 CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
 
@@ -103,6 +104,7 @@ IGNORE_INBOUND_HEADERS = {
     "forwarded",
     "x-real-ip",
     CODEX_INSTALLATION_ID_HEADER,
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     "true-client-ip",
 }
 INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset(
@@ -475,6 +477,7 @@ class ProxyResponseError(Exception):
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
         failed_session: aiohttp.ClientSession | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -486,6 +489,7 @@ class ProxyResponseError(Exception):
         self.upstream_status_code = upstream_status_code
         self.upstream_error_code = upstream_error_code
         self.failed_session = failed_session
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _process_network_failure_error(

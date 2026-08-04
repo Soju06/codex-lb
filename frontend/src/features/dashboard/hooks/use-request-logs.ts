@@ -105,7 +105,12 @@ function timeframeToSinceIso(timeframe: FilterState["timeframe"]): string | unde
   return new Date(now - lookup[timeframe]).toISOString();
 }
 
-export function useRequestLogs() {
+export type UseRequestLogsOptions = {
+  enabled?: boolean;
+};
+
+export function useRequestLogs(options: UseRequestLogsOptions = {}) {
+  const enabled = options.enabled ?? true;
   const [searchParams, setSearchParams] = useSearchParams();
 
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
@@ -145,6 +150,7 @@ export function useRequestLogs() {
   } = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
     queryFn: () => getRequestLogs(listFilters),
+    enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -171,6 +177,7 @@ export function useRequestLogs() {
   } = useQuery({
     queryKey: ["dashboard", "request-log-options", facetFilters],
     queryFn: () => getRequestLogOptions(facetFilters),
+    enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,

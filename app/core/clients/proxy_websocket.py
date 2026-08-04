@@ -138,6 +138,24 @@ def normalize_realtime_call_id(value: str) -> str | None:
     return normalized.lower()
 
 
+def _consume_connection_lost_exception(done: asyncio.Future[Any]) -> None:
+    """Retrieve close exceptions before websockets shields the waiter.
+
+    websockets 16 waits on ``connection_lost_waiter`` through
+    ``asyncio.shield`` while completing ``ClientConnection.recv``.  A peer
+    keepalive/protocol close therefore leaves an exception on the waiter,
+    which asyncio reports as an ``exception in shielded future`` even though
+    ``recv`` translates it into an ``UpstreamWebSocketMessage``.  Consume it
+    at the adapter boundary; ``receive`` still classifies the close normally.
+    """
+    if done.cancelled():
+        return
+    try:
+        done.exception()
+    except asyncio.CancelledError:
+        return
+
+
 @dataclass(slots=True)
 class UpstreamWebSocketMessage:
     kind: str
@@ -170,7 +188,14 @@ def _relay_receive_error_code(error_code: str) -> str | None:
 
     # Relay owners map an absent code to their established stream_incomplete
     # contract. Leaking the adapter's generic fallback would bypass that path.
-    return error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+    return error_code if error_code in {PROCESS_NETWORK_UNAVAILABLE_CODE, "upstream_keepalive_timeout"} else None
+
+
+def _is_keepalive_timeout_close(exc: ConnectionClosedError) -> bool:
+    """Classify peer/proxy heartbeat failures without exposing socket details."""
+
+    reason = _close_reason_from_exception(exc)
+    return "keepalive ping timeout" in f"{exc} {reason or ''}".lower()
 
 
 async def _rotate_after_websocket_network_failure(error_code: str) -> None:
@@ -223,6 +248,9 @@ class WebsocketsUpstreamWebSocket:
         self._connection = connection
         self._uses_proxy = uses_proxy
         self._preserve_close_semantics = preserve_close_semantics
+        connection_lost_waiter = getattr(connection, "connection_lost_waiter", None)
+        if isinstance(connection_lost_waiter, asyncio.Future):
+            connection_lost_waiter.add_done_callback(_consume_connection_lost_exception)
 
     async def send_text(self, text: str) -> None:
         try:
@@ -254,6 +282,11 @@ class WebsocketsUpstreamWebSocket:
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
+            relay_error_code = (
+                "upstream_keepalive_timeout"
+                if _is_keepalive_timeout_close(exc)
+                else _relay_receive_error_code(error_code)
+            )
             # ConnectionClosedError describes an incomplete close handshake,
             # not generic transport provenance. Let Responses relay owners map
             # it to stream_incomplete while live relays preserve received closes.
@@ -265,7 +298,7 @@ class WebsocketsUpstreamWebSocket:
                     if self._preserve_close_semantics
                     else str(exc)
                 ),
-                error_code=_relay_receive_error_code(error_code),
+                error_code=relay_error_code,
             )
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)

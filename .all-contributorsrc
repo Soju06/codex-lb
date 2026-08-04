@@ -1082,6 +1082,56 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "shaqman",
+      "name": "Syakur Rahman",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1113851?v=4",
+      "profile": "http://expressthisout.com/",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "cigro-manager",
+      "name": "cigro-manager",
+      "avatar_url": "https://avatars.githubusercontent.com/u/219247995?v=4",
+      "profile": "https://github.com/cigro-manager",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "lkraider",
+      "name": "Paul Eipper",
+      "avatar_url": "https://avatars.githubusercontent.com/u/52256?v=4",
+      "profile": "https://github.com/lkraider",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "ret2basic",
+      "name": "ret2basic.eth",
+      "avatar_url": "https://avatars.githubusercontent.com/u/59381775?v=4",
+      "profile": "https://github.com/ret2basic",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "yeongjun-cigro",
+      "name": "유영준",
+      "avatar_url": "https://avatars.githubusercontent.com/u/260819931?v=4",
+      "profile": "https://github.com/yeongjun-cigro",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

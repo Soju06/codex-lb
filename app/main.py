@@ -358,12 +358,12 @@ async def lifespan(app: FastAPI):
     try:
         await cache_poller.prime()
     except Exception:
-        # prime() raises when the baseline version read fails; degrade to
-        # first-poll-baselines (matching initialize()'s contract) rather than
-        # continuing as if the seed succeeded. A peer bump landing before the
-        # first background poll may then be absorbed as the initial baseline
-        # and only converge on the fallback TTL / next bump, but the failure is
-        # surfaced here instead of silently voiding the delivery guarantee.
+        # prime() raises when the baseline version read fails, leaving the poller
+        # uninitialized so an explicit retry would remain baseline-only. Startup
+        # continues, but start() arms conservative recovery: the first successful
+        # background read invokes callbacks for positive versions before
+        # acknowledging them, so a peer bump cannot become a callback-less
+        # baseline after local caches are warm.
         logger.warning("cache invalidation baseline prime failed", exc_info=True)
     try:
         await routing_availability_cache.refresh_from_db()
@@ -518,7 +518,22 @@ async def lifespan(app: FastAPI):
             logger.warning("Drain timeout reached, proceeding with shutdown")
 
         proxy_service = getattr(app.state, "proxy_service", None)
-        if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
+        recovery_settlements_drained = True
+        # Settle detached recovery journals while their origin leases are
+        # still held; bridge teardown below may release those owner fences.
+        if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
+            try:
+                recovery_settlements_drained = await proxy_service.drain_persistence_tasks(
+                    timeout_seconds=settings.shutdown_drain_timeout_seconds,
+                    task_name_prefixes=("http-bridge-recovery-settlement-",),
+                )
+            except Exception:
+                logger.warning("Failed to pre-drain proxy settlement tasks during shutdown", exc_info=True)
+        if (
+            recovery_settlements_drained
+            and proxy_service is not None
+            and hasattr(proxy_service, "mark_http_bridge_draining")
+        ):
             try:
                 await proxy_service.mark_http_bridge_draining()
             except Exception:
@@ -687,6 +702,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_api.router)
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
+    app.include_router(request_logs_api.conversations_router)
     app.include_router(quota_planner_api.router)
     app.include_router(reports_api.router)
     app.include_router(conversation_archive_api.router)

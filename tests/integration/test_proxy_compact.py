@@ -16,6 +16,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
+from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -343,6 +344,72 @@ async def test_proxy_compact_success(async_client, monkeypatch):
     assert response.headers.get("x-codex-credits-has-credits") == "true"
     assert response.headers.get("x-codex-credits-unlimited") == "false"
     assert response.headers.get("x-codex-credits-balance") == "12.50"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(async_client, monkeypatch):
+    for raw_account_id, email in (
+        ("acc_compact_trim_file_owner", "compact-trim-file-owner@example.com"),
+        ("acc_compact_trim_selected", "compact-trim-selected@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+        )
+        assert response.status_code == 200
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account).order_by(Account.id))).scalars().all()
+    file_owner = next(account for account in accounts if account.chatgpt_account_id == "acc_compact_trim_file_owner")
+    selected_account = next(
+        account for account in accounts if account.chatgpt_account_id == "acc_compact_trim_selected"
+    )
+    await service._pin_file_account("file_compact_trimmed_optional", file_owner.id)
+
+    seen: dict[str, object] = {}
+
+    async def fake_select_account(self, deadline, **kwargs):
+        del self, deadline
+        seen["preferred_account_id"] = kwargs.get("preferred_account_id")
+        return proxy_module.AccountSelection(account=selected_account, error_message=None)
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token
+        seen["upstream_account_id"] = account_id
+        seen["upstream_payload"] = payload
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "stable prelude"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "x" * 500_000},
+                        {"type": "input_file", "file_id": "file_compact_trimmed_optional"},
+                    ],
+                },
+                {"role": "user", "content": "continue after compaction"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["preferred_account_id"] is None
+    assert seen["upstream_account_id"] == "acc_compact_trim_selected"
+    upstream_payload = cast(ResponsesCompactRequest, seen["upstream_payload"]).to_payload()
+    assert "file_compact_trimmed_optional" not in json.dumps(upstream_payload)
 
 
 @pytest.mark.asyncio
@@ -1256,6 +1323,145 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
         assert row.status == "released", f"forwarded reservation leaked held quota; status={row.status!r}"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_and_releases_reservation(
+    async_client,
+    monkeypatch,
+):
+    """A forwarded owner must not report compact success when its sole API-key
+    usage settlement fails. The failure is surfaced without another upstream or
+    account-health attempt, and a fresh repository releases the held quota."""
+    from app.core.config.settings import get_settings
+    from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+    from app.db.models import ApiKeyUsageReservation
+    from app.modules.api_keys.service import ApiKeyUsageReservationData
+    from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    email = "compact-forwarded-settlement-failure@example.com"
+    raw_account_id = "acc_compact_forwarded_settlement_failure"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    settings_resp = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings_resp.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-forwarded-settlement-failure-key",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    key = create.json()["key"]
+
+    compact_model = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    async with SessionLocal() as session:
+        api_keys_service = ApiKeysService(ApiKeysRepository(session))
+        reservation = await api_keys_service.enforce_limits_for_request(
+            key_id,
+            request_model=compact_model.model,
+            request_service_tier=None,
+            request_usage_budget=estimate_api_key_request_usage(compact_model),
+        )
+    async with SessionLocal() as session:
+        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+        assert row is not None
+        assert row.status == "reserved"
+
+    forwarded_payload = ResponsesRequest.model_validate(
+        {
+            "model": compact_model.model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin-instance",
+        target_instance=get_settings().http_responses_session_bridge_instance_id,
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        reservation=ApiKeyUsageReservationData(
+            reservation_id=reservation.reservation_id,
+            key_id=key_id,
+            model=compact_model.model,
+        ),
+    )
+    headers = build_owner_forward_headers(
+        headers={"authorization": f"Bearer {key}"},
+        payload=forwarded_payload,
+        context=context,
+    )
+
+    compact_calls: list[str | None] = []
+
+    async def fake_compact(payload, request_headers, access_token, account_id):
+        del payload, request_headers, access_token
+        compact_calls.append(account_id)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": compact_model.model,
+                "output": [
+                    {
+                        "id": "cmp_forwarded_settlement_failure",
+                        "type": "compaction",
+                        "encrypted_content": "enc_forwarded_settlement_failure",
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "total_tokens": 10,
+                },
+            }
+        )
+
+    finalize_attempts: list[str] = []
+
+    async def fail_finalize(self, reservation_id: str, **kwargs: object) -> None:
+        del self, kwargs
+        finalize_attempts.append(reservation_id)
+        raise RuntimeError("compact settlement persistence failed")
+
+    handle_stream_error = AsyncMock(return_value={"failure_class": "upstream"})
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fail_finalize)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", handle_stream_error)
+
+    response = await async_client.post(
+        "/internal/bridge/responses",
+        json=forwarded_payload.model_dump_for_forwarding(),
+        headers=headers,
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "usage_settlement_failed"
+    assert compact_calls == [raw_account_id]
+    assert finalize_attempts == [reservation.reservation_id]
+    handle_stream_error.assert_not_awaited()
+
+    async with SessionLocal() as session:
+        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+        assert row is not None
+        assert row.status == "released"
 
 
 @pytest.mark.asyncio

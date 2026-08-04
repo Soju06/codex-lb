@@ -3036,8 +3036,66 @@ class _HTTPBridgeStreamingMixin:
             yielded_any = False
             keepalive_sent = False
             keepalive_count = 0
+            completed_delivery_suppression_logged = False
             circuit_keepalive_waiting = False
             circuit_keepalive_until: float | None = None
+
+            async def completed_delivery_suppresses_idle_timeout(
+                *,
+                downstream_response_id: str,
+                revoke_queue_if_inactive: bool,
+            ) -> bool:
+                nonlocal completed_delivery_suppression_logged, keepalive_count
+
+                async with session.pending_lock:
+                    completed_delivery_scope = request_state.completed_delivery_scope
+                    completed_delivery_owns_queue = completed_delivery_scope is not None and (
+                        completed_delivery_scope.active or completed_delivery_scope.terminal_enqueued
+                    )
+                    if completed_delivery_owns_queue:
+                        keepalive_count = 0
+                    elif revoke_queue_if_inactive:
+                        # The terminal idle timeout and completed queue claim
+                        # share this lock. Revoking the mutable queue here
+                        # prevents a later completion from claiming an
+                        # orphaned downstream consumer.
+                        request_state.event_queue = None
+
+                if completed_delivery_owns_queue and not completed_delivery_suppression_logged:
+                    logger.info(
+                        "HTTP bridge stream idle timeout suppressed during completed delivery "
+                        "request_id=%s response_id=%s elapsed_seconds=%.2f",
+                        request_state.request_id,
+                        downstream_response_id,
+                        max(0.0, _service_time().monotonic() - request_state.started_at),
+                    )
+                    completed_delivery_suppression_logged = True
+                return completed_delivery_owns_queue
+
+            def stream_idle_keepalive(*, downstream_response_id: str) -> str | None:
+                nonlocal keepalive_sent, yielded_any
+
+                if propagate_http_errors and request_state.response_id is None and not circuit_keepalive_waiting:
+                    return None
+                keepalive_sent = True
+                yielded_any = True
+                if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
+                    stream_keepalive_sent_total.labels(surface="http_bridge").inc()
+                if request_state.response_id or request_state.replay_downstream_response_id:
+                    return format_sse_event(
+                        cast(
+                            Mapping[str, JsonValue],
+                            {
+                                "type": "response.in_progress",
+                                "response": {
+                                    "id": downstream_response_id,
+                                    "status": "in_progress",
+                                },
+                            },
+                        )
+                    )
+                return _codex_keepalive_frame()
+
             while True:
                 keepalive_interval = getattr(_service_get_settings(), "sse_keepalive_interval_seconds", 10.0)
                 if keepalive_interval > 0:
@@ -3110,9 +3168,14 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                             continue
-                        keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
-                        if keepalive_count >= max_keepalive_count:
+                        completed_delivery_in_progress = await completed_delivery_suppresses_idle_timeout(
+                            downstream_response_id=downstream_response_id,
+                            revoke_queue_if_inactive=False,
+                        )
+                        if not completed_delivery_in_progress:
+                            keepalive_count += 1
+                        if not completed_delivery_in_progress and keepalive_count >= max_keepalive_count:
                             if not response_started:
                                 retried = False
                                 if not circuit_keepalive_waiting:
@@ -3120,6 +3183,16 @@ class _HTTPBridgeStreamingMixin:
                                         downstream_response_id=downstream_response_id,
                                     )
                                     if terminal_event is not None:
+                                        if await completed_delivery_suppresses_idle_timeout(
+                                            downstream_response_id=downstream_response_id,
+                                            revoke_queue_if_inactive=True,
+                                        ):
+                                            keepalive_event = stream_idle_keepalive(
+                                                downstream_response_id=downstream_response_id,
+                                            )
+                                            if keepalive_event is not None:
+                                                yield keepalive_event
+                                            continue
                                         yield terminal_event
                                         break
                                     if retried:
@@ -3142,6 +3215,16 @@ class _HTTPBridgeStreamingMixin:
                                 if retry_cooldown_seconds > 0 and (
                                     continuity_bound or (session.key.strength == "hard" and not fresh_replay_is_safe)
                                 ):
+                                    if await completed_delivery_suppresses_idle_timeout(
+                                        downstream_response_id=downstream_response_id,
+                                        revoke_queue_if_inactive=True,
+                                    ):
+                                        keepalive_event = stream_idle_keepalive(
+                                            downstream_response_id=downstream_response_id,
+                                        )
+                                        if keepalive_event is not None:
+                                            yield keepalive_event
+                                        continue
                                     if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                         stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                     _record_continuity_fail_closed(
@@ -3178,6 +3261,16 @@ class _HTTPBridgeStreamingMixin:
                                         request_deadline - _service_time().monotonic(),
                                     )
                                     if retry_cooldown_seconds >= retry_cooldown_remaining_budget:
+                                        if await completed_delivery_suppresses_idle_timeout(
+                                            downstream_response_id=downstream_response_id,
+                                            revoke_queue_if_inactive=True,
+                                        ):
+                                            keepalive_event = stream_idle_keepalive(
+                                                downstream_response_id=downstream_response_id,
+                                            )
+                                            if keepalive_event is not None:
+                                                yield keepalive_event
+                                            continue
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                         logger.info(
@@ -3219,6 +3312,16 @@ class _HTTPBridgeStreamingMixin:
                                             after_circuit_cooldown=True,
                                         )
                                         if terminal_event is not None:
+                                            if await completed_delivery_suppresses_idle_timeout(
+                                                downstream_response_id=downstream_response_id,
+                                                revoke_queue_if_inactive=True,
+                                            ):
+                                                keepalive_event = stream_idle_keepalive(
+                                                    downstream_response_id=downstream_response_id,
+                                                )
+                                                if keepalive_event is not None:
+                                                    yield keepalive_event
+                                                continue
                                             yield terminal_event
                                             break
                                     if retried:
@@ -3232,6 +3335,16 @@ class _HTTPBridgeStreamingMixin:
                                         yielded_any = False
                                         continue
                                     if not retried:
+                                        if await completed_delivery_suppresses_idle_timeout(
+                                            downstream_response_id=downstream_response_id,
+                                            revoke_queue_if_inactive=True,
+                                        ):
+                                            keepalive_event = stream_idle_keepalive(
+                                                downstream_response_id=downstream_response_id,
+                                            )
+                                            if keepalive_event is not None:
+                                                yield keepalive_event
+                                            continue
                                         await self._record_http_bridge_retry_circuit_failure(
                                             session,
                                             detail="stream_idle_timeout",
@@ -3257,6 +3370,16 @@ class _HTTPBridgeStreamingMixin:
                                         )
                                         break
                             elif response_started:
+                                if await completed_delivery_suppresses_idle_timeout(
+                                    downstream_response_id=downstream_response_id,
+                                    revoke_queue_if_inactive=True,
+                                ):
+                                    keepalive_event = stream_idle_keepalive(
+                                        downstream_response_id=downstream_response_id,
+                                    )
+                                    if keepalive_event is not None:
+                                        yield keepalive_event
+                                    continue
                                 if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                     stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                 logger.info(
@@ -3277,31 +3400,11 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                                 break
-                        if (
-                            propagate_http_errors
-                            and request_state.response_id is None
-                            and not circuit_keepalive_waiting
-                        ):
-                            continue
-                        keepalive_sent = True
-                        yielded_any = True
-                        if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
-                            stream_keepalive_sent_total.labels(surface="http_bridge").inc()
-                        if request_state.response_id or request_state.replay_downstream_response_id:
-                            yield format_sse_event(
-                                cast(
-                                    Mapping[str, JsonValue],
-                                    {
-                                        "type": "response.in_progress",
-                                        "response": {
-                                            "id": downstream_response_id,
-                                            "status": "in_progress",
-                                        },
-                                    },
-                                )
-                            )
-                        else:
-                            yield _codex_keepalive_frame()
+                        keepalive_event = stream_idle_keepalive(
+                            downstream_response_id=downstream_response_id,
+                        )
+                        if keepalive_event is not None:
+                            yield keepalive_event
                         continue
                 else:
                     event_block = await event_queue.get()

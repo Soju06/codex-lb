@@ -64,10 +64,10 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_CODE as PREVIOUS_RESPONSE_STALE_CODE,
+    PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
 )
 from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_MESSAGE as PREVIOUS_RESPONSE_STALE_MESSAGE,
+    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
@@ -2135,7 +2135,15 @@ _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
     "no tool output found for function call call_",
     "no tool output found for custom tool call call_",
     "no tool output found for apply patch call call_",
+    "no tool output found for tool search call call_",
 )
+
+
+def _is_missing_tool_output_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
 
 
 def _is_missing_tool_output_error(
@@ -2144,10 +2152,9 @@ def _is_missing_tool_output_error(
     param: str | None,
     message: str | None,
 ) -> bool:
-    if code != "invalid_request_error" or param != "input" or message is None:
+    if code != "invalid_request_error" or param != "input":
         return False
-    normalized = " ".join(message.lower().split())
-    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
+    return _is_missing_tool_output_message(message)
 
 
 def _is_previous_response_not_found_error(

@@ -39,8 +39,8 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketMessage,
 )
 from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_CODE,
-    PREVIOUS_RESPONSE_STALE_MESSAGE,
+    PREVIOUS_RESPONSE_NOT_FOUND_CODE,
+    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     openai_error,
@@ -1064,7 +1064,7 @@ def _websocket_continuity_error_fields(
     expose_stale_previous_response_classifier: bool,
 ) -> tuple[str, str]:
     if reason == "previous_response_not_found" and expose_stale_previous_response_classifier:
-        return PREVIOUS_RESPONSE_STALE_CODE, PREVIOUS_RESPONSE_STALE_MESSAGE
+        return PREVIOUS_RESPONSE_NOT_FOUND_CODE, PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE
     return "stream_incomplete", PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE
 
 
@@ -1753,6 +1753,8 @@ def _app_error_to_websocket_event(exc: AppError) -> dict[str, JsonValue]:
 def _wrapped_websocket_error_event(
     status_code: int,
     payload: OpenAIErrorEnvelope,
+    *,
+    expose_stale_previous_response_classifier: bool = False,
 ) -> dict[str, JsonValue]:
     error = payload["error"]
     error_code = _normalize_error_code(
@@ -1767,7 +1769,13 @@ def _wrapped_websocket_error_event(
         message=error_message,
     ):
         status_code = 502
-        payload = previous_response_stream_incomplete_error()
+        # On the Codex-native route, the caller has already sanitized this to
+        # the canonical code (see _sanitize_websocket_previous_response_error);
+        # do not re-mask it back to stream_incomplete. Every other caller
+        # (public /v1, or a raw error this function is seeing for the first
+        # time) keeps the existing stream_incomplete safety net.
+        if not expose_stale_previous_response_classifier:
+            payload = previous_response_stream_incomplete_error()
     error_payload = cast(JsonValue, dict(payload["error"]))
     event: dict[str, JsonValue] = {
         "type": "error",

@@ -1100,7 +1100,11 @@ class _WebSocketMixin:
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(status_code, error_payload)
+                                            _wrapped_websocket_error_event(
+                                                status_code,
+                                                error_payload,
+                                                expose_stale_previous_response_classifier=codex_session_affinity,
+                                            )
                                         )
                                     )
                                 continue
@@ -4812,7 +4816,12 @@ class _WebSocketMixin:
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await _release_websocket_response_create_gate(request_state, response_create_gate)
-        await proxy._settle_stream_api_key_usage(
+        if settlement.account_health_error:
+            # Connection safety must not wait on settlement or health
+            # persistence. The health write remains ordered below.
+            upstream_control.reconnect_requested = True
+            upstream_control.retire_after_drain = True
+        settlement_confirmed = await proxy._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
             settlement,
@@ -4822,13 +4831,12 @@ class _WebSocketMixin:
             wait_for_settlement=settlement.account_health_error,
         )
         if settlement.account_health_error:
-            await proxy._handle_stream_error(
-                account,
-                _stream_settlement_error_payload(settlement),
-                settlement.error_code or "upstream_error",
-            )
-            upstream_control.reconnect_requested = True
-            upstream_control.retire_after_drain = True
+            if settlement_confirmed:
+                await proxy._handle_stream_error(
+                    account,
+                    _stream_settlement_error_payload(settlement),
+                    settlement.error_code or "upstream_error",
+                )
         elif settlement.record_success:
             await proxy._load_balancer.record_success(account)
             for remembered_response_id in _websocket_continuity_response_ids(request_state, response_id):
@@ -5012,7 +5020,15 @@ class _WebSocketMixin:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
         async with client_send_lock:
             await websocket.send_text(
-                _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
+                _serialize_websocket_error_event(
+                    _wrapped_websocket_error_event(
+                        status_code,
+                        payload,
+                        expose_stale_previous_response_classifier=(
+                            request_state.expose_stale_previous_response_classifier
+                        ),
+                    )
+                )
             )
 
     async def _emit_websocket_proxy_request_timeout(

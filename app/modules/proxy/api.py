@@ -131,6 +131,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
     extract_input_file_ids,
     normalize_tool_type,
+    responses_request_has_explicit_prompt_cache_controls,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import (
@@ -307,6 +308,14 @@ _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
 )
 _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
 _SOURCE_LIMITED_STREAM_BUFFER_BYTES = 16 * 1024 * 1024
+_PROMPT_CACHE_MODE_HEADER = "X-Codex-LB-Prompt-Cache-Mode"
+_SUBSCRIPTION_IMPLICIT_PROMPT_CACHE_MODE = "subscription-implicit"
+
+
+def _mark_subscription_prompt_cache_fallback(response: Response, payload: ResponsesRequest) -> Response:
+    if response.status_code < 400 and responses_request_has_explicit_prompt_cache_controls(payload):
+        response.headers[_PROMPT_CACHE_MODE_HEADER] = _SUBSCRIPTION_IMPLICIT_PROMPT_CACHE_MODE
+    return response
 
 
 class _V1ResetCreditFreshCredentials:
@@ -1064,7 +1073,7 @@ async def responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
 
-    return await _stream_responses(
+    response = await _stream_responses(
         request,
         responses_payload,
         context,
@@ -1079,6 +1088,7 @@ async def responses(
         enforce_openai_sdk_contract=openai_sdk_request,
         native_codex_heartbeat=native_codex_heartbeat,
     )
+    return _mark_subscription_prompt_cache_fallback(response, responses_payload)
 
 
 @router.get("/opportunistic/admission")
@@ -1191,7 +1201,7 @@ async def v1_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     if responses_payload.stream:
-        return await _stream_responses(
+        response = await _stream_responses(
             request,
             responses_payload,
             context,
@@ -1201,16 +1211,18 @@ async def v1_responses(
             prefer_http_bridge=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
-    return await _collect_responses(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        codex_session_affinity=False,
-        openai_cache_affinity=True,
-        prefer_http_bridge=True,
-        prohibit_fast_mode=prohibit_fast_mode,
-    )
+    else:
+        response = await _collect_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            prefer_http_bridge=True,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
+    return _mark_subscription_prompt_cache_fallback(response, responses_payload)
 
 
 @internal_router.post(

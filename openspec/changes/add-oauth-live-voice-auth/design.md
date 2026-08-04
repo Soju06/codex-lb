@@ -21,7 +21,9 @@ Live Voice has two authenticated legs: HTTP call creation and a control sideband
 
 The OAuth resolver validates the supplied credential pair against the upstream usage endpoint. Every caller with a stable verified `chatgpt_user_id` or `sub` receives `principal:{stable_seat_claim}` whether or not an imported Account matches. A matching imported Account remains optional `caller_account_id` metadata for usage and route integration. Credentials without a stable claim fall back to one unambiguous imported Account id. External callers follow the configured default upstream proxy route when routing is enabled.
 
-The typed result contains `principal_id`, optional `caller_account_id` for usage integration, normalized ChatGPT account id, verified usage payload, and route. Raw credentials remain absent from logs and persistence.
+The typed result contains `principal_id`, optional `caller_account_id` for usage integration, normalized ChatGPT account id, verified usage payload, and route. Raw credentials remain absent from logs and persistence. OAuth Live accepts independent verified principals through its global policy, while `/api/codex/usage` requires an eligible imported `caller_account_id` before exposing aggregate local pool usage.
+
+Identity validation admits at most 32 distinct in-flight credential pairs per process. Same-pair callers share one task. The final departing waiter cancels unfinished work, and cancelling work retains its admission slot until the task drains.
 
 ### Use one global policy
 
@@ -35,7 +37,7 @@ Key callers keep `api_key.id` affinity, assignments, limits, reservations, last-
 
 ### Keep the Settings job singular
 
-The Live Voice card answers one operator question: which upstream Accounts may serve verified OAuth Live calls? It exposes one global enable switch, one explicit account multi-select, and one save action. Caller inputs and caller-to-account matching are absent from the UI.
+The Live Voice card answers one operator question: which upstream Accounts may serve verified OAuth Live calls? It exposes one global enable switch, one explicit account multi-select, and one save action. Caller inputs and caller-to-account matching are absent from the UI. The compact selector keeps selected unavailable Accounts visible so operators can identify and remove stale assignments while other unavailable Accounts remain excluded.
 
 ## Migration and rollback
 

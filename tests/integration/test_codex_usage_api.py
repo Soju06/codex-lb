@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from datetime import timedelta, timezone
 
 import pytest
@@ -20,6 +22,11 @@ from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_cred
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+def _jwt(payload: dict[str, object]) -> str:
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"header.{encoded}.signature"
 
 
 def _make_account(
@@ -86,6 +93,28 @@ def stub_codex_usage_caller_validation(monkeypatch):
     monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
     yield
     clear_codex_oauth_identity_cache()
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_rejects_external_verified_oauth_principal(async_client, db_setup, monkeypatch):
+    expected_access_token = _jwt({"sub": "external-user"})
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == expected_access_token
+        return UsagePayload.model_validate({"plan_type": "plus", "workspace_id": account_id})
+
+    monkeypatch.setattr("app.core.auth.codex_oauth_identity.fetch_usage", stub_fetch_usage)
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": f"Bearer {expected_access_token}",
+            "chatgpt-account-id": "workspace_external",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.asyncio

@@ -432,6 +432,91 @@ async def test_cancelled_waiter_does_not_cancel_shared_validation(monkeypatch: p
     assert fetch_count == 1
 
 
+@pytest.mark.asyncio
+async def test_cancelled_only_waiter_cancels_and_drains_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetch_started = asyncio.Event()
+    fetch_cancelled = asyncio.Event()
+    release_fetch = asyncio.Event()
+    release_cancellation = asyncio.Event()
+    access_token = _jwt({"chatgpt_user_id": "user_a"})
+
+    async def fetch_usage(*args: object, **kwargs: object) -> UsagePayload:
+        fetch_started.set()
+        try:
+            await release_fetch.wait()
+        except asyncio.CancelledError:
+            fetch_cancelled.set()
+            await release_cancellation.wait()
+            raise
+        return UsagePayload(workspace_id="workspace_1")
+
+    _install_single_account_fakes(monkeypatch, fetch_usage)
+    waiter = asyncio.create_task(
+        codex_oauth_identity.resolve_verified_codex_oauth_identity(
+            f"Bearer {access_token}",
+            "workspace_account",
+        )
+    )
+
+    await fetch_started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    await asyncio.wait_for(fetch_cancelled.wait(), timeout=1.0)
+    assert len(codex_oauth_identity._identity_inflight) == 1
+    with pytest.raises(ProxyRateLimitError, match="still being cancelled"):
+        await codex_oauth_identity.resolve_verified_codex_oauth_identity(
+            f"Bearer {access_token}",
+            "workspace_account",
+        )
+
+    release_cancellation.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert codex_oauth_identity._identity_inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_distinct_identity_validation_capacity_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetch_count = 0
+    all_fetches_started = asyncio.Event()
+    release_fetches = asyncio.Event()
+
+    async def fetch_usage(*args: object, **kwargs: object) -> UsagePayload:
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == codex_oauth_identity._INFLIGHT_MAX_ENTRIES:
+            all_fetches_started.set()
+        await release_fetches.wait()
+        return UsagePayload(workspace_id="workspace_1")
+
+    _install_single_account_fakes(monkeypatch, fetch_usage)
+    waiters = [
+        asyncio.create_task(
+            codex_oauth_identity.resolve_verified_codex_oauth_identity(
+                f"Bearer {_jwt({'chatgpt_user_id': 'user_a', 'nonce': index})}",
+                "workspace_account",
+            )
+        )
+        for index in range(codex_oauth_identity._INFLIGHT_MAX_ENTRIES)
+    ]
+
+    await asyncio.wait_for(all_fetches_started.wait(), timeout=1.0)
+    overflow_token = _jwt({"chatgpt_user_id": "user_a", "nonce": "overflow"})
+    with pytest.raises(ProxyRateLimitError, match="Too many concurrent"):
+        await codex_oauth_identity.resolve_verified_codex_oauth_identity(
+            f"Bearer {overflow_token}",
+            "workspace_account",
+        )
+    assert fetch_count == codex_oauth_identity._INFLIGHT_MAX_ENTRIES
+
+    release_fetches.set()
+    await asyncio.gather(*waiters)
+    await asyncio.sleep(0)
+    assert codex_oauth_identity._identity_inflight == {}
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_error"),
     [(429, ProxyRateLimitError), (503, ProxyUpstreamError)],

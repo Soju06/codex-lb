@@ -59,6 +59,36 @@ async def test_validate_codex_usage_identity_projects_verified_identity_to_reque
 
 
 @pytest.mark.asyncio
+async def test_validate_codex_usage_identity_rejects_external_oauth_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer oauth-token", "chatgpt-account-id": "workspace_account"},
+        state=SimpleNamespace(),
+    )
+    identity = VerifiedCodexOAuthIdentity(
+        principal_id="principal:user-external",
+        caller_account_id=None,
+        chatgpt_account_id="workspace_account",
+        usage_payload=UsagePayload(workspace_id="workspace_1"),
+        route=None,
+    )
+
+    async def resolve_identity(
+        authorization: str | None,
+        chatgpt_account_id: str | None,
+    ) -> VerifiedCodexOAuthIdentity:
+        return identity
+
+    monkeypatch.setattr(auth_dependencies, "resolve_verified_codex_oauth_identity", resolve_identity)
+
+    with pytest.raises(ProxyAuthError, match="eligible imported account"):
+        await auth_dependencies.validate_codex_usage_identity(cast(Any, request))
+
+    assert not hasattr(request.state, "codex_usage_identity_payload")
+
+
+@pytest.mark.asyncio
 async def test_validate_codex_usage_identity_keeps_proxy_key_on_key_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

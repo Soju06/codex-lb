@@ -161,20 +161,27 @@ export function AccountMultiSelect({
       ),
     [accounts, allowPausedAccounts],
   );
+  const selectedSet = useMemo(() => new Set(value), [value]);
+  const visibleAccounts = useMemo(() => {
+    const selectableIds = new Set(selectableAccounts.map((account) => account.accountId));
+    const selectedUnavailableAccounts = accounts.filter(
+      (account) => selectedSet.has(account.accountId) && !selectableIds.has(account.accountId),
+    );
+    return [...selectableAccounts, ...selectedUnavailableAccounts];
+  }, [accounts, selectableAccounts, selectedSet]);
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return selectableAccounts;
+    if (!search.trim()) return visibleAccounts;
     const query = search.toLowerCase();
-    return selectableAccounts.filter(
+    return visibleAccounts.filter(
       (account) =>
         account.accountId.toLowerCase().includes(query) ||
         account.email.toLowerCase().includes(query) ||
         account.displayName.toLowerCase().includes(query),
     );
-  }, [search, selectableAccounts]);
+  }, [search, visibleAccounts]);
 
-  const selectedSet = useMemo(() => new Set(value), [value]);
   const selectedAccounts = useMemo(
     () =>
       value

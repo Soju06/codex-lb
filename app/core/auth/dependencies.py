@@ -289,6 +289,8 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
         request.headers.get("Authorization"),
         request.headers.get("chatgpt-account-id"),
     )
+    if identity.caller_account_id is None:
+        raise ProxyAuthError("ChatGPT identity is not an eligible imported account")
     request.state.codex_usage_identity_access_token = token
     request.state.codex_usage_identity_chatgpt_account_id = identity.chatgpt_account_id
     request.state.codex_usage_identity_account_id = identity.caller_account_id

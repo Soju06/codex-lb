@@ -27,6 +27,7 @@ from app.modules.accounts.repository import AccountsRepository
 _POSITIVE_CACHE_TTL_SECONDS = 60.0
 _DENIAL_CACHE_TTL_SECONDS = 5.0
 _CACHE_MAX_ENTRIES = 256
+_INFLIGHT_MAX_ENTRIES = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +50,14 @@ class _CacheEntry:
     expires_at: float
 
 
+@dataclass(slots=True)
+class _InflightValidation:
+    task: asyncio.Task[VerifiedCodexOAuthIdentity]
+    waiters: int
+
+
 _identity_cache: OrderedDict[str, _CacheEntry] = OrderedDict()
-_identity_inflight: dict[str, asyncio.Task[VerifiedCodexOAuthIdentity]] = {}
+_identity_inflight: dict[str, _InflightValidation] = {}
 _identity_lock = asyncio.Lock()
 
 
@@ -58,6 +65,8 @@ def clear_codex_oauth_identity_cache() -> None:
     """Clear process-local identity state (used by tests and lifecycle resets)."""
 
     _identity_cache.clear()
+    for validation in _identity_inflight.values():
+        validation.task.cancel()
     _identity_inflight.clear()
 
 
@@ -81,8 +90,10 @@ async def resolve_verified_codex_oauth_identity(
                 raise ProxyAuthError(cached.message)
             return cached
 
-        task = _identity_inflight.get(cache_key)
-        if task is None:
+        validation = _identity_inflight.get(cache_key)
+        if validation is None:
+            if len(_identity_inflight) >= _INFLIGHT_MAX_ENTRIES:
+                raise ProxyRateLimitError("Too many concurrent ChatGPT credential validations")
             task = asyncio.create_task(
                 _validate_and_cache_identity(
                     cache_key=cache_key,
@@ -90,10 +101,17 @@ async def resolve_verified_codex_oauth_identity(
                     chatgpt_account_id=normalized_account_id,
                 )
             )
-            _identity_inflight[cache_key] = task
+            validation = _InflightValidation(task=task, waiters=0)
+            _identity_inflight[cache_key] = validation
             task.add_done_callback(lambda completed, key=cache_key: _remove_inflight(key, completed))
+        elif validation.waiters == 0:
+            raise ProxyRateLimitError("ChatGPT credential validation is still being cancelled")
+        validation.waiters += 1
 
-    return await asyncio.shield(task)
+    try:
+        return await asyncio.shield(validation.task)
+    finally:
+        await _release_inflight_waiter(cache_key, validation.task)
 
 
 async def _validate_and_cache_identity(
@@ -337,5 +355,21 @@ def _remove_inflight(
     cache_key: str,
     completed: asyncio.Task[VerifiedCodexOAuthIdentity],
 ) -> None:
-    if _identity_inflight.get(cache_key) is completed:
+    validation = _identity_inflight.get(cache_key)
+    if validation is not None and validation.task is completed:
         _identity_inflight.pop(cache_key, None)
+    if not completed.cancelled():
+        completed.exception()
+
+
+async def _release_inflight_waiter(
+    cache_key: str,
+    task: asyncio.Task[VerifiedCodexOAuthIdentity],
+) -> None:
+    async with _identity_lock:
+        validation = _identity_inflight.get(cache_key)
+        if validation is None or validation.task is not task:
+            return
+        validation.waiters -= 1
+        if validation.waiters == 0 and not task.done():
+            task.cancel()

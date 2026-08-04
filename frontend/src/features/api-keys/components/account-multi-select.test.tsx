@@ -107,7 +107,7 @@ describe("AccountMultiSelect", () => {
     expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
   });
 
-  it("excludes hard-blocked accounts from new selections", async () => {
+  it("keeps selected hard-blocked accounts removable while hiding unselected ones", async () => {
     server.use(
       http.get("/api/accounts", () =>
         HttpResponse.json({
@@ -141,17 +141,27 @@ describe("AccountMultiSelect", () => {
     );
 
     const user = userEvent.setup();
+    const onChange = vi.fn();
 
-    renderWithProviders(<AccountMultiSelect value={["acc_reauth_picker"]} onChange={vi.fn()} />);
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_reauth_picker"]}
+        onChange={onChange}
+        selectionMode="explicit"
+        presentation="compact"
+      />,
+    );
 
-    expect(await screen.findByText("reauth-picker@example.com")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "1 account selected" }));
+    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
 
     expect(await screen.findByRole("menuitemcheckbox", { name: /active-picker@example\.com/i })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i })).not.toBeInTheDocument();
+    const selectedUnavailable = screen.getByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i });
+    expect(selectedUnavailable).toBeChecked();
     expect(screen.queryByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
+
+    await user.click(selectedUnavailable);
+    expect(onChange).toHaveBeenCalledWith([]);
   });
 
   it("can include paused accounts while keeping other hard-blocked accounts hidden", async () => {

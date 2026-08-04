@@ -2406,3 +2406,10 @@ The Settings page SHALL expose one Live Voice card with a global OAuth enable sw
 - **WHEN** a read-only dashboard user views Live Voice settings
 - **THEN** active state and selected upstream Accounts remain visible
 - **AND** switch, selector, and save action remain disabled
+
+#### Scenario: Selected Account becomes unavailable
+
+- **GIVEN** an Account selected in the OAuth Live pool becomes paused, reauthentication-required, or deactivated
+- **WHEN** a dashboard writer opens the compact Account selector
+- **THEN** the selected unavailable Account remains identifiable and selected
+- **AND** the writer can remove it while unselected unavailable Accounts remain hidden

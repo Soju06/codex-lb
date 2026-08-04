@@ -477,6 +477,7 @@ class ProxyResponseError(Exception):
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
         failed_session: aiohttp.ClientSession | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -488,6 +489,7 @@ class ProxyResponseError(Exception):
         self.upstream_status_code = upstream_status_code
         self.upstream_error_code = upstream_error_code
         self.failed_session = failed_session
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _process_network_failure_error(

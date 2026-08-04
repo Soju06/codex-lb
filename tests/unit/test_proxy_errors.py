@@ -46,6 +46,36 @@ async def test_stream_proxy_error_preserves_upstream_diagnostic_markers():
     assert message in events[0]
 
 
+@pytest.mark.asyncio
+async def test_stream_proxy_error_preserves_retry_after_as_sse_retry_hint():
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(
+            503,
+            {
+                "error": {
+                    "code": "upstream_request_timeout",
+                    "message": "Retry shortly.",
+                    "type": "server_error",
+                }
+            },
+            retry_after_seconds=2,
+        )
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0].startswith("retry: 2000\n")
+
+
 def _payload_error_code(payload) -> str | None:
     return payload["error"].get("code")
 

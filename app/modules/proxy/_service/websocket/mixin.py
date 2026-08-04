@@ -856,6 +856,7 @@ class _WebSocketMixin:
                 await _facade()._await_cancelled_task(
                     upstream_reader,
                     label="proxy websocket upstream reader",
+                    cleanup_tasks=proxy._background_cleanup_tasks,
                 )
                 upstream_reader = None
             upstream_control = None
@@ -1748,6 +1749,7 @@ class _WebSocketMixin:
                         await _facade()._await_cancelled_task(
                             upstream_reader,
                             label="proxy websocket upstream reader",
+                            cleanup_tasks=proxy._background_cleanup_tasks,
                         )
                         upstream_reader = None
                     upstream_control = None
@@ -1778,7 +1780,9 @@ class _WebSocketMixin:
                         replay_request_state = replay_candidate
                         if upstream_reader is not None:
                             await _facade()._await_cancelled_task(
-                                upstream_reader, label="proxy websocket upstream reader"
+                                upstream_reader,
+                                label="proxy websocket upstream reader",
+                                cleanup_tasks=proxy._background_cleanup_tasks,
                             )
                             upstream_reader = None
                         upstream_control = None
@@ -1815,7 +1819,11 @@ class _WebSocketMixin:
                             downstream_activity,
                         )
                     if upstream_reader is not None:
-                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        await _facade()._await_cancelled_task(
+                            upstream_reader,
+                            label="proxy websocket upstream reader",
+                            cleanup_tasks=proxy._background_cleanup_tasks,
+                        )
                         upstream_reader = None
                     upstream_control = None
                     if upstream is not None:
@@ -1831,7 +1839,11 @@ class _WebSocketMixin:
                     continue
         finally:
             if upstream_reader is not None:
-                await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                await _facade()._await_cancelled_task(
+                    upstream_reader,
+                    label="proxy websocket upstream reader",
+                    cleanup_tasks=proxy._background_cleanup_tasks,
+                )
             if upstream is not None:
                 try:
                     await upstream.close()
@@ -3823,17 +3835,14 @@ class _WebSocketMixin:
                     penalize_account=not account_neutral,
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
-                if message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
-                    # Release the routed-client/context owner immediately. The
-                    # next downstream request must open a socket on the current
-                    # host route instead of retaining this dead generation.
-                    try:
-                        await upstream.close()
-                    except Exception:
-                        _facade().logger.debug(
-                            "Failed to retire upstream websocket after liveness timeout",
-                            exc_info=True,
-                        )
+                # A terminal receive can race the outer session loop's
+                # cleanup (especially when the downstream closes as soon as
+                # it receives the failure event). Close here as well so the
+                # transport is retired before the reader task exits.
+                try:
+                    await upstream.close()
+                except Exception:
+                    _facade().logger.debug("Failed to close upstream websocket after terminal receive", exc_info=True)
                 if sequenced_downstream_replay_refused:
                     await _close_downstream_after_sequenced_replay_refusal(
                         websocket,

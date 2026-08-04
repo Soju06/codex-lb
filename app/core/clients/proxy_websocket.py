@@ -144,6 +144,24 @@ def normalize_realtime_call_id(value: str) -> str | None:
     return normalized.lower()
 
 
+def _consume_connection_lost_exception(done: asyncio.Future[Any]) -> None:
+    """Retrieve close exceptions before websockets shields the waiter.
+
+    websockets 16 waits on ``connection_lost_waiter`` through
+    ``asyncio.shield`` while completing ``ClientConnection.recv``.  A peer
+    keepalive/protocol close therefore leaves an exception on the waiter,
+    which asyncio reports as an ``exception in shielded future`` even though
+    ``recv`` translates it into an ``UpstreamWebSocketMessage``.  Consume it
+    at the adapter boundary; ``receive`` still classifies the close normally.
+    """
+    if done.cancelled():
+        return
+    try:
+        done.exception()
+    except asyncio.CancelledError:
+        return
+
+
 @dataclass(slots=True)
 class UpstreamWebSocketMessage:
     kind: str
@@ -176,12 +194,14 @@ def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> 
 def is_account_neutral_websocket_error_code(error_code: str | None) -> bool:
     """Return whether transport provenance rules out an account-health penalty."""
 
-    # Both failures occur below the selected account's application protocol.
+    # These failures occur below the selected account's application protocol.
     # They follow an ambiguous send, so relay owners must fail rather than
-    # replay while leaving the account eligible for unrelated requests.
+    # replay while leaving the account eligible for unrelated requests. Keep
+    # the compatibility keepalive code here as long as adapters can emit it.
     return error_code in {
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+        "upstream_keepalive_timeout",
     }
 
 
@@ -219,6 +239,18 @@ def _relay_receive_error_code(error_code: str) -> str | None:
     # Relay owners map an absent code to their established stream_incomplete
     # contract. Leaking the adapter's generic fallback would bypass that path.
     return error_code if is_account_neutral_websocket_error_code(error_code) else None
+
+
+def _is_keepalive_timeout_close(exc: ConnectionClosedError) -> bool:
+    """Classify peer/proxy heartbeat failures without exposing socket details."""
+
+    # Treat the legacy text marker as trusted only when this endpoint initiated
+    # the close. A peer can send the same public code and reason, so peer-first
+    # ordering must retain ordinary close/error semantics.
+    if exc.sent is None or (exc.rcvd is not None and exc.rcvd_then_sent is not False):
+        return False
+    reason = _close_reason_from_exception(exc)
+    return "keepalive ping timeout" in f"{exc} {reason or ''}".lower()
 
 
 async def _rotate_after_websocket_network_failure(error_code: str) -> None:
@@ -271,6 +303,9 @@ class WebsocketsUpstreamWebSocket:
         self._connection = connection
         self._uses_proxy = uses_proxy
         self._preserve_close_semantics = preserve_close_semantics
+        connection_lost_waiter = getattr(connection, "connection_lost_waiter", None)
+        if isinstance(connection_lost_waiter, asyncio.Future):
+            connection_lost_waiter.add_done_callback(_consume_connection_lost_exception)
 
     async def send_text(self, text: str) -> None:
         try:
@@ -302,6 +337,12 @@ class WebsocketsUpstreamWebSocket:
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
+            relay_error_code = _relay_receive_error_code(error_code)
+            if relay_error_code is None and _is_keepalive_timeout_close(exc):
+                # Prefer the stable, provenance-checked watchdog code above.
+                # This text fallback preserves compatibility with keepalive
+                # failures whose exception shape lacks the local-send marker.
+                relay_error_code = "upstream_keepalive_timeout"
             # ConnectionClosedError describes an incomplete close handshake,
             # not generic transport provenance. Let Responses relay owners map
             # it to stream_incomplete while live relays preserve received closes.
@@ -313,7 +354,7 @@ class WebsocketsUpstreamWebSocket:
                     if self._preserve_close_semantics
                     else str(exc)
                 ),
-                error_code=_relay_receive_error_code(error_code),
+                error_code=relay_error_code,
             )
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)

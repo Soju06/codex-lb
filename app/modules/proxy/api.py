@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -82,7 +83,11 @@ from app.core.exceptions import (
     ProxyRateLimitError,
     ProxyUpstreamError,
 )
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    bridge_public_contract_error_total,
+    stream_keepalive_sent_total,
+)
 from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
 from app.core.multipart import (
     IMAGE_EDITS_MULTIPART_POLICY,
@@ -719,6 +724,11 @@ _CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
         "x-request-id",
     }
 )
+
+# A hard HTTP-bridge circuit is opened only after an ambiguous upstream turn
+# failure. The caller must not immediately replay that turn, but it should
+# also not have to guess when a new attempt is safe. Advertise a short,
+# bounded retry interval on the one-shot 503 response.
 
 
 def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -3871,6 +3881,7 @@ async def v1_chat_completions(
             inject_sse_keepalives(
                 chat_stream,
                 get_settings().sse_keepalive_interval_seconds,
+                on_keepalive=lambda: _record_stream_keepalive("chat_completions"),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
@@ -5036,6 +5047,7 @@ async def _stream_responses(
             stream,
             get_settings().sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
+            on_keepalive=lambda: _record_stream_keepalive("responses"),
         ),
         media_type="text/event-stream",
         headers={
@@ -6089,6 +6101,11 @@ async def _prepend_initial_sse_heartbeat(
         yield line
 
 
+def _record_stream_keepalive(surface: str) -> None:
+    if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
+        stream_keepalive_sent_total.labels(surface=surface).inc()
+
+
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
     async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
         yield line
@@ -6112,7 +6129,15 @@ async def _stream_response_error_events(
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
-        yield format_sse_event(
+        retry_hint = ""
+        if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
+            # Preserve the HTTP Retry-After signal when a streaming response
+            # has already started and the exception must be represented as an
+            # SSE event.  The SSE retry field is milliseconds, while the
+            # exception stores seconds.  Clients that do not implement the
+            # directive safely ignore the extra comment line.
+            retry_hint = f"retry: {max(1, math.ceil(exc.retry_after_seconds * 1000))}\n"
+        yield retry_hint + format_sse_event(
             response_failed_event(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
@@ -6131,11 +6156,14 @@ def _stream_startup_error_response(
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
         status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        startup_headers = dict(headers)
+        if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
+            startup_headers.setdefault("Retry-After", str(error.retry_after_seconds))
         return _logged_error_json_response(
             request,
             status_code,
             envelope.model_dump(mode="json", exclude_none=True),
-            headers=headers,
+            headers=startup_headers,
         )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(

@@ -2,7 +2,7 @@
 
 ### Requirement: Responses upstream websocket liveness is bounded
 
-The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection.
+The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
 
 #### Scenario: Direct Responses websocket loses pong liveness
 
@@ -28,6 +28,14 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **WHEN** the upstream WebSocket continues replying to transport pings
 - **THEN** the proxy keeps the upstream socket open
 - **AND** the existing Responses request budget remains authoritative for the turn
+
+#### Scenario: Closed bridge without a sender claim later loses pong liveness
+
+- **GIVEN** an HTTP bridge session has multiple pending requests
+- **AND** a separate submit failure marks the session closed without claiming liveness-settlement ownership
+- **WHEN** the still-running upstream transport later expires its heartbeat
+- **THEN** the reader settles every pending request with `upstream_websocket_liveness_timeout`
+- **AND** the selected account receives no failure-health signal
 
 ## MODIFIED Requirements
 

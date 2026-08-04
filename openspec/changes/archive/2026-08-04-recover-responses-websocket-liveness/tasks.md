@@ -16,3 +16,8 @@
 ## 4. Verification
 
 - [x] 4.1 Run focused tests, formatting, lint, type, architecture, and strict OpenSpec validation checks.
+
+## 5. Maintainer review follow-up
+
+- [x] 5.1 Replace the HTTP bridge reader's overloaded `closed` ownership guard with an explicit submitter liveness-settlement claim and cover closed-session sibling settlement.
+- [x] 5.2 Drive a real installed-library no-pong timeout so integration coverage pins the `websockets` watchdog shape used by classification.

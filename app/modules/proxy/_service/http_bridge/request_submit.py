@@ -1149,7 +1149,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     upstream_send_started = True
                     try:
                         await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
-                    except BaseException:
+                    except BaseException as exc:
                         request_state.recovery_attempt_dispatched = True
                         # Publish retirement while lifecycle ownership is still
                         # held; a gate waiter must never reuse an ambiguously sent
@@ -1157,6 +1157,15 @@ class _HTTPBridgeRequestSubmitMixin:
                         session.closed = True
                         session.upstream_control.reconnect_requested = True
                         session.upstream_control.retire_after_drain = True
+                        if (
+                            isinstance(exc, UpstreamWebSocketTransportError)
+                            and exc.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                        ):
+                            # Only this narrow claim, not ``closed``, tells the
+                            # reader that the submitter will settle siblings.
+                            # Keep it inside lifecycle_lock with the failing
+                            # send so the reader cannot observe an ownership gap.
+                            session.claim_liveness_settlement()
                         raise
                     request_state.recovery_attempt_dispatched = True
                     session.last_used_at = _service_time().monotonic()
@@ -1242,9 +1251,9 @@ class _HTTPBridgeRequestSubmitMixin:
             # with the reader path's shared provenance classification.
             account_neutral = is_account_neutral_websocket_error_code(error_code)
             if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
-                # The sender marked the session closed while holding
-                # lifecycle_lock. It therefore owns the entire session deque,
-                # including older in-flight requests; settling only this
+                # The sender claimed ownership beside the failing send while
+                # holding lifecycle_lock. It therefore owns the entire session
+                # deque, including older in-flight requests; settling only this
                 # request would strand its siblings after the reader yields.
                 async with session.lifecycle_lock:
                     await self._fail_http_bridge_reader_and_maybe_retire(

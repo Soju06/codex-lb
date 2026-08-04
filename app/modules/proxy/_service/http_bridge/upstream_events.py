@@ -965,11 +965,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     else None
                 )
                 async with session.lifecycle_lock:
-                    if session.closed and message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
-                        # A submitter holds this lock across send_text and marks
-                        # the session closed before releasing it on ambiguous
-                        # send failure. In that race the submitter owns terminal
-                        # settlement; the reader must not settle the same state.
+                    if (
+                        session.liveness_settlement_owner == "send"
+                        and message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                    ):
+                        # A submitter publishes this dedicated claim beside the
+                        # failing send while holding lifecycle_lock. ``closed``
+                        # alone is only an admission/retirement state and must
+                        # never suppress settlement of still-pending siblings.
                         break
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
@@ -1007,7 +1010,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
             account_neutral = is_account_neutral_websocket_error_code(error_code)
             async with session.lifecycle_lock:
-                if not (session.closed and error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE):
+                if not (
+                    session.liveness_settlement_owner == "send"
+                    and error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                ):
                     # Match the message path above when receive() raises while
                     # a concurrent send failure already owns settlement.
                     await self._fail_http_bridge_reader_and_maybe_retire(

@@ -987,6 +987,13 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # ``closed`` rejects new admissions but is written by many unrelated
+    # retirement paths; it never proves that a sender owns pending settlement.
+    # Only the submitter may claim this, while holding ``lifecycle_lock``, when
+    # its own send reports a liveness timeout. The reader remains the default
+    # settlement owner for every other close, including an already-closed
+    # session whose still-running transport later loses heartbeat liveness.
+    liveness_settlement_owner: Literal["send"] | None = None
     # Set while a reader handoff is replacing the socket. Idle pruning must
     # retain the registered session during this short transition even though
     # ``closed`` is fail-closed for normal request reuse.
@@ -1000,6 +1007,17 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+    def claim_liveness_settlement(self) -> bool:
+        """Claim whole-deque settlement for a liveness-failed submitter.
+
+        The caller must hold ``lifecycle_lock`` across the failing send and
+        this synchronous claim so the reader cannot settle the same deque.
+        """
+
+        if self.liveness_settlement_owner is None:
+            self.liveness_settlement_owner = "send"
+        return self.liveness_settlement_owner == "send"
 
 
 def _complete_http_bridge_handoff(

@@ -23,27 +23,31 @@ Ordinary proxy traffic already has a zero-key admission contract. When global AP
 
 The keyless lane calls the same proxy authorization dependency with no Proxy Key. Global API-key mode therefore fails closed. Disabled mode retains the existing loopback, trusted-proxy consensus, raw-socket capture, and `proxy_unauthenticated_client_cidrs` checks.
 
-The network boundary supplies trust. The OAuth credential pair supplies call ownership and separation between admitted clients.
+The network boundary supplies trust. The normalized, locally unverified `chatgpt-account-id` header supplies a rotation-stable ownership namespace for admitted clients; it is not an independent authentication factor.
 
 ### Derive credential-safe affinity locally
 
 A purpose-specific HMAC key is derived from the existing persistent encryption key. The caller scope is:
 
-`oauth-local:HMAC-SHA256(derived-key, bearer + NUL + normalized-chatgpt-account-id)`
+`oauth-local:HMAC-SHA256(derived-key, normalized-chatgpt-account-id)`
 
 Only this digest participates in the existing call-owner digest. Raw bearers, account headers, call ids, SDP, attestation values, frames, audio, and transcripts remain outside persistence and diagnostics. Replicas sharing the existing encryption key derive the same scope without another setting.
 
-A refreshed bearer produces a new caller scope. A sideband using a different bearer cannot attach an older call; the client creates a new call after credential rotation. This preserves possession-based ownership without an upstream identity request.
+Bearer rotation preserves the caller scope when the normalized `chatgpt-account-id` remains stable, so an established call can reconnect after OAuth refresh. Changing the normalized account id or persistent encryption key produces a different scope. Every OAuth request still requires a bearer, while the existing zero-key origin boundary remains the authorization decision.
+
+All admitted clients presenting the same normalized account id share this ownership namespace. Sideband attachment still requires the bounded high-entropy call id, and operators requiring caller-level isolation use registered Proxy API Keys.
 
 ### Use one global policy
 
 `oauth_live_global_policy` contains singleton id `1`, active state, and timestamps. `oauth_live_global_policy_accounts` links it to imported serving Accounts. Dashboard writes replace the complete set transactionally. Active policy writes require a non-empty known set; runtime lookup filters to currently active Accounts.
 
-Every admitted keyless caller shares this pool. Each credential pair receives isolated affinity material, so learning another call id does not grant sideband attachment.
+Every admitted keyless caller shares this pool. Each normalized account id receives isolated affinity material; clients using the same account id share that namespace and still require the call id to attach.
 
 ### Keep Key and keyless lanes compatible
 
 Key callers keep `api_key.id` affinity, assignments, limits, reservations, last-used updates, and request-log attribution. Keyless callers select within the global pool and write request logs with `api_key_id = NULL`.
+
+Keyless sideband connections still acquire the normal Account stream lease, count toward pool inflight, and obey the serving Account's stream-capacity limit. API-key-specific fair-share admission applies only to registered Key callers; the keyless lane does not synthesize an API Key principal.
 
 ### Keep the Settings job singular
 
@@ -56,6 +60,6 @@ One revision creates the global singleton policy table and its allowed-account r
 ## Risks
 
 - Every process admitted by the existing zero-key network boundary can use the configured OAuth Live pool, matching ordinary zero-key proxy access.
-- Bearer rotation changes affinity and requires a new Live call.
+- Admitted clients using the same normalized account id share one keyless ownership namespace.
 - Incorrect trusted-proxy configuration can alter locality decisions, so the existing raw-peer and forwarded-header regression suite remains part of acceptance.
 - Experimental client route keys can drift, so each bundled Codex upgrade requires call-create, sideband, and audible Live E2E acceptance.

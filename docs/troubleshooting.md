@@ -34,7 +34,7 @@ The OAuth lane uses the zero-key origin boundary and is available while global P
 Open **Settings → Live Voice**, select at least one active upstream Account, enable **OAuth Live access**, and save.
 
 **A sideband returns `404 realtime_call_not_found`.**
-The ownership binding is missing or the OAuth credential pair changed. Start a new Live call with the current credentials.
+The ownership binding is missing, expired, or scoped to another `chatgpt-account-id`. OAuth bearer refresh preserves the binding when the account header remains stable. Start a new Live call after an account-scope change.
 
 ## Fast Mode and service tiers
 

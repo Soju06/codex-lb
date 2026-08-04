@@ -19,10 +19,11 @@ The built-in profile preserves the official OpenAI provider and requires no clie
 
 - **Bearer dispatch is explicit:** `sk-clb-` bearers enter strict Proxy Key validation. Every other bearer enters the keyless lane.
 - **Zero-key origin admission is shared:** Keyless Live calls reuse the ordinary proxy's loopback, trusted-proxy consensus, preserved raw-socket peer, and existing unauthenticated CIDR checks. Global API-key mode closes this lane.
-- **Possession defines caller scope:** A purpose-separated HMAC of the bearer and normalized account header participates in the ownership digest. A call id alone grants no access.
+- **The normalized account header defines the keyless scope:** A purpose-separated HMAC of this locally unverified value participates in the ownership digest. Bearer rotation preserves the scope, while sideband attachment still requires the call id; the network boundary remains the authorization decision.
 - **Final success owns the call:** Ownership is captured after the final successful account returns a supported call `Location`.
 - **Ownership is durable and opaque:** The sticky-session store holds a bounded digest and owner reference. Raw call ids, credentials, SDP, attestation values, and frames remain outside persistence.
 - **Attachment enforces hard continuity:** Every ingress recomputes caller scope, resolves the exact owner, rechecks policy and account state, loads current persisted upstream identity, and acquires one stream lease.
+- **Capacity remains account-scoped:** Keyless sideband uses `api_key_id = NULL`, while still counting toward pool inflight and the serving Account's stream-capacity limit. API-key-specific fair-share admission remains exclusive to registered Key callers.
 - **Protocols stay explicit:** Current-app and v3 ingress connect to `/v1/live/{call_id}`. Legacy ingress preserves remaining ordered query fields and appends one normalized `call_id` to `/v1/realtime`.
 - **Base setup remains zero-config:** OAuth Live starts disabled. Registered-Key Live keeps its existing configuration and behavior.
 
@@ -41,7 +42,8 @@ The built-in profile preserves the official OpenAI provider and requires no clie
 
 - **Source outside the zero-key boundary or global API-key mode enabled:** Deny the keyless lane with `401 invalid_api_key`.
 - **OAuth policy inactive or empty:** Deny keyless Live before account selection with `403 oauth_live_not_enabled`.
-- **Bearer, account header, or encryption key changed:** The ownership namespace changes; an existing sideband receives the credential-safe not-found response and the client creates a new call.
+- **Bearer changed with the same account header:** The ownership namespace remains stable and sideband can reconnect to the bound owner.
+- **Account header or encryption key changed:** The ownership namespace changes; an existing sideband receives the credential-safe not-found response.
 - **Missing or unsupported successful `Location` or durable binding failure:** Persist one private error request row and return `503 realtime_call_binding_failed`.
 - **Conflicting immutable owner:** Preserve the original owner and fail closed.
 - **Expired ownership or owner outside the current caller scope:** Deny attachment without account substitution.
@@ -53,9 +55,9 @@ The built-in profile preserves the official OpenAI provider and requires no clie
 ### Built-in OAuth profile
 
 1. Codex uses `model_provider = "openai"` and sends official ChatGPT OAuth credentials from loopback.
-2. codex-lb applies its existing zero-key origin guard and derives an opaque credential-pair scope locally.
+2. codex-lb applies its existing zero-key origin guard and derives an opaque account-stable scope locally.
 3. The final serving Account owns the new call under that scope.
-4. Sideband presents the same credential pair and reconnects to that exact owner.
+4. Sideband presents the same account identity with the current bearer and reconnects to that exact owner.
 
 ### Registered-Key profile
 

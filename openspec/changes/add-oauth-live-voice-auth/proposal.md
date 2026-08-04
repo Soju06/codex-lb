@@ -7,7 +7,7 @@ Official Codex uses ChatGPT OAuth for both WebRTC call creation and the sideband
 - Accept registered Proxy API Keys and locally admitted ChatGPT OAuth credentials on the four private Live Voice routes.
 - Dispatch `sk-clb-` bearers through existing strict Key validation.
 - Admit other bearers only through the existing zero-key proxy origin contract: loopback or an explicitly configured raw-socket CIDR while global API-key authentication is disabled.
-- Derive credential-safe caller affinity from a purpose-separated HMAC of the bearer and normalized `chatgpt-account-id`, using the existing persistent encryption key.
+- Derive rotation-stable, credential-safe caller affinity from a purpose-separated HMAC of the normalized `chatgpt-account-id`, using the existing persistent encryption key.
 - Add one global OAuth Live policy with an explicit upstream account pool.
 - Preserve Key assignments, limits, attribution, affinity input, and the documented `requires_openai_auth = true` plus `env_key` Codex profile.
 - Add one compact Settings editor: global enable switch, shared upstream pool, and save action.

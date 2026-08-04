@@ -13,6 +13,6 @@
 
 ## 3. Verification and delivery
 
-- [x] 3.1 Cover origin admission, credential affinity, policy validation, migration round-trip, HTTP/three-WS auth, owner continuity, nullable logging, and Key compatibility.
-- [x] 3.2 Pass real local Codex Desktop normal conversation and audible Live Voice with official OAuth, plus registered-Key regression acceptance.
+- [x] 3.1 Cover origin admission, account-stable affinity across bearer rotation, policy validation, migration round-trip, HTTP/three-WS auth, owner continuity, nullable logging, and Key compatibility.
+- [x] 3.2 Pass real local Codex Desktop normal conversation and audible Live Voice with official OAuth, including sideband Bearer replacement after call creation, plus registered-Key regression acceptance.
 - [x] 3.3 Sync stable requirements to main specs/context and pass the local verification gates.

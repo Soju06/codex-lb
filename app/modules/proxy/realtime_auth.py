@@ -21,9 +21,9 @@ from app.modules.api_keys.service import ApiKeyData
 RealtimeCallerKind = Literal["api_key", "oauth"]
 ApiKeyValidator = Callable[[str | None], Awaitable[ApiKeyData]]
 KeylessOriginValidator = Callable[[HTTPConnection], Awaitable[None]]
-AffinityMaterialBuilder = Callable[[str, str], str]
+AffinityMaterialBuilder = Callable[[str], str]
 
-_OAUTH_LIVE_AFFINITY_DOMAIN = b"codex-lb/oauth-live-affinity/v1"
+_OAUTH_LIVE_AFFINITY_DOMAIN = b"codex-lb/oauth-live-account-affinity/v1"
 
 
 class OAuthLiveNotEnabledError(ProxyAuthError):
@@ -102,14 +102,15 @@ async def _validate_keyless_origin(connection: HTTPConnection) -> None:
     await validate_proxy_api_key_authorization(None, request=connection)
 
 
-def _oauth_live_affinity_scope_material(access_token: str, chatgpt_account_id: str) -> str:
+def _oauth_live_affinity_scope_material(chatgpt_account_id: str) -> str:
     # Derive a purpose-specific HMAC key from the existing persistent encryption
     # key. Replicas that can decrypt the same account store therefore derive the
-    # same affinity material without adding another secret or setting.
+    # same affinity material without adding another secret or setting. The
+    # downstream bearer is deliberately excluded so OAuth refresh preserves an
+    # in-flight call's sideband ownership scope.
     root_key = get_or_create_key()
     affinity_key = hmac.digest(root_key, _OAUTH_LIVE_AFFINITY_DOMAIN, hashlib.sha256)
-    credential_pair = f"{access_token}\0{chatgpt_account_id}".encode()
-    digest = hmac.new(affinity_key, credential_pair, hashlib.sha256).hexdigest()
+    digest = hmac.new(affinity_key, chatgpt_account_id.encode(), hashlib.sha256).hexdigest()
     return f"oauth-local:{digest}"
 
 
@@ -136,6 +137,6 @@ async def resolve_realtime_caller_scope(
 
     allowed_account_ids = await _active_oauth_live_allowed_account_ids()
     return RealtimeCallerScope.for_oauth(
-        affinity_scope_material=affinity_material_builder(token, normalized_account_id),
+        affinity_scope_material=affinity_material_builder(normalized_account_id),
         allowed_account_ids=allowed_account_ids,
     )

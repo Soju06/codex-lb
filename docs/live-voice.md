@@ -32,7 +32,7 @@ The same private routes accept two caller types:
 
 The OAuth lane is available when global proxy API-key authentication is disabled and the request comes from loopback or an existing explicitly allowed raw socket CIDR. Loopback needs no CIDR configuration. Other remote clients use registered Proxy API Keys.
 
-codex-lb derives an opaque caller scope locally from the bearer and normalized `chatgpt-account-id`. It does not call OpenAI usage to authenticate Live requests. The network boundary grants keyless access; the credential pair separates call ownership between admitted clients.
+codex-lb derives an opaque caller scope locally from the normalized `chatgpt-account-id` header. A bearer remains required on every Live request, but bearer rotation does not change the scope. codex-lb does not verify the bearer or account header through OpenAI usage. The network boundary grants keyless access; admitted clients using the same account id share one ownership namespace and still need the call id to attach.
 
 ## Configure the OAuth Live pool
 
@@ -94,7 +94,7 @@ The current client appends `/realtime/calls` to the WebRTC base and `/realtime?i
 
 After call creation succeeds, codex-lb binds the returned call id to the final serving account under the caller scope. Every sideband form recomputes that scope, reloads the exact owner, and confirms the current policy still allows it.
 
-OAuth bearer rotation or encryption-key rotation changes the caller scope. A sideband using changed credentials receives the credential-safe not-found response and the client creates a new call.
+OAuth bearer rotation preserves the caller scope when `chatgpt-account-id` remains stable, so sideband can reconnect to the existing call. Changing the account header or encryption key changes the scope; sideband then receives the credential-safe not-found response.
 
 ## Privacy and request history
 
@@ -105,7 +105,7 @@ Ownership records contain a caller-scoped digest and the owning account referenc
 - `401 invalid_api_key`: caller authentication or zero-key origin admission failed.
 - `403 oauth_live_not_enabled`: the global OAuth Live policy is inactive or has no active eligible account.
 - `400 invalid_realtime_call_id`: the sideband supplied an invalid call id.
-- `404 realtime_call_not_found`: ownership is missing or the credential pair changed.
+- `404 realtime_call_not_found`: ownership is missing or the account scope changed.
 - `503 realtime_call_binding_failed`: a successful upstream call could not be bound safely.
 
 For client-side symptoms and route checks, see [Troubleshooting](troubleshooting.md#live-voice).

@@ -166,12 +166,12 @@ async def test_registered_key_scope_preserves_key_assignments_in_service_layer()
 
 
 @pytest.mark.asyncio
-async def test_oauth_scope_uses_keyless_origin_and_credential_affinity(
+async def test_oauth_scope_uses_keyless_origin_and_account_affinity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = _connection()
     origin_connections: list[HTTPConnection] = []
-    affinity_inputs: list[tuple[str, str]] = []
+    affinity_inputs: list[str] = []
 
     async def validate_origin(candidate: HTTPConnection) -> None:
         origin_connections.append(candidate)
@@ -179,8 +179,8 @@ async def test_oauth_scope_uses_keyless_origin_and_credential_affinity(
     async def load_policy() -> frozenset[str]:
         return frozenset({"allowed-a", "allowed-b"})
 
-    def build_affinity(token: str, account_id: str) -> str:
-        affinity_inputs.append((token, account_id))
+    def build_affinity(account_id: str) -> str:
+        affinity_inputs.append(account_id)
         return "oauth-local:digest"
 
     monkeypatch.setattr(realtime_auth_module, "_active_oauth_live_allowed_account_ids", load_policy)
@@ -194,7 +194,7 @@ async def test_oauth_scope_uses_keyless_origin_and_credential_affinity(
     )
 
     assert origin_connections == [connection]
-    assert affinity_inputs == [("oauth-token", "workspace-id")]
+    assert affinity_inputs == ["workspace-id"]
     assert scope.kind == "oauth"
     assert scope.affinity_scope_material == "oauth-local:digest"
     assert scope.api_key is None
@@ -279,19 +279,53 @@ async def test_oauth_scope_fails_closed_when_policy_has_no_active_accounts(
     assert raised.value.code == "oauth_live_not_enabled"
 
 
-def test_oauth_affinity_is_deterministic_credential_bound_and_secret_free(
+def test_oauth_affinity_is_deterministic_account_bound_and_secret_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(realtime_auth_module, "get_or_create_key", lambda: b"persistent-test-key")
 
-    first = realtime_auth_module._oauth_live_affinity_scope_material("token-a", "account-a")
-    repeated = realtime_auth_module._oauth_live_affinity_scope_material("token-a", "account-a")
-    rotated = realtime_auth_module._oauth_live_affinity_scope_material("token-b", "account-a")
-    other_account = realtime_auth_module._oauth_live_affinity_scope_material("token-a", "account-b")
+    first = realtime_auth_module._oauth_live_affinity_scope_material("account-a")
+    repeated = realtime_auth_module._oauth_live_affinity_scope_material("account-a")
+    other_account = realtime_auth_module._oauth_live_affinity_scope_material("account-b")
 
     assert first == repeated
     assert first.startswith("oauth-local:")
     assert len(first) == len("oauth-local:") + 64
-    assert len({first, rotated, other_account}) == 3
-    assert "token-a" not in first
+    assert first != other_account
     assert "account-a" not in first
+
+
+@pytest.mark.asyncio
+async def test_oauth_scope_survives_bearer_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def allow_origin(_connection: HTTPConnection) -> None:
+        return None
+
+    async def load_policy() -> frozenset[str]:
+        return frozenset({"allowed-a"})
+
+    monkeypatch.setattr(realtime_auth_module, "get_or_create_key", lambda: b"persistent-test-key")
+    monkeypatch.setattr(realtime_auth_module, "_active_oauth_live_allowed_account_ids", load_policy)
+
+    before_refresh = await realtime_auth_module.resolve_realtime_caller_scope(
+        _connection(),
+        "Bearer oauth-token-a",
+        "workspace-id",
+        keyless_origin_validator=allow_origin,
+    )
+    after_refresh = await realtime_auth_module.resolve_realtime_caller_scope(
+        _connection(),
+        "Bearer oauth-token-b",
+        "workspace-id",
+        keyless_origin_validator=allow_origin,
+    )
+    other_account = await realtime_auth_module.resolve_realtime_caller_scope(
+        _connection(),
+        "Bearer oauth-token-b",
+        "other-workspace-id",
+        keyless_origin_validator=allow_origin,
+    )
+
+    assert before_refresh.affinity_scope_material == after_refresh.affinity_scope_material
+    assert before_refresh.affinity_scope_material != other_account.affinity_scope_material

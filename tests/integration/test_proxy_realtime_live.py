@@ -261,21 +261,23 @@ def test_realtime_sideband_oauth_uses_local_keyless_scope(
         base_url="http://localhost",
         client=("127.0.0.1", 50000),
     ) as client:
-        with client.websocket_connect(
-            "ws://localhost/v1/live/rtc_local_oauth",
-            headers={
-                "Authorization": "Bearer oauth-token",
-                "chatgpt-account-id": "workspace-caller",
-            },
-        ) as websocket:
-            assert websocket.receive_text() == "ready"
+        for token in ("oauth-token-before-refresh", "oauth-token-after-refresh"):
+            with client.websocket_connect(
+                "ws://localhost/v1/live/rtc_local_oauth",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "chatgpt-account-id": "workspace-caller",
+                },
+            ) as websocket:
+                assert websocket.receive_text() == "ready"
 
-    assert len(captured_scopes) == 1
+    assert len(captured_scopes) == 2
     scope = captured_scopes[0]
     assert scope.kind == "oauth"
     assert scope.api_key is None
     assert scope.allowed_account_ids == frozenset({allowed_account_id})
     assert scope.affinity_scope_material.startswith("oauth-local:")
+    assert captured_scopes[1].affinity_scope_material == scope.affinity_scope_material
 
 
 @pytest.mark.parametrize(
@@ -414,6 +416,111 @@ async def test_realtime_call_create_oauth_scope_selects_only_allowed_account(
             raise AssertionError("OAuth realtime call-create request log was not persisted")
         await asyncio.sleep(0.01)
     assert persisted.api_key_id is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_live_sideband_reconnects_after_downstream_bearer_rotation(
+    app_instance,
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "allowed.json",
+                json.dumps(_auth_json("workspace-allowed", "allowed@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    policy = await async_client.put(
+        "/api/oauth-live-policy",
+        json={"isActive": True, "allowedAccountIds": [imported.json()["accountId"]]},
+    )
+    assert policy.status_code == 200
+
+    async def create_call(*_args: object, **_kwargs: object) -> CodexControlResponse:
+        return CodexControlResponse(
+            status_code=201,
+            body=b"answer",
+            headers={"location": "/v1/realtime/calls/rtc_oauth_rotated"},
+        )
+
+    class Upstream:
+        uses_proxy = False
+
+        def __init__(self) -> None:
+            self.messages = [
+                UpstreamWebSocketMessage(kind="text", text="ready"),
+                UpstreamWebSocketMessage(kind="close", close_code=1000, close_reason="done"),
+            ]
+
+        async def send_text(self, _text: str) -> None:
+            return None
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            return self.messages.pop(0)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
+
+        def response_header(self, _name: str) -> str | None:
+            return None
+
+        def archive_received(self, _message: UpstreamWebSocketMessage) -> None:
+            return None
+
+    connector_calls: list[tuple[str, str | None]] = []
+
+    async def connect_upstream(
+        _headers: dict[str, str],
+        access_token: str,
+        account_id: str | None,
+        **_kwargs: object,
+    ) -> Upstream:
+        connector_calls.append((access_token, account_id))
+        return Upstream()
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", create_call)
+    monkeypatch.setattr(proxy_websocket_module, "_connect_upstream_websocket", connect_upstream)
+
+    created = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"offer",
+        headers={
+            "Authorization": "Bearer oauth-token-before-refresh",
+            "chatgpt-account-id": "workspace-caller",
+        },
+    )
+    assert created.status_code == 201
+    service = get_proxy_service_for_app(app_instance)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    with TestClient(
+        app_instance,
+        base_url="http://localhost",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        with client.websocket_connect(
+            "ws://localhost/v1/live/rtc_oauth_rotated",
+            headers={
+                "Authorization": "Bearer oauth-token-after-refresh",
+                "chatgpt-account-id": "workspace-caller",
+            },
+        ) as websocket:
+            assert websocket.receive_text() == "ready"
+            close_message = websocket.receive()
+            assert close_message["type"] == "websocket.close"
+            assert close_message["code"] == 1000
+        assert client.portal is not None
+        assert client.portal.call(lambda: service.drain_persistence_tasks(timeout_seconds=1))
+
+    assert connector_calls == [("access-token", "workspace-allowed")]
 
 
 @pytest.mark.asyncio

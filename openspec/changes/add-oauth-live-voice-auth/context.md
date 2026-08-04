@@ -13,7 +13,7 @@ The registered-Key profile combines `requires_openai_auth = true` with `env_key 
 1. An operator imports several upstream ChatGPT accounts through existing Codex-LB flows.
 2. Under Settings → Live Voice, the operator enables OAuth Live Voice and selects the shared upstream Accounts allowed to serve keyless calls.
 3. Official Codex keeps `model_provider = "openai"` and routes WebRTC call creation to `http://127.0.0.1:2455/backend-api/codex` and sideband to `http://127.0.0.1:2455/v1`.
-4. Codex-LB applies the existing zero-key origin check, derives a private credential-pair affinity digest, selects within the configured pool, binds the final call owner, and attaches sideband to that owner.
+4. Codex-LB applies the existing zero-key origin check, derives a private account-stable affinity digest, selects within the configured pool, binds the final call owner, and attaches sideband to that owner across OAuth bearer refreshes.
 5. Registered Proxy API Key clients keep their existing assignments, limits, logs, affinity digests, and Key profile.
 
 ## Operational boundary

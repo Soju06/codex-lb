@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -93,6 +94,7 @@ class _FakeUpstreamWebSocket:
         self.archived_receive_request_ids: list[str | None] = []
         self.archived_receive_texts: list[str] = []
         self.closed = False
+        self.closed_event = threading.Event()
         self._messages: asyncio.Queue[_FakeUpstreamMessage] = asyncio.Queue()
         for message in messages:
             self._messages.put_nowait(message)
@@ -116,6 +118,7 @@ class _FakeUpstreamWebSocket:
 
     async def close(self) -> None:
         self.closed = True
+        self.closed_event.set()
 
 
 class _SequencedUpstreamWebSocket(_FakeUpstreamWebSocket):
@@ -5606,6 +5609,9 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
         for call in log_calls
     )
     assert any(call["status"] == "success" and call["request_id"] == "resp_ws_inflight" for call in log_calls)
+    # TestClient runs the ASGI task in a worker thread. Wait for its owned
+    # cancellation cleanup instead of racing that thread on the plain flag.
+    assert fake_upstream.closed_event.wait(timeout=1.0)
     assert fake_upstream.closed is True
 
 

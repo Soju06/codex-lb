@@ -130,6 +130,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
@@ -398,7 +399,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 input_full_fingerprint = _fingerprint_input_items(payload_input_list)
 
         resolved_request_id = request_id or f"ws_{uuid4().hex}"
-        request_kind = _request_kind_from_headers(headers)
+        header_request_kind = _request_kind_from_headers(headers)
+        generate_false_prewarm = header_request_kind == "prewarm" and upstream_payload.get("generate") is False
+        connection_request_kind = header_request_kind if transport == _REQUEST_TRANSPORT_WEBSOCKET else None
+        request_kind = (
+            "normal" if connection_request_kind == "prewarm" and not generate_false_prewarm else header_request_kind
+        )
         request_state = _WebSocketRequestState(
             request_id=resolved_request_id,
             request_log_id=request_log_id,
@@ -424,7 +430,8 @@ class _HTTPBridgeRequestSubmitMixin:
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             request_kind=request_kind,
-            generate_false_prewarm=request_kind == "prewarm" and upstream_payload.get("generate") is False,
+            connection_request_kind=connection_request_kind,
+            generate_false_prewarm=generate_false_prewarm,
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count

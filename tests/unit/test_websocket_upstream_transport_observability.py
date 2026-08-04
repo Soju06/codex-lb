@@ -240,6 +240,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
+            "connection_request_kind": None,
         }
     ]
     assert metric_calls == [
@@ -322,6 +323,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
+            "connection_request_kind": None,
         }
     ]
 
@@ -391,6 +393,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
+            "connection_request_kind": None,
         }
     ]
     assert metric_calls == [

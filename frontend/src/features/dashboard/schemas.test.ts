@@ -194,6 +194,7 @@ describe("RequestLogsResponseSchema", () => {
           apiKeyId: "key-1",
           requestId: "req-1",
           archiveRequestId: "archive-req-1",
+          connectionRequestKind: "prewarm",
           model: "gpt-5.1",
           transport: "websocket",
           useragent: "Mozilla/5.0",
@@ -233,6 +234,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.apiKeyId).toBe("key-1");
     expect(parsed.requests[0]?.archiveRequestId).toBe("archive-req-1");
     expect(parsed.requests[0]?.requestKind).toBe("normal");
+    expect(parsed.requests[0]?.connectionRequestKind).toBe("prewarm");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
     expect(parsed.requests[0]?.useragent).toBe("Mozilla/5.0");

@@ -9065,7 +9065,9 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
     assert event["error"]["code"] == "no_accounts"
 
 
-def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_instance, monkeypatch):
+def test_backend_responses_websocket_attributes_generated_turns_on_prewarm_connection_as_normal(
+    app_instance, monkeypatch
+):
     fake_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
@@ -9189,8 +9191,15 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
         "stream": True,
     }
 
+    headers = {
+        "x-codex-turn-metadata": json.dumps(
+            {"request_kind": "prewarm", "turn_id": "turn_connection_prewarm"},
+            separators=(",", ":"),
+        )
+    }
+
     with TestClient(app_instance) as client:
-        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+        with client.websocket_connect("/backend-api/codex/responses", headers=headers) as websocket:
             websocket.send_text(json.dumps(first_request))
             websocket.send_text(json.dumps(second_request))
             events = [json.loads(websocket.receive_text()) for _ in range(4)]
@@ -9205,9 +9214,13 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
     assert log_calls[0]["request_id"] == "resp_ws_b"
     assert log_calls[0]["model"] == "gpt-5.2"
     assert log_calls[0]["input_tokens"] == 7
+    assert log_calls[0]["request_kind"] == "normal"
+    assert log_calls[0]["connection_request_kind"] == "prewarm"
     assert log_calls[1]["request_id"] == "resp_ws_a"
     assert log_calls[1]["model"] == "gpt-5.1"
     assert log_calls[1]["input_tokens"] == 3
+    assert log_calls[1]["request_kind"] == "normal"
+    assert log_calls[1]["connection_request_kind"] == "prewarm"
 
 
 def test_backend_responses_websocket_emits_response_failed_before_close_on_upstream_eof(app_instance, monkeypatch):
@@ -9559,6 +9572,7 @@ def test_backend_responses_websocket_recovers_created_only_sequenced_prewarm(
     assert json.loads(replay_upstream.sent_text[0])["generate"] is False
     assert len(log_calls) == 1
     assert log_calls[0]["request_kind"] == "prewarm"
+    assert log_calls[0]["connection_request_kind"] == "prewarm"
 
     if expect_recovery:
         assert terminal_event is not None
@@ -9711,7 +9725,11 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     with TestClient(app_instance) as client:
         with client.websocket_connect(
             "/backend-api/codex/responses",
-            headers={"Authorization": "Bearer external-token", "session_id": "sid-client-stale"},
+            headers={
+                "Authorization": "Bearer external-token",
+                "session_id": "sid-client-stale",
+                "x-codex-turn-metadata": json.dumps({"request_kind": "prewarm"}, separators=(",", ":")),
+            },
         ) as websocket:
             websocket.send_text(
                 json.dumps(
@@ -9732,6 +9750,8 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     _assert_previous_response_not_found_error(event["error"])
     error_logs = [call for call in log_calls if call.get("status") == "error"]
     assert len(error_logs) == 1
+    assert error_logs[0]["request_kind"] == "normal"
+    assert error_logs[0]["connection_request_kind"] == "prewarm"
     failure_detail = error_logs[0]["failure_detail"]
     assert isinstance(failure_detail, str)
     assert failure_detail.startswith("previous_response_not_found ")

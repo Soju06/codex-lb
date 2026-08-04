@@ -795,6 +795,7 @@ class _WebSocketRequestState:
     enforce_openai_sdk_contract: bool = True
     propagate_http_errors: bool = False
     request_kind: str = "normal"
+    connection_request_kind: str | None = None
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None

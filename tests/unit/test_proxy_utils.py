@@ -18913,7 +18913,8 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
     assert prepared.request_state.model == "gpt-5.2"
     assert prepared.request_state.service_tier == "priority"
     assert prepared.request_state.reasoning_effort == "high"
-    assert prepared.request_state.request_kind == "prewarm"
+    assert prepared.request_state.request_kind == "normal"
+    assert prepared.request_state.connection_request_kind == "prewarm"
     assert prepared.request_state.generate_false_prewarm is False
     assert prepared.affinity_policy.key == "thread_123"
     assert prepared.affinity_policy.kind == proxy_service.StickySessionKind.PROMPT_CACHE
@@ -19124,6 +19125,7 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     assert first_payload["client_metadata"][marker] == "true"
     assert first_payload["reasoning"] == {"context": "all_turns"}
     assert first.request_state.request_kind == "prewarm"
+    assert first.request_state.connection_request_kind == "prewarm"
     assert first.request_state.generate_false_prewarm is True
     assert continuity_state.responses_lite_model is None
     first.request_state.response_create_gate_acquired = True
@@ -19177,7 +19179,8 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     )
 
     incremental_payload = json.loads(incremental.text_data)
-    assert incremental.request_state.request_kind == "prewarm"
+    assert incremental.request_state.request_kind == "normal"
+    assert incremental.request_state.connection_request_kind == "prewarm"
     assert incremental_payload["client_metadata"][marker] == "true"
     assert incremental_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
     incremental_turn_metadata = json.loads(incremental_payload["client_metadata"]["x-codex-turn-metadata"])
@@ -21372,7 +21375,8 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=0.0,
-        request_kind="prewarm",
+        request_kind="normal",
+        connection_request_kind="prewarm",
     )
     prewarm_upstream_control = proxy_service._WebSocketUpstreamControl()
 

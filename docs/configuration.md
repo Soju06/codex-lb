@@ -26,7 +26,7 @@ The remaining settings (timeouts, connection pools, bulkheads, session bridge, l
 - [Database backends](database.md)
 - [Troubleshooting](troubleshooting.md)
 
-Runtime behavior such as the routing strategy, upstream stream transport, and per-account limits is configured live in the dashboard under **Settings** — no restart required.
+Runtime behavior such as the routing strategy, upstream stream transport, per-account limits, and the OAuth Live Voice account pool is configured live in the dashboard under **Settings** — no restart required. See [Codex Live Voice](live-voice.md) for its default-off policy and client profiles.
 
 ---
 

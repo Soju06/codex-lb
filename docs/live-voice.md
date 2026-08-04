@@ -5,6 +5,24 @@ codex-lb keeps Live Voice call creation and its control sideband on the same ups
 !!! note "Private Codex compatibility"
     This capability covers the private routes used by Codex. WebRTC media remains peer-to-peer.
 
+## How it works
+
+```mermaid
+flowchart LR
+    OAuth["Built-in openai provider\nOfficial OAuth"] --> Origin["Zero-key origin admission"]
+    Origin --> GlobalPool["Settings-managed Live Voice pool"]
+
+    Key["Registered sk-clb-* key"] --> KeyAuth["Key assignments and limits"]
+    KeyAuth --> KeyPool["Key account pool"]
+
+    GlobalPool --> Create["Create Live call"]
+    KeyPool --> Create
+    Create --> Owner["Bind final serving account"]
+    Owner --> Sideband["Route sideband to the same account"]
+```
+
+The OAuth and registered-Key lanes share call ownership handling. Their admission rules and account pools remain independent.
+
 ## Caller authentication
 
 The same private routes accept two caller types:
@@ -15,6 +33,17 @@ The same private routes accept two caller types:
 The OAuth lane is available when global proxy API-key authentication is disabled and the request comes from loopback or an existing explicitly allowed raw socket CIDR. Loopback needs no CIDR configuration. Other remote clients use registered Proxy API Keys.
 
 codex-lb derives an opaque caller scope locally from the bearer and normalized `chatgpt-account-id`. It does not call OpenAI usage to authenticate Live requests. The network boundary grants keyless access; the credential pair separates call ownership between admitted clients.
+
+## Configure the OAuth Live pool
+
+1. Import the upstream ChatGPT Accounts that may carry Live calls.
+2. Open **Settings → Live Voice**.
+3. Select the allowed upstream Accounts.
+4. Enable **OAuth Live access** and save.
+
+The global policy starts disabled with an empty pool. Enabling it requires at least one Account. Runtime routing uses only Accounts that remain active. A selected Account that later becomes paused, deactivated, or requires reauthentication stays visible in the selector so it can be removed.
+
+This policy controls the OAuth lane only. Registered Proxy API Keys continue using their own assignments and limits.
 
 ## Built-in OpenAI provider (OAuth)
 
@@ -78,5 +107,7 @@ Ownership records contain a caller-scoped digest and the owning account referenc
 - `400 invalid_realtime_call_id`: the sideband supplied an invalid call id.
 - `404 realtime_call_not_found`: ownership is missing or the credential pair changed.
 - `503 realtime_call_binding_failed`: a successful upstream call could not be bound safely.
+
+For client-side symptoms and route checks, see [Troubleshooting](troubleshooting.md#live-voice).
 
 *Specs: [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*

@@ -509,8 +509,11 @@ def _http_bridge_can_replace_retired_gate_session(
 ) -> bool:
     # A gate timeout happens before this waiter is appended or sent.  Once the
     # stale owner has retired the session, only that fully cleaned pre-submit
-    # state is safe to carry to a replacement; any response/replay/downstream
-    # marker makes the upstream acceptance boundary ambiguous.
+    # state is safe to carry to a replacement; any response/downstream marker
+    # makes the upstream acceptance boundary ambiguous. A non-zero replay
+    # count reflects client-side reconnect attempts, not upstream progress on
+    # *this* bridge attempt, so it does not by itself make the boundary
+    # ambiguous and must not disqualify replacement on its own.
     code, _message = _proxy_error_code_message(exc)
     return (
         code == "response_create_gate_timeout"
@@ -521,7 +524,6 @@ def _http_bridge_can_replace_retired_gate_session(
         and request_state.event_queue is not None
         and request_state.response_id is None
         and request_state.response_event_count == 0
-        and request_state.replay_count == 0
         and request_state.last_downstream_sequence_number is None
         and not request_state.downstream_visible
         and not request_state.awaiting_response_created
@@ -2677,6 +2679,13 @@ class _HTTPBridgeStreamingMixin:
                 replacement_preferred_account_id = request_state.preferred_account_id
                 if request_state.previous_response_id is not None and replacement_preferred_account_id is None:
                     replacement_preferred_account_id = session.account.id
+                else:
+                    # The retired owner already proved stuck; a "replacement"
+                    # that could legally reselect that same account isn't a
+                    # replacement at all. Continuity turns are exempted above
+                    # because they're pinned to this account by
+                    # replacement_preferred_account_id instead.
+                    request_state.excluded_account_ids.add(session.account.id)
                 while True:
                     try:
                         replacement_session = await self._get_or_create_http_bridge_session(

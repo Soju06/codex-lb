@@ -254,4 +254,4 @@ The database SHALL store at most one global OAuth Live policy with singleton id 
 
 - **WHEN** the global revision downgrades
 - **THEN** the global relationship table is removed before the singleton table
-- **AND** the prior schema head is restored
+- **AND** the database has no OAuth Live policy tables
